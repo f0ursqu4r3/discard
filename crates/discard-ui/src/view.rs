@@ -4,9 +4,12 @@ use discard_core::approval::Decision;
 use discard_core::event::{AgentStatus, ApprovalId};
 use discard_core::model::{Block, Message, Role};
 use discard_core::timeline::{ApprovalPrompt, ApprovalView};
+use crate::dispatch::{self, Confirm};
+use crate::menus;
 use crate::plugin_element::{ActionFactory, apply_theme, render_element};
 use crate::problems::{problem_count, problem_lines, problem_summary};
 use crate::settings::open_settings;
+use discard_core::action::{Action, MenuContext};
 use crate::shared::{PROTECTED_DEFAULT, Shared, hsla};
 use discard_core::settings_page::SettingsPage;
 use discard_core::ui_state::{Command, SlotLabels, UiState, Update};
@@ -50,6 +53,10 @@ pub struct DiscardView {
     commands: UnboundedSender<Command>,
     composer: Entity<InputState>,
     _composer_events: Subscription,
+    /// A Quit or relaunch that waits for the user to confirm it. The main window draws the notice.
+    pending_confirm: Option<Confirm>,
+    /// The state the installed menu bar was built for. A change installs it again.
+    menu_ctx: MenuContext,
 }
 
 /// Everything the window needs from the app to start.
@@ -79,6 +86,9 @@ impl DiscardView {
                 let alive = this
                     .update(cx, |view, cx| {
                         view.state.apply(update);
+                        // The pending-review count comes from the poller. Here only `turn_running` can move.
+                        let pending_reviews = view.menu_ctx.pending_reviews;
+                        view.refresh_menus(pending_reviews, cx);
                         cx.notify();
                     })
                     .is_ok();
@@ -110,6 +120,7 @@ impl DiscardView {
                     if epoch_moved || pending_moved {
                         let alive = this
                             .update(cx, |view, cx| {
+                                view.refresh_menus(now_pending, cx);
                                 if epoch_moved {
                                     view.after_plugin_change(cx);
                                 } else {
@@ -126,6 +137,13 @@ impl DiscardView {
             .detach();
         }
 
+        let menu_ctx = MenuContext {
+            safe_mode: load_report.safe_mode,
+            turn_running: state.turn_running(),
+            pending_reviews: plugins.pending().len(),
+        };
+        menus::install(&menu_ctx, cx);
+
         Self {
             data,
             plugins,
@@ -137,6 +155,34 @@ impl DiscardView {
             commands,
             composer,
             _composer_events: events,
+            pending_confirm: None,
+            menu_ctx,
+        }
+    }
+
+    pub(crate) fn turn_running(&self) -> bool {
+        self.state.turn_running()
+    }
+
+    pub(crate) fn pending_confirm(&self) -> Option<Confirm> {
+        self.pending_confirm
+    }
+
+    pub(crate) fn set_pending_confirm(&mut self, pending: Option<Confirm>, cx: &mut Context<Self>) {
+        self.pending_confirm = pending;
+        cx.notify();
+    }
+
+    /// Install the menu bar again when the state it shows changed.
+    fn refresh_menus(&mut self, pending_reviews: usize, cx: &mut App) {
+        let ctx = MenuContext {
+            safe_mode: self.load_report.safe_mode,
+            turn_running: self.state.turn_running(),
+            pending_reviews,
+        };
+        if ctx != self.menu_ctx {
+            menus::install(&ctx, cx);
+            self.menu_ctx = ctx;
         }
     }
 
@@ -156,7 +202,7 @@ impl DiscardView {
         let _ = self.commands.send(Command::Decide { approval_id: ApprovalId(id.to_string()), decision });
     }
 
-    fn cancel(&mut self) {
+    pub(crate) fn cancel(&mut self) {
         let _ = self.commands.send(Command::Cancel);
     }
 
@@ -236,6 +282,43 @@ impl DiscardView {
                         .small()
                         .label("Review")
                         .on_click(|_, _, cx| open_settings(SettingsPage::Plugins, cx)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The confirm notice for a Quit or relaunch while a turn runs. Rust draws it, so plugins cannot hide it.
+    fn confirm_notice(&self) -> Option<AnyElement> {
+        let pending = self.pending_confirm?;
+        let theme = self.plugins.manager().lock().unwrap_or_else(|p| p.into_inner()).theme();
+        let palette = protected_palette(&theme, PROTECTED_DEFAULT);
+        Some(
+            h_flex()
+                .mx_4()
+                .mb_2()
+                .p_2()
+                .gap_2()
+                .items_center()
+                .rounded_md()
+                .border_1()
+                .border_color(hsla(palette.border))
+                .bg(hsla(palette.background))
+                .text_color(hsla(palette.foreground))
+                .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child(pending.message()))
+                // Plain closures, not `cx.listener`: the dispatcher reads this view, so it must not be leased.
+                .child(
+                    Button::new("confirm-cancel")
+                        .outline()
+                        .small()
+                        .label("Cancel")
+                        .on_click(|_, _, cx| dispatch::cancel_pending(cx)),
+                )
+                .child(
+                    Button::new("confirm-ok")
+                        .danger()
+                        .small()
+                        .label("Confirm")
+                        .on_click(|_, _, cx| dispatch::confirm_pending(cx)),
                 )
                 .into_any_element(),
         )
@@ -355,7 +438,7 @@ impl DiscardView {
                             0 => "Plugins".to_string(),
                             n => format!("Plugins ({n} to review)"),
                         })
-                        .on_click(|_, _, cx| open_settings(SettingsPage::Plugins, cx)),
+                        .on_click(|_, _, cx| dispatch::run(Action::ReviewPlugins, cx)),
                 )
                 .child(
                     Button::new("settings-open")
@@ -363,7 +446,7 @@ impl DiscardView {
                         .small()
                         .w_full()
                         .label("Settings")
-                        .on_click(|_, _, cx| open_settings(SettingsPage::General, cx)),
+                        .on_click(|_, _, cx| dispatch::run(Action::OpenSettings, cx)),
                 ),
             )
     }
@@ -607,6 +690,7 @@ impl Render for DiscardView {
         };
         let plugin_problem_line = self.plugin_problem_line();
         let review_banner = self.review_banner();
+        let confirm_notice = self.confirm_notice();
         let rows: Vec<AnyElement> = history.iter().enumerate().map(|(i, m)| self.message_row(m, i, cx)).collect();
         let live = self.live_row(cx);
         let running = self.state.turn_running();
@@ -618,6 +702,7 @@ impl Render for DiscardView {
             .h_full()
             .child(header)
             .child(v_flex().id("messages").flex_1().overflow_y_scroll().py_2().children(rows).children(live))
+            .children(confirm_notice)
             .children(review_banner)
             .children(plugin_problem_line)
             .when_some(notice, |col, text| {

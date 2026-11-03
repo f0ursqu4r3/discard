@@ -1,13 +1,15 @@
 //! The Plugins page: reviews waiting for the user, installed plugins, rollback, and plugin problems.
 //! Rust draws it in the Settings window. Plugins cannot hide or replace it.
 
-use super::{SettingsView, soon_tag};
+use super::SettingsView;
+use crate::dispatch;
 use crate::problems::problem_lines;
+use discard_core::action::Action;
 use crate::shared::{PROTECTED_DEFAULT, hsla};
 use discard_lua::theme::{ProtectedPalette, protected_palette};
 use discard_lua::{PluginState, Review, ReviewKind};
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::sync::atomic::Ordering;
@@ -230,8 +232,8 @@ fn review_card(
         .into_any_element()
 }
 
-/// The safe-mode notice. "Relaunch normally" is wired in a later task, so it shows disabled with a "Soon" tag.
-fn safe_mode_row(palette: ProtectedPalette, cx: &App) -> AnyElement {
+/// The safe-mode notice. "Relaunch normally" relaunches without `--safe-mode`.
+fn safe_mode_row(palette: ProtectedPalette) -> AnyElement {
     h_flex()
         .gap_2()
         .p_2()
@@ -252,10 +254,9 @@ fn safe_mode_row(palette: ProtectedPalette, cx: &App) -> AnyElement {
             Button::new("relaunch-normally")
                 .outline()
                 .small()
-                .disabled(true)
-                .label("Relaunch normally"),
+                .label("Relaunch normally")
+                .on_click(|_, _, cx| dispatch::run(Action::ToggleSafeMode, cx)),
         )
-        .child(soon_tag(cx))
         .into_any_element()
 }
 
@@ -327,7 +328,7 @@ pub(super) fn render(view: &mut SettingsView, cx: &mut Context<SettingsView>) ->
     v_flex()
         .gap_4()
         .when(view.shared.load_report.safe_mode, |c| {
-            c.child(safe_mode_row(palette, cx))
+            c.child(safe_mode_row(palette))
         })
         .when(!problems.is_empty(), |c| {
             c.child(

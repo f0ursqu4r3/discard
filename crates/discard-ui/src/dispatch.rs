@@ -1,0 +1,262 @@
+//! The one place that runs a core `Action`. Menus, keys, and Rust-drawn buttons all call `run`.
+
+use crate::settings::open_settings;
+use crate::shared::Shared;
+use crate::view::DiscardView;
+use discard_core::action::{Action, needs_confirm};
+use discard_core::settings_page::SettingsPage;
+use gpui_kit::{AnyWindowHandle, App, Global, WeakEntity};
+use std::sync::{Arc, Mutex};
+
+/// An action that ends this process, and so may need the user to confirm it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confirm {
+    Quit,
+    Relaunch { safe_mode: bool },
+}
+
+impl Confirm {
+    /// The question the confirm notice asks.
+    pub fn message(self) -> &'static str {
+        match self {
+            Confirm::Quit => "The agent is working. Quit Discard and stop the turn?",
+            Confirm::Relaunch { safe_mode: true } => {
+                "The agent is working. Relaunch in safe mode and stop the turn?"
+            }
+            Confirm::Relaunch { safe_mode: false } => {
+                "The agent is working. Relaunch normally and stop the turn?"
+            }
+        }
+    }
+}
+
+/// What `run` does for one action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Plan {
+    OpenSettings(SettingsPage),
+    CancelTurn,
+    /// End the process now.
+    Perform(Confirm),
+    /// Show the confirm notice in the main window.
+    Ask(Confirm),
+    Nothing,
+}
+
+/// Decide what to do. Pure, so the rules are testable without a window.
+pub(crate) fn plan(
+    action: Action,
+    turn_running: bool,
+    confirm_while_working: bool,
+    safe_mode: bool,
+) -> Plan {
+    let ending = match action {
+        Action::OpenSettings => return Plan::OpenSettings(SettingsPage::General),
+        Action::ReviewPlugins | Action::ShowPluginErrors => {
+            return Plan::OpenSettings(SettingsPage::Plugins);
+        }
+        Action::CancelTurn if turn_running => return Plan::CancelTurn,
+        Action::CancelTurn => return Plan::Nothing,
+        Action::Quit => Confirm::Quit,
+        Action::ToggleSafeMode => Confirm::Relaunch {
+            safe_mode: !safe_mode,
+        },
+    };
+    if needs_confirm(action, turn_running, confirm_while_working) {
+        Plan::Ask(ending)
+    } else {
+        Plan::Perform(ending)
+    }
+}
+
+/// Where a relaunch request waits until `application().run` returns. `Some(safe_mode)` means relaunch.
+#[derive(Clone, Default)]
+pub(crate) struct RelaunchSlot(pub(crate) Arc<Mutex<Option<bool>>>);
+
+impl Global for RelaunchSlot {}
+
+/// The main window and its view, so the dispatcher can reach them from any window.
+pub(crate) struct MainWindow {
+    pub(crate) handle: AnyWindowHandle,
+    pub(crate) view: WeakEntity<DiscardView>,
+}
+
+impl Global for MainWindow {}
+
+/// Run `action`.
+///
+/// Do not call this while the main view is being updated (for example from a `cx.listener` on it):
+/// `run` reads the view. Plain `on_click` closures, menu items, and key bindings are safe.
+pub fn run(action: Action, cx: &mut App) {
+    let main = cx
+        .try_global::<MainWindow>()
+        .map(|m| (m.handle, m.view.clone()));
+    let view = main.as_ref().and_then(|(_, view)| view.upgrade());
+    let turn_running = view.as_ref().is_some_and(|v| v.read(cx).turn_running());
+    let (confirm_while_working, safe_mode) = match cx.try_global::<Shared>() {
+        Some(shared) => (
+            shared
+                .settings
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .settings()
+                .general
+                .confirm_while_working,
+            shared.load_report.safe_mode,
+        ),
+        None => (true, false),
+    };
+    match plan(action, turn_running, confirm_while_working, safe_mode) {
+        Plan::OpenSettings(page) => open_settings(page, cx),
+        Plan::CancelTurn => {
+            if let Some(view) = view {
+                view.update(cx, |view, cx| {
+                    view.cancel();
+                    cx.notify();
+                });
+            }
+        }
+        Plan::Perform(ending) => perform(ending, cx),
+        Plan::Ask(ending) => match (view, main) {
+            (Some(view), Some((handle, _))) => {
+                view.update(cx, |view, cx| view.set_pending_confirm(Some(ending), cx));
+                // The main window may be the one dispatching this key or click right now, and GPUI cannot update
+                // a window from inside its own update. Activate it after the current update ends.
+                cx.defer(move |cx| {
+                    let _ = handle.update(cx, |_, window, _| window.activate_window());
+                });
+            }
+            // No main view means no turn to protect.
+            _ => perform(ending, cx),
+        },
+        Plan::Nothing => {}
+    }
+}
+
+/// End the process. A relaunch stores its outcome first, so `run` returns it after the event loop ends.
+pub(crate) fn perform(ending: Confirm, cx: &mut App) {
+    if let Confirm::Relaunch { safe_mode } = ending
+        && let Some(slot) = cx.try_global::<RelaunchSlot>()
+    {
+        *slot.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(safe_mode);
+    }
+    cx.quit();
+}
+
+/// The confirm notice's Confirm button: run the waiting action.
+pub(crate) fn confirm_pending(cx: &mut App) {
+    let Some(view) = cx.try_global::<MainWindow>().and_then(|m| m.view.upgrade()) else {
+        return;
+    };
+    let pending = view.update(cx, |view, cx| {
+        let pending = view.pending_confirm();
+        view.set_pending_confirm(None, cx);
+        pending
+    });
+    if let Some(ending) = pending {
+        perform(ending, cx);
+    }
+}
+
+/// The confirm notice's Cancel button: forget the waiting action.
+pub(crate) fn cancel_pending(cx: &mut App) {
+    if let Some(view) = cx.try_global::<MainWindow>().and_then(|m| m.view.upgrade()) {
+        view.update(cx, |view, cx| view.set_pending_confirm(None, cx));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Confirm, Plan, plan};
+    use discard_core::action::Action;
+    use discard_core::settings_page::SettingsPage;
+
+    #[test]
+    fn settings_actions_open_their_page_in_any_state() {
+        for running in [false, true] {
+            for confirm in [false, true] {
+                for safe in [false, true] {
+                    assert_eq!(
+                        plan(Action::OpenSettings, running, confirm, safe),
+                        Plan::OpenSettings(SettingsPage::General)
+                    );
+                    assert_eq!(
+                        plan(Action::ReviewPlugins, running, confirm, safe),
+                        Plan::OpenSettings(SettingsPage::Plugins)
+                    );
+                    assert_eq!(
+                        plan(Action::ShowPluginErrors, running, confirm, safe),
+                        Plan::OpenSettings(SettingsPage::Plugins)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cancel_turn_does_nothing_while_idle() {
+        assert_eq!(plan(Action::CancelTurn, false, true, false), Plan::Nothing);
+        assert_eq!(
+            plan(Action::CancelTurn, true, true, false),
+            Plan::CancelTurn
+        );
+        assert_eq!(
+            plan(Action::CancelTurn, true, false, false),
+            Plan::CancelTurn
+        );
+    }
+
+    #[test]
+    fn quit_asks_only_while_working_with_confirm_on() {
+        assert_eq!(
+            plan(Action::Quit, true, true, false),
+            Plan::Ask(Confirm::Quit)
+        );
+        assert_eq!(
+            plan(Action::Quit, true, false, false),
+            Plan::Perform(Confirm::Quit)
+        );
+        assert_eq!(
+            plan(Action::Quit, false, true, false),
+            Plan::Perform(Confirm::Quit)
+        );
+        assert_eq!(
+            plan(Action::Quit, false, false, true),
+            Plan::Perform(Confirm::Quit)
+        );
+    }
+
+    #[test]
+    fn safe_mode_toggle_relaunches_with_the_opposite_flag() {
+        assert_eq!(
+            plan(Action::ToggleSafeMode, false, true, false),
+            Plan::Perform(Confirm::Relaunch { safe_mode: true })
+        );
+        assert_eq!(
+            plan(Action::ToggleSafeMode, false, true, true),
+            Plan::Perform(Confirm::Relaunch { safe_mode: false })
+        );
+        assert_eq!(
+            plan(Action::ToggleSafeMode, true, true, true),
+            Plan::Ask(Confirm::Relaunch { safe_mode: false })
+        );
+        assert_eq!(
+            plan(Action::ToggleSafeMode, true, false, false),
+            Plan::Perform(Confirm::Relaunch { safe_mode: true })
+        );
+    }
+
+    #[test]
+    fn confirm_messages_name_the_ending() {
+        assert!(Confirm::Quit.message().contains("Quit"));
+        assert!(
+            Confirm::Relaunch { safe_mode: true }
+                .message()
+                .contains("safe mode")
+        );
+        assert!(
+            Confirm::Relaunch { safe_mode: false }
+                .message()
+                .contains("normally")
+        );
+    }
+}
