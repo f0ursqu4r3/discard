@@ -71,18 +71,27 @@ impl SettingsPage {
     }
 }
 
+/// Lowercase text with all whitespace removed, so "Roll back" matches "rollback".
+fn normalize(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 /// Pages whose title or field labels contain `query`, in `all()` order.
+/// Case and whitespace are ignored.
 pub fn search(query: &str) -> Vec<SettingsPage> {
-    let needle = query.to_lowercase();
+    let needle = normalize(query);
     SettingsPage::all()
         .iter()
         .copied()
         .filter(|page| {
-            page.title().to_lowercase().contains(&needle)
+            normalize(page.title()).contains(&needle)
                 || page
                     .field_labels()
                     .iter()
-                    .any(|label| label.to_lowercase().contains(&needle))
+                    .any(|label| normalize(label).contains(&needle))
         })
         .collect()
 }
@@ -120,7 +129,16 @@ mod tests {
 
     #[test]
     fn rollback_matches_plugins_only() {
+        assert_eq!(search("rollback"), vec![SettingsPage::Plugins]);
         assert_eq!(search("roll back"), vec![SettingsPage::Plugins]);
+    }
+
+    #[test]
+    fn surrounding_spaces_are_ignored() {
+        assert_eq!(
+            search("  provider "),
+            vec![SettingsPage::General, SettingsPage::Providers]
+        );
     }
 
     #[test]
