@@ -6,12 +6,14 @@ use discard_core::model::{Block, Message, Role};
 use discard_core::timeline::{ApprovalPrompt, ApprovalView};
 use crate::dispatch::{self, Confirm};
 use crate::menus;
-use crate::plugin_element::{ActionFactory, apply_theme, render_element};
+use crate::appearance::{self, AppearanceState};
+use crate::plugin_element::{ActionFactory, render_element};
 use crate::problems::{problem_count, problem_lines, problem_summary};
 use discard_core::action::{Action, MenuContext};
 use crate::shared::{PROTECTED_DEFAULT, Shared, hsla};
 use discard_core::ui_state::{Command, SlotLabels, UiState, Update};
-use discard_lua::theme::protected_palette;
+use discard_core::settings::SettingsStore;
+use discard_lua::theme::{ThemeOverrides, protected_palette};
 use discard_lua::{LoadReport, PluginService, Rendered};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -46,6 +48,9 @@ pub struct DiscardView {
     plugin_epoch: Arc<AtomicU64>,
     /// The last plugin notice or error. The Plugins page shows it.
     plugin_notice: Arc<Mutex<Option<String>>>,
+    settings: Arc<Mutex<SettingsStore>>,
+    /// The theme in use. The poller keeps it current.
+    appearance: Arc<Mutex<AppearanceState>>,
     slot_cache: HashMap<&'static str, (String, Option<Rendered>)>,
     state: UiState,
     commands: UnboundedSender<Command>,
@@ -69,7 +74,7 @@ pub struct ViewInit {
 impl DiscardView {
     pub fn new(init: ViewInit, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let ViewInit { data, shared, state, commands, mut updates } = init;
-        let Shared { plugins, load_report, plugin_epoch, plugin_notice, .. } = shared;
+        let Shared { plugins, load_report, plugin_epoch, plugin_notice, settings, appearance, .. } = shared;
         let placeholder = format!("Message #{}", data.channel_name);
         let composer = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         let events = cx.subscribe_in(&composer, window, |this, _, event: &InputEvent, window, cx| {
@@ -97,8 +102,6 @@ impl DiscardView {
         })
         .detach();
 
-        apply_theme(&plugins.manager().lock().unwrap_or_else(|p| p.into_inner()).theme(), cx);
-
         // The agent can submit a plugin while the user is looking at something else, and the user can approve,
         // reject, or roll back in Settings. Redraw when a review arrives. Apply the change when the epoch moves.
         {
@@ -109,6 +112,9 @@ impl DiscardView {
                 let mut seen_epoch = epoch.load(Ordering::SeqCst);
                 loop {
                     cx.background_executor().timer(Duration::from_millis(700)).await;
+                    if this.update(cx, |view, cx| view.refresh_appearance(cx)).is_err() {
+                        break;
+                    }
                     let now_pending = plugins.pending().len();
                     let now_epoch = epoch.load(Ordering::SeqCst);
                     let epoch_moved = now_epoch != seen_epoch;
@@ -148,6 +154,8 @@ impl DiscardView {
             load_report,
             plugin_epoch,
             plugin_notice,
+            settings,
+            appearance,
             slot_cache: HashMap::new(),
             state,
             commands,
@@ -253,9 +261,30 @@ impl DiscardView {
 
     fn after_plugin_change(&mut self, cx: &mut Context<Self>) {
         self.slot_cache.clear();
-        let theme = self.plugins.manager().lock().unwrap_or_else(|p| p.into_inner()).theme();
-        apply_theme(&theme, cx);
+        self.refresh_appearance(cx);
         cx.notify();
+    }
+
+    /// Check the settings, the system appearance, the theme files, and the plugin theme.
+    /// Apply the theme when any of them changed.
+    fn refresh_appearance(&mut self, cx: &mut Context<Self>) {
+        let settings = {
+            let mut store = self.settings.lock().unwrap_or_else(|p| p.into_inner());
+            store.reload_if_changed();
+            store.settings().appearance.clone()
+        };
+        let plugin_theme = self.plugins.manager().lock().unwrap_or_else(|p| p.into_inner()).theme();
+        let system = appearance::system_appearance(cx.window_appearance());
+        let mut state = self.appearance.lock().unwrap_or_else(|p| p.into_inner());
+        if state.update(&settings, system, &plugin_theme) {
+            appearance::apply(&state, cx);
+            cx.notify();
+        }
+    }
+
+    /// The theme the protected surfaces build their palette from.
+    fn protected_theme(&self) -> ThemeOverrides {
+        self.appearance.lock().unwrap_or_else(|p| p.into_inner()).protected_overrides()
     }
 
     /// A banner, drawn by Rust in the main column, when reviews are waiting.
@@ -264,8 +293,7 @@ impl DiscardView {
         if pending.is_empty() {
             return None;
         }
-        let theme = self.plugins.manager().lock().unwrap_or_else(|p| p.into_inner()).theme();
-        let palette = protected_palette(&theme, PROTECTED_DEFAULT);
+        let palette = protected_palette(&self.protected_theme(), PROTECTED_DEFAULT);
         let names = pending.iter().map(|r| r.name.clone()).collect::<Vec<_>>().join(", ");
         Some(
             h_flex()
@@ -294,8 +322,7 @@ impl DiscardView {
     /// The confirm notice for a Quit or relaunch while a turn runs. Rust draws it, so plugins cannot hide it.
     fn confirm_notice(&self) -> Option<AnyElement> {
         let pending = self.pending_confirm?;
-        let theme = self.plugins.manager().lock().unwrap_or_else(|p| p.into_inner()).theme();
-        let palette = protected_palette(&theme, PROTECTED_DEFAULT);
+        let palette = protected_palette(&self.protected_theme(), PROTECTED_DEFAULT);
         Some(
             h_flex()
                 .mx_4()
@@ -331,17 +358,14 @@ impl DiscardView {
     /// One Rust-drawn line when plugins have problems. Plugins cannot hide or replace it.
     /// The list itself is on the Plugins page in Settings.
     fn plugin_problem_line(&self) -> Option<AnyElement> {
-        let (errors, theme) = {
-            let manager = self.plugins.manager().lock().unwrap_or_else(|p| p.into_inner());
-            (manager.errors(), manager.theme())
-        };
+        let errors = self.plugins.manager().lock().unwrap_or_else(|p| p.into_inner()).errors();
         let lines = problem_lines(&errors, &self.plugins.statuses(), &self.load_report);
         let has_notice = self.plugin_notice.lock().unwrap_or_else(|p| p.into_inner()).is_some();
         let count = problem_count(lines.len(), has_notice);
         if count == 0 {
             return None;
         }
-        let palette = protected_palette(&theme, PROTECTED_DEFAULT);
+        let palette = protected_palette(&self.protected_theme(), PROTECTED_DEFAULT);
         Some(
             h_flex()
                 .mx_4()
@@ -561,7 +585,7 @@ impl DiscardView {
     ) -> AnyElement {
         let view = prompt.as_ref().map(|p| p.view);
         // Protected surface: plugin themes can recolor it, but it always stays readable.
-        let palette = protected_palette(&self.plugins.manager().lock().unwrap_or_else(|p| p.into_inner()).theme(), PROTECTED_DEFAULT);
+        let palette = protected_palette(&self.protected_theme(), PROTECTED_DEFAULT);
         let card = v_flex()
             .gap_2()
             .p_3()

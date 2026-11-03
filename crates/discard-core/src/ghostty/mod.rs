@@ -4,6 +4,7 @@
 pub mod bundled;
 pub mod color;
 pub mod file;
+pub mod live;
 pub mod lookup;
 pub mod map;
 pub mod resolve;

@@ -198,6 +198,7 @@ fn run_app(
         commands_tx,
         updates_rx,
         settings,
+        data_dir.to_path_buf(),
         relaunch,
     );
     Ok(())

@@ -1,5 +1,6 @@
 //! State both windows share. Stored as a GPUI global so `open_settings` can reach it.
 
+use crate::appearance::AppearanceState;
 use discard_core::settings::SettingsStore;
 use discard_lua::theme::{ProtectedPalette, Rgb};
 use discard_lua::{LoadReport, PluginService};
@@ -13,6 +14,8 @@ pub struct Shared {
     pub plugins: Arc<PluginService>,
     pub load_report: Rc<LoadReport>,
     pub settings: Arc<Mutex<SettingsStore>>,
+    /// The theme in use: Ghostty colors with plugin overrides on top. The main window's timer keeps it current.
+    pub appearance: Arc<Mutex<AppearanceState>>,
     /// Bumped when plugin state changes (approve, reject, roll back, revert). Each window compares it to redraw.
     pub plugin_epoch: Arc<AtomicU64>,
     /// The last plugin notice or error. The Plugins page shows it, and the main window counts it as a problem.

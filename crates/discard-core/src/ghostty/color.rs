@@ -85,6 +85,13 @@ impl Rgb {
         (light + 0.05) / (dark + 0.05)
     }
 
+    /// The color is closer to black than to white.
+    pub fn is_dark(self) -> bool {
+        let black = Rgb { r: 0, g: 0, b: 0 };
+        let white = Rgb { r: 255, g: 255, b: 255 };
+        self.contrast(white) > self.contrast(black)
+    }
+
     /// Whichever of `a` and `b` has more contrast against `self`.
     pub fn more_readable(self, a: Rgb, b: Rgb) -> Rgb {
         if self.contrast(b) > self.contrast(a) { b } else { a }
@@ -180,6 +187,15 @@ mod tests {
         assert!((black.contrast(white) - 21.0).abs() < 0.01);
         assert!((white.contrast(black) - 21.0).abs() < 0.01);
         assert!((white.contrast(white) - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn is_dark_splits_by_contrast_with_black_and_white() {
+        assert!(rgb(0, 0, 0).is_dark());
+        assert!(rgb(0x1e, 0x1e, 0x2e).is_dark());
+        assert!(rgb(0x00, 0x2b, 0x36).is_dark(), "solarized dark");
+        assert!(!rgb(255, 255, 255).is_dark());
+        assert!(!rgb(0xfd, 0xf6, 0xe3).is_dark(), "solarized light");
     }
 
     #[test]

@@ -1,68 +1,16 @@
-//! Draws a plugin's element tree with GPUI components, and applies theme overrides.
+//! Draws a plugin's element tree with GPUI components.
 
 use discard_lua::element::{Element, Node, Prop, Tag};
-use discard_lua::theme::{Rgb, ThemeOverrides};
 use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::badge::Badge;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::text::markdown;
-use gpui_kit::component::{ActiveTheme, Sizable, Theme, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 use gpui_kit::*;
 use std::rc::Rc;
 
 /// Builds the click handler for a plugin action id.
 pub type ActionFactory = Rc<dyn Fn(&str) -> Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>>;
-
-fn rgb_to_hsla(c: Rgb) -> Hsla {
-    let rgba = Rgba { r: f32::from(c.0) / 255.0, g: f32::from(c.1) / 255.0, b: f32::from(c.2) / 255.0, a: 1.0 };
-    rgba.into()
-}
-
-/// The theme as it was before any plugin changed it, so removing a plugin's override restores the original.
-struct BaseTheme {
-    colors: gpui_kit::component::ThemeColor,
-    radius: Pixels,
-}
-
-impl Global for BaseTheme {}
-
-/// Apply a merged theme to the global component theme. Starts from the original theme every time.
-pub fn apply_theme(overrides: &ThemeOverrides, cx: &mut App) {
-    if !cx.has_global::<BaseTheme>() {
-        let theme = Theme::global(cx);
-        let base = BaseTheme { colors: theme.colors, radius: theme.radius };
-        cx.set_global(base);
-    }
-    let (colors, radius) = {
-        let base = cx.global::<BaseTheme>();
-        (base.colors, base.radius)
-    };
-    let theme = Theme::global_mut(cx);
-    theme.colors = colors;
-    theme.radius = radius;
-    let set = |slot: &mut Hsla, token: &str| {
-        if let Some(c) = overrides.color(token) {
-            *slot = rgb_to_hsla(c);
-        }
-    };
-    set(&mut theme.colors.background, "background");
-    set(&mut theme.colors.foreground, "foreground");
-    set(&mut theme.colors.sidebar, "sidebar");
-    set(&mut theme.colors.sidebar_foreground, "sidebar_foreground");
-    set(&mut theme.colors.sidebar_accent, "sidebar_accent");
-    set(&mut theme.colors.primary, "primary");
-    set(&mut theme.colors.primary_foreground, "primary_foreground");
-    set(&mut theme.colors.muted, "muted");
-    set(&mut theme.colors.muted_foreground, "muted_foreground");
-    set(&mut theme.colors.border, "border");
-    set(&mut theme.colors.accent, "accent");
-    set(&mut theme.colors.success, "success");
-    set(&mut theme.colors.warning, "warning");
-    set(&mut theme.colors.danger, "danger");
-    if let Some(r) = overrides.radius() {
-        theme.radius = px(r);
-    }
-}
 
 fn token_color(name: &str, cx: &App) -> Option<Hsla> {
     let c = &cx.theme().colors;

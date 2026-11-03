@@ -262,14 +262,30 @@ and the engine runs for it. A Mac app usually stays open with no window. Discard
 - The menu bar, the keys, the confirm notice, the relaunch, the single Settings window, and the Plugins page were
   built and logic-tested. The manual GUI checks have not been run.
 
-## Themes and window state (core only so far)
+## Themes
 
-The code that reads Ghostty themes, maps them to UI colors, and saves window state is built and tested. The window
-does not use it yet. The next phases connect it.
+Discard colors the windows with a Ghostty theme. A plugin theme goes on top.
 
-- **Theme files.** Discard reads the Ghostty format (`palette = N=#hex`, `background`, `foreground`, `cursor-color`,
-  `selection-background`, `split-divider-color`). Colors can be `#rrggbb`, `rrggbb`, `#rgb`, or an X11 name.
+- **Source.** `appearance.theme_source` picks the theme. `default` uses the bundled pair. `ghostty` reads your Ghostty
+  config (`$XDG_CONFIG_HOME/ghostty/config`, `~/Library/Application Support/com.mitchellh.ghostty/config`, and the
+  `config.ghostty` names). `custom` uses `appearance.theme`. Discard does not follow `config-file =` includes.
+- **Light and dark.** A `light:X,dark:Y` value picks the theme for the system appearance and switches when it
+  changes. The window uses gpui-component's light or dark base from the brightness of the theme's background.
+- **Theme files.** Discard reads the Ghostty format (`palette = N=#hex`, `background`, `foreground`,
+  `cursor-color`, `selection-background`, `split-divider-color`). Colors can be `#rrggbb`, `rrggbb`, `#rgb`, or an
+  X11 name. Inline keys in the Ghostty config replace the same keys in the theme file.
 - **Lookup order for a theme name.** `$DISCARD_HOME/themes/`, then Ghostty's user folders, then the Ghostty app, then
   the themes bundled in Discard (see `THIRD-PARTY-NOTICES`). An absolute path also works.
-- **`state.toml`.** `$DISCARD_HOME/state.toml` holds the window position and size and the two panel widths (180 to 400,
-  default 240). Discard writes this file. Delete it to reset the layout.
+- **Live reload.** While the main window is open, Discard checks `settings.toml`, the Ghostty config, the theme file,
+  and the system appearance every 0.7 seconds. A change applies at once.
+- **Plugin themes.** Plugin color tokens replace the matching Ghostty colors. `appearance.ignore_plugin_themes = true`
+  turns them off. Plugins cannot change selection, caret, or diff colors. Approval cards and review screens read
+  their palette from the theme you see, and keep their contrast rule.
+- **Diff colors.** Added and removed lines in a plugin review use palette 2 and palette 1, through the contrast rule.
+- **A theme that fails.** A missing theme, a missing Ghostty config, or a bad value falls back to the default pair.
+  A bad line in a theme file is skipped. The General page lists each problem with the file and line.
+
+## Window state (not used by the window yet)
+
+`$DISCARD_HOME/state.toml` holds the window position and size and the two panel widths (180 to 400, default 240).
+Discard writes this file. The code is built and tested. The window does not read or write it yet.

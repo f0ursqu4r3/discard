@@ -5,6 +5,7 @@ use super::SettingsView;
 use crate::dispatch;
 use crate::problems::problem_lines;
 use discard_core::action::Action;
+use crate::appearance::to_lua;
 use crate::shared::{PROTECTED_DEFAULT, hsla};
 use discard_lua::theme::{
     MIN_BORDER_CONTRAST, MIN_CONTRAST, ProtectedPalette, Rgb, protected_accent, protected_palette,
@@ -74,10 +75,14 @@ fn toggle_trust(view: &mut SettingsView, id: &str, cx: &mut Context<SettingsView
     cx.notify();
 }
 
-/// Fixed colors for added and removed diff lines and the full-access warning. Rust picks them, not the theme,
-/// because a plugin theme reaches this window and could set `success` or `danger` to the background.
-const ADDED: Rgb = Rgb(0x3f, 0xb9, 0x50);
-const REMOVED: Rgb = Rgb(0xf8, 0x51, 0x49);
+/// Colors for added and removed diff lines and the full-access warning. They come from the Ghostty palette,
+/// not from plugin tokens, so a plugin theme cannot set them. Each use still goes through `protected_accent`,
+/// so a color that is hard to read on the card background falls back to the card's text color.
+#[derive(Clone, Copy)]
+struct DiffColors {
+    added: Rgb,
+    removed: Rgb,
+}
 
 fn muted(text: &str, cx: &App) -> Div {
     div()
@@ -91,6 +96,7 @@ fn review_card(
     index: usize,
     review: &Review,
     palette: ProtectedPalette,
+    diff_colors: DiffColors,
     cx: &mut Context<SettingsView>,
 ) -> AnyElement {
     let (id_a, id_r, id_t) = (review.id.clone(), review.id.clone(), review.id.clone());
@@ -99,8 +105,8 @@ fn review_card(
         ReviewKind::New => "New plugin",
         ReviewKind::Update => "Update",
     };
-    let added = hsla(protected_accent(&palette, ADDED, MIN_CONTRAST));
-    let removed = hsla(protected_accent(&palette, REMOVED, MIN_CONTRAST));
+    let added = hsla(protected_accent(&palette, diff_colors.added, MIN_CONTRAST));
+    let removed = hsla(protected_accent(&palette, diff_colors.removed, MIN_CONTRAST));
     let diff_lines: Vec<AnyElement> = review
         .diff
         .lines()
@@ -175,7 +181,7 @@ fn review_card(
                     .p_2()
                     .rounded_md()
                     .border_1()
-                    .border_color(hsla(protected_accent(&palette, REMOVED, MIN_BORDER_CONTRAST)))
+                    .border_color(hsla(protected_accent(&palette, diff_colors.removed, MIN_BORDER_CONTRAST)))
                     .font_weight(FontWeight::BOLD)
                     .child("FULL LOCAL ACCESS: this plugin can run programs. A program can read your files, use the network, and start other programs."),
             )
@@ -271,11 +277,17 @@ fn safe_mode_row(palette: ProtectedPalette) -> AnyElement {
 
 pub(super) fn render(view: &mut SettingsView, cx: &mut Context<SettingsView>) -> AnyElement {
     let plugins = view.shared.plugins.clone();
-    let (errors, theme) = {
-        let manager = plugins.manager().lock().unwrap_or_else(|p| p.into_inner());
-        (manager.errors(), manager.theme())
+    let errors = plugins.manager().lock().unwrap_or_else(|p| p.into_inner()).errors();
+    let (theme, diff_added, diff_removed) = {
+        let appearance = view.shared.appearance.lock().unwrap_or_else(|p| p.into_inner());
+        let ui = appearance.effective();
+        (appearance.protected_overrides(), ui.diff_added, ui.diff_removed)
     };
     let palette = protected_palette(&theme, PROTECTED_DEFAULT);
+    let diff_colors = DiffColors {
+        added: to_lua(diff_added),
+        removed: to_lua(diff_removed),
+    };
     let reviews = plugins.pending();
     let statuses = plugins.statuses();
     let problems = problem_lines(&errors, &statuses, &view.shared.load_report);
@@ -288,7 +300,7 @@ pub(super) fn render(view: &mut SettingsView, cx: &mut Context<SettingsView>) ->
     let cards: Vec<AnyElement> = reviews
         .iter()
         .enumerate()
-        .map(|(i, r)| review_card(view, i, r, palette, cx))
+        .map(|(i, r)| review_card(view, i, r, palette, diff_colors, cx))
         .collect();
     let rows: Vec<AnyElement> = statuses
         .iter()

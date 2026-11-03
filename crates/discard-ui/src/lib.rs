@@ -1,5 +1,6 @@
 //! GPUI views for Discard. Thin on purpose: all state logic lives in `discard_core::ui_state`.
 
+mod appearance;
 mod dispatch;
 mod menus;
 mod plugin_element;
@@ -12,6 +13,8 @@ pub use settings::{SettingsView, open_settings};
 pub use shared::Shared;
 pub use view::{DiscardView, ViewData, ViewInit};
 
+use appearance::AppearanceState;
+use discard_core::ghostty::live::LiveTheme;
 use discard_core::settings::SettingsStore;
 use discard_core::ui_state::{Command, UiState, Update};
 use gpui_kit::{AppContext as _, WindowOptions, application, init, open_window};
@@ -32,6 +35,7 @@ pub fn run(
     commands: UnboundedSender<Command>,
     updates: UnboundedReceiver<Update>,
     settings: std::sync::Arc<std::sync::Mutex<SettingsStore>>,
+    discard_home: std::path::PathBuf,
     relaunch: Relaunch,
 ) {
     // On macOS `cx.quit()` ends the process inside this call, so nothing after it may matter.
@@ -41,10 +45,21 @@ pub fn run(
         // Bind keys before the first menu install, so the menu shows each shortcut.
         menus::register_handlers(cx);
         menus::bind_keys(cx);
+        let appearance = {
+            let settings = settings.lock().unwrap_or_else(|p| p.into_inner()).settings().appearance.clone();
+            let (dirs, configs) = appearance::theme_env(&discard_home);
+            let system = appearance::system_appearance(cx.window_appearance());
+            let live = LiveTheme::new(dirs, configs, &settings, system);
+            let plugin_theme = plugins.manager().lock().unwrap_or_else(|p| p.into_inner()).theme();
+            let state = AppearanceState::new(live, &settings, plugin_theme);
+            appearance::apply(&state, cx);
+            std::sync::Arc::new(std::sync::Mutex::new(state))
+        };
         let shared = Shared {
             plugins,
             load_report: std::rc::Rc::new(load_report),
             settings,
+            appearance,
             plugin_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             plugin_notice: std::sync::Arc::new(std::sync::Mutex::new(None)),
         };

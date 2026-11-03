@@ -1,8 +1,21 @@
 //! The plugin problem lines. The main window counts them and the Plugins page lists them.
 
+use discard_core::ghostty::resolve::ThemeProblem;
 use discard_lua::service::PluginStatus;
 use discard_lua::{LoadReport, PluginState};
 use std::collections::BTreeMap;
+
+/// One line for each theme problem. A problem in a file names the file and the line.
+pub fn theme_problem_lines(problems: &[ThemeProblem]) -> Vec<String> {
+    problems
+        .iter()
+        .map(|p| match (&p.file, p.line) {
+            (Some(file), Some(line)) => format!("{}:{line}: {}", file.display(), p.message),
+            (Some(file), None) => format!("{}: {}", file.display(), p.message),
+            (None, _) => p.message.clone(),
+        })
+        .collect()
+}
 
 /// One line for each plugin problem. An empty list means no problem.
 pub fn problem_lines(
@@ -136,5 +149,38 @@ mod tests {
     fn the_summary_uses_the_singular_for_one() {
         assert_eq!(problem_summary(1), "1 plugin problem");
         assert_eq!(problem_summary(3), "3 plugin problems");
+    }
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn problem(file: Option<&str>, line: Option<usize>, message: &str) -> ThemeProblem {
+        ThemeProblem { file: file.map(PathBuf::from), line, message: message.to_string() }
+    }
+
+    #[test]
+    fn a_file_problem_names_the_file_and_line() {
+        let lines = theme_problem_lines(&[problem(Some("/t/Mine"), Some(3), "`foreground`: `x` is not a color")]);
+        assert_eq!(lines, vec!["/t/Mine:3: `foreground`: `x` is not a color"]);
+    }
+
+    #[test]
+    fn a_file_problem_without_a_line_names_only_the_file() {
+        let lines = theme_problem_lines(&[problem(Some("/t/Mine"), None, "cannot read")]);
+        assert_eq!(lines, vec!["/t/Mine: cannot read"]);
+    }
+
+    #[test]
+    fn a_problem_with_no_file_is_just_the_message() {
+        let lines = theme_problem_lines(&[problem(None, None, "theme `Nope` was not found")]);
+        assert_eq!(lines, vec!["theme `Nope` was not found"]);
+    }
+
+    #[test]
+    fn no_problems_gives_no_lines() {
+        assert!(theme_problem_lines(&[]).is_empty());
     }
 }

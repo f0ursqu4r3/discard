@@ -1,6 +1,7 @@
 //! The General page: default provider, confirm while working, and the issues found in `settings.toml`.
 
 use super::{SettingsView, soon_tag};
+use crate::problems::theme_problem_lines;
 use discard_core::bootstrap::PROVIDERS;
 use discard_core::settings::{Change, SettingsIssue, SettingsStore};
 use discard_core::settings_page::{
@@ -52,6 +53,9 @@ pub(super) fn render(view: &mut SettingsView, cx: &mut Context<SettingsView>) ->
             issue_lines(store.issues()),
         )
     };
+    let theme_problems = theme_problem_lines(
+        view.shared.appearance.lock().unwrap_or_else(|p| p.into_inner()).problems(),
+    );
     let muted = cx.theme().muted_foreground;
     let danger = cx.theme().danger;
 
@@ -95,6 +99,19 @@ pub(super) fn render(view: &mut SettingsView, cx: &mut Context<SettingsView>) ->
                             .child("Problems in settings.toml"),
                     )
                     .children(issues),
+            )
+        })
+        .when(!theme_problems.is_empty(), |c| {
+            c.child(
+                v_flex()
+                    .gap_1()
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(danger)
+                    .text_sm()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Problems with the theme"))
+                    .children(theme_problems),
             )
         })
         .when_some(view.general_error.clone(), |c, error| {
