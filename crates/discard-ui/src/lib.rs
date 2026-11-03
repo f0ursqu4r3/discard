@@ -41,10 +41,20 @@ pub fn run(
             plugin_notice: std::sync::Arc::new(std::sync::Mutex::new(None)),
         };
         cx.set_global(shared.clone());
-        open_window(WindowOptions::default(), cx, move |window, cx| {
+        let (main_window, _) = open_window(WindowOptions::default(), cx, move |window, cx| {
             cx.new(|cx| DiscardView::new(ViewInit { data, shared, state, commands, updates }, window, cx))
         })
         .expect("failed to open the main window");
+        // Discard has one main window and the engine runs for it. When it closes, the app ends on every platform,
+        // and Settings goes with it. GPUI's default quit mode on macOS is Explicit, so it would keep running without this.
+        // Closing the Settings window alone does not match the main window id, so it does not quit.
+        let main_id = main_window.window_id();
+        cx.on_window_closed(move |cx, closed| {
+            if closed == main_id {
+                cx.quit();
+            }
+        })
+        .detach();
         cx.activate(true);
     });
     RunOutcome::Quit

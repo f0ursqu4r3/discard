@@ -227,19 +227,59 @@ struct OpenSettings {
 
 impl Global for OpenSettings {}
 
+/// What `open_settings` does with an existing window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reuse {
+    /// The window took the page. Nothing more to do.
+    Done,
+    /// The window is open but is being updated now. Switch its page after the current update.
+    Defer,
+    /// The window is closed. Open a new one.
+    OpenNew,
+}
+
+/// `alive`: the window is still open. `updated`: the update call succeeded.
+/// A failed update alone does not mean the window closed: GPUI also fails an update
+/// of a window that is being updated right now, for example when a deep link fires from inside Settings.
+fn plan_reuse(alive: bool, updated: bool) -> Reuse {
+    match (alive, updated) {
+        (false, _) => Reuse::OpenNew,
+        (true, true) => Reuse::Done,
+        (true, false) => Reuse::Defer,
+    }
+}
+
+/// Activate the window and switch its page. Returns `false` when the window cannot be updated now.
+fn switch_page(
+    handle: AnyWindowHandle,
+    view: &WeakEntity<SettingsView>,
+    page: SettingsPage,
+    cx: &mut App,
+) -> bool {
+    let result = handle.update(cx, |_, window, cx| {
+        window.activate_window();
+        view.update(cx, |view, cx| view.show_page(page, window, cx))
+    });
+    matches!(result, Ok(Ok(())))
+}
+
 /// Open the Settings window on `page`. When one is open, activate it and switch its page.
 pub fn open_settings(page: SettingsPage, cx: &mut App) {
     let existing = cx
         .try_global::<OpenSettings>()
         .map(|open| (open.handle, open.view.clone()));
     if let Some((handle, view)) = existing {
-        // An error here means the window was closed.
-        let reused = handle.update(cx, |_, window, cx| {
-            window.activate_window();
-            view.update(cx, |view, cx| view.show_page(page, window, cx))
-        });
-        if matches!(reused, Ok(Ok(()))) {
-            return;
+        let alive = cx.windows().contains(&handle) && view.upgrade().is_some();
+        let updated = alive && switch_page(handle, &view, page, cx);
+        match plan_reuse(alive, updated) {
+            Reuse::Done => return,
+            Reuse::Defer => {
+                cx.defer(move |cx| {
+                    switch_page(handle, &view, page, cx);
+                });
+                return;
+            }
+            Reuse::OpenNew => {}
         }
     }
 
@@ -272,7 +312,7 @@ pub fn open_settings(page: SettingsPage, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     // Import by name: `use super::*` would bring in GPUI's `test` macro and shadow the built-in `#[test]`.
-    use super::{SidebarEntry, sidebar_entries};
+    use super::{Reuse, SidebarEntry, plan_reuse, sidebar_entries};
     use discard_core::settings_page::SettingsPage;
 
     #[test]
@@ -299,6 +339,21 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_closed_window_opens_a_new_one() {
+        assert_eq!(plan_reuse(false, false), Reuse::OpenNew);
+    }
+
+    #[test]
+    fn an_open_window_that_took_the_update_is_done() {
+        assert_eq!(plan_reuse(true, true), Reuse::Done);
+    }
+
+    #[test]
+    fn a_busy_open_window_defers_and_never_opens_a_second_one() {
+        assert_eq!(plan_reuse(true, false), Reuse::Defer);
     }
 
     #[test]
