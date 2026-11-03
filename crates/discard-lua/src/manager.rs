@@ -2,6 +2,7 @@
 //! or the built-in Rust view takes over if it fails), merges themes, and tracks errors for the error badge.
 
 use crate::element::Element;
+use crate::host::Host;
 use crate::runtime::{HookResult, LoadedInfo, PluginError, PluginHandle, PluginLimits, Status};
 use crate::snapshot::Snapshot;
 use crate::theme::ThemeOverrides;
@@ -43,18 +44,25 @@ impl Entry {
 
 pub struct PluginManager {
     limits: PluginLimits,
+    host: Host,
     plugins: Vec<Entry>,
 }
 
 impl PluginManager {
+    /// A manager whose plugins get no files and no memory. Use it to check drafts.
     pub fn new(limits: PluginLimits) -> Self {
-        Self { limits, plugins: Vec::new() }
+        Self::with_host(limits, Host::default())
+    }
+
+    /// A manager whose plugins get the services their manifests ask for.
+    pub fn with_host(limits: PluginLimits, host: Host) -> Self {
+        Self { limits, host, plugins: Vec::new() }
     }
 
     /// Load a plugin. A plugin with the same name is replaced. Later plugins win over earlier ones.
     pub fn load(&mut self, snapshot: Snapshot) -> Result<LoadedInfo, PluginError> {
         // Spawn first. If it fails, nothing changes and an older version of the plugin keeps running.
-        let (handle, info) = PluginHandle::spawn(snapshot, self.limits.clone())?;
+        let (handle, info) = PluginHandle::spawn_with_host(snapshot, self.limits.clone(), self.host.clone())?;
         let entry = Entry { handle, info: info.clone(), last_error: None, failures: 0 };
         match self.plugins.iter().position(|e| e.info.manifest.name == info.manifest.name) {
             Some(i) => {

@@ -3,6 +3,7 @@
 mod args;
 mod keys;
 mod plugin_events;
+mod plugin_memory;
 
 use discard_core::bootstrap::{Role, WorkspaceChoice};
 use discard_core::engine::Engine;
@@ -13,7 +14,7 @@ use discard_core::worktree::WorktreeManager;
 use discard_core::ui_state::UiState;
 use discard_core::memory::MemoryStore;
 use discard_lua::ledger::Ledger;
-use discard_lua::{PluginLimits, PluginManager, PluginService};
+use discard_lua::{Host, PluginLimits, PluginManager, PluginService};
 use discard_mcp::MemoryRuntime;
 use discard_core::provider::Provider;
 use discard_providers::claude::ClaudeProvider;
@@ -105,7 +106,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Plugins. The bundled UI loads first. User plugins load only if their bytes match a signed approval.
     let keys = keys::choose(std::env::var("DISCARD_PLUGIN_PASSPHRASE").ok().as_deref(), &data_dir, keys::system_store());
     let ledger = Ledger::open(&data_dir.join("plugins.db"), keys)?;
-    let manager = Arc::new(Mutex::new(PluginManager::new(PluginLimits::default())));
+    // Approved plugins get the files and memory their manifests ask for. Drafts are tested in a manager with none.
+    let plugin_memory = Arc::new(plugin_memory::PluginMemory::new(
+        Arc::clone(&memory_store),
+        workspace.channel.agent_id.clone(),
+        workspace.project.id.clone(),
+    ));
+    let manager = Arc::new(Mutex::new(PluginManager::with_host(PluginLimits::default(), Host::live(Some(plugin_memory)))));
     manager.lock().unwrap_or_else(|p| p.into_inner()).load(discard_lua::bundled::default_ui())?;
     let plugins = Arc::new(PluginService::new(&data_dir, ledger, Arc::clone(&manager), options.safe_mode)?);
     let load_report = plugins.load_all();

@@ -60,6 +60,9 @@ pub struct ExecScope {
 pub struct MemoryScope {
     /// Any of `agent`, `project`, `global`.
     pub scopes: Vec<String>,
+    /// Without this, the plugin can list, read, and search, but not append or edit.
+    #[serde(default)]
+    pub write: bool,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -72,6 +75,8 @@ pub enum ManifestError {
     ApiMismatch { wanted: String, have: &'static str },
     #[error("unknown memory scope `{0}`")]
     BadMemoryScope(String),
+    #[error("bad fs path: {0}")]
+    BadFsPath(String),
     #[error("capability `{0}` has an empty scope list")]
     EmptyScope(&'static str),
 }
@@ -92,6 +97,11 @@ impl Manifest {
         let c = &m.capabilities;
         if c.fs.as_ref().is_some_and(|f| f.paths.is_empty()) {
             return Err(ManifestError::EmptyScope("fs"));
+        }
+        if let Some(fs) = &c.fs {
+            for path in &fs.paths {
+                crate::host::check_scope_path(path).map_err(ManifestError::BadFsPath)?;
+            }
         }
         if c.net.as_ref().is_some_and(|n| n.hosts.is_empty()) {
             return Err(ManifestError::EmptyScope("net"));
@@ -140,7 +150,14 @@ impl Capabilities {
             ));
         }
         if let Some(mem) = &self.memory {
-            out.push(format!("Read and write agent memory ({})", mem.scopes.join(", ")));
+            if mem.write {
+                out.push(format!(
+                    "Read and write agent memory ({}). Memory under `core/` is added to the agent's instructions, so a write can change how the agent behaves.",
+                    mem.scopes.join(", ")
+                ));
+            } else {
+                out.push(format!("Read agent memory ({})", mem.scopes.join(", ")));
+            }
         }
         out
     }
@@ -211,6 +228,24 @@ mod tests {
         assert_eq!(Manifest::parse(&bad), Err(ManifestError::BadMemoryScope("galaxy".into())));
         let empty = format!("{MINIMAL}[capabilities.net]\nhosts = []\n");
         assert_eq!(Manifest::parse(&empty), Err(ManifestError::EmptyScope("net")));
+    }
+
+    #[test]
+    fn fs_paths_must_be_absolute_and_free_of_dot_dot() {
+        for bad in ["notes", "../x", "/tmp/../etc"] {
+            let text = format!("{MINIMAL}[capabilities.fs]\npaths = [\"{bad}\"]\n");
+            assert!(matches!(Manifest::parse(&text), Err(ManifestError::BadFsPath(_))), "{bad}");
+        }
+        assert!(Manifest::parse(&format!("{MINIMAL}[capabilities.fs]\npaths = [\"~/notes\", \"/tmp/x\"]\n")).is_ok());
+    }
+
+    #[test]
+    fn memory_is_read_only_unless_write_is_set_and_the_review_says_which() {
+        let read = Manifest::parse(&format!("{MINIMAL}[capabilities.memory]\nscopes = [\"global\"]\n")).unwrap().capabilities;
+        assert!(!read.memory.as_ref().unwrap().write);
+        assert!(read.describe()[0].starts_with("Read agent memory"));
+        let write = Manifest::parse(&format!("{MINIMAL}[capabilities.memory]\nscopes = [\"global\"]\nwrite = true\n")).unwrap().capabilities;
+        assert!(write.describe()[0].contains("change how the agent behaves"), "{:?}", write.describe());
     }
 
     #[test]

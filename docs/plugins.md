@@ -56,6 +56,29 @@ Agents have no tool that approves, installs, or trusts. Only the buttons in Disc
 - **Permission.** `plugin.write` is off for every agent by default. The bundled Builder agent has it on.
   The plugin tools are on a separate MCP connection with their own token. `plugin_rollback` always asks you.
 
+## Files and memory
+
+`discard.fs` and `discard.memory` work only after the user approves the capability.
+
+```toml
+[capabilities.fs]
+paths = ["~/notes", "/tmp/scratch"]   # absolute, or start with ~/. No `..`.
+write = false                          # read-only unless true
+
+[capabilities.memory]
+scopes = ["project", "global"]         # any of agent, project, global
+write = false                          # append and edit need true
+```
+
+- **Files.** `read`, `write`, `list`, `exists`, `mkdir`, `remove`. Discard resolves each path and every link in it,
+  and refuses any path that ends outside the listed folders. A read or write holds at most 1 MB of UTF-8 text. A
+  write replaces the file in one step. `remove` deletes files only.
+- **Memory.** `list`, `read`, `search`, `append`, `edit`. A call for a scope the manifest does not name is refused
+  before it reaches memory. `edit` needs the version from `read`, as in the agent tools. Memory under `core/` is added
+  to the agent's instructions, so the review screen warns that a write can change agent behavior.
+- A failed call raises a Lua error. Use `pcall` to handle it.
+- Each write, remove, append, and edit is logged with the plugin name and path.
+
 ## Events
 
 `discard.on(name, handler)` receives these events. Delivery is in order, on a separate thread, and the app never
@@ -75,9 +98,13 @@ secrets. The three tool events are sent only if the provider shows tool calls.
 
 ## Limits you should know
 
-- The runtime provides only the functions of the `ui` capability. Other capabilities in `plugin.toml`
-  (`fs`, `net`, `exec`, `memory`, `approvals.decide`) can be declared and are shown in review, but the runtime
-  gives plugins no functions for them yet.
+- `net`, `exec`, and `approvals_decide` can be declared and are shown in review, but the runtime gives plugins no
+  functions for them yet.
+- File scopes are checked when each call runs, not held open. A folder swapped for a link between the check and the
+  use is a race that Discard does not close. The same-user agent threat in `PLAN.md` applies.
+- `plugin_test` runs a draft with no files and no memory. A call to `discard.fs` or `discard.memory` fails there, so
+  a draft must not call them at load time.
+- Plugins see the memory of this app's agent and project only.
 - Events are observe-only. A handler can read an event, but a `{ block = true }` result changes nothing yet. Blocking a
   message or a tool call is not built.
 - The Keychain may ask for your permission the first time, and again after a rebuild of an unsigned binary.

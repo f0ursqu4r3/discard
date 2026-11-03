@@ -2,6 +2,7 @@
 //! Limits: CPU budget per call, memory cap, bounded queue. A violation terminates the plugin.
 
 use crate::element::{self, Element, ElementError};
+use crate::host::{FsAccess, Host, MAX_SEARCH_HITS};
 use crate::manifest::{API_VERSION, Capabilities, Manifest};
 use crate::queue::{BoundedQueue, Kind, PushOutcome};
 use crate::snapshot::Snapshot;
@@ -107,6 +108,11 @@ fn set_status(status: &Mutex<Status>, new: Status) {
 impl PluginHandle {
     /// Load a plugin from a snapshot. Blocks until `init.lua` has run.
     pub fn spawn(snapshot: Snapshot, limits: PluginLimits) -> Result<(PluginHandle, LoadedInfo), PluginError> {
+        Self::spawn_with_host(snapshot, limits, Host::default())
+    }
+
+    /// Like `spawn`, with the services (files, memory) the plugin may use if its manifest asks for them.
+    pub fn spawn_with_host(snapshot: Snapshot, limits: PluginLimits, host: Host) -> Result<(PluginHandle, LoadedInfo), PluginError> {
         let manifest = snapshot.manifest().map_err(|e| PluginError::Load(e.to_string()))?;
         let queue = Arc::new(BoundedQueue::new(limits.queue_capacity));
         let status = Arc::new(Mutex::new(Status::Running));
@@ -118,7 +124,7 @@ impl PluginHandle {
                 .name(format!("plugin-{}", manifest.name))
                 .spawn(move || {
                     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        worker(snapshot, manifest, limits, &queue, &status, init_tx);
+                        worker(snapshot, manifest, limits, host, &queue, &status, init_tx);
                     }));
                     if outcome.is_err() {
                         set_status(&status, Status::Terminated("plugin thread panicked".into()));
@@ -320,6 +326,133 @@ fn need(granted: bool, capability: &str, function: &str) -> mlua::Result<()> {
     }
 }
 
+fn runtime_err(message: String) -> mlua::Error {
+    mlua::Error::runtime(message)
+}
+
+/// `discard.fs`: files under the folders the manifest names. Every call is checked by the host.
+fn install_fs(lua: &Lua, api: &Table, manifest: &Manifest, host: &Host) -> mlua::Result<()> {
+    let access: Arc<Option<FsAccess>> =
+        Arc::new(manifest.capabilities.fs.as_ref().map(|scope| FsAccess::new(scope, std::env::var_os("HOME").map(Into::into))));
+    let enabled = host.fs_enabled;
+    let plugin = manifest.name.clone();
+    let fs = lua.create_table()?;
+
+    // Each function checks the host first, then the capability, then the scope.
+    fn guard<'a>(enabled: bool, access: &'a Option<FsAccess>, function: &str) -> mlua::Result<&'a FsAccess> {
+        if !enabled {
+            return Err(mlua::Error::runtime(format!("`{function}` is not available while a draft is being tested")));
+        }
+        access.as_ref().ok_or_else(|| {
+            mlua::Error::runtime(format!("`{function}` needs the `fs` capability, which this plugin was not granted"))
+        })
+    }
+
+    macro_rules! entry {
+        ($name:literal, |$a:ident, $p:ident, $($arg:ident : $ty:ty),*| $body:expr) => {{
+            let access = Arc::clone(&access);
+            let $p = plugin.clone();
+            fs.set($name, lua.create_function(move |_, ($($arg,)*): ($($ty,)*)| {
+                let $a = guard(enabled, &access, concat!("discard.fs.", $name))?;
+                let _ = &$p;
+                $body.map_err(runtime_err)
+            })?)?;
+        }};
+    }
+    entry!("read", |a, _p, path: String| a.read(&path));
+    entry!("list", |a, _p, path: String| a.list(&path));
+    entry!("exists", |a, _p, path: String| a.exists(&path));
+    entry!("mkdir", |a, _p, path: String| a.mkdir(&path));
+    entry!("remove", |a, plugin, path: String| {
+        info!(plugin = %plugin, path = %path, "plugin removes a file");
+        a.remove(&path)
+    });
+    entry!("write", |a, plugin, path: String, text: String| {
+        info!(plugin = %plugin, path = %path, bytes = text.len(), "plugin writes a file");
+        a.write(&path, &text)
+    });
+    api.set("fs", fs)
+}
+
+/// `discard.memory`: agent memory in the scopes the manifest names.
+fn install_memory(lua: &Lua, api: &Table, manifest: &Manifest, host: &Host) -> mlua::Result<()> {
+    let grant = manifest.capabilities.memory.clone();
+    let backend = host.memory.clone();
+    let plugin = manifest.name.clone();
+    let memory = lua.create_table()?;
+
+    // Returns the backend and the scope, or the reason the plugin may not use it.
+    fn allow(
+        grant: &Option<crate::manifest::MemoryScope>,
+        backend: &Option<Arc<dyn crate::host::MemoryHost>>,
+        function: &str,
+        scope: Option<&str>,
+        write: bool,
+    ) -> mlua::Result<Arc<dyn crate::host::MemoryHost>> {
+        let Some(grant) = grant else {
+            return Err(mlua::Error::runtime(format!("`{function}` needs the `memory` capability, which this plugin was not granted")));
+        };
+        let Some(backend) = backend else {
+            return Err(mlua::Error::runtime(format!("`{function}` is not available while a draft is being tested")));
+        };
+        if let Some(scope) = scope
+            && !grant.scopes.iter().any(|s| s == scope)
+        {
+            return Err(mlua::Error::runtime(format!("memory scope `{scope}` was not granted to this plugin (granted: {})", grant.scopes.join(", "))));
+        }
+        if write && !grant.write {
+            return Err(mlua::Error::runtime(format!("`{function}` needs write access to memory, and this plugin has read-only access")));
+        }
+        Ok(Arc::clone(backend))
+    }
+
+    {
+        let (grant, backend) = (grant.clone(), backend.clone());
+        memory.set("list", lua.create_function(move |lua, scope: String| {
+            let host = allow(&grant, &backend, "discard.memory.list", Some(&scope), false)?;
+            let files = host.list(&scope).map_err(runtime_err)?;
+            let rows: Vec<_> = files.into_iter().map(|f| serde_json::json!({"path": f.path, "version": f.version, "bytes": f.bytes})).collect();
+            lua.to_value(&rows)
+        })?)?;
+    }
+    {
+        let (grant, backend) = (grant.clone(), backend.clone());
+        memory.set("read", lua.create_function(move |lua, (scope, path): (String, String)| {
+            let host = allow(&grant, &backend, "discard.memory.read", Some(&scope), false)?;
+            let r = host.read(&scope, &path).map_err(runtime_err)?;
+            lua.to_value(&serde_json::json!({"text": r.text, "version": r.version}))
+        })?)?;
+    }
+    {
+        let (grant, backend) = (grant.clone(), backend.clone());
+        memory.set("search", lua.create_function(move |lua, (query, limit): (String, Option<i64>)| {
+            let host = allow(&grant, &backend, "discard.memory.search", None, false)?;
+            let scopes = grant.as_ref().map(|g| g.scopes.clone()).unwrap_or_default();
+            let limit = limit.unwrap_or(10).clamp(1, MAX_SEARCH_HITS as i64) as usize;
+            let hits = host.search(&scopes, &query, limit).map_err(runtime_err)?;
+            let rows: Vec<_> = hits.into_iter().take(limit).map(|h| serde_json::json!({"scope": h.scope, "path": h.path, "snippet": h.snippet})).collect();
+            lua.to_value(&rows)
+        })?)?;
+    }
+    {
+        let (grant, backend, plugin) = (grant.clone(), backend.clone(), plugin.clone());
+        memory.set("append", lua.create_function(move |_, (scope, path, text): (String, String, String)| {
+            let host = allow(&grant, &backend, "discard.memory.append", Some(&scope), true)?;
+            info!(plugin = %plugin, scope = %scope, path = %path, "plugin appends to memory");
+            host.append(&scope, &path, &text).map_err(runtime_err)
+        })?)?;
+    }
+    {
+        let (grant, backend, plugin) = (grant.clone(), backend.clone(), plugin.clone());
+        memory.set("edit", lua.create_function(move |_, (scope, path, old, new, version): (String, String, String, String, String)| {
+            let host = allow(&grant, &backend, "discard.memory.edit", Some(&scope), true)?;
+            info!(plugin = %plugin, scope = %scope, path = %path, "plugin edits memory");
+            host.edit(&scope, &path, &old, &new, &version).map_err(runtime_err)
+        })?)?;
+    }
+    api.set("memory", memory)
+}
+
 fn register_list(lua: &Lua, table: &Table, name: String, f: Function) -> mlua::Result<()> {
     let list: Table = match table.raw_get::<Value>(name.as_str())? {
         Value::Table(t) => t,
@@ -379,6 +512,7 @@ fn build(
     snapshot: &Arc<Snapshot>,
     manifest: &Manifest,
     limits: &PluginLimits,
+    host: &Host,
 ) -> Result<(Vm, Arc<Mutex<ThemeOverrides>>), PluginError> {
     let load_err = |e: mlua::Error| match classify(&e) {
         PluginError::Runtime(msg) => PluginError::Load(msg),
@@ -452,6 +586,9 @@ fn build(
             Ok(())
         })?)?;
 
+        install_fs(&lua, &api, manifest, host)?;
+        install_memory(&lua, &api, manifest, host)?;
+
         lua.globals().set("discard", api.clone())?;
         lua.globals().set("require", make_require(&lua, Arc::clone(snapshot))?)?;
         lua.sandbox(true)
@@ -476,12 +613,13 @@ fn worker(
     snapshot: Snapshot,
     manifest: Manifest,
     limits: PluginLimits,
+    host: Host,
     queue: &BoundedQueue<Request>,
     status: &Mutex<Status>,
     init_tx: Sender<Result<LoadedInfo, PluginError>>,
 ) {
     let snapshot = Arc::new(snapshot);
-    let (vm, theme) = match build(&snapshot, &manifest, &limits) {
+    let (vm, theme) = match build(&snapshot, &manifest, &limits, &host) {
         Ok(built) => built,
         Err(e) => {
             set_status(status, Status::Terminated(e.to_string()));
