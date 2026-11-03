@@ -10,6 +10,18 @@ pub enum Action {
     ReviewPlugins,
     ShowPluginErrors,
     ToggleSafeMode,
+    /// Hide Discard (Cmd+H).
+    HideApp,
+    /// Hide every other app.
+    HideOthers,
+    /// Show every hidden app.
+    ShowAll,
+    /// Minimize the focused window (Cmd+M).
+    Minimize,
+    /// Zoom the focused window.
+    Zoom,
+    /// Close the focused window (Cmd+W). Closing the main window ends the app, so it can need a confirm.
+    CloseWindow,
 }
 
 impl Action {
@@ -22,6 +34,12 @@ impl Action {
             Action::ReviewPlugins => "review_plugins",
             Action::ShowPluginErrors => "show_plugin_errors",
             Action::ToggleSafeMode => "toggle_safe_mode",
+            Action::HideApp => "hide_app",
+            Action::HideOthers => "hide_others",
+            Action::ShowAll => "show_all",
+            Action::Minimize => "minimize",
+            Action::Zoom => "zoom",
+            Action::CloseWindow => "close_window",
         }
     }
 
@@ -37,6 +55,12 @@ impl Action {
             Action::ReviewPlugins,
             Action::ShowPluginErrors,
             Action::ToggleSafeMode,
+            Action::HideApp,
+            Action::HideOthers,
+            Action::ShowAll,
+            Action::Minimize,
+            Action::Zoom,
+            Action::CloseWindow,
         ]
     }
 }
@@ -113,7 +137,13 @@ pub fn menu_bar(ctx: &MenuContext) -> Vec<MenuSpec> {
             title: "Discard",
             entries: vec![
                 action("Settings…", Action::OpenSettings),
+                MenuEntry::Separator,
                 MenuEntry::Services,
+                MenuEntry::Separator,
+                action("Hide Discard", Action::HideApp),
+                action("Hide Others", Action::HideOthers),
+                action("Show All", Action::ShowAll),
+                MenuEntry::Separator,
                 action("Quit Discard", Action::Quit),
             ],
         },
@@ -122,6 +152,8 @@ pub fn menu_bar(ctx: &MenuContext) -> Vec<MenuSpec> {
             entries: vec![
                 future("New Channel…"),
                 future("Archive Channel…"),
+                MenuEntry::Separator,
+                action("Close Window", Action::CloseWindow),
                 MenuEntry::Separator,
                 MenuEntry::Action {
                     label: "Cancel Turn".to_string(),
@@ -163,17 +195,25 @@ pub fn menu_bar(ctx: &MenuContext) -> Vec<MenuSpec> {
                 },
             ],
         },
-        MenuSpec { title: "Window", entries: vec![] },
+        MenuSpec {
+            title: "Window",
+            entries: vec![action("Minimize", Action::Minimize), action("Zoom", Action::Zoom)],
+        },
         MenuSpec { title: "Help", entries: vec![future("Discard Documentation")] },
     ]
 }
 
-/// Default key bindings. System keys (Cmd+C and so on) stay with the OS and are not listed.
+/// Default key bindings. GPUI adds no window or app keys of its own, so Cmd+W, Cmd+H, and Cmd+M are listed here.
+/// The edit keys (Cmd+C and so on) stay with the OS and the text inputs and are not listed.
 pub fn default_keymap() -> &'static [(Action, &'static str)] {
     &[
         (Action::OpenSettings, "cmd-,"),
         (Action::Quit, "cmd-q"),
         (Action::CancelTurn, "cmd-."),
+        (Action::HideApp, "cmd-h"),
+        (Action::HideOthers, "alt-cmd-h"),
+        (Action::Minimize, "cmd-m"),
+        (Action::CloseWindow, "cmd-w"),
     ]
 }
 
@@ -274,6 +314,56 @@ mod tests {
         assert!(default_keymap().contains(&(Action::OpenSettings, "cmd-,")));
         assert!(default_keymap().contains(&(Action::Quit, "cmd-q")));
         assert!(default_keymap().contains(&(Action::CancelTurn, "cmd-.")));
+        assert!(default_keymap().contains(&(Action::HideApp, "cmd-h")));
+        assert!(default_keymap().contains(&(Action::HideOthers, "alt-cmd-h")));
+        assert!(default_keymap().contains(&(Action::Minimize, "cmd-m")));
+        assert!(default_keymap().contains(&(Action::CloseWindow, "cmd-w")));
+    }
+
+    fn actions_in(title: &str) -> Vec<(String, Action)> {
+        menu_bar(&MenuContext::default())
+            .into_iter()
+            .find(|m| m.title == title)
+            .expect("menu exists")
+            .entries
+            .into_iter()
+            .filter_map(|e| match e {
+                MenuEntry::Action { label, action, .. } => Some((label, action)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn discard_menu_has_the_standard_app_items_in_order() {
+        let menu = &menu_bar(&MenuContext::default())[0];
+        assert_eq!(menu.title, "Discard");
+        let services = menu.entries.iter().position(|e| *e == MenuEntry::Services).expect("Services");
+        assert_eq!(
+            actions_in("Discard"),
+            [
+                ("Settings…".to_string(), Action::OpenSettings),
+                ("Hide Discard".to_string(), Action::HideApp),
+                ("Hide Others".to_string(), Action::HideOthers),
+                ("Show All".to_string(), Action::ShowAll),
+                ("Quit Discard".to_string(), Action::Quit),
+            ]
+        );
+        let hide = menu
+            .entries
+            .iter()
+            .position(|e| matches!(e, MenuEntry::Action { action: Action::HideApp, .. }))
+            .expect("Hide Discard");
+        assert!(services < hide, "Services comes before Hide Discard");
+    }
+
+    #[test]
+    fn file_menu_has_close_window_and_window_menu_has_minimize_and_zoom() {
+        assert!(actions_in("File").contains(&("Close Window".to_string(), Action::CloseWindow)));
+        assert_eq!(
+            actions_in("Window"),
+            [("Minimize".to_string(), Action::Minimize), ("Zoom".to_string(), Action::Zoom)]
+        );
     }
 
     #[test]

@@ -50,10 +50,19 @@ pub fn run(
         };
         cx.set_global(shared.clone());
         let (main_window, main_view) = open_window(WindowOptions::default(), cx, move |window, cx| {
+            // The red close button ends the app, so it follows the Quit confirm rule. `false` keeps the window open.
+            window.on_window_should_close(cx, |_, cx| dispatch::main_window_should_close(cx));
             cx.new(|cx| DiscardView::new(ViewInit { data, shared, state, commands, updates }, window, cx))
         })
         .expect("failed to open the main window");
         cx.set_global(dispatch::MainWindow { handle: main_window, view: main_view.downgrade() });
+        // A quit from any path (Dock, Cmd+Q, logout) tells the engine to cancel a running turn. Best effort only:
+        // GPUI gives quit handlers a short window and then the process exits, so provider child processes can survive.
+        cx.on_app_quit(|cx| {
+            dispatch::cancel_running_turn(cx);
+            async {}
+        })
+        .detach();
         // Discard has one main window and the engine runs for it. When it closes, the app ends on every platform,
         // and Settings goes with it. GPUI's default quit mode on macOS is Explicit, so it would keep running without this.
         // Closing the Settings window alone does not match the main window id, so it does not quit.

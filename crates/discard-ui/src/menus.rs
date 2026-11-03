@@ -33,7 +33,13 @@ action_types!(
     CancelTurn,
     ReviewPlugins,
     ShowPluginErrors,
-    ToggleSafeMode
+    ToggleSafeMode,
+    HideApp,
+    HideOthers,
+    ShowAll,
+    Minimize,
+    Zoom,
+    CloseWindow,
 );
 
 /// Bind `default_keymap()`. System keys other than those in the keymap stay with the OS and the inputs.
