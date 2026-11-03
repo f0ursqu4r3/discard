@@ -2,6 +2,7 @@
 
 mod args;
 mod keys;
+mod plugin_events;
 
 use discard_core::bootstrap::{Role, WorkspaceChoice};
 use discard_core::engine::Engine;
@@ -135,6 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         plugin_write: workspace.agent.plugin_write,
         workspace_mode: workspace.channel.workspace_mode,
         workspace: Some(Arc::new(GitWorkspace::new(&data_dir.join("worktrees"), Arc::clone(&store)))),
+        observer: Some(Arc::new(plugin_events::PluginEvents::new(Arc::clone(&manager)))),
         channel_name: workspace.channel.name.clone(),
         provider: provider_for(&workspace.agent.provider)?,
         channel_id: workspace.channel.id.clone(),

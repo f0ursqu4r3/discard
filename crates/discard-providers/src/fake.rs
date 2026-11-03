@@ -89,6 +89,12 @@ impl FakeProvider {
         self
     }
 
+    /// Whether the provider reports tool calls to the host.
+    pub fn with_tool_call_visibility(mut self, visible: bool) -> Self {
+        self.matrix.capabilities.tool_call_visibility = visible;
+        self
+    }
+
     /// The resume handle every session reports once started.
     pub fn with_resume_handle(mut self, handle: &str) -> Self {
         self.resume_handle = Some(handle.to_string());

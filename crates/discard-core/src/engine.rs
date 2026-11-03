@@ -1,9 +1,10 @@
 //! Engine: turns UI commands into provider turns and persists the result.
 
 use crate::approval::{ApprovalState, Decider, Decision};
-use crate::capability::ApprovalPolicy;
+use crate::capability::{ApprovalPolicy, HookKind, HookMode};
 use crate::driver::{DecisionMsg, TurnContext, TurnInputs, run_turn};
 use crate::event::{EventKind, Sequencer, SessionId};
+use crate::observer::{self, EventObserver};
 use crate::model::{AgentId, Block, ChannelId, Message, MessageId, ProjectId, Role, WorkspaceMode};
 use crate::provider::{Provider, ProviderError, SessionSpec, SetupStatus};
 use crate::redact::redact;
@@ -78,6 +79,8 @@ pub struct Engine {
     /// Where this channel's agent works: the project's main checkout, or its own git worktree.
     pub workspace_mode: WorkspaceMode,
     pub workspace: Option<Arc<dyn WorkspaceService>>,
+    /// Told about messages, tool calls, approvals, status changes, and finished turns. Never waited on.
+    pub observer: Option<Arc<dyn EventObserver>>,
     pub channel_name: String,
     pub provider: Arc<dyn Provider>,
     pub channel_id: ChannelId,
@@ -131,6 +134,18 @@ impl Engine {
         }
     }
 
+    fn observe(&self, (name, payload): (&'static str, serde_json::Value)) {
+        if let Some(observer) = &self.observer {
+            observer.observe(name, &payload);
+        }
+    }
+
+    /// Tell the UI the turn ended, and tell plugins.
+    fn finish(&self, updates: &mpsc::UnboundedSender<Update>, outcome: crate::driver::TurnOutcome) {
+        send(updates, Update::TurnFinished(outcome));
+        self.observe(observer::turn_finished(outcome));
+    }
+
     fn store_message(&self, role: Role, blocks: Vec<Block>) {
         let message = Message { id: MessageId::new(), channel_id: self.channel_id.clone(), role, blocks };
         if let Err(e) = crate::driver::lock(&self.store).insert_message(&message) {
@@ -146,12 +161,13 @@ impl Engine {
         updates: &mpsc::UnboundedSender<Update>,
     ) {
         self.store_message(Role::User, vec![Block::Markdown { text: text.clone() }]);
+        self.observe(observer::message_sent(&self.channel_id.0, &text));
 
         let enforcement = match self.provider.capabilities().enforcement_for(self.policy) {
             Ok(mode) => mode,
             Err(e) => {
                 send(updates, Update::Error(e.to_string()));
-                send(updates, Update::TurnFinished(crate::driver::TurnOutcome::Failed));
+                self.finish(updates, crate::driver::TurnOutcome::Failed);
                 return;
             }
         };
@@ -188,7 +204,7 @@ impl Engine {
                     }
                     Err(e) => {
                         send(updates, Update::Error(redact(&e)));
-                        send(updates, Update::TurnFinished(crate::driver::TurnOutcome::Failed));
+                        self.finish(updates, crate::driver::TurnOutcome::Failed);
                         return;
                     }
                 }
@@ -201,7 +217,7 @@ impl Engine {
                 Ok(p) => Some(p),
                 Err(e) => {
                     send(updates, Update::Error(redact(&e)));
-                    send(updates, Update::TurnFinished(crate::driver::TurnOutcome::Failed));
+                    self.finish(updates, crate::driver::TurnOutcome::Failed);
                     return;
                 }
             },
@@ -233,7 +249,7 @@ impl Engine {
                     other => redact(&other.to_string()),
                 };
                 send(updates, Update::Error(message));
-                send(updates, Update::TurnFinished(crate::driver::TurnOutcome::Failed));
+                self.finish(updates, crate::driver::TurnOutcome::Failed);
                 return;
             }
         };
@@ -251,6 +267,8 @@ impl Engine {
         let driver = run_turn(ctx, &mut *session, &text, TurnInputs { decisions: decisions_rx, cancel: cancel_rx });
 
         let mut timeline = Timeline::new();
+        // Tool events need a provider that shows tool calls. Without it they are never sent.
+        let tool_events = self.provider.capabilities().hook_mode(HookKind::ObserveEvents) == HookMode::Active;
         let pump = async {
             let mut commands_open = true;
             loop {
@@ -258,6 +276,11 @@ impl Engine {
                     event = events_rx.recv() => {
                         let Some(event) = event else { break };
                         timeline.apply(&event.kind);
+                        if let Some(mapped) = observer::from_event(&event.kind)
+                            && (tool_events || !observer::is_tool_event(mapped.0))
+                        {
+                            self.observe(mapped);
+                        }
                         // Discard's own memory tools are approved by policy, and the decision is audited.
                         let memory_approval = match &event.kind {
                             EventKind::ApprovalRequest { approval_id, tool, .. }
@@ -320,11 +343,11 @@ impl Engine {
                 {
                     warn!(error = %e, "could not save the resume handle");
                 }
-                send(updates, Update::TurnFinished(outcome));
+                self.finish(updates, outcome);
             }
             Err(e) => {
                 send(updates, Update::Error(redact(&e.to_string())));
-                send(updates, Update::TurnFinished(crate::driver::TurnOutcome::Failed));
+                self.finish(updates, crate::driver::TurnOutcome::Failed);
             }
         }
     }

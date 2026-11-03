@@ -57,6 +57,7 @@ async fn build_plugin(provider: Arc<dyn Provider>, model: Option<&str>) {
         plugin_write: true,
         workspace_mode: discard_core::model::WorkspaceMode::MainCheckout,
         workspace: None,
+        observer: None,
         channel_name: "c".into(),
         provider,
         channel_id: channel.id.clone(),

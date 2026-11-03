@@ -56,12 +56,30 @@ Agents have no tool that approves, installs, or trusts. Only the buttons in Disc
 - **Permission.** `plugin.write` is off for every agent by default. The bundled Builder agent has it on.
   The plugin tools are on a separate MCP connection with their own token. `plugin_rollback` always asks you.
 
+## Events
+
+`discard.on(name, handler)` receives these events. Delivery is in order, on a separate thread, and the app never
+waits for a plugin. A slow plugin loses its oldest queued events.
+
+| Event | Payload |
+| --- | --- |
+| `message_sent` | `channel_id`, `text` |
+| `tool_call` | `call_id`, `tool` |
+| `tool_result` | `call_id`, `is_error` |
+| `approval_requested` | `approval_id`, `call_id`, `tool` |
+| `agent_status` | `status`: `idle`, `working`, `awaiting_approval`, or `offline` |
+| `turn_finished` | `outcome`: `completed`, `failed`, or `cancelled` |
+
+Payloads hold names, ids, and flags. They never hold tool input, tool output, or agent text, because those can hold
+secrets. The three tool events are sent only if the provider shows tool calls.
+
 ## Limits you should know
 
 - The runtime provides only the functions of the `ui` capability. Other capabilities in `plugin.toml`
   (`fs`, `net`, `exec`, `memory`, `approvals.decide`) can be declared and are shown in review, but the runtime
   gives plugins no functions for them yet.
-- Hooks (`discard.on`) run in the plugin runtime, but the app does not yet call them for message and tool events.
+- Events are observe-only. A handler can read an event, but a `{ block = true }` result changes nothing yet. Blocking a
+  message or a tool call is not built.
 - The Keychain may ask for your permission the first time, and again after a rebuild of an unsigned binary.
 - Linux and Windows secret stores are not wired. Use `DISCARD_PLUGIN_PASSPHRASE` there.
 - The review screen was built and logic-tested but not checked visually in this milestone.

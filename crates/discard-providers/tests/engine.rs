@@ -6,6 +6,7 @@ use discard_core::capability::ApprovalPolicy;
 use discard_core::driver::TurnOutcome;
 use discard_core::engine::{Engine, MEMORY_TOOL_PREFIX, MemoryService, PreparedMemory, PreparedWorkspace, WorkspaceService};
 use discard_core::event::{ApprovalId, EventKind, SessionId};
+use discard_core::observer::EventObserver;
 use discard_core::model::{AgentId, Block, Channel, ChannelId, Project, ProjectId, Role, WorkspaceMode};
 use discard_core::provider::SetupStatus;
 use discard_core::store::Store;
@@ -32,6 +33,15 @@ fn start(provider: FakeProvider, policy: ApprovalPolicy) -> Rig {
 }
 
 fn start_with(provider: FakeProvider, policy: ApprovalPolicy, memory: Option<Arc<dyn MemoryService>>) -> Rig {
+    start_full(provider, policy, memory, None)
+}
+
+fn start_full(
+    provider: FakeProvider,
+    policy: ApprovalPolicy,
+    memory: Option<Arc<dyn MemoryService>>,
+    observer: Option<Arc<dyn EventObserver>>,
+) -> Rig {
     let store = Store::open_in_memory().unwrap();
     let project = Project { id: ProjectId::new(), name: "p".into(), path: "/p".into() };
     store.insert_project(&project).unwrap();
@@ -63,6 +73,7 @@ fn start_with(provider: FakeProvider, policy: ApprovalPolicy, memory: Option<Arc
         plugin_write: false,
         workspace_mode: discard_core::model::WorkspaceMode::MainCheckout,
         workspace: None,
+        observer,
         channel_name: "c".into(),
         provider: Arc::new(provider),
         channel_id: channel.id.clone(),
@@ -460,6 +471,7 @@ fn start_workspace(
         plugin_write: false,
         workspace_mode: mode,
         workspace,
+        observer: None,
         channel_name: "general".into(),
         provider: Arc::new(provider),
         channel_id: channel.id.clone(),
@@ -547,4 +559,83 @@ async fn the_workspace_is_requested_again_on_every_turn() {
         rig.until_finished().await;
     }
     assert_eq!(ws.calls.lock().unwrap().len(), 2, "prepare is idempotent, so the engine asks every turn");
+}
+
+#[derive(Default)]
+struct Recorder(Mutex<Vec<(String, serde_json::Value)>>);
+
+impl EventObserver for Recorder {
+    fn observe(&self, event: &str, payload: &serde_json::Value) {
+        self.0.lock().unwrap().push((event.to_string(), payload.clone()));
+    }
+}
+
+impl Recorder {
+    fn names(&self) -> Vec<String> {
+        self.0.lock().unwrap().iter().map(|(n, _)| n.clone()).collect()
+    }
+}
+
+#[tokio::test]
+async fn an_observer_sees_the_message_status_changes_and_the_finished_turn_in_order() {
+    let rec = Arc::new(Recorder::default());
+    let mut rig = start_full(FakeProvider::new(vec![Step::working(), Step::text("hi"), Step::idle()]), ApprovalPolicy::Ask, None, Some(rec.clone()));
+    rig.commands.send(Command::Send("hello".into())).unwrap();
+    rig.until_finished().await;
+    assert_eq!(rec.names(), ["message_sent", "agent_status", "agent_status", "turn_finished"]);
+    let seen = rec.0.lock().unwrap().clone();
+    assert_eq!(seen[0].1, json!({ "channel_id": rig.channel.0, "text": "hello" }));
+    assert_eq!(seen[1].1, json!({ "status": "working" }));
+    assert_eq!(seen[3].1, json!({ "outcome": "completed" }));
+}
+
+#[tokio::test]
+async fn an_observer_sees_the_approval_request_without_its_input() {
+    let rec = Arc::new(Recorder::default());
+    let mut rig = start_full(FakeProvider::new(vec![Step::working(), bash(), Step::idle()]), ApprovalPolicy::Ask, None, Some(rec.clone()));
+    rig.commands.send(Command::Send("go".into())).unwrap();
+    let approval_id = loop {
+        if let Update::Event(e) = rig.next().await
+            && let EventKind::ApprovalRequest { approval_id, .. } = e.kind
+        {
+            break approval_id;
+        }
+    };
+    rig.commands.send(Command::Decide { approval_id, decision: Decision::Deny }).unwrap();
+    rig.until_finished().await;
+    let seen = rec.0.lock().unwrap().clone();
+    let (_, payload) = seen.iter().find(|(n, _)| n == "approval_requested").expect("an approval_requested event");
+    assert_eq!(payload["tool"], "Bash");
+    assert!(!payload.to_string().contains("touch x"), "the tool input must not reach plugins: {payload}");
+}
+
+#[tokio::test]
+async fn a_turn_whose_stream_ends_early_is_reported_as_failed() {
+    let rec = Arc::new(Recorder::default());
+    let mut rig = start_full(FakeProvider::new(vec![]), ApprovalPolicy::Ask, None, Some(rec.clone()));
+    rig.commands.send(Command::Send("x".into())).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(matches!(updates.last(), Some(Update::TurnFinished(TurnOutcome::Failed))));
+    let last = rec.0.lock().unwrap().last().cloned().unwrap();
+    assert_eq!((last.0.as_str(), last.1), ("turn_finished", json!({ "outcome": "failed" })));
+}
+
+#[tokio::test]
+async fn tool_events_are_not_sent_when_the_provider_cannot_show_tool_calls() {
+    let rec = Arc::new(Recorder::default());
+    let provider = FakeProvider::new(vec![Step::working(), bash(), Step::idle()]).with_tool_call_visibility(false);
+    let mut rig = start_full(provider, ApprovalPolicy::Ask, None, Some(rec.clone()));
+    rig.commands.send(Command::Send("go".into())).unwrap();
+    let approval_id = loop {
+        if let Update::Event(e) = rig.next().await
+            && let EventKind::ApprovalRequest { approval_id, .. } = e.kind
+        {
+            break approval_id;
+        }
+    };
+    rig.commands.send(Command::Decide { approval_id, decision: Decision::Deny }).unwrap();
+    rig.until_finished().await;
+    let names = rec.names();
+    assert!(!names.iter().any(|n| n == "approval_requested" || n == "tool_call" || n == "tool_result"), "{names:?}");
+    assert!(names.iter().any(|n| n == "agent_status"), "non-tool events still flow: {names:?}");
 }

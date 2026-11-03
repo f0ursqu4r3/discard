@@ -15,6 +15,7 @@ pub mod logging;
 pub mod timeline;
 pub mod ui_state;
 pub mod engine;
+pub mod observer;
 pub mod bootstrap;
 pub mod memory;
 pub mod worktree;

@@ -1311,6 +1311,7 @@ dependencies = [
  "discard-providers",
  "discard-ui",
  "keyring",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

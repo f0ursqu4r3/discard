@@ -34,7 +34,7 @@ pub const FUNCTIONS: &[ApiFn] = &[
     ApiFn {
         name: "on",
         signature: "(event: string, handler: (payload: any) -> { block: boolean?, reason: string? }?) -> ()",
-        doc: "Subscribe to an event. A handler may return `{ block = true, reason = \"...\" }` where the provider can block before running.",
+        doc: "Subscribe to an event: `message_sent`, `tool_call`, `tool_result`, `approval_requested`, `agent_status`, `turn_finished`. Events are observe-only for now: a returned `{ block = true }` has no effect.",
         capability: None,
     },
     ApiFn { name: "log", signature: "(message: string) -> ()", doc: "Write a line to Discard's log.", capability: None },

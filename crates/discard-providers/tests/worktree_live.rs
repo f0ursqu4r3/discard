@@ -54,6 +54,7 @@ async fn run(provider: Arc<dyn Provider>, model: Option<&str>) {
         plugin_write: false,
         workspace_mode: WorkspaceMode::Worktree,
         workspace: Some(workspace.clone()),
+        observer: None,
         channel_name: "general".into(),
         provider,
         channel_id: channel.id.clone(),
