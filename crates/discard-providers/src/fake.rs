@@ -39,6 +39,8 @@ impl Step {
 /// What the fake observed. Tests assert on this.
 #[derive(Debug, Default, Clone)]
 pub struct Probe {
+    /// Every session spec the provider was started with.
+    pub specs: Arc<Mutex<Vec<SessionSpec>>>,
     /// The resume handle each started session was given.
     pub started_with: Arc<Mutex<Vec<Option<String>>>>,
     pub responses: Arc<Mutex<Vec<(ApprovalId, Decision)>>>,
@@ -108,6 +110,7 @@ impl Provider for FakeProvider {
     async fn start_session(&self, spec: SessionSpec) -> Result<Box<dyn ProviderSession>, ProviderError> {
         self.matrix.supports(spec.enforcement)?;
         self.probe.started_with.lock().expect("probe lock").push(spec.resume_handle.clone());
+        self.probe.specs.lock().expect("probe lock").push(spec.clone());
         let (decisions_tx, decisions_rx) = mpsc::unbounded_channel();
         Ok(Box::new(FakeSession {
             script: self.script.iter().cloned().collect(),

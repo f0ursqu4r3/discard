@@ -4,6 +4,7 @@ members = [
     "crates/discard-core",
     "crates/discard-providers",
     "crates/discard-lua",
+    "crates/discard-mcp",
     "crates/discard-ui",
     "crates/discard-app",
 ]
@@ -15,6 +16,7 @@ license = "MIT"
 
 [workspace.dependencies]
 async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 nix = { version = "0.30", features = ["signal"] }
 regex = "1"
 mlua = { version = "0.12", features = ["luau", "vendored", "serialize", "send"] }
@@ -27,6 +29,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-uuid = { version = "1", features = ["v7", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 discard-core = { path = "crates/discard-core" }
 discard-providers = { path = "crates/discard-providers" }

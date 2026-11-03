@@ -4,7 +4,9 @@ use discard_core::engine::Engine;
 use discard_core::logging;
 use discard_core::store::Store;
 use discard_core::ui_state::UiState;
+use discard_core::memory::MemoryStore;
 use discard_lua::{PluginLimits, PluginManager};
+use discard_mcp::MemoryRuntime;
 use discard_providers::claude::ClaudeProvider;
 use discard_ui::ViewData;
 use std::collections::HashSet;
@@ -48,11 +50,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Runtime::new()?;
     let _enter = runtime.enter();
 
+    // Memory: markdown files are the source of truth. The FTS index can always be rebuilt from them.
+    let memory_store = Arc::new(MemoryStore::open(&data_dir.join("memory"), &data_dir.join("memory-index.db"))?);
+    match memory_store.reconcile() {
+        Ok(stats) if stats.indexed + stats.removed > 0 => info!(indexed = stats.indexed, removed = stats.removed, "memory index reconciled"),
+        Ok(_) => {}
+        Err(e) => warn!(error = %e, "could not reconcile the memory index"),
+    }
+    let memory = runtime.block_on(MemoryRuntime::start(Arc::clone(&memory_store), &data_dir.join("run")))?;
+
     let (commands_tx, commands_rx) = mpsc::unbounded_channel();
     let (updates_tx, updates_rx) = mpsc::unbounded_channel();
 
     let engine = Engine {
         store: Arc::new(Mutex::new(store)),
+        agent_id: workspace.channel.agent_id.clone(),
+        project_id: workspace.project.id.clone(),
+        memory: Some(memory),
         provider: Arc::new(ClaudeProvider::new("claude")),
         channel_id: workspace.channel.id.clone(),
         session_id: workspace.session_id.clone(),
