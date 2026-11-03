@@ -17,14 +17,13 @@ use discard_core::ui_state::{Command, UiState, Update};
 use gpui_kit::{AppContext as _, WindowOptions, application, init, open_window};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-/// How the app ended. `Relaunch` asks the caller to start a new process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunOutcome {
-    Quit,
-    Relaunch { safe_mode: bool },
-}
+/// Starts a process that runs Discard again after this one exits. The argument is the new safe-mode state.
+/// `Err` holds a message for the user. On `Ok` the dispatcher quits this process.
+pub type Relaunch = std::sync::Arc<dyn Fn(bool) -> Result<(), String> + Send + Sync>;
 
 /// Open the main window and run until it quits. Blocks the calling (main) thread.
+/// On macOS it never returns: GPUI's quit ends the process inside the event loop.
+#[allow(clippy::too_many_arguments)] // Each argument is one piece the app hands over once. A wrapper struct adds nothing.
 pub fn run(
     data: ViewData,
     plugins: std::sync::Arc<discard_lua::PluginService>,
@@ -33,13 +32,12 @@ pub fn run(
     commands: UnboundedSender<Command>,
     updates: UnboundedReceiver<Update>,
     settings: std::sync::Arc<std::sync::Mutex<SettingsStore>>,
-) -> RunOutcome {
-    // The dispatcher stores a relaunch request here before it quits. Read it after the event loop ends.
-    let relaunch = dispatch::RelaunchSlot::default();
-    let slot = relaunch.clone();
+    relaunch: Relaunch,
+) {
+    // On macOS `cx.quit()` ends the process inside this call, so nothing after it may matter.
     application().run(move |cx| {
         init(cx);
-        cx.set_global(slot);
+        cx.set_global(dispatch::Relauncher(relaunch));
         // Bind keys before the first menu install, so the menu shows each shortcut.
         menus::register_handlers(cx);
         menus::bind_keys(cx);
@@ -68,25 +66,4 @@ pub fn run(
         .detach();
         cx.activate(true);
     });
-    outcome(*relaunch.0.lock().unwrap_or_else(|p| p.into_inner()))
-}
-
-/// The outcome for what the dispatcher stored. Nothing stored means a plain quit.
-fn outcome(stored: Option<bool>) -> RunOutcome {
-    match stored {
-        Some(safe_mode) => RunOutcome::Relaunch { safe_mode },
-        None => RunOutcome::Quit,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{RunOutcome, outcome};
-
-    #[test]
-    fn stored_relaunch_becomes_the_outcome() {
-        assert_eq!(outcome(None), RunOutcome::Quit);
-        assert_eq!(outcome(Some(true)), RunOutcome::Relaunch { safe_mode: true });
-        assert_eq!(outcome(Some(false)), RunOutcome::Relaunch { safe_mode: false });
-    }
 }

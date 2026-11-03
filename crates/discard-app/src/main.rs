@@ -21,7 +21,7 @@ use discard_core::provider::Provider;
 use discard_providers::claude::ClaudeProvider;
 use discard_providers::codex::CodexProvider;
 use discard_core::settings::SettingsStore;
-use discard_ui::{RunOutcome, ViewData};
+use discard_ui::{Relaunch, ViewData};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -82,18 +82,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&data_dir)?;
 
     // `run_app` owns the store, the memory runtime, the provider processes and the tokio runtime.
-    // They are all dropped when it returns, so the relaunched process can take over their files and socket.
-    let outcome = run_app(&options, &data_dir, settings)?;
-    if let RunOutcome::Relaunch { safe_mode } = outcome {
-        let spawned = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).args(relaunch::args(&argv, safe_mode)).spawn());
-        if let Err(e) = spawned {
-            warn!(error = %e, "could not relaunch Discard");
-        }
-    }
-    Ok(())
+    // They are all dropped when it returns. A relaunch does not depend on that: on macOS the quit ends the process
+    // inside the event loop. The relaunch waiter starts before the quit and waits for this process to exit.
+    let relaunch: Relaunch = Arc::new(move |safe_mode| relaunch::spawn(&argv, safe_mode).map_err(|e| e.to_string()));
+    run_app(&options, &data_dir, settings, relaunch)
 }
 
-fn run_app(options: &args::Options, data_dir: &Path, settings: SettingsStore) -> Result<RunOutcome, Box<dyn std::error::Error>> {
+fn run_app(
+    options: &args::Options,
+    data_dir: &Path,
+    settings: SettingsStore,
+    relaunch: Relaunch,
+) -> Result<(), Box<dyn std::error::Error>> {
     let settings = Arc::new(Mutex::new(settings));
     let project_dir = std::env::current_dir()?;
     let store = Arc::new(Mutex::new(Store::open(&data_dir.join("discard.db"))?));
@@ -185,7 +185,7 @@ fn run_app(options: &args::Options, data_dir: &Path, settings: SettingsStore) ->
     };
     runtime.spawn(engine.run(commands_rx, updates_tx));
 
-    Ok(discard_ui::run(
+    discard_ui::run(
         ViewData {
             project_name: workspace.project.name,
             channel_name: workspace.channel.name,
@@ -198,7 +198,9 @@ fn run_app(options: &args::Options, data_dir: &Path, settings: SettingsStore) ->
         commands_tx,
         updates_rx,
         settings,
-    ))
+        relaunch,
+    );
+    Ok(())
 }
 
 #[cfg(test)]

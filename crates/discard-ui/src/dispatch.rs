@@ -1,12 +1,12 @@
 //! The one place that runs a core `Action`. Menus, keys, and Rust-drawn buttons all call `run`.
 
+use crate::Relaunch;
 use crate::settings::open_settings;
 use crate::shared::Shared;
 use crate::view::DiscardView;
 use discard_core::action::{Action, needs_confirm};
 use discard_core::settings_page::SettingsPage;
 use gpui_kit::{AnyWindowHandle, App, Global, WeakEntity};
-use std::sync::{Arc, Mutex};
 
 /// An action that ends this process, and so may need the user to confirm it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,11 +68,25 @@ pub(crate) fn plan(
     }
 }
 
-/// Where a relaunch request waits until `application().run` returns. `Some(safe_mode)` means relaunch.
-#[derive(Clone, Default)]
-pub(crate) struct RelaunchSlot(pub(crate) Arc<Mutex<Option<bool>>>);
+/// The relaunch callback from the app. It starts a process that waits for this one to exit.
+pub(crate) struct Relauncher(pub(crate) Relaunch);
 
-impl Global for RelaunchSlot {}
+impl Global for Relauncher {}
+
+/// Prepare to end the process for `ending`. `Ok` means quit now. `Err` holds the message to show, and the app stays open.
+/// Pure apart from `relaunch`, so the rule "a failed relaunch never quits" is testable.
+pub(crate) fn prepare_exit(
+    ending: Confirm,
+    relaunch: Option<&(dyn Fn(bool) -> Result<(), String> + Send + Sync)>,
+) -> Result<(), String> {
+    match ending {
+        Confirm::Quit => Ok(()),
+        Confirm::Relaunch { safe_mode } => match relaunch {
+            Some(relaunch) => relaunch(safe_mode),
+            None => Err("relaunch is not available".to_string()),
+        },
+    }
+}
 
 /// The main window and its view, so the dispatcher can reach them from any window.
 pub(crate) struct MainWindow {
@@ -132,14 +146,21 @@ pub fn run(action: Action, cx: &mut App) {
     }
 }
 
-/// End the process. A relaunch stores its outcome first, so `run` returns it after the event loop ends.
+/// End the process. A relaunch first starts the waiting child. If that fails, the app stays open
+/// and the main window shows the error.
 pub(crate) fn perform(ending: Confirm, cx: &mut App) {
-    if let Confirm::Relaunch { safe_mode } = ending
-        && let Some(slot) = cx.try_global::<RelaunchSlot>()
-    {
-        *slot.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(safe_mode);
+    let relaunch = cx.try_global::<Relauncher>().map(|r| r.0.clone());
+    match prepare_exit(ending, relaunch.as_deref()) {
+        Ok(()) => cx.quit(),
+        Err(error) => {
+            tracing::warn!(%error, "could not relaunch Discard");
+            if let Some(view) = cx.try_global::<MainWindow>().and_then(|m| m.view.upgrade()) {
+                view.update(cx, |view, cx| {
+                    view.show_notice(format!("Could not relaunch Discard: {error}"), cx)
+                });
+            }
+        }
     }
-    cx.quit();
 }
 
 /// The confirm notice's Confirm button: run the waiting action.
@@ -166,9 +187,10 @@ pub(crate) fn cancel_pending(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Confirm, Plan, plan};
+    use super::{Confirm, Plan, plan, prepare_exit};
     use discard_core::action::Action;
     use discard_core::settings_page::SettingsPage;
+    use std::cell::Cell;
 
     #[test]
     fn settings_actions_open_their_page_in_any_state() {
@@ -243,6 +265,40 @@ mod tests {
             plan(Action::ToggleSafeMode, true, false, false),
             Plan::Perform(Confirm::Relaunch { safe_mode: true })
         );
+    }
+
+    #[test]
+    fn quit_needs_no_relaunch() {
+        assert_eq!(prepare_exit(Confirm::Quit, None), Ok(()));
+    }
+
+    #[test]
+    fn relaunch_calls_back_with_the_target_safe_mode() {
+        thread_local!(static SEEN: Cell<Option<bool>> = const { Cell::new(None) });
+        let ok = |safe: bool| {
+            SEEN.with(|s| s.set(Some(safe)));
+            Ok(())
+        };
+        assert_eq!(
+            prepare_exit(Confirm::Relaunch { safe_mode: true }, Some(&ok)),
+            Ok(())
+        );
+        assert_eq!(SEEN.with(Cell::get), Some(true));
+        assert_eq!(
+            prepare_exit(Confirm::Relaunch { safe_mode: false }, Some(&ok)),
+            Ok(())
+        );
+        assert_eq!(SEEN.with(Cell::get), Some(false));
+    }
+
+    #[test]
+    fn a_failed_or_missing_relaunch_does_not_quit() {
+        let fail = |_: bool| Err("no sh".to_string());
+        assert_eq!(
+            prepare_exit(Confirm::Relaunch { safe_mode: true }, Some(&fail)),
+            Err("no sh".to_string())
+        );
+        assert!(prepare_exit(Confirm::Relaunch { safe_mode: false }, None).is_err());
     }
 
     #[test]

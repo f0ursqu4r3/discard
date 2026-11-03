@@ -164,6 +164,12 @@ impl DiscardView {
         self.state.turn_running()
     }
 
+    /// Show `text` in the main window's notice line. The next send clears it.
+    pub(crate) fn show_notice(&mut self, text: String, cx: &mut Context<Self>) {
+        self.state.apply(Update::Notice(text));
+        cx.notify();
+    }
+
     pub(crate) fn pending_confirm(&self) -> Option<Confirm> {
         self.pending_confirm
     }
