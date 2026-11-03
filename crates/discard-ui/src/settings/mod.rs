@@ -1,6 +1,7 @@
 //! The Settings window: a second OS window with a sidebar, a search box, and one page at a time.
 
 mod general;
+mod plugins;
 
 use crate::shared::Shared;
 use discard_core::settings_page::{SettingsPage, search};
@@ -9,6 +10,8 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::collections::HashSet;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 /// How often the window checks `settings.toml` for edits made outside it.
@@ -39,6 +42,8 @@ pub struct SettingsView {
     query: String,
     /// The last error from a General page change. `None` after a change succeeds.
     general_error: Option<String>,
+    /// Review IDs where the user switched on "trust future edits".
+    trusted: HashSet<String>,
     _search_events: Subscription,
 }
 
@@ -57,8 +62,13 @@ impl SettingsView {
             }
         });
 
-        // The file can change on disk. Read it again and redraw when it did.
+        // The file can change on disk, and a review can arrive while this window is open.
+        // Read the file again, and redraw when it changed, when plugin state changed, or when the review count changed.
         let settings = shared.settings.clone();
+        let plugins = shared.plugins.clone();
+        let epoch = shared.plugin_epoch.clone();
+        let mut seen_epoch = epoch.load(Ordering::SeqCst);
+        let mut seen_pending = plugins.pending().len();
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL_INTERVAL).await;
@@ -66,9 +76,14 @@ impl SettingsView {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .reload_if_changed();
+                let now_epoch = epoch.load(Ordering::SeqCst);
+                let now_pending = plugins.pending().len();
+                let plugins_changed = now_epoch != seen_epoch || now_pending != seen_pending;
+                seen_epoch = now_epoch;
+                seen_pending = now_pending;
                 let alive = this
                     .update(cx, |_, cx| {
-                        if changed {
+                        if changed || plugins_changed {
                             cx.notify();
                         }
                     })
@@ -86,6 +101,7 @@ impl SettingsView {
             search,
             query: String::new(),
             general_error: None,
+            trusted: HashSet::new(),
             _search_events: events,
         }
     }
@@ -163,7 +179,7 @@ impl SettingsView {
     fn content(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let body = match self.page {
             SettingsPage::General => general::render(self, cx),
-            SettingsPage::Plugins => plugins_stub(cx),
+            SettingsPage::Plugins => plugins::render(self, cx),
             _ => div()
                 .text_color(cx.theme().muted_foreground)
                 .child("Soon")
@@ -208,14 +224,6 @@ fn soon_tag(cx: &App) -> Div {
         .border_color(cx.theme().border)
         .text_xs()
         .child("Soon")
-}
-
-/// Task 6 moves the plugin panel here.
-fn plugins_stub(cx: &App) -> AnyElement {
-    div()
-        .text_color(cx.theme().muted_foreground)
-        .child("Moves here in Task 6")
-        .into_any_element()
 }
 
 /// The open Settings window. A second `open_settings` call reuses it.

@@ -1,6 +1,7 @@
 //! GPUI views for Discard. Thin on purpose: all state logic lives in `discard_core::ui_state`.
 
 mod plugin_element;
+mod problems;
 mod settings;
 mod shared;
 mod view;
