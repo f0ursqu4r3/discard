@@ -22,3 +22,4 @@ pub mod memory;
 pub mod worktree;
 pub mod workspace;
 pub mod settings;
+pub mod settings_page;
