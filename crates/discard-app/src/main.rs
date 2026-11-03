@@ -4,6 +4,7 @@ mod args;
 mod keys;
 mod plugin_events;
 mod plugin_memory;
+mod relaunch;
 
 use discard_core::bootstrap::{Role, WorkspaceChoice};
 use discard_core::engine::Engine;
@@ -19,9 +20,10 @@ use discard_mcp::MemoryRuntime;
 use discard_core::provider::Provider;
 use discard_providers::claude::ClaudeProvider;
 use discard_providers::codex::CodexProvider;
-use discard_ui::ViewData;
+use discard_core::settings::SettingsStore;
+use discard_ui::{Relaunch, ViewData};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -48,9 +50,21 @@ fn provider_for(name: &str) -> Result<Arc<dyn Provider>, String> {
     }
 }
 
+/// Read the settings from the data directory. This creates nothing: `SettingsStore::open` only reads.
+/// A bad or missing file gives defaults, so it never stops startup.
+fn open_settings(data_dir: &Path) -> SettingsStore {
+    SettingsStore::open(&data_dir.join("settings.toml"))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    let options = match args::parse(&argv, std::env::var("DISCARD_PROVIDER").ok().as_deref()) {
+    // Opening the store reads only. `--help` and bad arguments must not create the data directory.
+    let data_dir = data_dir();
+    let settings = open_settings(&data_dir);
+    // Precedence: the `--provider` flag (handled in `parse`), then `$DISCARD_PROVIDER`, then settings.
+    let default_provider =
+        args::default_provider(std::env::var("DISCARD_PROVIDER").ok().as_deref(), &settings.settings().general.default_provider);
+    let options = match args::parse(&argv, Some(&default_provider)) {
         Ok(args::Parsed::Run(options)) => options,
         Ok(args::Parsed::Help) => {
             print!("{}", args::USAGE);
@@ -62,9 +76,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     logging::init();
-
-    let data_dir = data_dir();
+    for issue in settings.issues() {
+        warn!(key = %issue.key, message = %issue.message, "settings issue");
+    }
     std::fs::create_dir_all(&data_dir)?;
+
+    // `run_app` owns the store, the memory runtime, the provider processes and the tokio runtime.
+    // They are all dropped when it returns. A relaunch does not depend on that: on macOS the quit ends the process
+    // inside the event loop. The relaunch waiter starts before the quit and waits for this process to exit.
+    let relaunch: Relaunch = Arc::new(move |safe_mode| relaunch::spawn(&argv, safe_mode).map_err(|e| e.to_string()));
+    run_app(&options, &data_dir, settings, relaunch)
+}
+
+fn run_app(
+    options: &args::Options,
+    data_dir: &Path,
+    settings: SettingsStore,
+    relaunch: Relaunch,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let settings = Arc::new(Mutex::new(settings));
     let project_dir = std::env::current_dir()?;
     let store = Arc::new(Mutex::new(Store::open(&data_dir.join("discard.db"))?));
 
@@ -104,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => warn!(error = %e, "could not reconcile the memory index"),
     }
     // Plugins. The bundled UI loads first. User plugins load only if their bytes match a signed approval.
-    let keys = keys::choose(std::env::var("DISCARD_PLUGIN_PASSPHRASE").ok().as_deref(), &data_dir, keys::system_store());
+    let keys = keys::choose(std::env::var("DISCARD_PLUGIN_PASSPHRASE").ok().as_deref(), data_dir, keys::system_store());
     let ledger = Ledger::open(&data_dir.join("plugins.db"), keys)?;
     // Approved plugins get the files and memory their manifests ask for. Drafts are tested in a manager with none.
     let plugin_memory = Arc::new(plugin_memory::PluginMemory::new(
@@ -114,7 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
     let manager = Arc::new(Mutex::new(PluginManager::with_host(PluginLimits::default(), Host::live(Some(plugin_memory)))));
     manager.lock().unwrap_or_else(|p| p.into_inner()).load(discard_lua::bundled::default_ui())?;
-    let plugins = Arc::new(PluginService::new(&data_dir, ledger, Arc::clone(&manager), options.safe_mode)?);
+    let plugins = Arc::new(PluginService::new(data_dir, ledger, Arc::clone(&manager), options.safe_mode)?);
     let load_report = plugins.load_all();
     info!(
         loaded = ?load_report.loaded,
@@ -167,6 +197,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         UiState::new(workspace.channel.id, history),
         commands_tx,
         updates_rx,
+        settings,
+        relaunch,
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opening_settings_in_a_missing_directory_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("missing").join(".discard");
+        let store = open_settings(&data_dir);
+        assert_eq!(store.settings().general.default_provider, "claude");
+        assert!(!tmp.path().join("missing").exists(), "opening the settings must not create the data directory");
+    }
 }

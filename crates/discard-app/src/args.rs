@@ -19,12 +19,20 @@ pub enum Parsed {
 }
 
 pub const USAGE: &str = "Usage: discard [--provider claude|codex] [--builder] [--worktree | --main-checkout] [--safe-mode]\n\n\
-  --provider NAME   Which agent to talk to in this project (default: $DISCARD_PROVIDER or claude)\n\
+  --provider NAME   Which agent to talk to in this project (default: $DISCARD_PROVIDER, then settings.toml, then claude)\n\
   --builder         Use the Builder agent, which can write plugins for you to review\n\
   --worktree        Work in a git worktree for this channel (the default for new channels in a git repo)\n\
   --main-checkout   Work in the main checkout of the project. Changing an existing channel starts a new session.\n\
   --safe-mode       Start with all user plugins disabled\n\
   --help            Show this help\n";
+
+/// The provider used when no `--provider` flag is given: a non-empty `$DISCARD_PROVIDER` wins, else the settings value.
+pub fn default_provider(env: Option<&str>, settings: &str) -> String {
+    match env.filter(|p| !p.is_empty()) {
+        Some(name) => name.to_string(),
+        None => settings.to_string(),
+    }
+}
 
 /// Parse arguments (without the program name). `env_provider` is the value of `$DISCARD_PROVIDER`.
 pub fn parse(args: &[String], env_provider: Option<&str>) -> Result<Parsed, String> {
@@ -85,6 +93,11 @@ mod tests {
     }
 
     #[test]
+    fn usage_names_the_provider_default_order() {
+        assert!(USAGE.contains("(default: $DISCARD_PROVIDER, then settings.toml, then claude)"), "{USAGE}");
+    }
+
+    #[test]
     fn defaults_to_claude_without_safe_mode() {
         assert_eq!(run(&[], None), opts("claude", false));
     }
@@ -112,6 +125,17 @@ mod tests {
     #[test]
     fn an_empty_environment_value_is_ignored() {
         assert_eq!(run(&[], Some("")), opts("claude", false));
+    }
+
+    #[test]
+    fn env_provider_beats_settings() {
+        assert_eq!(default_provider(Some("codex"), "claude"), "codex");
+    }
+
+    #[test]
+    fn empty_env_falls_to_settings() {
+        assert_eq!(default_provider(Some(""), "codex"), "codex");
+        assert_eq!(default_provider(None, "codex"), "codex");
     }
 
     #[test]

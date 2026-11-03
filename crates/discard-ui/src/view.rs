@@ -4,13 +4,19 @@ use discard_core::approval::Decision;
 use discard_core::event::{AgentStatus, ApprovalId};
 use discard_core::model::{Block, Message, Role};
 use discard_core::timeline::{ApprovalPrompt, ApprovalView};
+use crate::dispatch::{self, Confirm};
+use crate::menus;
 use crate::plugin_element::{ActionFactory, apply_theme, render_element};
+use crate::problems::{problem_count, problem_lines, problem_summary};
+use discard_core::action::{Action, MenuContext};
+use crate::shared::{PROTECTED_DEFAULT, Shared, hsla};
 use discard_core::ui_state::{Command, SlotLabels, UiState, Update};
-use discard_lua::theme::{ProtectedPalette, Rgb, protected_palette};
-use discard_lua::{LoadReport, PluginService, PluginState, Rendered, Review, ReviewKind};
-use std::collections::{HashMap, HashSet};
+use discard_lua::theme::protected_palette;
+use discard_lua::{LoadReport, PluginService, Rendered};
+use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::badge::Badge;
@@ -31,43 +37,30 @@ pub struct ViewData {
     pub provider_label: String,
 }
 
-/// Colors for protected surfaces when the theme says nothing.
-const PROTECTED_DEFAULT: ProtectedPalette = ProtectedPalette {
-    background: Rgb(0x1e, 0x1e, 0x1e),
-    foreground: Rgb(0xf0, 0xf0, 0xf0),
-    border: Rgb(0xff, 0xaa, 0x00),
-};
-
-fn palette_text(p: ProtectedPalette) -> Hsla {
-    hsla(p.foreground)
-}
-
-fn hsla(c: Rgb) -> Hsla {
-    Rgba { r: f32::from(c.0) / 255.0, g: f32::from(c.1) / 255.0, b: f32::from(c.2) / 255.0, a: 1.0 }.into()
-}
-
 pub struct DiscardView {
     data: ViewData,
     plugins: Arc<PluginService>,
     /// What happened when user plugins were loaded at startup.
-    load_report: LoadReport,
-    /// The plugin panel (review screen and plugin list) is open. Rust draws it. Plugins cannot change it.
-    show_plugins: bool,
-    /// Review IDs where the user switched on "trust future edits".
-    trusted: HashSet<String>,
-    panel_error: Option<String>,
+    load_report: Rc<LoadReport>,
+    /// Bumped when plugin state changes in either window. The poller compares it.
+    plugin_epoch: Arc<AtomicU64>,
+    /// The last plugin notice or error. The Plugins page shows it.
+    plugin_notice: Arc<Mutex<Option<String>>>,
     slot_cache: HashMap<&'static str, (String, Option<Rendered>)>,
     state: UiState,
     commands: UnboundedSender<Command>,
     composer: Entity<InputState>,
     _composer_events: Subscription,
+    /// A Quit or relaunch that waits for the user to confirm it. The main window draws the notice.
+    pending_confirm: Option<Confirm>,
+    /// The state the installed menu bar was built for. A change installs it again.
+    menu_ctx: MenuContext,
 }
 
 /// Everything the window needs from the app to start.
 pub struct ViewInit {
     pub data: ViewData,
-    pub plugins: Arc<PluginService>,
-    pub load_report: LoadReport,
+    pub shared: Shared,
     pub state: UiState,
     pub commands: UnboundedSender<Command>,
     pub updates: UnboundedReceiver<Update>,
@@ -75,7 +68,8 @@ pub struct ViewInit {
 
 impl DiscardView {
     pub fn new(init: ViewInit, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let ViewInit { data, plugins, load_report, state, commands, mut updates } = init;
+        let ViewInit { data, shared, state, commands, mut updates } = init;
+        let Shared { plugins, load_report, plugin_epoch, plugin_notice, .. } = shared;
         let placeholder = format!("Message #{}", data.channel_name);
         let composer = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         let events = cx.subscribe_in(&composer, window, |this, _, event: &InputEvent, window, cx| {
@@ -90,6 +84,9 @@ impl DiscardView {
                 let alive = this
                     .update(cx, |view, cx| {
                         view.state.apply(update);
+                        // The pending-review count comes from the poller. Here only `turn_running` can move.
+                        let pending_reviews = view.menu_ctx.pending_reviews;
+                        view.refresh_menus(pending_reviews, cx);
                         cx.notify();
                     })
                     .is_ok();
@@ -102,17 +99,34 @@ impl DiscardView {
 
         apply_theme(&plugins.manager().lock().unwrap_or_else(|p| p.into_inner()).theme(), cx);
 
-        // The agent can submit a plugin while the user is looking at something else. Redraw when that happens.
+        // The agent can submit a plugin while the user is looking at something else, and the user can approve,
+        // reject, or roll back in Settings. Redraw when a review arrives. Apply the change when the epoch moves.
         {
             let plugins = Arc::clone(&plugins);
+            let epoch = Arc::clone(&plugin_epoch);
             cx.spawn(async move |this, cx| {
-                let mut seen = 0usize;
+                let mut seen_pending = 0usize;
+                let mut seen_epoch = epoch.load(Ordering::SeqCst);
                 loop {
                     cx.background_executor().timer(Duration::from_millis(700)).await;
-                    let now = plugins.pending().len();
-                    if now != seen {
-                        seen = now;
-                        if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    let now_pending = plugins.pending().len();
+                    let now_epoch = epoch.load(Ordering::SeqCst);
+                    let epoch_moved = now_epoch != seen_epoch;
+                    let pending_moved = now_pending != seen_pending;
+                    seen_pending = now_pending;
+                    seen_epoch = now_epoch;
+                    if epoch_moved || pending_moved {
+                        let alive = this
+                            .update(cx, |view, cx| {
+                                view.refresh_menus(now_pending, cx);
+                                if epoch_moved {
+                                    view.after_plugin_change(cx);
+                                } else {
+                                    cx.notify();
+                                }
+                            })
+                            .is_ok();
+                        if !alive {
                             break;
                         }
                     }
@@ -121,18 +135,58 @@ impl DiscardView {
             .detach();
         }
 
+        let menu_ctx = MenuContext {
+            safe_mode: load_report.safe_mode,
+            turn_running: state.turn_running(),
+            pending_reviews: plugins.pending().len(),
+        };
+        menus::install(&menu_ctx, cx);
+
         Self {
             data,
             plugins,
             load_report,
-            show_plugins: false,
-            trusted: HashSet::new(),
-            panel_error: None,
+            plugin_epoch,
+            plugin_notice,
             slot_cache: HashMap::new(),
             state,
             commands,
             composer,
             _composer_events: events,
+            pending_confirm: None,
+            menu_ctx,
+        }
+    }
+
+    pub(crate) fn turn_running(&self) -> bool {
+        self.state.turn_running()
+    }
+
+    /// Show `text` in the main window's notice line. The next send clears it.
+    pub(crate) fn show_notice(&mut self, text: String, cx: &mut Context<Self>) {
+        self.state.apply(Update::Notice(text));
+        cx.notify();
+    }
+
+    pub(crate) fn pending_confirm(&self) -> Option<Confirm> {
+        self.pending_confirm
+    }
+
+    pub(crate) fn set_pending_confirm(&mut self, pending: Option<Confirm>, cx: &mut Context<Self>) {
+        self.pending_confirm = pending;
+        cx.notify();
+    }
+
+    /// Install the menu bar again when the state it shows changed.
+    fn refresh_menus(&mut self, pending_reviews: usize, cx: &mut App) {
+        let ctx = MenuContext {
+            safe_mode: self.load_report.safe_mode,
+            turn_running: self.state.turn_running(),
+            pending_reviews,
+        };
+        if ctx != self.menu_ctx {
+            menus::install(&ctx, cx);
+            self.menu_ctx = ctx;
         }
     }
 
@@ -152,7 +206,7 @@ impl DiscardView {
         let _ = self.commands.send(Command::Decide { approval_id: ApprovalId(id.to_string()), decision });
     }
 
-    fn cancel(&mut self) {
+    pub(crate) fn cancel(&mut self) {
         let _ = self.commands.send(Command::Cancel);
     }
 
@@ -204,190 +258,10 @@ impl DiscardView {
         cx.notify();
     }
 
-    fn approve_review(&mut self, id: &str, cx: &mut Context<Self>) {
-        let trust = self.trusted.remove(id);
-        self.panel_error = self.plugins.approve(id, trust).err().map(|e| e.to_string());
-        self.after_plugin_change(cx);
-    }
-
-    fn reject_review(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.plugins.reject(id);
-        self.trusted.remove(id);
-        self.after_plugin_change(cx);
-    }
-
-    fn rollback_plugin(&mut self, name: &str, cx: &mut Context<Self>) {
-        self.panel_error = self.plugins.rollback(name).err().map(|e| e.to_string());
-        self.after_plugin_change(cx);
-    }
-
-    fn toggle_trust(&mut self, id: &str, cx: &mut Context<Self>) {
-        if !self.trusted.remove(id) {
-            self.trusted.insert(id.to_string());
-        }
-        cx.notify();
-    }
-
-    fn review_card(&self, index: usize, review: &Review, palette: ProtectedPalette, cx: &mut Context<Self>) -> AnyElement {
-        let (id_a, id_r, id_t) = (review.id.clone(), review.id.clone(), review.id.clone());
-        let trusted = self.trusted.contains(&review.id);
-        let kind = match review.kind {
-            ReviewKind::New => "New plugin",
-            ReviewKind::Update => "Update",
-        };
-        let diff_lines: Vec<AnyElement> = review
-            .diff
-            .lines()
-            .map(|line| {
-                let color = if line.starts_with('+') && !line.starts_with("+++") {
-                    cx.theme().success
-                } else if line.starts_with('-') && !line.starts_with("---") {
-                    cx.theme().danger
-                } else {
-                    palette_text(palette)
-                };
-                div().text_color(color).child(if line.is_empty() { " ".to_string() } else { line.to_string() }).into_any_element()
-            })
-            .collect();
-        v_flex()
-            .gap_2()
-            .p_3()
-            .rounded_md()
-            .border_1()
-            .border_color(hsla(palette.border))
-            .bg(hsla(palette.background))
-            .text_color(hsla(palette.foreground))
-            .child(div().font_weight(FontWeight::BOLD).child(format!("{kind}: {}", review.name)))
-            .child(div().text_sm().child(review.manifest.description.clone()))
-            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("This plugin asks to:"))
-            .children(review.capability_lines.iter().map(|l| div().text_sm().child(format!("• {l}"))))
-            .when(review.capability_lines.is_empty(), |c| c.child(div().text_sm().child("• nothing beyond running in the sandbox")))
-            .when(!review.capability_changes.is_empty(), |c| {
-                c.child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Changed since the approved version:"))
-                    .children(review.capability_changes.iter().map(|l| div().text_sm().child(l.clone())))
-            })
-            .when(review.full_local_access, |c| {
-                c.child(
-                    div()
-                        .p_2()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(cx.theme().danger)
-                        .font_weight(FontWeight::BOLD)
-                        .child("FULL LOCAL ACCESS: this plugin can run programs. A program can read your files, use the network, and start other programs."),
-                )
-            })
-            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Code changes:"))
-            .child(
-                v_flex()
-                    .id(("diff", index))
-                    .max_h(px(280.))
-                    .overflow_y_scroll()
-                    .p_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(hsla(palette.border))
-                    .font_family("Menlo")
-                    .text_xs()
-                    .children(diff_lines),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .when(review.trust_offered, |row| {
-                        row.child(
-                            Button::new(("trust", index))
-                                .outline()
-                                .small()
-                                .label(if trusted { "Trust future edits: ON" } else { "Trust future edits: off" })
-                                .on_click(cx.listener(move |this, _, _, cx| this.toggle_trust(&id_t, cx))),
-                        )
-                    })
-                    .child(div().flex_1())
-                    .child(
-                        Button::new(("review-reject", index))
-                            .danger()
-                            .small()
-                            .label("Reject")
-                            .on_click(cx.listener(move |this, _, _, cx| this.reject_review(&id_r, cx))),
-                    )
-                    .child(
-                        Button::new(("review-approve", index))
-                            .success()
-                            .small()
-                            .label("Approve and run")
-                            .on_click(cx.listener(move |this, _, _, cx| this.approve_review(&id_a, cx))),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    /// The plugin panel: reviews waiting for the user, and installed plugins. Plugins cannot replace or hide it.
-    fn plugin_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = self.plugins.manager().lock().unwrap_or_else(|p| p.into_inner()).theme();
-        let palette = protected_palette(&theme, PROTECTED_DEFAULT);
-        let reviews = self.plugins.pending();
-        let cards: Vec<AnyElement> = reviews.iter().enumerate().map(|(i, r)| self.review_card(i, r, palette, cx)).collect();
-        let statuses = self.plugins.statuses();
-        let rows: Vec<AnyElement> = statuses
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let name = s.name.clone();
-                let state = match &s.state {
-                    PluginState::Running => "running".to_string(),
-                    PluginState::Failed(m) => format!("failed: {}", m.lines().next().unwrap_or("")),
-                    PluginState::ModifiedOutsideReview => "disabled: files changed outside review".to_string(),
-                    PluginState::DisabledSafeMode => "disabled: safe mode".to_string(),
-                };
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(s.name.clone()))
-                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(state))
-                    .when(s.trusted_edits, |r| r.child(div().text_xs().child("trusts future edits")))
-                    .child(div().flex_1())
-                    .child(
-                        Button::new(("rollback", i))
-                            .outline()
-                            .small()
-                            .label("Roll back")
-                            .on_click(cx.listener(move |this, _, _, cx| this.rollback_plugin(&name, cx))),
-                    )
-                    .into_any_element()
-            })
-            .collect();
-        v_flex()
-            .id("plugin-panel")
-            .flex_1()
-            .overflow_y_scroll()
-            .p_4()
-            .gap_4()
-            .child(
-                h_flex()
-                    .items_center()
-                    .child(div().text_lg().font_weight(FontWeight::BOLD).child("Plugins"))
-                    .child(div().flex_1())
-                    .child(Button::new("plugins-close").outline().small().label("Close").on_click(cx.listener(|this, _, _, cx| {
-                        this.show_plugins = false;
-                        cx.notify();
-                    }))),
-            )
-            .when_some(self.panel_error.clone(), |c, e| c.child(div().p_2().rounded_md().border_1().border_color(cx.theme().danger).text_sm().child(e)))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Waiting for your review"))
-            .children(cards)
-            .when(reviews.is_empty(), |c| c.child(self.muted("Nothing to review.", cx)))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Installed plugins"))
-            .children(rows)
-            .when(statuses.is_empty(), |c| c.child(self.muted("No user plugins are installed. The built-in interface is a bundled plugin and is not listed here.", cx)))
-            .into_any_element()
-    }
-
     /// A banner, drawn by Rust in the main column, when reviews are waiting.
-    fn review_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn review_banner(&self) -> Option<AnyElement> {
         let pending = self.plugins.pending();
-        if pending.is_empty() || self.show_plugins {
+        if pending.is_empty() {
             return None;
         }
         let theme = self.plugins.manager().lock().unwrap_or_else(|p| p.into_inner()).theme();
@@ -406,54 +280,89 @@ impl DiscardView {
                 .bg(hsla(palette.background))
                 .text_color(hsla(palette.foreground))
                 .child(div().flex_1().text_sm().child(format!("Plugin code is waiting for your review: {names}")))
-                .child(Button::new("banner-review").primary().small().label("Review").on_click(cx.listener(|this, _, _, cx| {
-                    this.show_plugins = true;
-                    cx.notify();
-                })))
+                .child(
+                    Button::new("banner-review")
+                        .primary()
+                        .small()
+                        .label("Review")
+                        .on_click(|_, _, cx| dispatch::run(Action::ReviewPlugins, cx)),
+                )
                 .into_any_element(),
         )
     }
 
-    /// Rust-rendered list of plugins that failed. Plugins cannot hide or replace it.
-    fn plugin_errors(&self) -> Option<AnyElement> {
+    /// The confirm notice for a Quit or relaunch while a turn runs. Rust draws it, so plugins cannot hide it.
+    fn confirm_notice(&self) -> Option<AnyElement> {
+        let pending = self.pending_confirm?;
+        let theme = self.plugins.manager().lock().unwrap_or_else(|p| p.into_inner()).theme();
+        let palette = protected_palette(&theme, PROTECTED_DEFAULT);
+        Some(
+            h_flex()
+                .mx_4()
+                .mb_2()
+                .p_2()
+                .gap_2()
+                .items_center()
+                .rounded_md()
+                .border_1()
+                .border_color(hsla(palette.border))
+                .bg(hsla(palette.background))
+                .text_color(hsla(palette.foreground))
+                .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child(pending.message()))
+                // Plain closures, not `cx.listener`: the dispatcher reads this view, so it must not be leased.
+                .child(
+                    Button::new("confirm-cancel")
+                        .outline()
+                        .small()
+                        .label("Cancel")
+                        .on_click(|_, _, cx| dispatch::cancel_pending(cx)),
+                )
+                .child(
+                    Button::new("confirm-ok")
+                        .danger()
+                        .small()
+                        .label("Confirm")
+                        .on_click(|_, _, cx| dispatch::confirm_pending(cx)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// One Rust-drawn line when plugins have problems. Plugins cannot hide or replace it.
+    /// The list itself is on the Plugins page in Settings.
+    fn plugin_problem_line(&self) -> Option<AnyElement> {
         let (errors, theme) = {
             let manager = self.plugins.manager().lock().unwrap_or_else(|p| p.into_inner());
             (manager.errors(), manager.theme())
         };
-        let mut lines: Vec<String> = errors.iter().map(|(name, msg)| format!("{name}: {}", msg.lines().next().unwrap_or(""))).collect();
-        for status in self.plugins.statuses() {
-            match status.state {
-                PluginState::ModifiedOutsideReview => lines.push(format!("{}: disabled because its files changed outside review", status.name)),
-                PluginState::Failed(reason) if !errors.contains_key(&status.name) => {
-                    lines.push(format!("{}: {}", status.name, reason.lines().next().unwrap_or("")));
-                }
-                _ => {}
-            }
-        }
-        if let Some(problem) = &self.load_report.key_problem {
-            lines.push(format!("user plugins are off: {problem}"));
-        }
-        if self.load_report.safe_mode {
-            lines.push("safe mode: user plugins are disabled".to_string());
-        }
-        if lines.is_empty() {
+        let lines = problem_lines(&errors, &self.plugins.statuses(), &self.load_report);
+        let has_notice = self.plugin_notice.lock().unwrap_or_else(|p| p.into_inner()).is_some();
+        let count = problem_count(lines.len(), has_notice);
+        if count == 0 {
             return None;
         }
         let palette = protected_palette(&theme, PROTECTED_DEFAULT);
         Some(
-            v_flex()
+            h_flex()
                 .mx_4()
                 .mb_2()
                 .p_2()
-                .gap_1()
+                .gap_2()
+                .items_center()
                 .rounded_md()
                 .border_1()
                 .border_color(hsla(palette.border))
                 .bg(hsla(palette.background))
                 .text_color(hsla(palette.foreground))
                 .text_sm()
-                .child(div().font_weight(FontWeight::SEMIBOLD).child("Plugin problems"))
-                .children(lines)
+                .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child(problem_summary(count)))
+                .child(
+                    Button::new("problems-details")
+                        .outline()
+                        .small()
+                        .label("Details")
+                        .on_click(|_, _, cx| dispatch::run(Action::ShowPluginErrors, cx)),
+                )
                 .into_any_element(),
         )
     }
@@ -523,8 +432,8 @@ impl DiscardView {
             )
             .child(div().flex_1())
             .child(
-                // Rust draws this entry point, so a plugin cannot hide the way to review plugins.
-                div().p_2().child(
+                // Rust draws these entry points, so a plugin cannot hide the way to review plugins or open Settings.
+                v_flex().p_2().gap_2().child(
                     Button::new("plugins-open")
                         .outline()
                         .small()
@@ -533,10 +442,15 @@ impl DiscardView {
                             0 => "Plugins".to_string(),
                             n => format!("Plugins ({n} to review)"),
                         })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_plugins = !this.show_plugins;
-                            cx.notify();
-                        })),
+                        .on_click(|_, _, cx| dispatch::run(Action::ReviewPlugins, cx)),
+                )
+                .child(
+                    Button::new("settings-open")
+                        .outline()
+                        .small()
+                        .w_full()
+                        .label("Settings")
+                        .on_click(|_, _, cx| dispatch::run(Action::OpenSettings, cx)),
                 ),
             )
     }
@@ -763,8 +677,11 @@ impl Render for DiscardView {
         self.plugins.set_ui_state(self.state.slot_state(&self.labels()));
         let reverted = self.plugins.maintain();
         if !reverted.is_empty() {
-            self.panel_error = Some(format!("Reverted after repeated failures: {}", reverted.join(", ")));
+            *self.plugin_notice.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some(format!("Reverted after repeated failures: {}", reverted.join(", ")));
             self.after_plugin_change(cx);
+            // Tell the Plugins page. The main window's poller runs `after_plugin_change` once more, which is harmless.
+            self.plugin_epoch.fetch_add(1, Ordering::SeqCst);
         }
         let history: Vec<Message> = self.state.history().to_vec();
         let header = match self.plugin_slot("channel_header", cx) {
@@ -775,9 +692,9 @@ impl Render for DiscardView {
             Some(element) => element,
             None => self.member_list(cx).into_any_element(),
         };
-        let plugin_errors = self.plugin_errors();
-        let review_banner = self.review_banner(cx);
-        let panel = if self.show_plugins { Some(self.plugin_panel(cx)) } else { None };
+        let plugin_problem_line = self.plugin_problem_line();
+        let review_banner = self.review_banner();
+        let confirm_notice = self.confirm_notice();
         let rows: Vec<AnyElement> = history.iter().enumerate().map(|(i, m)| self.message_row(m, i, cx)).collect();
         let live = self.live_row(cx);
         let running = self.state.turn_running();
@@ -788,19 +705,10 @@ impl Render for DiscardView {
             .min_w_0()
             .h_full()
             .child(header)
-            .child(match panel {
-                Some(panel) => panel,
-                None => v_flex()
-                    .id("messages")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .py_2()
-                    .children(rows)
-                    .children(live)
-                    .into_any_element(),
-            })
+            .child(v_flex().id("messages").flex_1().overflow_y_scroll().py_2().children(rows).children(live))
+            .children(confirm_notice)
             .children(review_banner)
-            .children(plugin_errors)
+            .children(plugin_problem_line)
             .when_some(notice, |col, text| {
                 col.child(
                     div()
