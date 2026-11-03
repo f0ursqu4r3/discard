@@ -5,6 +5,8 @@ use crate::capability::ApprovalPolicy;
 use crate::model::{AgentId, Channel, ChannelId, Project, ProjectId, WorkspaceMode};
 use crate::event::SessionId;
 use crate::store::{Result, Store};
+use crate::workspace::change_workspace_mode;
+use crate::worktree::WorktreeManager;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,9 +29,20 @@ pub enum Role {
     Builder,
 }
 
+/// Where a channel's agent works.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceChoice {
+    /// New channels in a git repository get their own worktree. Existing channels are left alone.
+    Auto,
+    /// Use a git worktree for this channel. Changing an existing channel starts a new session.
+    Worktree,
+    /// Work in the project's main checkout. Changing an existing channel starts a new session.
+    Main,
+}
+
 /// Find or create the workspace for `project_dir`, `provider`, and `role`.
 /// A project has one channel per provider and role, each with its own agent and session.
-pub fn ensure_workspace(store: &Store, project_dir: &Path, provider: &str, role: Role) -> Result<Workspace> {
+pub fn ensure_workspace(store: &Store, project_dir: &Path, provider: &str, role: Role, choice: WorkspaceChoice) -> Result<Workspace> {
     let path = project_dir.to_string_lossy().into_owned();
     let project = match store.project_by_path(&path)? {
         Some(project) => project,
@@ -79,12 +92,29 @@ pub fn ensure_workspace(store: &Store, project_dir: &Path, provider: &str, role:
                     Role::Default => provider.to_string(),
                 },
                 agent_id,
-                workspace_mode: WorkspaceMode::MainCheckout,
+                workspace_mode: match choice {
+                    WorkspaceChoice::Worktree => WorkspaceMode::Worktree,
+                    WorkspaceChoice::Main => WorkspaceMode::MainCheckout,
+                    WorkspaceChoice::Auto if WorktreeManager::is_repo(project_dir) => WorkspaceMode::Worktree,
+                    WorkspaceChoice::Auto => WorkspaceMode::MainCheckout,
+                },
             };
             store.insert_channel(&channel)?;
             (channel, agent)
         }
     };
+
+    // An explicit choice that differs from the channel's mode moves it, with a new session.
+    let wanted = match choice {
+        WorkspaceChoice::Worktree => Some(WorkspaceMode::Worktree),
+        WorkspaceChoice::Main => Some(WorkspaceMode::MainCheckout),
+        WorkspaceChoice::Auto => None,
+    };
+    let mut channel = channel;
+    if let Some(mode) = wanted.filter(|m| *m != channel.workspace_mode) {
+        change_workspace_mode(store, &channel.id, mode)?;
+        channel.workspace_mode = mode;
+    }
 
     let session_id = match store.latest_session(&channel.id)? {
         Some(id) => id,
@@ -112,7 +142,7 @@ mod tests {
     #[test]
     fn first_run_creates_a_project_agent_channel_and_session() {
         let store = Store::open_in_memory().unwrap();
-        let ws = ensure_workspace(&store, &PathBuf::from("/work/my-app"), "claude", Role::Default).unwrap();
+        let ws = ensure_workspace(&store, &PathBuf::from("/work/my-app"), "claude", Role::Default, WorkspaceChoice::Auto).unwrap();
         assert_eq!(ws.project.name, "my-app");
         assert_eq!(ws.project.path, "/work/my-app");
         assert_eq!(ws.channel.name, "general");
@@ -125,16 +155,16 @@ mod tests {
     #[test]
     fn a_second_run_reuses_everything() {
         let store = Store::open_in_memory().unwrap();
-        let first = ensure_workspace(&store, &PathBuf::from("/work/my-app"), "claude", Role::Default).unwrap();
-        let second = ensure_workspace(&store, &PathBuf::from("/work/my-app"), "claude", Role::Default).unwrap();
+        let first = ensure_workspace(&store, &PathBuf::from("/work/my-app"), "claude", Role::Default, WorkspaceChoice::Auto).unwrap();
+        let second = ensure_workspace(&store, &PathBuf::from("/work/my-app"), "claude", Role::Default, WorkspaceChoice::Auto).unwrap();
         assert_eq!(first, second);
     }
 
     #[test]
     fn different_directories_get_separate_projects() {
         let store = Store::open_in_memory().unwrap();
-        let a = ensure_workspace(&store, &PathBuf::from("/work/a"), "claude", Role::Default).unwrap();
-        let b = ensure_workspace(&store, &PathBuf::from("/work/b"), "claude", Role::Default).unwrap();
+        let a = ensure_workspace(&store, &PathBuf::from("/work/a"), "claude", Role::Default, WorkspaceChoice::Auto).unwrap();
+        let b = ensure_workspace(&store, &PathBuf::from("/work/b"), "claude", Role::Default, WorkspaceChoice::Auto).unwrap();
         assert_ne!(a.project.id, b.project.id);
         assert_ne!(a.session_id, b.session_id);
     }
@@ -143,8 +173,8 @@ mod tests {
     fn each_provider_gets_its_own_channel_agent_and_session_in_the_same_project() {
         let store = Store::open_in_memory().unwrap();
         let dir = PathBuf::from("/work/my-app");
-        let claude = ensure_workspace(&store, &dir, "claude", Role::Default).unwrap();
-        let codex = ensure_workspace(&store, &dir, "codex", Role::Default).unwrap();
+        let claude = ensure_workspace(&store, &dir, "claude", Role::Default, WorkspaceChoice::Auto).unwrap();
+        let codex = ensure_workspace(&store, &dir, "codex", Role::Default, WorkspaceChoice::Auto).unwrap();
         assert_eq!(claude.project, codex.project, "the same project");
         assert_ne!(claude.channel.id, codex.channel.id);
         assert_ne!(claude.session_id, codex.session_id);
@@ -158,9 +188,9 @@ mod tests {
     fn switching_back_to_a_provider_reuses_its_channel() {
         let store = Store::open_in_memory().unwrap();
         let dir = PathBuf::from("/work/my-app");
-        let first = ensure_workspace(&store, &dir, "codex", Role::Default).unwrap();
-        ensure_workspace(&store, &dir, "claude", Role::Default).unwrap();
-        assert_eq!(ensure_workspace(&store, &dir, "codex", Role::Default).unwrap(), first);
+        let first = ensure_workspace(&store, &dir, "codex", Role::Default, WorkspaceChoice::Auto).unwrap();
+        ensure_workspace(&store, &dir, "claude", Role::Default, WorkspaceChoice::Auto).unwrap();
+        assert_eq!(ensure_workspace(&store, &dir, "codex", Role::Default, WorkspaceChoice::Auto).unwrap(), first);
         assert_eq!(first.channel.name, "general", "whichever provider comes first owns `general`");
     }
 
@@ -168,8 +198,8 @@ mod tests {
     fn the_builder_is_a_separate_agent_with_plugin_write_on() {
         let store = Store::open_in_memory().unwrap();
         let dir = PathBuf::from("/work/my-app");
-        let normal = ensure_workspace(&store, &dir, "claude", Role::Default).unwrap();
-        let builder = ensure_workspace(&store, &dir, "claude", Role::Builder).unwrap();
+        let normal = ensure_workspace(&store, &dir, "claude", Role::Default, WorkspaceChoice::Auto).unwrap();
+        let builder = ensure_workspace(&store, &dir, "claude", Role::Builder, WorkspaceChoice::Auto).unwrap();
         assert!(!normal.agent.plugin_write, "the everyday agent must not be able to write plugins");
         assert!(builder.agent.plugin_write);
         assert_eq!((builder.agent.name.as_str(), builder.channel.name.as_str()), ("Builder", "builder"));
@@ -182,17 +212,77 @@ mod tests {
     fn the_builder_is_reused_per_provider() {
         let store = Store::open_in_memory().unwrap();
         let dir = PathBuf::from("/work/my-app");
-        let first = ensure_workspace(&store, &dir, "codex", Role::Builder).unwrap();
+        let first = ensure_workspace(&store, &dir, "codex", Role::Builder, WorkspaceChoice::Auto).unwrap();
         assert_eq!(first.channel.name, "builder-codex");
-        assert_eq!(ensure_workspace(&store, &dir, "codex", Role::Builder).unwrap(), first);
-        let claude = ensure_workspace(&store, &dir, "claude", Role::Builder).unwrap();
+        assert_eq!(ensure_workspace(&store, &dir, "codex", Role::Builder, WorkspaceChoice::Auto).unwrap(), first);
+        let claude = ensure_workspace(&store, &dir, "claude", Role::Builder, WorkspaceChoice::Auto).unwrap();
         assert_ne!(claude.channel.id, first.channel.id);
+    }
+
+    fn git_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(["-c", "user.name=T", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        run(&["init", "-q"]);
+        std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    #[test]
+    fn new_channels_in_a_git_repository_get_a_worktree_and_others_use_the_main_checkout() {
+        let store = Store::open_in_memory().unwrap();
+        let repo = git_repo();
+        assert_eq!(ensure_workspace(&store, repo.path(), "claude", Role::Default, WorkspaceChoice::Auto).unwrap().channel.workspace_mode, WorkspaceMode::Worktree);
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(ensure_workspace(&store, plain.path(), "claude", Role::Default, WorkspaceChoice::Auto).unwrap().channel.workspace_mode, WorkspaceMode::MainCheckout);
+    }
+
+    #[test]
+    fn an_explicit_choice_sets_the_mode_of_a_new_channel() {
+        let store = Store::open_in_memory().unwrap();
+        let repo = git_repo();
+        assert_eq!(ensure_workspace(&store, repo.path(), "claude", Role::Default, WorkspaceChoice::Main).unwrap().channel.workspace_mode, WorkspaceMode::MainCheckout);
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(ensure_workspace(&store, plain.path(), "claude", Role::Default, WorkspaceChoice::Worktree).unwrap().channel.workspace_mode, WorkspaceMode::Worktree);
+    }
+
+    #[test]
+    fn auto_never_moves_an_existing_channel() {
+        let store = Store::open_in_memory().unwrap();
+        let repo = git_repo();
+        let first = ensure_workspace(&store, repo.path(), "claude", Role::Default, WorkspaceChoice::Main).unwrap();
+        let again = ensure_workspace(&store, repo.path(), "claude", Role::Default, WorkspaceChoice::Auto).unwrap();
+        assert_eq!(again.channel.workspace_mode, WorkspaceMode::MainCheckout, "a channel from before worktrees stays where it is");
+        assert_eq!(again.session_id, first.session_id);
+    }
+
+    #[test]
+    fn an_explicit_different_choice_moves_the_channel_with_a_new_session() {
+        let store = Store::open_in_memory().unwrap();
+        let repo = git_repo();
+        let first = ensure_workspace(&store, repo.path(), "claude", Role::Default, WorkspaceChoice::Main).unwrap();
+        let moved = ensure_workspace(&store, repo.path(), "claude", Role::Default, WorkspaceChoice::Worktree).unwrap();
+        assert_eq!(moved.channel.id, first.channel.id);
+        assert_eq!(moved.channel.workspace_mode, WorkspaceMode::Worktree);
+        assert_ne!(moved.session_id, first.session_id);
+        let same = ensure_workspace(&store, repo.path(), "claude", Role::Default, WorkspaceChoice::Worktree).unwrap();
+        assert_eq!(same.session_id, moved.session_id, "asking for the mode the channel already has changes nothing");
     }
 
     #[test]
     fn a_root_directory_still_gets_a_usable_name() {
         let store = Store::open_in_memory().unwrap();
-        let ws = ensure_workspace(&store, &PathBuf::from("/"), "claude", Role::Default).unwrap();
+        let ws = ensure_workspace(&store, &PathBuf::from("/"), "claude", Role::Default, WorkspaceChoice::Auto).unwrap();
         assert!(!ws.project.name.is_empty());
     }
 }

@@ -55,6 +55,9 @@ async fn build_plugin(provider: Arc<dyn Provider>, model: Option<&str>) {
         project_id: project.id.clone(),
         memory: Some(memory),
         plugin_write: true,
+        workspace_mode: discard_core::model::WorkspaceMode::MainCheckout,
+        workspace: None,
+        channel_name: "c".into(),
         provider,
         channel_id: channel.id.clone(),
         session_id: session,
@@ -79,7 +82,7 @@ async fn build_plugin(provider: Arc<dyn Provider>, model: Option<&str>) {
             }
             Update::TurnFinished(outcome) => break outcome,
             Update::Error(m) | Update::SetupNeeded(m) => panic!("engine problem: {m}"),
-            Update::ApprovalState { .. } => {}
+            Update::ApprovalState { .. } | Update::Notice(_) => {}
         }
     };
     assert_eq!(outcome, TurnOutcome::Completed, "tools used: {tools:?}");

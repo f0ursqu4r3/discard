@@ -32,7 +32,7 @@ async fn turn(commands: &mpsc::UnboundedSender<Command>, updates: &mut mpsc::Unb
             }
             Update::TurnFinished(outcome) => return (outcome, reply, kinds),
             Update::Error(m) | Update::SetupNeeded(m) => panic!("engine problem: {m}"),
-            Update::ApprovalState { .. } => {}
+            Update::ApprovalState { .. } | Update::Notice(_) => {}
         }
     }
 }
@@ -74,6 +74,9 @@ async fn save_and_recall(provider: Arc<dyn Provider>, model: Option<&str>) {
         project_id: project.id.clone(),
         memory: Some(memory),
         plugin_write: false,
+        workspace_mode: discard_core::model::WorkspaceMode::MainCheckout,
+        workspace: None,
+        channel_name: "c".into(),
         provider,
         channel_id: channel.id.clone(),
         session_id: session,

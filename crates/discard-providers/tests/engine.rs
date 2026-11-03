@@ -4,7 +4,7 @@ use discard_core::agent::AgentConfig;
 use discard_core::approval::{ApprovalState, Decision};
 use discard_core::capability::ApprovalPolicy;
 use discard_core::driver::TurnOutcome;
-use discard_core::engine::{Engine, MEMORY_TOOL_PREFIX, MemoryService, PreparedMemory};
+use discard_core::engine::{Engine, MEMORY_TOOL_PREFIX, MemoryService, PreparedMemory, PreparedWorkspace, WorkspaceService};
 use discard_core::event::{ApprovalId, EventKind, SessionId};
 use discard_core::model::{AgentId, Block, Channel, ChannelId, Project, ProjectId, Role, WorkspaceMode};
 use discard_core::provider::SetupStatus;
@@ -61,6 +61,9 @@ fn start_with(provider: FakeProvider, policy: ApprovalPolicy, memory: Option<Arc
         project_id: project_id.clone(),
         memory,
         plugin_write: false,
+        workspace_mode: discard_core::model::WorkspaceMode::MainCheckout,
+        workspace: None,
+        channel_name: "c".into(),
         provider: Arc::new(provider),
         channel_id: channel.id.clone(),
         session_id: session.clone(),
@@ -403,4 +406,145 @@ async fn the_agents_own_system_prompt_is_passed_to_the_memory_service() {
     rig.commands.send(Command::Send("hi".into())).unwrap();
     rig.until_finished().await;
     assert_eq!(mem.prepared.lock().unwrap()[0].2, None);
+}
+
+// ---- workspace (worktree) integration ----
+
+struct FakeWorkspace {
+    fail: Option<String>,
+    notes: Vec<String>,
+    calls: Mutex<Vec<(PathBuf, ChannelId, String)>>,
+}
+
+impl FakeWorkspace {
+    fn ok(notes: &[&str]) -> Arc<Self> {
+        Arc::new(Self { fail: None, notes: notes.iter().map(|s| s.to_string()).collect(), calls: Mutex::default() })
+    }
+    fn failing(message: &str) -> Arc<Self> {
+        Arc::new(Self { fail: Some(message.into()), notes: vec![], calls: Mutex::default() })
+    }
+}
+
+impl WorkspaceService for FakeWorkspace {
+    fn prepare(&self, project_dir: &std::path::Path, channel: &ChannelId, name: &str) -> Result<PreparedWorkspace, String> {
+        self.calls.lock().unwrap().push((project_dir.to_path_buf(), channel.clone(), name.to_string()));
+        match &self.fail {
+            Some(m) => Err(m.clone()),
+            None => Ok(PreparedWorkspace { cwd: PathBuf::from("/worktrees/chan-1"), notes: self.notes.clone() }),
+        }
+    }
+}
+
+fn start_workspace(
+    provider: FakeProvider,
+    mode: discard_core::model::WorkspaceMode,
+    workspace: Option<Arc<dyn WorkspaceService>>,
+    memory: Option<Arc<dyn MemoryService>>,
+) -> Rig {
+    let store = Store::open_in_memory().unwrap();
+    let project = Project { id: ProjectId::new(), name: "p".into(), path: "/p".into() };
+    store.insert_project(&project).unwrap();
+    let agent_id = AgentId::new();
+    store.insert_agent(&agent_id, &AgentConfig { name: "A".into(), avatar: None, provider: "fake".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+    let channel = Channel { id: ChannelId::new(), project_id: project.id.clone(), name: "general".into(), agent_id: agent_id.clone(), workspace_mode: mode };
+    store.insert_channel(&channel).unwrap();
+    let session = SessionId::new();
+    store.create_session(&session, &channel.id).unwrap();
+    let store = Arc::new(Mutex::new(store));
+    let probe = provider.probe.clone();
+    let engine = Engine {
+        store: Arc::clone(&store),
+        agent_id,
+        project_id: project.id,
+        memory,
+        plugin_write: false,
+        workspace_mode: mode,
+        workspace,
+        channel_name: "general".into(),
+        provider: Arc::new(provider),
+        channel_id: channel.id.clone(),
+        session_id: session.clone(),
+        cwd: PathBuf::from("/projects/app"),
+        model: None,
+        system_prompt: None,
+        policy: ApprovalPolicy::Ask,
+    };
+    let (commands, commands_rx) = mpsc::unbounded_channel();
+    let (updates_tx, updates) = mpsc::unbounded_channel();
+    let task = tokio::spawn(engine.run(commands_rx, updates_tx));
+    Rig { store, channel: channel.id, session, probe, commands, updates, task }
+}
+
+#[tokio::test]
+async fn a_worktree_channel_gets_its_workspace_before_the_session_and_runs_there() {
+    use discard_core::model::WorkspaceMode::Worktree;
+    let ws = FakeWorkspace::ok(&[]);
+    let mut rig = start_workspace(FakeProvider::new(vec![Step::working(), Step::idle()]), Worktree, Some(ws.clone()), None);
+    rig.commands.send(Command::Send("hi".into())).unwrap();
+    rig.until_finished().await;
+    let calls = ws.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, PathBuf::from("/projects/app"));
+    assert_eq!((calls[0].1.clone(), calls[0].2.as_str()), (rig.channel.clone(), "general"));
+    let specs = rig.probe.specs.lock().unwrap().clone();
+    assert_eq!(specs[0].cwd, PathBuf::from("/worktrees/chan-1"), "the session runs in the worktree");
+}
+
+#[tokio::test]
+async fn a_main_checkout_channel_never_touches_the_workspace_service() {
+    use discard_core::model::WorkspaceMode::MainCheckout;
+    let ws = FakeWorkspace::ok(&[]);
+    let mut rig = start_workspace(FakeProvider::new(vec![Step::working(), Step::idle()]), MainCheckout, Some(ws.clone()), None);
+    rig.commands.send(Command::Send("hi".into())).unwrap();
+    rig.until_finished().await;
+    assert!(ws.calls.lock().unwrap().is_empty());
+    assert_eq!(rig.probe.specs.lock().unwrap()[0].cwd, PathBuf::from("/projects/app"));
+}
+
+#[tokio::test]
+async fn a_worktree_channel_with_no_workspace_service_fails_closed_instead_of_using_the_main_checkout() {
+    use discard_core::model::WorkspaceMode::Worktree;
+    let mut rig = start_workspace(FakeProvider::new(vec![Step::idle()]), Worktree, None, None);
+    rig.commands.send(Command::Send("hi".into())).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(updates.iter().any(|u| matches!(u, Update::Error(m) if m.contains("worktree"))), "{updates:?}");
+    assert!(matches!(updates.last(), Some(Update::TurnFinished(TurnOutcome::Failed))));
+    assert!(rig.probe.started_with.lock().unwrap().is_empty(), "no session may start in the wrong directory");
+}
+
+#[tokio::test]
+async fn if_the_workspace_cannot_be_created_the_turn_does_not_start() {
+    use discard_core::model::WorkspaceMode::Worktree;
+    let mem = FakeMemory::new(false);
+    let mut rig = start_workspace(FakeProvider::new(vec![Step::idle()]), Worktree, Some(FakeWorkspace::failing("the repository has no commits yet")), Some(mem.clone()));
+    rig.commands.send(Command::Send("hi".into())).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(updates.iter().any(|u| matches!(u, Update::Error(m) if m.contains("no commits"))), "{updates:?}");
+    assert!(matches!(updates.last(), Some(Update::TurnFinished(TurnOutcome::Failed))));
+    assert!(rig.probe.started_with.lock().unwrap().is_empty());
+    assert!(mem.prepared.lock().unwrap().is_empty(), "no memory token may be issued for a turn that cannot start");
+}
+
+#[tokio::test]
+async fn workspace_notes_reach_the_user_as_notices_before_the_reply() {
+    use discard_core::model::WorkspaceMode::Worktree;
+    let ws = FakeWorkspace::ok(&["Uncommitted changes were not copied: a.txt"]);
+    let mut rig = start_workspace(FakeProvider::new(vec![Step::working(), Step::idle()]), Worktree, Some(ws), None);
+    rig.commands.send(Command::Send("hi".into())).unwrap();
+    let updates = rig.until_finished().await;
+    let notice_at = updates.iter().position(|u| matches!(u, Update::Notice(m) if m.contains("not copied"))).expect("a notice");
+    let first_event = updates.iter().position(|u| matches!(u, Update::Event(_))).unwrap();
+    assert!(notice_at < first_event);
+}
+
+#[tokio::test]
+async fn the_workspace_is_requested_again_on_every_turn() {
+    use discard_core::model::WorkspaceMode::Worktree;
+    let ws = FakeWorkspace::ok(&[]);
+    let mut rig = start_workspace(FakeProvider::new(vec![Step::working(), Step::idle()]), Worktree, Some(ws.clone()), None);
+    for text in ["one", "two"] {
+        rig.commands.send(Command::Send(text.into())).unwrap();
+        rig.until_finished().await;
+    }
+    assert_eq!(ws.calls.lock().unwrap().len(), 2, "prepare is idempotent, so the engine asks every turn");
 }

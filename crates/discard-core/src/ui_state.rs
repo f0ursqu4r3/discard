@@ -23,6 +23,8 @@ pub enum Update {
     /// The provider CLI needs setup. The text names the exact command the user must run.
     SetupNeeded(String),
     Error(String),
+    /// Something the user should know that does not stop the turn.
+    Notice(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -61,7 +63,7 @@ impl UiState {
                 self.finish_turn();
                 self.notice = Some(text);
             }
-            Update::Error(text) => self.notice = Some(text),
+            Update::Error(text) | Update::Notice(text) => self.notice = Some(text),
         }
     }
 
@@ -288,6 +290,17 @@ mod tests {
         assert_eq!(v["pending_approvals"], 1);
         assert_eq!(v["agent"]["status"], "awaiting_approval");
         assert_eq!(v["turn_running"], true);
+    }
+
+    #[test]
+    fn a_notice_is_shown_without_ending_the_turn() {
+        let mut s = state();
+        s.user_sent("hi");
+        s.apply(Update::Notice("Uncommitted changes were not copied".into()));
+        assert_eq!(s.notice(), Some("Uncommitted changes were not copied"));
+        assert!(s.turn_running(), "a notice is information, not the end of the turn");
+        s.apply(text("still streaming"));
+        assert_eq!(s.live_blocks().len(), 1);
     }
 
     #[test]

@@ -4,13 +4,13 @@ use crate::approval::{ApprovalState, Decider, Decision};
 use crate::capability::ApprovalPolicy;
 use crate::driver::{DecisionMsg, TurnContext, TurnInputs, run_turn};
 use crate::event::{EventKind, Sequencer, SessionId};
-use crate::model::{AgentId, Block, ChannelId, Message, MessageId, ProjectId, Role};
+use crate::model::{AgentId, Block, ChannelId, Message, MessageId, ProjectId, Role, WorkspaceMode};
 use crate::provider::{Provider, ProviderError, SessionSpec, SetupStatus};
 use crate::redact::redact;
 use crate::store::Store;
 use crate::timeline::{ApprovalView, Timeline};
 use crate::ui_state::{Command, Update};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -33,6 +33,20 @@ pub fn auto_approved_tool(tool: &str) -> bool {
         Some(name) => !name.is_empty() && !PLUGIN_TOOLS_THAT_ASK.contains(&name),
         None => false,
     }
+}
+
+/// Where a session runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedWorkspace {
+    pub cwd: PathBuf,
+    /// Things the user should know, such as uncommitted files that were not copied.
+    pub notes: Vec<String>,
+}
+
+/// Creates the working directory for a channel before its session starts. Implemented by the git worktree code.
+pub trait WorkspaceService: Send + Sync {
+    /// Must be safe to call every turn: it returns the existing workspace after the first call.
+    fn prepare(&self, project_dir: &Path, channel: &ChannelId, channel_name: &str) -> Result<PreparedWorkspace, String>;
 }
 
 /// What a session needs to use memory.
@@ -61,6 +75,10 @@ pub struct Engine {
     pub memory: Option<Arc<dyn MemoryService>>,
     /// The agent may write plugins.
     pub plugin_write: bool,
+    /// Where this channel's agent works: the project's main checkout, or its own git worktree.
+    pub workspace_mode: WorkspaceMode,
+    pub workspace: Option<Arc<dyn WorkspaceService>>,
+    pub channel_name: String,
     pub provider: Arc<dyn Provider>,
     pub channel_id: ChannelId,
     pub session_id: SessionId,
@@ -153,6 +171,30 @@ impl Engine {
             }
         }
 
+        // The workspace is chosen and created before the provider session starts. A session is never moved.
+        let cwd = match self.workspace_mode {
+            WorkspaceMode::MainCheckout => self.cwd.clone(),
+            WorkspaceMode::Worktree => {
+                let prepared = match &self.workspace {
+                    Some(service) => service.prepare(&self.cwd, &self.channel_id, &self.channel_name),
+                    None => Err("this channel needs a git worktree, but worktrees are not available".to_string()),
+                };
+                match prepared {
+                    Ok(prepared) => {
+                        for note in prepared.notes {
+                            send(updates, Update::Notice(note));
+                        }
+                        prepared.cwd
+                    }
+                    Err(e) => {
+                        send(updates, Update::Error(redact(&e)));
+                        send(updates, Update::TurnFinished(crate::driver::TurnOutcome::Failed));
+                        return;
+                    }
+                }
+            }
+        };
+
         // Memory: issue a session token and build the prompt. If this fails, no session starts.
         let prepared = match &self.memory {
             Some(service) => match service.prepare(&self.agent_id, &self.project_id, self.system_prompt.as_deref(), self.plugin_write) {
@@ -173,7 +215,7 @@ impl Engine {
 
         let resume_handle = crate::driver::lock(&self.store).resume_handle(&self.session_id).ok().flatten();
         let spec = SessionSpec {
-            cwd: self.cwd.clone(),
+            cwd,
             model: self.model.clone(),
             system_prompt: prepared.as_ref().map(|p| p.system_prompt.clone()).or_else(|| self.system_prompt.clone()),
             enforcement,

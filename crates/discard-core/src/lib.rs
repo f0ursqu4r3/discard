@@ -17,3 +17,5 @@ pub mod ui_state;
 pub mod engine;
 pub mod bootstrap;
 pub mod memory;
+pub mod worktree;
+pub mod workspace;

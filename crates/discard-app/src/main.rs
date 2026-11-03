@@ -3,10 +3,12 @@
 mod args;
 mod keys;
 
-use discard_core::bootstrap::Role;
+use discard_core::bootstrap::{Role, WorkspaceChoice};
 use discard_core::engine::Engine;
 use discard_core::logging;
 use discard_core::store::Store;
+use discard_core::workspace::GitWorkspace;
+use discard_core::worktree::WorktreeManager;
 use discard_core::ui_state::UiState;
 use discard_core::memory::MemoryStore;
 use discard_lua::ledger::Ledger;
@@ -29,6 +31,10 @@ fn data_dir() -> PathBuf {
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     home.join(".discard")
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 /// The provider implementation for an agent's `provider` name.
@@ -58,10 +64,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = data_dir();
     std::fs::create_dir_all(&data_dir)?;
     let project_dir = std::env::current_dir()?;
-    let store = Store::open(&data_dir.join("discard.db"))?;
+    let store = Arc::new(Mutex::new(Store::open(&data_dir.join("discard.db"))?));
 
     // No provider process survives a restart. Fail orphaned turns and expire their approvals.
-    let report = store.reconcile(&HashSet::new())?;
+    let report = lock(&store).reconcile(&HashSet::new())?;
     if !report.turns_failed.is_empty() {
         warn!(
             turns = report.turns_failed.len(),
@@ -70,8 +76,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let workspace = discard_core::bootstrap::ensure_workspace(&store, &project_dir, &options.provider, if options.builder { Role::Builder } else { Role::Default })?;
-    let history = store.messages_for_channel(&workspace.channel.id)?;
+    if options.workspace == WorkspaceChoice::Worktree && !WorktreeManager::is_repo(&project_dir) {
+        eprintln!("discard: --worktree needs a git repository, and {} is not inside one", project_dir.display());
+        std::process::exit(2);
+    }
+    let workspace = discard_core::bootstrap::ensure_workspace(
+        &lock(&store),
+        &project_dir,
+        &options.provider,
+        if options.builder { Role::Builder } else { Role::Default },
+        options.workspace,
+    )?;
+    let history = lock(&store).messages_for_channel(&workspace.channel.id)?;
     info!(project = %workspace.project.name, channel = %workspace.channel.name, "workspace ready");
 
     // The engine and provider processes run on tokio. GPUI owns the main thread.
@@ -112,11 +128,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (updates_tx, updates_rx) = mpsc::unbounded_channel();
 
     let engine = Engine {
-        store: Arc::new(Mutex::new(store)),
+        store: Arc::clone(&store),
         agent_id: workspace.channel.agent_id.clone(),
         project_id: workspace.project.id.clone(),
         memory: Some(memory),
         plugin_write: workspace.agent.plugin_write,
+        workspace_mode: workspace.channel.workspace_mode,
+        workspace: Some(Arc::new(GitWorkspace::new(&data_dir.join("worktrees"), Arc::clone(&store)))),
+        channel_name: workspace.channel.name.clone(),
         provider: provider_for(&workspace.agent.provider)?,
         channel_id: workspace.channel.id.clone(),
         session_id: workspace.session_id.clone(),

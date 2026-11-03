@@ -92,6 +92,27 @@ CREATE TABLE messages (
 );
 ";
 
+const SCHEMA_V2: &str = "
+CREATE TABLE worktrees (
+    channel_id TEXT PRIMARY KEY REFERENCES channels(id),
+    path TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    base_commit TEXT NOT NULL,
+    repo TEXT NOT NULL
+);
+ALTER TABLE channels ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+";
+
+/// A channel's git worktree, as recorded when it was created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeRecord {
+    pub channel_id: ChannelId,
+    pub path: String,
+    pub branch: String,
+    pub base_commit: String,
+    pub repo: String,
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -154,6 +175,12 @@ impl Store {
             tx.pragma_update(None, "user_version", 1)?;
             tx.commit()?;
         }
+        if self.schema_version()? < 2 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(SCHEMA_V2)?;
+            tx.pragma_update(None, "user_version", 2)?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -196,7 +223,7 @@ impl Store {
 
     pub fn channels_for_project(&self, p: &ProjectId) -> Result<Vec<Channel>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, project_id, name, agent_id, workspace_mode FROM channels WHERE project_id = ?1 ORDER BY ord",
+            "SELECT id, project_id, name, agent_id, workspace_mode FROM channels WHERE project_id = ?1 AND archived = 0 ORDER BY ord",
         )?;
         let rows = stmt.query_map(params![p.0], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?))
@@ -209,6 +236,50 @@ impl Store {
             out.push(Channel { id: ChannelId(id), project_id: ProjectId(project_id), name, agent_id: AgentId(agent_id), workspace_mode });
         }
         Ok(out)
+    }
+
+    pub fn save_worktree(&self, w: &WorktreeRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO worktrees (channel_id, path, branch, base_commit, repo) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(channel_id) DO UPDATE SET path = excluded.path, branch = excluded.branch,
+               base_commit = excluded.base_commit, repo = excluded.repo",
+            params![w.channel_id.0, w.path, w.branch, w.base_commit, w.repo],
+        )?;
+        Ok(())
+    }
+
+    pub fn worktree_for(&self, channel: &ChannelId) -> Result<Option<WorktreeRecord>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT path, branch, base_commit, repo FROM worktrees WHERE channel_id = ?1",
+                params![channel.0],
+                |r| Ok(WorktreeRecord { channel_id: channel.clone(), path: r.get(0)?, branch: r.get(1)?, base_commit: r.get(2)?, repo: r.get(3)? }),
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn delete_worktree(&self, channel: &ChannelId) -> Result<()> {
+        self.conn.execute("DELETE FROM worktrees WHERE channel_id = ?1", params![channel.0])?;
+        Ok(())
+    }
+
+    pub fn set_workspace_mode(&self, channel: &ChannelId, mode: WorkspaceMode) -> Result<()> {
+        let n = self.conn.execute("UPDATE channels SET workspace_mode = ?2 WHERE id = ?1", params![channel.0, mode.as_str()])?;
+        if n == 0 {
+            return Err(StoreError::NotFound(format!("channel {}", channel.0)));
+        }
+        Ok(())
+    }
+
+    /// Hide a channel from its project. Its history stays in the database.
+    pub fn archive_channel(&self, channel: &ChannelId) -> Result<()> {
+        let n = self.conn.execute("UPDATE channels SET archived = 1 WHERE id = ?1", params![channel.0])?;
+        if n == 0 {
+            return Err(StoreError::NotFound(format!("channel {}", channel.0)));
+        }
+        Ok(())
     }
 
     pub fn project_by_path(&self, path: &str) -> Result<Option<Project>> {
@@ -490,7 +561,7 @@ mod tests {
         let path = dir.path().join("d.db");
         let v1 = Store::open(&path).unwrap().schema_version().unwrap();
         let v2 = Store::open(&path).unwrap().schema_version().unwrap();
-        assert!(v1 >= 1);
+        assert!(v1 >= 2);
         assert_eq!(v1, v2);
     }
 
@@ -505,6 +576,61 @@ mod tests {
         f.store.create_session(&newer, &f.channel.id).unwrap();
         assert_eq!(f.store.latest_session(&f.channel.id).unwrap(), Some(newer));
         assert_eq!(f.store.latest_session(&ChannelId::new()).unwrap(), None);
+    }
+
+    #[test]
+    fn a_version_one_database_upgrades_in_place_and_keeps_its_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            // Build a database exactly as milestone M1 left it.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute("INSERT INTO projects (id, name, path) VALUES ('p', 'old', '/old')", []).unwrap();
+            conn.execute("INSERT INTO agents (id, config_toml) VALUES ('a', 'name=\"A\"\nprovider=\"claude\"\npolicy=\"ask\"')", []).unwrap();
+            conn.execute("INSERT INTO channels (id, project_id, name, agent_id, workspace_mode) VALUES ('c', 'p', 'general', 'a', 'main_checkout')", []).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 2);
+        let channels = store.channels_for_project(&ProjectId("p".into())).unwrap();
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].workspace_mode, WorkspaceMode::MainCheckout, "old channels stay in the main checkout");
+        assert_eq!(store.worktree_for(&ChannelId("c".into())).unwrap(), None);
+    }
+
+    #[test]
+    fn worktree_records_round_trip_update_and_delete() {
+        let f = fixture();
+        let rec = WorktreeRecord { channel_id: f.channel.id.clone(), path: "/w/x".into(), branch: "discard/x".into(), base_commit: "abc".into(), repo: "/r".into() };
+        assert_eq!(f.store.worktree_for(&f.channel.id).unwrap(), None);
+        f.store.save_worktree(&rec).unwrap();
+        assert_eq!(f.store.worktree_for(&f.channel.id).unwrap(), Some(rec.clone()));
+        let moved = WorktreeRecord { path: "/w/y".into(), ..rec };
+        f.store.save_worktree(&moved).unwrap();
+        assert_eq!(f.store.worktree_for(&f.channel.id).unwrap(), Some(moved));
+        f.store.delete_worktree(&f.channel.id).unwrap();
+        assert_eq!(f.store.worktree_for(&f.channel.id).unwrap(), None);
+    }
+
+    #[test]
+    fn the_workspace_mode_can_be_changed_and_the_change_persists() {
+        let f = fixture();
+        f.store.set_workspace_mode(&f.channel.id, WorkspaceMode::Worktree).unwrap();
+        assert_eq!(f.store.channels_for_project(&f.project.id).unwrap()[0].workspace_mode, WorkspaceMode::Worktree);
+        assert!(matches!(f.store.set_workspace_mode(&ChannelId::new(), WorkspaceMode::Worktree), Err(StoreError::NotFound(_))));
+    }
+
+    #[test]
+    fn archived_channels_disappear_from_the_project_but_keep_their_history() {
+        let f = fixture();
+        let m = Message { id: MessageId::new(), channel_id: f.channel.id.clone(), role: Role::User, blocks: vec![Block::Markdown { text: "hi".into() }] };
+        f.store.insert_message(&m).unwrap();
+        f.store.archive_channel(&f.channel.id).unwrap();
+        assert!(f.store.channels_for_project(&f.project.id).unwrap().is_empty());
+        assert_eq!(f.store.first_channel(&f.project.id).unwrap(), None);
+        assert_eq!(f.store.messages_for_channel(&f.channel.id).unwrap().len(), 1);
+        assert!(matches!(f.store.archive_channel(&ChannelId::new()), Err(StoreError::NotFound(_))));
     }
 
     #[test]
