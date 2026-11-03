@@ -13,6 +13,11 @@ version = 1
 [general]
 default_provider = "claude"       # claude or codex
 confirm_while_working = true      # ask before Quit or Safe Mode while a turn runs
+
+[appearance]
+theme_source = "default"          # default, ghostty, or custom
+theme = "light:Catppuccin Latte,dark:Catppuccin Mocha"   # used when theme_source is "custom"
+ignore_plugin_themes = false      # true: plugin theme tokens have no effect
 ```
 
 | Key | Type | Default |
@@ -20,6 +25,9 @@ confirm_while_working = true      # ask before Quit or Safe Mode while a turn ru
 | `version` | integer | none. Discard writes `1` the first time it writes the file. |
 | `general.default_provider` | `"claude"` or `"codex"` | `"claude"` |
 | `general.confirm_while_working` | `true` or `false` | `true` |
+| `appearance.theme_source` | `"default"`, `"ghostty"`, or `"custom"` | `"default"` |
+| `appearance.theme` | A Ghostty `theme` value: `Name` or `light:X,dark:Y` | `"light:Catppuccin Latte,dark:Catppuccin Mocha"` |
+| `appearance.ignore_plugin_themes` | `true` or `false` | `false` |
 
 Discard never creates the file at startup. It creates the file on the first change you make in the Settings window.
 The folder already exists after startup.
@@ -33,6 +41,7 @@ Discard reads each key on its own. A bad key falls back to its default. The rest
 | Missing file | All defaults. No problem is reported. |
 | Wrong type for a key (for example `confirm_while_working = "yes"`) | That key uses its default. One problem is reported. |
 | Unknown provider name | `default_provider` uses `claude`. One problem is reported. |
+| Unknown `theme_source`, or a `theme` that names no theme (empty, or only `light:X`) | That key uses its default. One problem is reported. |
 | `general` is not a table | All `general` keys use their defaults. One problem is reported. |
 | `version` is not `1` | The keys are still read. One problem is reported. This holds for a newer version and for any other number. |
 | `version` is not an integer | One problem is reported. The keys are still read. |
@@ -252,3 +261,15 @@ and the engine runs for it. A Mac app usually stays open with no window. Discard
 - The "Soon" sidebar rows and the greyed menu items have no tooltip.
 - The menu bar, the keys, the confirm notice, the relaunch, the single Settings window, and the Plugins page were
   built and logic-tested. The manual GUI checks have not been run.
+
+## Themes and window state (core only so far)
+
+The code that reads Ghostty themes, maps them to UI colors, and saves window state is built and tested. The window
+does not use it yet. The next phases connect it.
+
+- **Theme files.** Discard reads the Ghostty format (`palette = N=#hex`, `background`, `foreground`, `cursor-color`,
+  `selection-background`, `split-divider-color`). Colors can be `#rrggbb`, `rrggbb`, `#rgb`, or an X11 name.
+- **Lookup order for a theme name.** `$DISCARD_HOME/themes/`, then Ghostty's user folders, then the Ghostty app, then
+  the themes bundled in Discard (see `THIRD-PARTY-NOTICES`). An absolute path also works.
+- **`state.toml`.** `$DISCARD_HOME/state.toml` holds the window position and size and the two panel widths (180 to 400,
+  default 240). Discard writes this file. Delete it to reset the layout.

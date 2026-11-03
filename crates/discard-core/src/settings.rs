@@ -6,11 +6,33 @@ use std::path::{Path, PathBuf};
 use toml_edit::{DocumentMut, Item, Table, Value, value};
 
 use crate::bootstrap::PROVIDERS;
+use crate::ghostty::bundled::DEFAULT_THEME;
+use crate::ghostty::resolve::ThemeSource;
+use crate::ghostty::spec::ThemeSpec;
 
 /// The settings Discard understands.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Settings {
     pub general: GeneralSettings,
+    pub appearance: AppearanceSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppearanceSettings {
+    pub theme_source: ThemeSource,
+    /// A Ghostty `theme` value. Used when `theme_source` is `custom`.
+    pub theme: String,
+    pub ignore_plugin_themes: bool,
+}
+
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        AppearanceSettings {
+            theme_source: ThemeSource::Default,
+            theme: DEFAULT_THEME.to_string(),
+            ignore_plugin_themes: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +63,10 @@ pub struct SettingsIssue {
 pub enum Change {
     DefaultProvider(String),
     ConfirmWhileWorking(bool),
+    ThemeSource(ThemeSource),
+    /// A Ghostty `theme` value: `Name` or `light:X,dark:Y`.
+    Theme(String),
+    IgnorePluginThemes(bool),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -112,20 +138,30 @@ impl SettingsStore {
                 "unknown provider `{name}`"
             )));
         }
+        if let Change::Theme(value) = &change
+            && ThemeSpec::parse(value).is_none()
+        {
+            return Err(SettingsError::Invalid(format!(
+                "`{value}` does not name a theme"
+            )));
+        }
 
         let mut doc = self.doc.clone();
         if doc.get("version").is_none() {
             doc.insert("version", value(CURRENT_VERSION));
         }
-        let key = match &change {
-            Change::DefaultProvider(_) => "default_provider",
-            Change::ConfirmWhileWorking(_) => "confirm_while_working",
+        let (table, key, new_value) = match change {
+            Change::DefaultProvider(name) => ("general", "default_provider", Value::from(name)),
+            Change::ConfirmWhileWorking(on) => {
+                ("general", "confirm_while_working", Value::from(on))
+            }
+            Change::ThemeSource(source) => {
+                ("appearance", "theme_source", Value::from(source.as_str()))
+            }
+            Change::Theme(value) => ("appearance", "theme", Value::from(value.trim())),
+            Change::IgnorePluginThemes(on) => ("appearance", "ignore_plugin_themes", Value::from(on)),
         };
-        let new_value = match change {
-            Change::DefaultProvider(name) => Value::from(name),
-            Change::ConfirmWhileWorking(on) => Value::from(on),
-        };
-        set_general(&mut doc, key, new_value);
+        set_in_table(&mut doc, table, key, new_value);
 
         if self.parse_failed {
             self.save_invalid_copy()?;
@@ -301,25 +337,64 @@ fn evaluate(doc: &DocumentMut) -> (Settings, Vec<SettingsIssue>) {
             }
         },
     }
+
+    match doc.get("appearance") {
+        None => {}
+        Some(item) => match item.as_table_like() {
+            None => issue("appearance", "`appearance` must be a table".to_string()),
+            Some(appearance) => {
+                if let Some(item) = appearance.get("theme_source") {
+                    match item.as_str().and_then(ThemeSource::from_setting) {
+                        Some(source) => settings.appearance.theme_source = source,
+                        None => issue(
+                            "appearance.theme_source",
+                            "must be \"default\", \"ghostty\", or \"custom\"".to_string(),
+                        ),
+                    }
+                }
+                if let Some(item) = appearance.get("theme") {
+                    match item.as_str() {
+                        Some(value) if ThemeSpec::parse(value).is_some() => {
+                            settings.appearance.theme = value.trim().to_string();
+                        }
+                        Some(value) => issue(
+                            "appearance.theme",
+                            format!("`{value}` does not name a theme"),
+                        ),
+                        None => issue("appearance.theme", "must be a string".to_string()),
+                    }
+                }
+                if let Some(item) = appearance.get("ignore_plugin_themes") {
+                    match item.as_bool() {
+                        Some(on) => settings.appearance.ignore_plugin_themes = on,
+                        None => issue(
+                            "appearance.ignore_plugin_themes",
+                            "must be true or false".to_string(),
+                        ),
+                    }
+                }
+            }
+        },
+    }
     (settings, issues)
 }
 
-/// Set `[general].<key>`, keeping the old value's comments and spacing.
-fn set_general(doc: &mut DocumentMut, key: &str, mut new_value: Value) {
+/// Set `[<table>].<key>`, keeping the old value's comments and spacing.
+fn set_in_table(doc: &mut DocumentMut, table: &str, key: &str, mut new_value: Value) {
     if doc
-        .get_mut("general")
+        .get_mut(table)
         .and_then(Item::as_table_like_mut)
         .is_none()
     {
-        doc.insert("general", Item::Table(Table::new()));
+        doc.insert(table, Item::Table(Table::new()));
     }
-    let Some(general) = doc.get_mut("general").and_then(Item::as_table_like_mut) else {
+    let Some(section) = doc.get_mut(table).and_then(Item::as_table_like_mut) else {
         return;
     };
-    if let Some(old) = general.get(key).and_then(Item::as_value) {
+    if let Some(old) = section.get(key).and_then(Item::as_value) {
         *new_value.decor_mut() = old.decor().clone();
     }
-    general.insert(key, Item::Value(new_value));
+    section.insert(key, Item::Value(new_value));
 }
 
 #[cfg(test)]
@@ -535,5 +610,97 @@ mod tests {
         assert!(!store.settings().general.confirm_while_working);
         assert!(store.issues().is_empty());
         assert!(!store.reload_if_changed());
+    }
+
+    #[test]
+    fn appearance_defaults_to_the_bundled_pair() {
+        let store = SettingsStore::open(&path_in(&tempfile::tempdir().unwrap()));
+        let a = &store.settings().appearance;
+        assert_eq!(a.theme_source, ThemeSource::Default);
+        assert_eq!(a.theme, DEFAULT_THEME);
+        assert!(!a.ignore_plugin_themes);
+    }
+
+    #[test]
+    fn appearance_keys_are_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        fs::write(
+            &path,
+            "version = 1\n[appearance]\ntheme_source = \"custom\"\ntheme = \"light:Nord,dark:Dracula\"\nignore_plugin_themes = true\n",
+        )
+        .unwrap();
+        let store = SettingsStore::open(&path);
+        let a = &store.settings().appearance;
+        assert_eq!(a.theme_source, ThemeSource::Custom);
+        assert_eq!(a.theme, "light:Nord,dark:Dracula");
+        assert!(a.ignore_plugin_themes);
+        assert!(store.issues().is_empty(), "{:?}", store.issues());
+    }
+
+    #[test]
+    fn bad_appearance_keys_fall_back_one_by_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        fs::write(
+            &path,
+            "[appearance]\ntheme_source = \"neon\"\ntheme = 5\nignore_plugin_themes = true\n",
+        )
+        .unwrap();
+        let store = SettingsStore::open(&path);
+        let a = &store.settings().appearance;
+        assert_eq!(a.theme_source, ThemeSource::Default);
+        assert_eq!(a.theme, DEFAULT_THEME);
+        assert!(a.ignore_plugin_themes, "a good key still applies");
+        let keys: Vec<&str> = store.issues().iter().map(|i| i.key.as_str()).collect();
+        assert_eq!(keys, ["appearance.theme_source", "appearance.theme"]);
+    }
+
+    #[test]
+    fn an_empty_theme_value_is_an_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        fs::write(&path, "[appearance]\ntheme = \"light:Nord\"\n").unwrap();
+        let store = SettingsStore::open(&path);
+        assert_eq!(store.settings().appearance.theme, DEFAULT_THEME);
+        assert_eq!(store.issues().len(), 1);
+        assert_eq!(store.issues()[0].key, "appearance.theme");
+    }
+
+    #[test]
+    fn apply_writes_appearance_keys_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        fs::write(&path, "version = 1\n[general]\nconfirm_while_working = false # keep\n").unwrap();
+        let mut store = SettingsStore::open(&path);
+        store.apply(Change::ThemeSource(ThemeSource::Ghostty)).unwrap();
+        store.apply(Change::Theme("Nord".to_string())).unwrap();
+        store.apply(Change::IgnorePluginThemes(true)).unwrap();
+        let a = &store.settings().appearance;
+        assert_eq!(a.theme_source, ThemeSource::Ghostty);
+        assert_eq!(a.theme, "Nord");
+        assert!(a.ignore_plugin_themes);
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# keep"), "{text}");
+        assert!(text.contains("theme_source = \"ghostty\""), "{text}");
+        assert!(text.contains("theme = \"Nord\""), "{text}");
+        assert!(text.contains("ignore_plugin_themes = true"), "{text}");
+        let reopened = SettingsStore::open(&path);
+        assert_eq!(reopened.settings(), store.settings());
+        assert!(reopened.issues().is_empty());
+    }
+
+    #[test]
+    fn apply_rejects_a_theme_that_names_nothing_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        let mut store = SettingsStore::open(&path);
+        for bad in ["", "  ", "light:Nord"] {
+            let err = store.apply(Change::Theme(bad.to_string())).unwrap_err();
+            assert!(matches!(err, SettingsError::Invalid(_)), "{bad:?}");
+        }
+        assert!(!path.exists());
+        assert_eq!(store.settings().appearance.theme, DEFAULT_THEME);
     }
 }

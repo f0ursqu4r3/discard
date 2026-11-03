@@ -23,3 +23,5 @@ pub mod worktree;
 pub mod workspace;
 pub mod settings;
 pub mod settings_page;
+pub mod ghostty;
+pub mod window_state;
