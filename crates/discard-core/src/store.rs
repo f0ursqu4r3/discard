@@ -463,7 +463,7 @@ mod tests {
                     provider: "claude".into(),
                     model: None,
                     system_prompt: String::new(),
-                    policy: ApprovalPolicy::Ask,
+                    policy: ApprovalPolicy::Ask, plugin_write: false,
                 },
             )
             .unwrap();
@@ -667,7 +667,7 @@ mod tests {
                         provider: "claude".into(),
                         model: None,
                         system_prompt: String::new(),
-                        policy: ApprovalPolicy::DenyAll,
+                        policy: ApprovalPolicy::DenyAll, plugin_write: false,
                     },
                 )
                 .unwrap();

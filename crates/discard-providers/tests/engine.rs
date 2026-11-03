@@ -40,7 +40,7 @@ fn start_with(provider: FakeProvider, policy: ApprovalPolicy, memory: Option<Arc
     store
         .insert_agent(
             &agent,
-            &AgentConfig { name: "A".into(), avatar: None, provider: "fake".into(), model: None, system_prompt: String::new(), policy },
+            &AgentConfig { name: "A".into(), avatar: None, provider: "fake".into(), model: None, system_prompt: String::new(), policy, plugin_write: false },
         )
         .unwrap();
     let channel = Channel {
@@ -60,6 +60,7 @@ fn start_with(provider: FakeProvider, policy: ApprovalPolicy, memory: Option<Arc
         agent_id: agent_id.clone(),
         project_id: project_id.clone(),
         memory,
+        plugin_write: false,
         provider: Arc::new(provider),
         channel_id: channel.id.clone(),
         session_id: session.clone(),
@@ -254,7 +255,7 @@ impl FakeMemory {
 }
 
 impl MemoryService for FakeMemory {
-    fn prepare(&self, agent: &AgentId, project: &ProjectId, base: Option<&str>) -> Result<PreparedMemory, String> {
+    fn prepare(&self, agent: &AgentId, project: &ProjectId, base: Option<&str>, _plugin_write: bool) -> Result<PreparedMemory, String> {
         self.prepared.lock().unwrap().push((agent.clone(), project.clone(), base.map(str::to_string)));
         if self.fail {
             return Err("memory is unavailable".into());
@@ -325,7 +326,7 @@ async fn memory_tool_calls_are_approved_by_policy_and_audited_as_such() {
     assert_eq!(responses[0].1, Decision::Approve);
     let approval = rig.store.lock().unwrap().load_approval(&responses[0].0).unwrap();
     assert_eq!(approval.state, ApprovalState::Decided(Decision::Approve));
-    assert_eq!(approval.audit[0].decider, discard_core::approval::Decider::Policy("builtin-memory-tools".into()));
+    assert_eq!(approval.audit[0].decider, discard_core::approval::Decider::Policy("builtin-discard-tools".into()));
 }
 
 #[tokio::test]

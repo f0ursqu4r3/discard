@@ -58,7 +58,7 @@ async fn save_and_recall(provider: Arc<dyn Provider>, model: Option<&str>) {
     let project = Project { id: ProjectId::new(), name: "p".into(), path: project_dir.to_string_lossy().into() };
     db.insert_project(&project).unwrap();
     let agent_id = AgentId::new();
-    db.insert_agent(&agent_id, &AgentConfig { name: "Scout".into(), avatar: None, provider: "any".into(), model: model.map(str::to_string), system_prompt: String::new(), policy: ApprovalPolicy::Ask }).unwrap();
+    db.insert_agent(&agent_id, &AgentConfig { name: "Scout".into(), avatar: None, provider: "any".into(), model: model.map(str::to_string), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
     let channel = Channel { id: ChannelId::new(), project_id: project.id.clone(), name: "c".into(), agent_id: agent_id.clone(), workspace_mode: WorkspaceMode::MainCheckout };
     db.insert_channel(&channel).unwrap();
     let session = SessionId::new();
@@ -73,6 +73,7 @@ async fn save_and_recall(provider: Arc<dyn Provider>, model: Option<&str>) {
         agent_id: agent_id.clone(),
         project_id: project.id.clone(),
         memory: Some(memory),
+        plugin_write: false,
         provider,
         channel_id: channel.id.clone(),
         session_id: session,

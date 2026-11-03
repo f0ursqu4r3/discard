@@ -137,6 +137,18 @@ impl ThemeOverrides {
         self.font_scale = other.font_scale.or(self.font_scale);
     }
 
+    /// Names of the tokens this override sets, sorted.
+    pub fn token_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.colors.keys().cloned().collect();
+        for (set, name) in [(self.radius.is_some(), "radius"), (self.spacing_scale.is_some(), "spacing_scale"), (self.font_scale.is_some(), "font_scale")] {
+            if set {
+                names.push(name.to_string());
+            }
+        }
+        names.sort();
+        names
+    }
+
     pub fn is_empty(&self) -> bool {
         self.colors.is_empty() && self.radius.is_none() && self.spacing_scale.is_none() && self.font_scale.is_none()
     }

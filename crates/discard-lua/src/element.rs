@@ -25,6 +25,25 @@ pub enum Tag {
 }
 
 impl Tag {
+    /// Every tag, in documentation order.
+    pub const ALL: [Tag; 10] =
+        [Tag::Row, Tag::Column, Tag::Text, Tag::Markdown, Tag::Button, Tag::Avatar, Tag::Badge, Tag::Divider, Tag::Spacer, Tag::Dot];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Tag::Row => "row",
+            Tag::Column => "column",
+            Tag::Text => "text",
+            Tag::Markdown => "markdown",
+            Tag::Button => "button",
+            Tag::Avatar => "avatar",
+            Tag::Badge => "badge",
+            Tag::Divider => "divider",
+            Tag::Spacer => "spacer",
+            Tag::Dot => "dot",
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Tag> {
         Some(match s {
             "row" => Tag::Row,

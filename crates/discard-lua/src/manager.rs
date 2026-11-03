@@ -18,6 +18,27 @@ struct Entry {
     handle: PluginHandle,
     info: LoadedInfo,
     last_error: Option<String>,
+    /// Failures since the last success. A terminated plugin counts as `TERMINATED_FAILURES`.
+    failures: u32,
+}
+
+/// A terminated plugin is past saving, so it counts as enough failures to trigger an auto-revert.
+pub const TERMINATED_FAILURES: u32 = 3;
+
+impl Entry {
+    fn succeeded(&mut self) {
+        self.last_error = None;
+        self.failures = 0;
+    }
+
+    fn failed(&mut self, error: &PluginError) {
+        self.last_error = Some(error.to_string());
+        self.failures = if matches!(error, PluginError::Violation(_) | PluginError::Terminated(_)) {
+            TERMINATED_FAILURES
+        } else {
+            self.failures + 1
+        };
+    }
 }
 
 pub struct PluginManager {
@@ -34,7 +55,7 @@ impl PluginManager {
     pub fn load(&mut self, snapshot: Snapshot) -> Result<LoadedInfo, PluginError> {
         // Spawn first. If it fails, nothing changes and an older version of the plugin keeps running.
         let (handle, info) = PluginHandle::spawn(snapshot, self.limits.clone())?;
-        let entry = Entry { handle, info: info.clone(), last_error: None };
+        let entry = Entry { handle, info: info.clone(), last_error: None, failures: 0 };
         match self.plugins.iter().position(|e| e.info.manifest.name == info.manifest.name) {
             Some(i) => {
                 let old = std::mem::replace(&mut self.plugins[i], entry);
@@ -59,6 +80,14 @@ impl PluginManager {
         self.plugins.iter().map(|e| e.info.manifest.name.clone()).collect()
     }
 
+    /// Every slot name any loaded plugin registered, sorted.
+    pub fn slot_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.plugins.iter().flat_map(|e| e.info.slots.iter().cloned()).collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     pub fn info(&self, name: &str) -> Option<&LoadedInfo> {
         self.plugins.iter().find(|e| e.info.manifest.name == name).map(|e| &e.info)
     }
@@ -71,10 +100,10 @@ impl PluginManager {
             }
             match entry.handle.render(slot, state) {
                 Ok(element) => {
-                    entry.last_error = None;
+                    entry.succeeded();
                     return Some(Rendered { plugin: entry.info.manifest.name.clone(), element });
                 }
-                Err(e) => entry.last_error = Some(e.to_string()),
+                Err(e) => entry.failed(&e),
             }
         }
         None
@@ -96,8 +125,9 @@ impl PluginManager {
             .find(|e| e.info.manifest.name == plugin)
             .ok_or_else(|| PluginError::NotRegistered { kind: "plugin", name: plugin.to_string() })?;
         let result = entry.handle.run_action(id);
-        if let Err(e) = &result {
-            entry.last_error = Some(e.to_string());
+        match &result {
+            Ok(()) => entry.succeeded(),
+            Err(e) => entry.failed(e),
         }
         result
     }
@@ -106,8 +136,9 @@ impl PluginManager {
     pub fn run_command(&mut self, name: &str, args: &str) -> Option<Result<Option<String>, PluginError>> {
         let entry = self.plugins.iter_mut().find(|e| e.info.commands.iter().any(|c| c == name))?;
         let result = entry.handle.run_command(name, args);
-        if let Err(e) = &result {
-            entry.last_error = Some(e.to_string());
+        match &result {
+            Ok(_) => entry.succeeded(),
+            Err(e) => entry.failed(e),
         }
         Some(result)
     }
@@ -118,8 +149,9 @@ impl PluginManager {
             .filter(|e| e.info.events.iter().any(|n| n == event))
             .map(|e| {
                 let result = e.handle.hook(event, payload);
-                if let Err(err) = &result {
-                    e.last_error = Some(err.to_string());
+                match &result {
+                    Ok(_) => e.succeeded(),
+                    Err(err) => e.failed(err),
                 }
                 (e.info.manifest.name.clone(), result)
             })
@@ -146,6 +178,16 @@ impl PluginManager {
                 message.map(|m| (e.info.manifest.name.clone(), m))
             })
             .collect()
+    }
+
+    /// Failures in a row for a plugin. Zero after a success.
+    pub fn failure_count(&self, name: &str) -> u32 {
+        self.plugins.iter().find(|e| e.info.manifest.name == name).map_or(0, |e| e.failures)
+    }
+
+    /// Plugins that have failed enough times in a row that Discard should revert them.
+    pub fn failing(&self, threshold: u32) -> Vec<String> {
+        self.plugins.iter().filter(|e| e.failures >= threshold).map(|e| e.info.manifest.name.clone()).collect()
     }
 
     pub fn status(&self, name: &str) -> Option<Status> {
@@ -229,6 +271,52 @@ mod tests {
         assert!(m.errors().contains_key("flaky"));
         assert!(m.render_slot("h", &json!({})).is_some());
         assert!(m.errors().is_empty());
+    }
+
+    #[test]
+    fn failures_are_counted_in_a_row_and_reset_by_a_success() {
+        let mut m = manager();
+        m.load(plugin("flaky", UI, "local n = 0 discard.slot(\"h\", function() n = n + 1 if n <= 2 or n == 4 then error(\"bad\") end return { \"text\", \"ok\" } end)")).unwrap();
+        assert_eq!(m.failure_count("flaky"), 0);
+        m.render_slot("h", &json!({}));
+        m.render_slot("h", &json!({}));
+        assert_eq!(m.failure_count("flaky"), 2);
+        m.render_slot("h", &json!({}));
+        assert_eq!(m.failure_count("flaky"), 0, "a success resets the count");
+        m.render_slot("h", &json!({}));
+        assert_eq!(m.failure_count("flaky"), 1);
+    }
+
+    #[test]
+    fn a_plugin_over_the_threshold_is_reported_as_failing() {
+        let mut m = manager();
+        m.load(plugin("bad", UI, "discard.slot(\"h\", function() error(\"x\") end)")).unwrap();
+        m.load(plugin("good", UI, &text_slot("g", "ok"))).unwrap();
+        for _ in 0..3 {
+            m.render_slot("h", &json!({}));
+        }
+        assert_eq!(m.failing(3), ["bad"]);
+        assert!(m.failing(4).is_empty());
+    }
+
+    #[test]
+    fn a_terminated_plugin_counts_as_failing_at_once() {
+        let mut m = manager();
+        m.load(plugin("loop", UI, "discard.slot(\"s\", function() while true do end end)")).unwrap();
+        m.render_slot("s", &json!({}));
+        assert_eq!(m.failing(3), ["loop"]);
+    }
+
+    #[test]
+    fn reloading_a_plugin_resets_its_failures() {
+        let mut m = manager();
+        m.load(plugin("p", UI, "discard.slot(\"h\", function() error(\"x\") end)")).unwrap();
+        for _ in 0..3 {
+            m.render_slot("h", &json!({}));
+        }
+        m.load(plugin("p", UI, &text_slot("h", "fixed"))).unwrap();
+        assert_eq!(m.failure_count("p"), 0);
+        assert!(m.failing(1).is_empty());
     }
 
     #[test]

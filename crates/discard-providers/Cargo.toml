@@ -17,5 +17,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 discard-mcp = { path = "../discard-mcp" }
+discard-lua = { path = "../discard-lua" }
 serde_json.workspace = true
 tempfile = "3"

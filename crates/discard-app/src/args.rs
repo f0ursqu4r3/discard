@@ -5,6 +5,8 @@ pub struct Options {
     pub provider: String,
     /// Start with every user plugin disabled.
     pub safe_mode: bool,
+    /// Talk to the Builder agent, which may write plugins.
+    pub builder: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -13,8 +15,9 @@ pub enum Parsed {
     Help,
 }
 
-pub const USAGE: &str = "Usage: discard [--provider claude|codex] [--safe-mode]\n\n\
+pub const USAGE: &str = "Usage: discard [--provider claude|codex] [--builder] [--safe-mode]\n\n\
   --provider NAME   Which agent to talk to in this project (default: $DISCARD_PROVIDER or claude)\n\
+  --builder         Use the Builder agent, which can write plugins for you to review\n\
   --safe-mode       Start with all user plugins disabled\n\
   --help            Show this help\n";
 
@@ -33,12 +36,14 @@ pub fn parse(args: &[String], env_provider: Option<&str>) -> Result<Parsed, Stri
         None => "claude".to_string(),
     };
     let mut safe_mode = false;
+    let mut builder = false;
     let mut help = false;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--help" | "-h" => help = true,
             "--safe-mode" => safe_mode = true,
+            "--builder" => builder = true,
             "--provider" => {
                 let value = iter.next().ok_or("--provider needs a value")?;
                 provider = check(value)?;
@@ -50,7 +55,7 @@ pub fn parse(args: &[String], env_provider: Option<&str>) -> Result<Parsed, Stri
     if help {
         return Ok(Parsed::Help);
     }
-    Ok(Parsed::Run(Options { provider, safe_mode }))
+    Ok(Parsed::Run(Options { provider, safe_mode, builder }))
 }
 
 #[cfg(test)]
@@ -63,7 +68,7 @@ mod tests {
     }
 
     fn opts(provider: &str, safe_mode: bool) -> Result<Parsed, String> {
-        Ok(Parsed::Run(Options { provider: provider.into(), safe_mode }))
+        Ok(Parsed::Run(Options { provider: provider.into(), safe_mode, builder: false }))
     }
 
     #[test]
@@ -100,6 +105,14 @@ mod tests {
     fn safe_mode_is_a_flag() {
         assert_eq!(run(&["--safe-mode"], None), opts("claude", true));
         assert_eq!(run(&["--safe-mode", "--provider", "codex"], None), opts("codex", true));
+    }
+
+    #[test]
+    fn builder_is_a_flag_that_combines_with_the_others() {
+        let Ok(Parsed::Run(o)) = run(&["--builder", "--provider", "codex", "--safe-mode"], None) else { panic!() };
+        assert_eq!((o.builder, o.provider.as_str(), o.safe_mode), (true, "codex", true));
+        let Ok(Parsed::Run(o)) = run(&[], None) else { panic!() };
+        assert!(!o.builder, "the builder is opt-in");
     }
 
     #[test]

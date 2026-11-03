@@ -2,6 +2,8 @@
 
 use crate::identity::{Identity, ScopeKindOrd, Surface};
 use discard_core::memory::{MemoryError, MemoryStore, Scope};
+use discard_lua::{PluginService, PluginState, ServiceError};
+use discard_lua::api_spec;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -12,11 +14,26 @@ pub const TOOL_PREFIX: &str = "mcp__discard-memory__";
 
 pub struct McpHandler {
     store: Arc<MemoryStore>,
+    plugins: Option<Arc<PluginService>>,
 }
 
 impl McpHandler {
+    fn tool_list(&self, identity: &Identity) -> Vec<Value> {
+        match identity.surface {
+            Surface::Memory => memory_tool_list(identity),
+            Surface::Plugins if self.plugins.is_some() => plugin_tool_list(identity),
+            Surface::Plugins => Vec::new(),
+        }
+    }
+
     pub fn new(store: Arc<MemoryStore>) -> Self {
-        Self { store }
+        Self { store, plugins: None }
+    }
+
+    /// Serve the plugin-authoring tools on the `Plugins` surface.
+    pub fn with_plugins(mut self, plugins: Arc<PluginService>) -> Self {
+        self.plugins = Some(plugins);
+        self
     }
 
     /// Handle one JSON-RPC message. `None` means no reply (a notification).
@@ -47,7 +64,7 @@ impl McpHandler {
                 )
             }
             "ping" => result(&reply_id, json!({})),
-            "tools/list" => result(&reply_id, json!({"tools": tool_list(identity)})),
+            "tools/list" => result(&reply_id, json!({"tools": self.tool_list(identity)})),
             "tools/call" => self.call(identity, &reply_id, &params),
             other if other.starts_with("notifications/") => return None,
             _ => error(&reply_id, -32601, "method not found"),
@@ -56,11 +73,18 @@ impl McpHandler {
 
     fn call(&self, identity: &Identity, id: &Value, params: &Value) -> Value {
         let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
-        let known = identity.surface == Surface::Memory && ALL_TOOLS.contains(&name);
+        let known = match identity.surface {
+            Surface::Memory => ALL_TOOLS.contains(&name),
+            Surface::Plugins => self.plugins.is_some() && PLUGIN_ALL_TOOLS.contains(&name),
+        };
         if !known {
             return error(id, -32602, "unknown tool");
         }
-        let outcome = self.run_tool(identity, name, params.get("arguments").unwrap_or(&Value::Null));
+        let args = params.get("arguments").unwrap_or(&Value::Null);
+        let outcome = match identity.surface {
+            Surface::Memory => self.run_tool(identity, name, args),
+            Surface::Plugins => self.run_plugin_tool(identity, name, args),
+        };
         match outcome {
             Ok(text) => result(id, json!({"content": [{"type": "text", "text": text}], "isError": false})),
             Err(message) => result(id, json!({"content": [{"type": "text", "text": message}], "isError": true})),
@@ -132,6 +156,10 @@ impl McpHandler {
     }
 }
 
+const PLUGIN_READ_TOOLS: &[&str] = &["plugin_api_docs", "plugin_list", "ui_inspect"];
+const PLUGIN_WRITE_TOOLS: &[&str] = &["plugin_create", "plugin_edit", "plugin_test", "plugin_reload", "plugin_rollback"];
+const PLUGIN_ALL_TOOLS: &[&str] = &["plugin_api_docs", "plugin_list", "ui_inspect", "plugin_create", "plugin_edit", "plugin_test", "plugin_reload", "plugin_rollback"];
+
 const SUPPORTED: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
 const READ_TOOLS: &[&str] = &["memory_list", "memory_read", "memory_search"];
 const WRITE_TOOLS: &[&str] = &["memory_append", "memory_edit"];
@@ -183,10 +211,7 @@ fn describe(e: MemoryError) -> String {
     }
 }
 
-fn tool_list(identity: &Identity) -> Vec<Value> {
-    if identity.surface != Surface::Memory {
-        return Vec::new();
-    }
+fn memory_tool_list(identity: &Identity) -> Vec<Value> {
     let scope = json!({"type": "string", "enum": ["agent", "project", "global"], "description": "agent: private to you. project: shared in this project. global: shared by all agents."});
     let defs = |name: &str| -> Value {
         match name {
@@ -207,6 +232,184 @@ fn tool_list(identity: &Identity) -> Vec<Value> {
         names.extend(WRITE_TOOLS);
     }
     names.into_iter().map(defs).collect()
+}
+
+fn plugin_tool_list(identity: &Identity) -> Vec<Value> {
+    let name = json!({"type": "string", "description": "Plugin name: lowercase letters, digits, and `-`."});
+    let defs = |tool: &str| -> Value {
+        match tool {
+            "plugin_api_docs" => json!({"name": tool, "description": "Read the plugin API reference, the Luau type definitions, and the authoring guide. Read this before writing a plugin.",
+                "inputSchema": {"type": "object", "properties": {}}}),
+            "plugin_list" => json!({"name": tool, "description": "List installed plugins with their status, your drafts, and reviews waiting for the user.",
+                "inputSchema": {"type": "object", "properties": {}}}),
+            "ui_inspect" => json!({"name": tool, "description": "Show what each UI slot draws right now, as JSON: which plugin owns it and the element tree.",
+                "inputSchema": {"type": "object", "properties": {}}}),
+            "plugin_create" => json!({"name": tool, "description": "Create a draft plugin from files, or start a draft from an installed plugin with from_installed. A draft never runs. Files: plugin.toml and init.lua at least.",
+                "inputSchema": {"type": "object", "properties": {"name": name, "files": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Map of file path to file content."}, "from_installed": {"type": "boolean"}}, "required": ["name"]}}),
+            "plugin_edit" => json!({"name": tool, "description": "Change one file in a draft. Give exactly one of: `content` (write the whole file), `old` and `new` (replace one piece of text), or `delete`.",
+                "inputSchema": {"type": "object", "properties": {"name": name, "path": {"type": "string"}, "content": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}, "delete": {"type": "boolean"}}, "required": ["name", "path"]}}),
+            "plugin_test" => json!({"name": tool, "description": "Load a draft in a sandbox and render its slots with sample state. Reports load and render errors. Nothing is installed.",
+                "inputSchema": {"type": "object", "properties": {"name": name}, "required": ["name"]}}),
+            "plugin_reload" => json!({"name": tool, "description": "Submit a draft for review. The user sees the code diff and the capabilities it asks for, then approves or rejects. Nothing runs until they approve.",
+                "inputSchema": {"type": "object", "properties": {"name": name}, "required": ["name"]}}),
+            _ => json!({"name": tool, "description": "Go back to the previous approved version of an installed plugin. The user is asked to confirm this call.",
+                "inputSchema": {"type": "object", "properties": {"name": name}, "required": ["name"]}}),
+        }
+    };
+    let mut names: Vec<&str> = PLUGIN_READ_TOOLS.to_vec();
+    if identity.can_write {
+        names.extend(PLUGIN_WRITE_TOOLS);
+    }
+    names.into_iter().map(defs).collect()
+}
+
+/// A message for the agent. Storage details such as absolute paths stay in the logs.
+fn describe_service(e: ServiceError) -> String {
+    use discard_lua::drafts::DraftError;
+    match e {
+        ServiceError::Draft(DraftError::Io(detail)) => {
+            tracing::warn!(error = %detail, "plugin draft storage error");
+            "plugin storage error".to_string()
+        }
+        ServiceError::Repo(detail) => {
+            tracing::warn!(error = %detail, "plugin repository error");
+            "plugin storage error".to_string()
+        }
+        ServiceError::Ledger(detail) => {
+            tracing::warn!(error = %detail, "plugin approval storage error");
+            "plugin approval storage error".to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
+const SAMPLE_STATE: &str = r#"{"project":"sample","channel":"general","pending_approvals":0,"turn_running":false,"agent":{"name":"Agent","provider":"claude","status":"idle"}}"#;
+
+impl McpHandler {
+    fn run_plugin_tool(&self, identity: &Identity, name: &str, args: &Value) -> Result<String, String> {
+        let svc = self.plugins.as_ref().ok_or("plugins are not available")?;
+        if !args.is_object() {
+            return Err("arguments must be an object".to_string());
+        }
+        if PLUGIN_WRITE_TOOLS.contains(&name) && !identity.can_write {
+            return Err("this session may not write plugins (plugin.write is off for this agent)".to_string());
+        }
+        let plugin = || str_arg(args, "name");
+        match name {
+            "plugin_api_docs" => Ok(format!(
+                "{}\n\n## Luau type definitions\n\n```luau\n{}```\n\n{}",
+                api_spec::markdown(),
+                api_spec::luau_types(),
+                api_spec::guide()
+            )),
+            "plugin_list" => {
+                let mut out = String::from("installed:\n");
+                let statuses = svc.statuses();
+                if statuses.is_empty() {
+                    out.push_str("- (none)\n");
+                }
+                for s in statuses {
+                    let state = match s.state {
+                        PluginState::Running => "running".to_string(),
+                        PluginState::Failed(m) => format!("failed: {}", m.lines().next().unwrap_or("")),
+                        PluginState::ModifiedOutsideReview => "disabled: modified outside review".to_string(),
+                        PluginState::DisabledSafeMode => "disabled: safe mode".to_string(),
+                    };
+                    out.push_str(&format!("- {}: {state}\n", s.name));
+                }
+                out.push_str("drafts:\n");
+                let drafts = svc.drafts().list().map_err(|e| describe_service(e.into()))?;
+                if drafts.is_empty() {
+                    out.push_str("- (none)\n");
+                }
+                for d in drafts {
+                    out.push_str(&format!("- {d}\n"));
+                }
+                out.push_str("awaiting review (the user must approve these in Discard):\n");
+                let pending = svc.pending();
+                if pending.is_empty() {
+                    out.push_str("- (none)\n");
+                }
+                for r in pending {
+                    out.push_str(&format!("- {} ({})\n", r.name, if r.kind == discard_lua::ReviewKind::New { "new" } else { "update" }));
+                }
+                Ok(out)
+            }
+            "ui_inspect" => serde_json::to_string_pretty(&svc.inspect()).map_err(|e| e.to_string()),
+            "plugin_create" => {
+                let name = plugin()?;
+                let from_installed = args.get("from_installed").and_then(Value::as_bool).unwrap_or(false);
+                if from_installed {
+                    if args.get("files").is_some() {
+                        return Err("use either `files` or `from_installed`, not both".to_string());
+                    }
+                    svc.fork_installed(name).map_err(describe_service)?;
+                    return Ok(format!("Draft `{name}` created from the installed version. Edit it with plugin_edit, try it with plugin_test, then submit it with plugin_reload."));
+                }
+                let files = args.get("files").and_then(Value::as_object).ok_or("`files` is required and must be an object of path to content")?;
+                let mut map = std::collections::BTreeMap::new();
+                for (path, content) in files {
+                    let content = content.as_str().ok_or_else(|| format!("the content of `{path}` must be a string"))?;
+                    map.insert(path.clone(), content.to_string());
+                }
+                svc.drafts().create(name, &map).map_err(|e| describe_service(e.into()))?;
+                Ok(format!("Draft `{name}` created with {} files. Next: plugin_test to try it, then plugin_reload to submit it for review. It does not run until the user approves it.", map.len()))
+            }
+            "plugin_edit" => {
+                let (name, path) = (plugin()?, str_arg(args, "path")?);
+                let content = args.get("content").and_then(Value::as_str);
+                let (old, new) = (args.get("old").and_then(Value::as_str), args.get("new").and_then(Value::as_str));
+                let delete = args.get("delete").and_then(Value::as_bool).unwrap_or(false);
+                let drafts = svc.drafts();
+                let done = match (content, old, new, delete) {
+                    (Some(c), None, None, false) => drafts.write_file(name, path, c).map(|()| "written"),
+                    (None, Some(o), Some(n), false) => drafts.edit_file(name, path, o, n).map(|()| "edited"),
+                    (None, None, None, true) => drafts.delete_file(name, path).map(|()| "deleted"),
+                    _ => return Err("give exactly one of: `content`, `old` with `new`, or `delete: true`".to_string()),
+                };
+                done.map(|what| format!("`{path}` {what} in draft `{name}`.")).map_err(|e| describe_service(e.into()))
+            }
+            "plugin_test" => {
+                let name = plugin()?;
+                let sample: Value = serde_json::from_str(SAMPLE_STATE).map_err(|e| e.to_string())?;
+                let report = svc.test_draft(name, &sample).map_err(describe_service)?;
+                if !report.loaded {
+                    return Ok(format!("Draft `{name}` did not load: {}", report.error.unwrap_or_default()));
+                }
+                let mut out = format!("Draft `{name}` loaded.\nCapabilities requested:\n");
+                for c in &report.capabilities {
+                    out.push_str(&format!("- {c}\n"));
+                }
+                out.push_str(&format!("Commands: {}\nTheme tokens: {}\n", report.commands.join(", "), report.theme_tokens.join(", ")));
+                for (slot, result) in &report.slots {
+                    match result {
+                        Ok(tree) => {
+                            let shown: String = tree.to_string().chars().take(600).collect();
+                            out.push_str(&format!("Slot `{slot}`: rendered OK: {shown}\n"));
+                        }
+                        Err(e) => out.push_str(&format!("Slot `{slot}`: FAILED: {e}\n")),
+                    }
+                }
+                Ok(out)
+            }
+            "plugin_reload" => {
+                let name = plugin()?;
+                let review = svc.submit(name).map_err(describe_service)?;
+                let kind = if review.kind == discard_lua::ReviewKind::New { "new plugin" } else { "update" };
+                let mut out = format!("Submitted `{name}` ({kind}) for review. Nothing runs until the user approves it in Discard.\nCapabilities requested:\n");
+                for c in &review.capability_lines {
+                    out.push_str(&format!("- {c}\n"));
+                }
+                Ok(out)
+            }
+            "plugin_rollback" => {
+                let name = plugin()?;
+                svc.rollback(name).map_err(describe_service)?;
+                Ok(format!("Rolled back `{name}` to its previous approved version."))
+            }
+            _ => Err("unknown tool".to_string()),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1310,8 +1310,11 @@ dependencies = [
  "discard-mcp",
  "discard-providers",
  "discard-ui",
+ "keyring",
+ "tempfile",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1337,14 +1340,19 @@ dependencies = [
 name = "discard-lua"
 version = "0.1.0"
 dependencies = [
+ "hmac",
  "mlua",
+ "pbkdf2",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "similar",
  "tempfile",
  "thiserror 2.0.21",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1353,6 +1361,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "discard-core",
+ "discard-lua",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
@@ -1367,6 +1376,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "discard-core",
+ "discard-lua",
  "discard-mcp",
  "nix",
  "serde",
@@ -3481,6 +3491,18 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "keyring"
+version = "3.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c"
+dependencies = [
+ "log",
+ "security-framework 2.11.1",
+ "security-framework 3.7.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -5768,7 +5790,7 @@ dependencies = [
  "openssl-probe",
  "rustls-pki-types",
  "schannel",
- "security-framework",
+ "security-framework 3.7.0",
 ]
 
 [[package]]
@@ -5915,6 +5937,19 @@ name = "seahash"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
+
+[[package]]
+name = "security-framework"
+version = "2.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "897b2245f0b511c87893af39b033e5ca9cce68824c4d7e7630b5a1d339658d02"
+dependencies = [
+ "bitflags 2.13.2",
+ "core-foundation 0.9.4",
+ "core-foundation-sys",
+ "libc",
+ "security-framework-sys",
+]
 
 [[package]]
 name = "security-framework"

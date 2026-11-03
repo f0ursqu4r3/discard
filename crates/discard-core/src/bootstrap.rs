@@ -18,9 +18,18 @@ pub struct Workspace {
 /// Providers Discard can run.
 pub const PROVIDERS: &[&str] = &["claude", "codex"];
 
-/// Find or create the workspace for `project_dir` and `provider`.
-/// A project has one channel per provider, each with its own agent and session.
-pub fn ensure_workspace(store: &Store, project_dir: &Path, provider: &str) -> Result<Workspace> {
+/// Which agent to use in a project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// The everyday agent. It cannot write plugins.
+    Default,
+    /// The bundled Builder agent. It has the `plugin.write` permission.
+    Builder,
+}
+
+/// Find or create the workspace for `project_dir`, `provider`, and `role`.
+/// A project has one channel per provider and role, each with its own agent and session.
+pub fn ensure_workspace(store: &Store, project_dir: &Path, provider: &str, role: Role) -> Result<Workspace> {
     let path = project_dir.to_string_lossy().into_owned();
     let project = match store.project_by_path(&path)? {
         Some(project) => project,
@@ -39,7 +48,7 @@ pub fn ensure_workspace(store: &Store, project_dir: &Path, provider: &str) -> Re
     let mut found = None;
     for channel in &existing {
         let agent = store.load_agent(&channel.agent_id)?;
-        if agent.provider == provider {
+        if agent.provider == provider && agent.plugin_write == (role == Role::Builder) {
             found = Some((channel.clone(), agent));
             break;
         }
@@ -49,12 +58,13 @@ pub fn ensure_workspace(store: &Store, project_dir: &Path, provider: &str) -> Re
         None => {
             // The default agent asks before it acts.
             let agent = AgentConfig {
-                name: display_name(provider),
+                name: if role == Role::Builder { "Builder".to_string() } else { display_name(provider) },
                 avatar: None,
                 provider: provider.to_string(),
                 model: None,
                 system_prompt: String::new(),
                 policy: ApprovalPolicy::Ask,
+                plugin_write: role == Role::Builder,
             };
             let agent_id = AgentId::new();
             store.insert_agent(&agent_id, &agent)?;
@@ -62,7 +72,12 @@ pub fn ensure_workspace(store: &Store, project_dir: &Path, provider: &str) -> Re
                 id: ChannelId::new(),
                 project_id: project.id.clone(),
                 // The first channel of a project is `general`. Later ones are named after their provider.
-                name: if existing.is_empty() { "general".into() } else { provider.to_string() },
+                name: match role {
+                    Role::Builder if provider == "claude" => "builder".into(),
+                    Role::Builder => format!("builder-{provider}"),
+                    Role::Default if existing.is_empty() => "general".into(),
+                    Role::Default => provider.to_string(),
+                },
                 agent_id,
                 workspace_mode: WorkspaceMode::MainCheckout,
             };
@@ -97,7 +112,7 @@ mod tests {
     #[test]
     fn first_run_creates_a_project_agent_channel_and_session() {
         let store = Store::open_in_memory().unwrap();
-        let ws = ensure_workspace(&store, &PathBuf::from("/work/my-app"), "claude").unwrap();
+        let ws = ensure_workspace(&store, &PathBuf::from("/work/my-app"), "claude", Role::Default).unwrap();
         assert_eq!(ws.project.name, "my-app");
         assert_eq!(ws.project.path, "/work/my-app");
         assert_eq!(ws.channel.name, "general");
@@ -110,16 +125,16 @@ mod tests {
     #[test]
     fn a_second_run_reuses_everything() {
         let store = Store::open_in_memory().unwrap();
-        let first = ensure_workspace(&store, &PathBuf::from("/work/my-app"), "claude").unwrap();
-        let second = ensure_workspace(&store, &PathBuf::from("/work/my-app"), "claude").unwrap();
+        let first = ensure_workspace(&store, &PathBuf::from("/work/my-app"), "claude", Role::Default).unwrap();
+        let second = ensure_workspace(&store, &PathBuf::from("/work/my-app"), "claude", Role::Default).unwrap();
         assert_eq!(first, second);
     }
 
     #[test]
     fn different_directories_get_separate_projects() {
         let store = Store::open_in_memory().unwrap();
-        let a = ensure_workspace(&store, &PathBuf::from("/work/a"), "claude").unwrap();
-        let b = ensure_workspace(&store, &PathBuf::from("/work/b"), "claude").unwrap();
+        let a = ensure_workspace(&store, &PathBuf::from("/work/a"), "claude", Role::Default).unwrap();
+        let b = ensure_workspace(&store, &PathBuf::from("/work/b"), "claude", Role::Default).unwrap();
         assert_ne!(a.project.id, b.project.id);
         assert_ne!(a.session_id, b.session_id);
     }
@@ -128,8 +143,8 @@ mod tests {
     fn each_provider_gets_its_own_channel_agent_and_session_in_the_same_project() {
         let store = Store::open_in_memory().unwrap();
         let dir = PathBuf::from("/work/my-app");
-        let claude = ensure_workspace(&store, &dir, "claude").unwrap();
-        let codex = ensure_workspace(&store, &dir, "codex").unwrap();
+        let claude = ensure_workspace(&store, &dir, "claude", Role::Default).unwrap();
+        let codex = ensure_workspace(&store, &dir, "codex", Role::Default).unwrap();
         assert_eq!(claude.project, codex.project, "the same project");
         assert_ne!(claude.channel.id, codex.channel.id);
         assert_ne!(claude.session_id, codex.session_id);
@@ -143,16 +158,41 @@ mod tests {
     fn switching_back_to_a_provider_reuses_its_channel() {
         let store = Store::open_in_memory().unwrap();
         let dir = PathBuf::from("/work/my-app");
-        let first = ensure_workspace(&store, &dir, "codex").unwrap();
-        ensure_workspace(&store, &dir, "claude").unwrap();
-        assert_eq!(ensure_workspace(&store, &dir, "codex").unwrap(), first);
+        let first = ensure_workspace(&store, &dir, "codex", Role::Default).unwrap();
+        ensure_workspace(&store, &dir, "claude", Role::Default).unwrap();
+        assert_eq!(ensure_workspace(&store, &dir, "codex", Role::Default).unwrap(), first);
         assert_eq!(first.channel.name, "general", "whichever provider comes first owns `general`");
+    }
+
+    #[test]
+    fn the_builder_is_a_separate_agent_with_plugin_write_on() {
+        let store = Store::open_in_memory().unwrap();
+        let dir = PathBuf::from("/work/my-app");
+        let normal = ensure_workspace(&store, &dir, "claude", Role::Default).unwrap();
+        let builder = ensure_workspace(&store, &dir, "claude", Role::Builder).unwrap();
+        assert!(!normal.agent.plugin_write, "the everyday agent must not be able to write plugins");
+        assert!(builder.agent.plugin_write);
+        assert_eq!((builder.agent.name.as_str(), builder.channel.name.as_str()), ("Builder", "builder"));
+        assert_ne!(normal.channel.id, builder.channel.id);
+        assert_ne!(normal.session_id, builder.session_id);
+        assert_eq!(builder.agent.policy, ApprovalPolicy::Ask, "the builder still asks before running commands");
+    }
+
+    #[test]
+    fn the_builder_is_reused_per_provider() {
+        let store = Store::open_in_memory().unwrap();
+        let dir = PathBuf::from("/work/my-app");
+        let first = ensure_workspace(&store, &dir, "codex", Role::Builder).unwrap();
+        assert_eq!(first.channel.name, "builder-codex");
+        assert_eq!(ensure_workspace(&store, &dir, "codex", Role::Builder).unwrap(), first);
+        let claude = ensure_workspace(&store, &dir, "claude", Role::Builder).unwrap();
+        assert_ne!(claude.channel.id, first.channel.id);
     }
 
     #[test]
     fn a_root_directory_still_gets_a_usable_name() {
         let store = Store::open_in_memory().unwrap();
-        let ws = ensure_workspace(&store, &PathBuf::from("/"), "claude").unwrap();
+        let ws = ensure_workspace(&store, &PathBuf::from("/"), "claude", Role::Default).unwrap();
         assert!(!ws.project.name.is_empty());
     }
 }

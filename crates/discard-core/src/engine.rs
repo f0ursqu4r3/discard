@@ -18,6 +18,23 @@ use tracing::warn;
 /// Claude names MCP tools `mcp__<server>__<tool>`. Discard approves its own memory tools by this prefix.
 pub const MEMORY_TOOL_PREFIX: &str = "mcp__discard-memory__";
 
+/// Discard's plugin-authoring tools. Drafts do nothing until the user approves them, so most are approved by policy.
+pub const PLUGIN_TOOL_PREFIX: &str = "mcp__discard-plugins__";
+
+/// Plugin tools that always ask the user, because they change live behavior without a review screen.
+pub const PLUGIN_TOOLS_THAT_ASK: &[&str] = &["plugin_rollback"];
+
+/// True if Discard approves this tool call by policy. Everything else waits for the user.
+pub fn auto_approved_tool(tool: &str) -> bool {
+    if let Some(name) = tool.strip_prefix(MEMORY_TOOL_PREFIX) {
+        return !name.is_empty();
+    }
+    match tool.strip_prefix(PLUGIN_TOOL_PREFIX) {
+        Some(name) => !name.is_empty() && !PLUGIN_TOOLS_THAT_ASK.contains(&name),
+        None => false,
+    }
+}
+
 /// What a session needs to use memory.
 #[derive(Debug, Clone)]
 pub struct PreparedMemory {
@@ -31,7 +48,8 @@ pub struct PreparedMemory {
 
 /// Provides memory to provider sessions. Implemented by the MCP crate.
 pub trait MemoryService: Send + Sync {
-    fn prepare(&self, agent: &AgentId, project: &ProjectId, base_prompt: Option<&str>) -> Result<PreparedMemory, String>;
+    /// `plugin_write` adds the plugin-authoring tools (a second MCP server with its own token).
+    fn prepare(&self, agent: &AgentId, project: &ProjectId, base_prompt: Option<&str>, plugin_write: bool) -> Result<PreparedMemory, String>;
     /// Revoke the token and remove the config file. Must be safe to call twice.
     fn finish(&self, token: &str);
 }
@@ -41,6 +59,8 @@ pub struct Engine {
     pub agent_id: AgentId,
     pub project_id: ProjectId,
     pub memory: Option<Arc<dyn MemoryService>>,
+    /// The agent may write plugins.
+    pub plugin_write: bool,
     pub provider: Arc<dyn Provider>,
     pub channel_id: ChannelId,
     pub session_id: SessionId,
@@ -135,7 +155,7 @@ impl Engine {
 
         // Memory: issue a session token and build the prompt. If this fails, no session starts.
         let prepared = match &self.memory {
-            Some(service) => match service.prepare(&self.agent_id, &self.project_id, self.system_prompt.as_deref()) {
+            Some(service) => match service.prepare(&self.agent_id, &self.project_id, self.system_prompt.as_deref(), self.plugin_write) {
                 Ok(p) => Some(p),
                 Err(e) => {
                     send(updates, Update::Error(redact(&e)));
@@ -199,7 +219,7 @@ impl Engine {
                         // Discard's own memory tools are approved by policy, and the decision is audited.
                         let memory_approval = match &event.kind {
                             EventKind::ApprovalRequest { approval_id, tool, .. }
-                                if self.memory.is_some() && tool.starts_with(MEMORY_TOOL_PREFIX) =>
+                                if self.memory.is_some() && auto_approved_tool(tool) =>
                             {
                                 Some(approval_id.clone())
                             }
@@ -210,7 +230,7 @@ impl Engine {
                             let _ = decisions_tx.send(DecisionMsg {
                                 approval_id: approval_id.clone(),
                                 decision: Decision::Approve,
-                                decider: Decider::Policy("builtin-memory-tools".into()),
+                                decider: Decider::Policy("builtin-discard-tools".into()),
                             });
                             let state = ApprovalState::Decided(Decision::Approve);
                             timeline.mark_approval(&approval_id, state);
@@ -264,6 +284,30 @@ impl Engine {
                 send(updates, Update::Error(redact(&e.to_string())));
                 send(updates, Update::TurnFinished(crate::driver::TurnOutcome::Failed));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn memory_tools_and_most_plugin_tools_are_approved_by_policy() {
+        for tool in ["mcp__discard-memory__memory_append", "mcp__discard-memory__memory_search", "mcp__discard-plugins__plugin_create", "mcp__discard-plugins__plugin_edit", "mcp__discard-plugins__plugin_test", "mcp__discard-plugins__plugin_reload", "mcp__discard-plugins__ui_inspect", "mcp__discard-plugins__plugin_list", "mcp__discard-plugins__plugin_api_docs"] {
+            assert!(auto_approved_tool(tool), "{tool}");
+        }
+    }
+
+    #[test]
+    fn a_rollback_always_asks_the_user() {
+        assert!(!auto_approved_tool("mcp__discard-plugins__plugin_rollback"));
+    }
+
+    #[test]
+    fn everything_else_asks_including_lookalikes() {
+        for tool in ["", "command", "Bash", "file_change", "mcp__other__memory_append", "mcp__discard-memory-evil__x", "mcp__discard-pluginsx__plugin_create", "discard-memory__memory_append", "mcp__discard-plugins__", "mcp__discard-memory__"] {
+            assert!(!auto_approved_tool(tool), "{tool:?} must wait for the user");
         }
     }
 }

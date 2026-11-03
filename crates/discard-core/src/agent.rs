@@ -15,6 +15,9 @@ pub struct AgentConfig {
     #[serde(default)]
     pub system_prompt: String,
     pub policy: ApprovalPolicy,
+    /// May write plugins (as drafts the user must review). Off by default.
+    #[serde(default)]
+    pub plugin_write: bool,
 }
 
 impl AgentConfig {
@@ -39,6 +42,7 @@ pub enum Initiator {
 pub enum AgentChange {
     Create { config: AgentConfig },
     SetPolicy { agent: AgentId, from: ApprovalPolicy, to: ApprovalPolicy },
+    SetPluginWrite { agent: AgentId, enabled: bool },
 }
 
 /// Strictness rank. Higher is stricter.
@@ -56,6 +60,7 @@ impl AgentChange {
         match (initiator, self) {
             (Initiator::User, AgentChange::Create { .. }) => false,
             (Initiator::User, AgentChange::SetPolicy { from, to, .. }) => strictness(*to) < strictness(*from),
+            (Initiator::User, AgentChange::SetPluginWrite { enabled, .. }) => *enabled,
             (Initiator::Plugin(_) | Initiator::Agent(_), _) => true,
         }
     }
@@ -73,6 +78,7 @@ mod tests {
             model: Some("haiku".into()),
             system_prompt: "Be brief.".into(),
             policy,
+            plugin_write: false,
         }
     }
 
@@ -88,6 +94,26 @@ mod tests {
         let c = AgentConfig::from_toml("name='A'\nprovider='claude'\npolicy='ask'\n").unwrap();
         assert_eq!(c.model, None);
         assert_eq!(c.system_prompt, "");
+    }
+
+    #[test]
+    fn plugin_write_defaults_to_off_and_round_trips() {
+        let c = AgentConfig::from_toml("name='A'\nprovider='claude'\npolicy='ask'\n").unwrap();
+        assert!(!c.plugin_write, "plugin authoring must be opt-in");
+        let mut on = cfg(ApprovalPolicy::Ask);
+        on.plugin_write = true;
+        assert!(AgentConfig::from_toml(&on.to_toml().unwrap()).unwrap().plugin_write);
+    }
+
+    #[test]
+    fn turning_on_plugin_writing_needs_user_approval_when_a_plugin_or_agent_asks() {
+        let on = AgentChange::SetPluginWrite { agent: AgentId::new(), enabled: true };
+        assert!(on.needs_user_approval(&Initiator::Plugin("p".into())));
+        assert!(on.needs_user_approval(&Initiator::Agent(AgentId::new())));
+        assert!(on.needs_user_approval(&Initiator::User), "granting a power is always confirmed");
+        let off = AgentChange::SetPluginWrite { agent: AgentId::new(), enabled: false };
+        assert!(!off.needs_user_approval(&Initiator::User), "taking a power away by the user needs no confirmation");
+        assert!(off.needs_user_approval(&Initiator::Plugin("p".into())));
     }
 
     #[test]

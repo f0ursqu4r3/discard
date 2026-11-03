@@ -1,13 +1,16 @@
 //! Discard: an agent harness with a Discord-style interface.
 
 mod args;
+mod keys;
 
+use discard_core::bootstrap::Role;
 use discard_core::engine::Engine;
 use discard_core::logging;
 use discard_core::store::Store;
 use discard_core::ui_state::UiState;
 use discard_core::memory::MemoryStore;
-use discard_lua::{PluginLimits, PluginManager};
+use discard_lua::ledger::Ledger;
+use discard_lua::{PluginLimits, PluginManager, PluginService};
 use discard_mcp::MemoryRuntime;
 use discard_core::provider::Provider;
 use discard_providers::claude::ClaudeProvider;
@@ -67,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let workspace = discard_core::bootstrap::ensure_workspace(&store, &project_dir, &options.provider)?;
+    let workspace = discard_core::bootstrap::ensure_workspace(&store, &project_dir, &options.provider, if options.builder { Role::Builder } else { Role::Default })?;
     let history = store.messages_for_channel(&workspace.channel.id)?;
     info!(project = %workspace.project.name, channel = %workspace.channel.name, "workspace ready");
 
@@ -82,7 +85,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(_) => {}
         Err(e) => warn!(error = %e, "could not reconcile the memory index"),
     }
-    let memory = runtime.block_on(MemoryRuntime::start(Arc::clone(&memory_store), &data_dir.join("run")))?;
+    // Plugins. The bundled UI loads first. User plugins load only if their bytes match a signed approval.
+    let keys = keys::choose(std::env::var("DISCARD_PLUGIN_PASSPHRASE").ok().as_deref(), &data_dir, keys::system_store());
+    let ledger = Ledger::open(&data_dir.join("plugins.db"), keys)?;
+    let manager = Arc::new(Mutex::new(PluginManager::new(PluginLimits::default())));
+    manager.lock().unwrap_or_else(|p| p.into_inner()).load(discard_lua::bundled::default_ui())?;
+    let plugins = Arc::new(PluginService::new(&data_dir, ledger, Arc::clone(&manager), options.safe_mode)?);
+    let load_report = plugins.load_all();
+    info!(
+        loaded = ?load_report.loaded,
+        modified_outside_review = ?load_report.modified_outside_review,
+        trusted_updates = ?load_report.trusted_updates,
+        reverted = ?load_report.reverted,
+        safe_mode = load_report.safe_mode,
+        key_problem = ?load_report.key_problem,
+        "user plugins loaded"
+    );
+
+    let memory = runtime.block_on(MemoryRuntime::start_with_plugins(
+        Arc::clone(&memory_store),
+        &data_dir.join("run"),
+        Some(Arc::clone(&plugins)),
+    ))?;
 
     let (commands_tx, commands_rx) = mpsc::unbounded_channel();
     let (updates_tx, updates_rx) = mpsc::unbounded_channel();
@@ -92,6 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent_id: workspace.channel.agent_id.clone(),
         project_id: workspace.project.id.clone(),
         memory: Some(memory),
+        plugin_write: workspace.agent.plugin_write,
         provider: provider_for(&workspace.agent.provider)?,
         channel_id: workspace.channel.id.clone(),
         session_id: workspace.session_id.clone(),
@@ -102,10 +127,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     runtime.spawn(engine.run(commands_rx, updates_tx));
 
-    // Bundled plugins first. User plugins arrive with the approval flow in M5.
-    let mut plugins = PluginManager::new(PluginLimits::default());
-    plugins.load(discard_lua::bundled::default_ui())?;
-
     discard_ui::run(
         ViewData {
             project_name: workspace.project.name,
@@ -114,6 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             provider_label: workspace.agent.provider,
         },
         plugins,
+        load_report,
         UiState::new(workspace.channel.id, history),
         commands_tx,
         updates_rx,

@@ -18,9 +18,28 @@ fn rgb_to_hsla(c: Rgb) -> Hsla {
     rgba.into()
 }
 
-/// Apply a merged theme to the global component theme.
+/// The theme as it was before any plugin changed it, so removing a plugin's override restores the original.
+struct BaseTheme {
+    colors: gpui_kit::component::ThemeColor,
+    radius: Pixels,
+}
+
+impl Global for BaseTheme {}
+
+/// Apply a merged theme to the global component theme. Starts from the original theme every time.
 pub fn apply_theme(overrides: &ThemeOverrides, cx: &mut App) {
+    if !cx.has_global::<BaseTheme>() {
+        let theme = Theme::global(cx);
+        let base = BaseTheme { colors: theme.colors, radius: theme.radius };
+        cx.set_global(base);
+    }
+    let (colors, radius) = {
+        let base = cx.global::<BaseTheme>();
+        (base.colors, base.radius)
+    };
     let theme = Theme::global_mut(cx);
+    theme.colors = colors;
+    theme.radius = radius;
     let set = |slot: &mut Hsla, token: &str| {
         if let Some(c) = overrides.color(token) {
             *slot = rgb_to_hsla(c);

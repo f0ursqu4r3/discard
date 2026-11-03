@@ -42,7 +42,7 @@ impl Harness {
                     provider: "fake".into(),
                     model: None,
                     system_prompt: String::new(),
-                    policy: ApprovalPolicy::Ask,
+                    policy: ApprovalPolicy::Ask, plugin_write: false,
                 },
             )
             .unwrap();

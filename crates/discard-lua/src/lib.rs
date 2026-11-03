@@ -12,3 +12,11 @@ pub mod manager;
 
 pub use manager::{PluginManager, Rendered};
 pub mod bundled;
+pub mod api_spec;
+pub mod keystore;
+pub mod ledger;
+pub mod drafts;
+pub mod repo;
+pub mod service;
+
+pub use service::{LoadReport, PluginService, PluginState, Review, ReviewKind, ServiceError, TestReport};

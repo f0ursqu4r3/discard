@@ -41,7 +41,7 @@ fn mode(path: &Path) -> u32 {
 async fn prepare_issues_a_token_for_this_agent_and_project() {
     let r = rig().await;
     let (a, p) = ids();
-    let prepared = r.runtime.prepare(&a, &p, None).unwrap();
+    let prepared = r.runtime.prepare(&a, &p, None, false).unwrap();
     let identity = r.runtime.registry().lookup(&prepared.token).expect("token is registered");
     assert_eq!((identity.agent, identity.project, identity.surface, identity.can_write), (a, p, Surface::Memory, true));
     assert!(identity.scopes.contains(&ScopeKindOrd::Agent) && identity.scopes.contains(&ScopeKindOrd::Project) && identity.scopes.contains(&ScopeKindOrd::Global));
@@ -51,7 +51,7 @@ async fn prepare_issues_a_token_for_this_agent_and_project() {
 async fn the_config_file_points_at_the_server_with_the_token_and_is_private() {
     let r = rig().await;
     let (a, p) = ids();
-    let prepared = r.runtime.prepare(&a, &p, None).unwrap();
+    let prepared = r.runtime.prepare(&a, &p, None, false).unwrap();
     let cfg = config(&prepared.mcp_config);
     let server = &cfg["mcpServers"]["discard-memory"];
     assert_eq!(server["type"], "http");
@@ -66,7 +66,7 @@ async fn the_config_file_points_at_the_server_with_the_token_and_is_private() {
 async fn the_token_is_not_in_the_system_prompt_or_the_file_name() {
     let r = rig().await;
     let (a, p) = ids();
-    let prepared = r.runtime.prepare(&a, &p, Some("Be brief.")).unwrap();
+    let prepared = r.runtime.prepare(&a, &p, Some("Be brief."), false).unwrap();
     assert!(!prepared.system_prompt.contains(&prepared.token));
     assert!(!prepared.mcp_config.to_string_lossy().contains(&prepared.token));
 }
@@ -79,7 +79,7 @@ async fn the_system_prompt_carries_core_blocks_from_all_three_scopes() {
     r.store.create(&Scope::Project(p.clone()), "core/project.md", "Uses Rust").unwrap();
     r.store.create(&Scope::Global, "core/user.md", "Kyle").unwrap();
     r.store.create(&Scope::Agent(a.clone()), "notes/skip.md", "not a core block").unwrap();
-    let prompt = r.runtime.prepare(&a, &p, Some("Be brief.")).unwrap().system_prompt;
+    let prompt = r.runtime.prepare(&a, &p, Some("Be brief."), false).unwrap().system_prompt;
     assert!(prompt.starts_with("Be brief."));
     for needle in ["I am Scout", "Uses Rust", "Kyle", "memory_search"] {
         assert!(prompt.contains(needle), "missing {needle}: {prompt}");
@@ -92,14 +92,14 @@ async fn other_agents_core_blocks_are_not_included() {
     let r = rig().await;
     let (a, p) = ids();
     r.store.create(&Scope::Agent(AgentId("someone-else".into())), "core/persona.md", "OTHER AGENT SECRET").unwrap();
-    assert!(!r.runtime.prepare(&a, &p, None).unwrap().system_prompt.contains("OTHER AGENT SECRET"));
+    assert!(!r.runtime.prepare(&a, &p, None, false).unwrap().system_prompt.contains("OTHER AGENT SECRET"));
 }
 
 #[tokio::test]
 async fn finish_revokes_the_token_and_deletes_the_file_and_is_safe_to_repeat() {
     let r = rig().await;
     let (a, p) = ids();
-    let prepared = r.runtime.prepare(&a, &p, None).unwrap();
+    let prepared = r.runtime.prepare(&a, &p, None, false).unwrap();
     r.runtime.finish(&prepared.token);
     assert!(r.runtime.registry().lookup(&prepared.token).is_none());
     assert!(!prepared.mcp_config.exists());
@@ -111,8 +111,8 @@ async fn finish_revokes_the_token_and_deletes_the_file_and_is_safe_to_repeat() {
 async fn each_prepare_gets_its_own_token_and_file() {
     let r = rig().await;
     let (a, p) = ids();
-    let one = r.runtime.prepare(&a, &p, None).unwrap();
-    let two = r.runtime.prepare(&a, &p, None).unwrap();
+    let one = r.runtime.prepare(&a, &p, None, false).unwrap();
+    let two = r.runtime.prepare(&a, &p, None, false).unwrap();
     assert_ne!(one.token, two.token);
     assert_ne!(one.mcp_config, two.mcp_config);
     r.runtime.finish(&one.token);
@@ -124,7 +124,7 @@ async fn each_prepare_gets_its_own_token_and_file() {
 async fn end_to_end_the_config_works_over_http_until_the_session_finishes() {
     let r = rig().await;
     let (a, p) = ids();
-    let prepared = r.runtime.prepare(&a, &p, None).unwrap();
+    let prepared = r.runtime.prepare(&a, &p, None, false).unwrap();
     let cfg = config(&prepared.mcp_config);
     let url = cfg["mcpServers"]["discard-memory"]["url"].as_str().unwrap().to_string();
     let auth = cfg["mcpServers"]["discard-memory"]["headers"]["Authorization"].as_str().unwrap().to_string();
@@ -151,4 +151,100 @@ async fn shutdown_closes_the_server() {
     let addr: std::net::SocketAddr = r.runtime.url().trim_start_matches("http://").trim_end_matches("/mcp").parse().unwrap();
     r.runtime.shutdown().await;
     assert!(TcpStream::connect(addr).await.is_err());
+}
+
+// ---- plugin authoring ----
+
+use discard_core::memory::Scope as MemScope;
+
+fn config_servers(path: &Path) -> Value {
+    config(path)["mcpServers"].clone()
+}
+
+fn bearer_of(server: &Value) -> String {
+    server["headers"]["Authorization"].as_str().unwrap().trim_start_matches("Bearer ").to_string()
+}
+
+#[tokio::test]
+async fn agents_without_plugin_write_get_only_the_memory_server() {
+    let r = rig().await;
+    let (a, p) = ids();
+    let prepared = r.runtime.prepare(&a, &p, None, false).unwrap();
+    let servers = config_servers(&prepared.mcp_config);
+    assert_eq!(servers.as_object().unwrap().keys().collect::<Vec<_>>(), ["discard-memory"]);
+    assert!(r.store.read(&MemScope::Agent(a), "core/plugin-guide.md").is_err(), "no guide for agents that cannot write plugins");
+}
+
+#[tokio::test]
+async fn agents_with_plugin_write_get_a_second_server_with_its_own_token() {
+    let r = rig().await;
+    let (a, p) = ids();
+    let prepared = r.runtime.prepare(&a, &p, None, true).unwrap();
+    let servers = config_servers(&prepared.mcp_config);
+    let (memory, plugins) = (&servers["discard-memory"], &servers["discard-plugins"]);
+    assert_eq!(plugins["url"], r.runtime.url());
+    let (memory_token, plugin_token) = (bearer_of(memory), bearer_of(plugins));
+    assert_ne!(memory_token, plugin_token, "separate connections need separate tokens");
+    assert_eq!(memory_token, prepared.token);
+    let (mi, pi) = (r.runtime.registry().lookup(&memory_token).unwrap(), r.runtime.registry().lookup(&plugin_token).unwrap());
+    assert_eq!((mi.surface, pi.surface), (Surface::Memory, Surface::Plugins));
+    assert!(pi.can_write && pi.agent == a);
+}
+
+#[tokio::test]
+async fn finishing_a_session_revokes_both_tokens_and_deletes_the_file() {
+    let r = rig().await;
+    let (a, p) = ids();
+    let prepared = r.runtime.prepare(&a, &p, None, true).unwrap();
+    let plugin_token = bearer_of(&config_servers(&prepared.mcp_config)["discard-plugins"]);
+    r.runtime.finish(&prepared.token);
+    assert!(r.runtime.registry().lookup(&prepared.token).is_none());
+    assert!(r.runtime.registry().lookup(&plugin_token).is_none(), "the plugin token must not outlive the session");
+    assert!(!prepared.mcp_config.exists());
+}
+
+#[tokio::test]
+async fn the_authoring_guide_is_kept_in_the_agents_core_memory_and_refreshed() {
+    let r = rig().await;
+    let (a, p) = ids();
+    let prompt = r.runtime.prepare(&a, &p, None, true).unwrap().system_prompt;
+    let guide = discard_lua::api_spec::guide();
+    let stored = r.store.read(&MemScope::Agent(a.clone()), "core/plugin-guide.md").unwrap();
+    assert_eq!(stored.text, guide);
+    assert!(prompt.contains("Writing Discard plugins"), "the guide is a core block, so it is in the prompt");
+    // A stale copy is replaced.
+    r.store.replace(&MemScope::Agent(a.clone()), "core/plugin-guide.md", "OLD GUIDE", &stored.version).unwrap();
+    r.runtime.prepare(&a, &p, None, true).unwrap();
+    assert_eq!(r.store.read(&MemScope::Agent(a), "core/plugin-guide.md").unwrap().text, guide);
+}
+
+#[tokio::test]
+async fn the_plugin_tools_work_over_http_with_the_plugin_token_and_not_with_the_memory_token() {
+    use discard_lua::keystore::StaticKeyStore;
+    use discard_lua::ledger::Ledger;
+    use discard_lua::{PluginLimits, PluginManager, PluginService};
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemoryStore::open_in_memory_index(&dir.path().join("memory")).unwrap());
+    let ledger = Ledger::open(&dir.path().join("plugins.db"), Arc::new(StaticKeyStore([3; 32]))).unwrap();
+    let manager = Arc::new(std::sync::Mutex::new(PluginManager::new(PluginLimits::default())));
+    let plugins = Arc::new(PluginService::new(dir.path(), ledger, manager, false).unwrap());
+    let runtime = MemoryRuntime::start_with_plugins(Arc::clone(&store), &dir.path().join("run"), Some(plugins)).await.unwrap();
+
+    let (a, p) = ids();
+    let prepared = runtime.prepare(&a, &p, None, true).unwrap();
+    let servers = config_servers(&prepared.mcp_config);
+    let addr: std::net::SocketAddr = runtime.url().trim_start_matches("http://").trim_end_matches("/mcp").parse().unwrap();
+    let post = |token: String, tool: &'static str| async move {
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": {}}}).to_string();
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let req = format!("POST /mcp HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        s.write_all(req.as_bytes()).await.unwrap();
+        let mut raw = String::new();
+        s.read_to_string(&mut raw).await.unwrap();
+        serde_json::from_str::<Value>(raw.split("\r\n\r\n").nth(1).unwrap_or("{}")).unwrap_or(Value::Null)
+    };
+    let ok = post(bearer_of(&servers["discard-plugins"]), "plugin_api_docs").await;
+    assert_eq!(ok["result"]["isError"], false, "{ok}");
+    let denied = post(bearer_of(&servers["discard-memory"]), "plugin_api_docs").await;
+    assert_eq!(denied["error"]["code"], -32602, "{denied}");
 }

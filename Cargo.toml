@@ -21,6 +21,9 @@ nix = { version = "0.30", features = ["signal"] }
 regex = "1"
 mlua = { version = "0.12", features = ["luau", "vendored", "serialize", "send"] }
 sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+similar = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -32,3 +35,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 discard-core = { path = "crates/discard-core" }
 discard-providers = { path = "crates/discard-providers" }
+
+# Key derivation is slow in debug builds. Optimize just the crypto crates so tests stay quick.
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3
