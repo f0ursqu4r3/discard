@@ -19,7 +19,7 @@ pub enum Parsed {
 }
 
 pub const USAGE: &str = "Usage: discard [--provider claude|codex] [--builder] [--worktree | --main-checkout] [--safe-mode]\n\n\
-  --provider NAME   Which agent to talk to in this project (default: $DISCARD_PROVIDER or claude)\n\
+  --provider NAME   Which agent to talk to in this project (default: $DISCARD_PROVIDER, then settings.toml, then claude)\n\
   --builder         Use the Builder agent, which can write plugins for you to review\n\
   --worktree        Work in a git worktree for this channel (the default for new channels in a git repo)\n\
   --main-checkout   Work in the main checkout of the project. Changing an existing channel starts a new session.\n\
@@ -90,6 +90,11 @@ mod tests {
 
     fn opts(provider: &str, safe_mode: bool) -> Result<Parsed, String> {
         Ok(Parsed::Run(Options { provider: provider.into(), safe_mode, builder: false, workspace: WorkspaceChoice::Auto }))
+    }
+
+    #[test]
+    fn usage_names_the_provider_default_order() {
+        assert!(USAGE.contains("(default: $DISCARD_PROVIDER, then settings.toml, then claude)"), "{USAGE}");
     }
 
     #[test]

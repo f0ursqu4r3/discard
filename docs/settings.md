@@ -1,6 +1,6 @@
 # Settings, menus, and key bindings
 
-Discard has a settings file, a native menu bar, three default key bindings, and a Settings window. Rust owns all of
+Discard has a settings file, a native menu bar, seven default key bindings, and a Settings window. Rust owns all of
 them. Plugins cannot change the menu bar, the keys, or the Settings pages.
 
 ## The settings file
@@ -21,8 +21,8 @@ confirm_while_working = true      # ask before Quit or Safe Mode while a turn ru
 | `general.default_provider` | `"claude"` or `"codex"` | `"claude"` |
 | `general.confirm_while_working` | `true` or `false` | `true` |
 
-Discard never creates the file at startup. It creates the file, and its folder, on the first change you make in the
-Settings window.
+Discard never creates the file at startup. It creates the file on the first change you make in the Settings window.
+The folder already exists after startup.
 
 ### A bad file never stops startup
 
@@ -37,6 +37,7 @@ Discard reads each key on its own. A bad key falls back to its default. The rest
 | `version` is not `1` | The keys are still read. One problem is reported. This holds for a newer version and for any other number. |
 | `version` is not an integer | One problem is reported. The keys are still read. |
 | The file is not valid TOML or not valid UTF-8 | All defaults. One problem, for the key `file`, is reported. |
+| The file exists but cannot be read (for example, no read permission) | All defaults. One problem, for the key `file`, is reported. |
 | Unknown keys and unknown tables | Ignored. No problem is reported. |
 
 Discard writes each problem to the log at startup (`settings issue`). The General page lists the problems in a box
@@ -52,13 +53,16 @@ titled "Problems in settings.toml".
   into place.
 - **A newer `version` stays.** Discard writes `version = 1` only if the file has no `version`. It never lowers or
   changes a version that is there.
+- **A non-table `general` is replaced.** If `general` is not a table (for example `general = 3`), the first write
+  replaces it with a `[general]` table that holds your change.
 - **Backup of an unparseable file.** If the file could not be parsed, the first write copies the bad text to
   `settings.toml.invalid`, then writes a new file from defaults plus your change. Each later backup of a bad file
   replaces the old `settings.toml.invalid`.
 - **Edits outside Discard.** While the Settings window is open, it checks the file every 0.7 seconds. It reads the
   file again when the bytes changed, and the page updates. Before it writes a change, it reads the file again, so a
-  hand edit is not lost. With the Settings window closed, Discard does not watch the file. A hand edit takes effect
-  when you open the Settings window, or at the next launch.
+  hand edit is not lost. With the Settings window closed, Discard does not watch the file, but it reads the file
+  again before it runs each menu item, key, or Rust-drawn button. So a hand edit to `confirm_while_working` applies at
+  the next action. Opening the Settings window also reads the file again.
 
 ## Provider precedence
 
@@ -82,16 +86,21 @@ changes. The Safe Mode check mark reflects the mode the app started in.
 | --- | --- | --- |
 | Discard | Settings… | Opens the Settings window on the General page. |
 | Discard | Services | The standard macOS Services submenu. |
+| Discard | Hide Discard | Hides Discard. |
+| Discard | Hide Others | Hides every other app. |
+| Discard | Show All | Shows every hidden app. |
 | Discard | Quit Discard | Quits. May ask first. See "Safe mode, relaunch, and confirm". |
 | File | New Channel… | Greyed, "Soon". |
 | File | Archive Channel… | Greyed, "Soon". |
+| File | Close Window | Closes the focused window. Closing the main window quits, so it may ask first. Closing Settings never asks and does not quit. |
 | File | Cancel Turn | Cancels the running turn. Greyed when no turn runs. |
 | Edit | Undo, Redo, Cut, Copy, Paste, Select All | Standard items. The OS and the text input handle them. |
 | View | Switch Channel… | Greyed, "Soon". |
 | Plugins | Review Plugins… | Opens the Settings window on the Plugins page. With waiting reviews, the label shows the count: "Review Plugins (2)…". |
 | Plugins | Plugin Errors… | Opens the Settings window on the Plugins page. |
 | Plugins | Safe Mode | Relaunches Discard with Safe Mode on or off. Has a check mark when Safe Mode is on. |
-| Window | (none) | Discard adds no items. |
+| Window | Minimize | Minimizes the focused window. |
+| Window | Zoom | Zooms the focused window. |
 | Help | Discard Documentation | Greyed, "Soon". |
 
 ### Why some items are greyed
@@ -105,19 +114,25 @@ turn runs, but it has no "Soon" tag.
 
 ## Default keys
 
-Discard binds three keys. The list is `default_keymap()` in `crates/discard-core/src/action.rs`.
+Discard binds seven keys. The list is `default_keymap()` in `crates/discard-core/src/action.rs`.
 
 | Key | Action |
 | --- | --- |
 | `Cmd+,` | Open Settings |
 | `Cmd+Q` | Quit |
 | `Cmd+.` | Cancel Turn (does nothing when no turn runs) |
+| `Cmd+W` | Close Window |
+| `Cmd+H` | Hide Discard |
+| `Alt+Cmd+H` | Hide Others |
+| `Cmd+M` | Minimize |
 
-Discard binds these keys before it builds the menu bar, so each menu item shows its key. An invalid binding is logged
-and skipped.
+GPUI adds no window or app keys of its own, so Discard binds Cmd+W, Cmd+H, and Cmd+M itself. Discard binds these keys
+before it builds the menu bar, so the menu items for them show their keys: Settings…, Hide Discard, Hide Others, Quit
+Discard, Close Window, and Minimize. Cancel Turn shows its key only while a turn runs. When no turn runs, its item
+carries a placeholder action with no key. Show All and Zoom have no key. An invalid binding is logged and skipped.
 
-System keys are not in this list. Cmd+C, Cmd+V, Cmd+X, Cmd+A, and Cmd+Z stay with the OS and the text inputs, through
-the Edit menu items. You cannot change any key yet. The Keybindings page is not built. When it arrives, `PLAN.md`
+The edit keys are not in this list. Cmd+C, Cmd+V, Cmd+X, Cmd+A, and Cmd+Z stay with the OS and the text inputs,
+through the Edit menu items. You cannot change any key yet. The Keybindings page is not built. When it arrives, `PLAN.md`
 fixes these keys: Cmd+Q, Cmd+, , Cmd+W, Cmd+H, Cmd+M, Cmd+C, Cmd+V, Cmd+X, Cmd+A, Cmd+Z.
 
 ## The Settings window
@@ -163,13 +178,14 @@ Rust draws this page. A plugin cannot hide or replace it. From top to bottom:
 
 Plugins load once at startup. So Safe Mode needs a new process. Plugins > Safe Mode and **Relaunch normally** do this:
 
-1. Discard starts a detached `/bin/sh` child with no input or output. The child polls until the old process id is
-   gone.
-2. Discard quits.
+1. Discard starts a detached `/bin/sh` child with no input or output. Its error output is the same as Discard's, so
+   the relaunched process keeps writing its logs there. The child polls until the old process id is gone.
+2. If a turn runs, Discard sends Cancel to the engine. Then Discard quits.
 3. The child starts the same executable again, with the original arguments. It removes every `--safe-mode`, and adds
    one when the target is Safe Mode on. Other arguments, such as `--provider` and `--builder`, stay.
 
-The child waits so that the two processes never share the database, the memory runtime, or the provider processes.
+The child waits for the old process to exit, so the two processes do not share the database or the memory runtime's
+TCP port. The child does not wait for provider child processes. See "Limits you should know".
 
 If Discard cannot start the child, it does not quit. The main window shows "Could not relaunch Discard:" and the
 reason.
@@ -183,8 +199,12 @@ window comes to the front and shows a notice with **Cancel** and **Confirm** but
 - "The agent is working. Relaunch in safe mode and stop the turn?"
 - "The agent is working. Relaunch normally and stop the turn?"
 
-Confirm ends the process, so the turn stops. Cancel clears the notice. With `confirm_while_working = false`, or with
-no turn running, the action runs at once. Cancel Turn and opening Settings never ask.
+Closing the main window (the red close button, `Cmd+W`, or File > Close Window) follows the Quit rule and shows the
+Quit notice. Closing the Settings window never asks.
+
+Confirm sends Cancel to the engine and ends the process. Cancel clears the notice. With
+`confirm_while_working = false`, or with no turn running, the action runs at once. Cancel Turn, opening Settings,
+Hide, Minimize, and Zoom never ask.
 
 ## What stays in the main window
 
@@ -204,18 +224,22 @@ window.
 ## Closing the main window
 
 Closing the main window quits the app on every platform, and Settings closes with it. Discard has one main window,
-and the engine runs for it. A Mac app usually stays open with no window. Discard does not.
+and the engine runs for it. A Mac app usually stays open with no window. Discard does not. While a turn runs and
+`confirm_while_working` is `true`, the window stays open and shows the Quit notice first.
 
 ## Limits you should know
 
 - The default provider applies at the next launch.
 - Relaunch works on unix only. On other systems the code starts the new process at once, without waiting for the old
   one to exit. Windows is out of scope for v1.
-- The relaunched process has no stderr. `relaunch.rs` sets its input, output, and error to null, and the logs go only
-  to stderr. A relaunched Discard writes no logs until you start it again by hand. A log file is planned for M9.
-- The confirm notice comes only from the Quit action (`Cmd+Q` and Quit Discard) and the Safe Mode relaunch. Closing
-  the main window does not ask. Discard has no hook for a Quit from the Dock or the system, so those do not ask
-  either. They end the process, and a running turn stops.
+- The relaunched process has no input or standard output. `relaunch.rs` sets them to null. Its stderr is inherited,
+  so the relaunched Discard writes its logs where the first one did. A log file is planned for M9.
+- The confirm notice comes from the Quit action (`Cmd+Q` and Quit Discard), closing the main window, and the Safe
+  Mode relaunch. Discard has no hook that can stop a Quit from the Dock or the system, so those do not ask. They end
+  the process. Discard sends Cancel to the engine when the app quits, but GPUI gives quit handlers only a short time.
+- Provider processes can outlive Discard. On macOS a quit ends the process with `exit()`, so no cleanup code runs.
+  Discard sends Cancel to the engine before it quits, on a best-effort basis only. A quit or relaunch during a running
+  tool call can leave provider child processes running, and a relaunched Discard can start while they still run.
 - The confirm notice does not clear when the turn ends on its own. It keeps its text until you press Cancel or
   Confirm. A second request replaces the first.
 - After the first write to a file that could not be parsed, the "file" problem disappears. Discard does not tell you

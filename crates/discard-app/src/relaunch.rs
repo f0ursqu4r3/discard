@@ -23,8 +23,10 @@ pub const WAIT_SCRIPT: &str =
 /// The program and arguments for a waiter that starts `exe` again after `parent_pid` exits.
 ///
 /// GPUI on macOS ends the process with `exit()` inside `[NSApp terminate:]`, so code after the event loop never runs.
-/// The waiter starts before the quit. It waits so the new process never shares the store, the memory runtime
-/// socket, or the provider processes with this one.
+/// The waiter starts before the quit. It waits for this process to exit, so the new process does not share the
+/// store or the memory runtime's TCP port with this one. It does not wait for provider child processes: a quit
+/// during a running tool call can leave them running. Discard sends `Cancel` to the engine first, on a best-effort
+/// basis only.
 pub fn wait_command(
     exe: &Path,
     argv: &[String],
@@ -62,10 +64,11 @@ pub fn spawn(argv: &[String], safe_mode: bool) -> std::io::Result<()> {
         command.args(args(argv, safe_mode));
         command
     };
+    // stderr is inherited, so the relaunched instance keeps writing its JSON logs where this one does.
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .spawn()
         .map(drop)
 }
