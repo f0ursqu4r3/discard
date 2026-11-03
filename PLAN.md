@@ -136,6 +136,46 @@ Discard writes structured logs with secret redaction for provider, plugin, appro
 - Safe mode (launch flag and menu item) starts with all user plugins disabled.
 - Agent discoverability: generated `.d.luau` types, generated markdown docs, a `plugin_api_docs` tool, a live `ui_inspect` tool that returns the current slot tree, and a plugin-authoring guide injected into the memory of any agent with `plugin.write`. All are generated from the Rust API definitions, so they cannot drift.
 
+## Menus and Settings
+
+### Actions
+
+- One Rust `Action` enum. The menu bar, context menus, keybindings, and the command palette all dispatch it. No surface has its own handler.
+- Items whose backend does not exist yet (for example New channel, Switch channel) show greyed with a "Soon" tag and a tooltip. They have no handler. One Rust list tracks them, so an item turns on when its backend lands.
+
+### Menu bar and context menus
+
+- macOS menu bar first: Discard, File, Edit, View, Window, Help, and a Plugins menu. Linux and Windows get an in-window fallback later.
+- Rust owns all menu structure and every protected item: Safe Mode, Review Plugins, Plugin Errors, Settings, Quit. Plugins cannot remove, reorder, or replace Rust items.
+- A plugin with the `ui` capability may add items to the Plugins menu and to a labeled section at the end of context menus. Each item shows the plugin name. No new capability is needed.
+- A plugin menu callback receives only the target type and ID (for example `message`, `<id>`). It reads content through APIs it already holds.
+- Context menu targets: server icon, channel row, member or agent row, message, code block, diff block, tool-call block. Message, code block, and channel row come first.
+- Archive channel uses the existing worktree data-loss check and confirmation.
+
+### Settings window
+
+- A separate OS window, single instance, opened with Cmd+,. A sidebar lists categories. A search box filters across pages and plugin fields. Menu items and banners deep-link to a page.
+- Pages: General, Appearance, Agents, Providers, Plugins, Memory, Workspaces, Keybindings, Logs, Advanced. Build order: General, Plugins, Providers, Agents, Appearance, then the rest.
+- **Plugins page.** It replaces the in-window plugin panel: plugin list, review cards, trust toggle, rollback, safe mode, error list. A Rust-rendered banner and badge stay in the main window when a review is pending or a plugin has an error, so a pending review is never hidden behind Settings.
+- **Safe mode.** Settings opens normally in safe mode. The Plugins page says "Safe mode: user plugins disabled" and offers "Relaunch normally". The Safe Mode menu item relaunches the app with or without the flag, because plugins load once at startup.
+- **Agents page.** Saving a policy change shows a before and after diff. A looser policy shows a warning and needs an explicit confirm. If the provider cannot enforce a policy, Settings disables that choice and says why. A plugin or agent can never save a policy change through Settings.
+- **Appearance page.** The user's settings are the base. A plugin theme layers on top, and Rust still clamps protected surfaces. The page shows which plugin overrides each token. An "ignore plugin themes" switch is available.
+- **Keybindings page.** The page edits the map from key to action. System keys are fixed: Cmd+Q, Cmd+, , Cmd+W, Cmd+H, Cmd+M, Cmd+C, Cmd+V, Cmd+X, Cmd+A, Cmd+Z. A conflict blocks the save and names the other action. Open Settings, Quit, and Cancel turn can be rebound but not unbound. Plugins cannot register keybindings in v1. They add menu items and slash commands only.
+- **Advanced page.** Three destructive actions: Reset settings (backs up to `settings.toml.bak`), Rebuild memory index, Clear logs. Each shows a confirmation that lists what it changes. There is no "delete all data" action.
+- **Logs page.** Discard first adds a rotating, redacted log file in `~/.discard/logs/`, next to the stderr output. The viewer is read-only and follows the file live. It filters by level, component (provider, plugin, approval, storage, MCP, workspace), and session, turn, or plugin ID.
+
+### Settings storage
+
+- App settings live in `~/.discard/settings.toml`. Rust owns the schema and validates it. Changes apply live. A hand edit reloads, and errors show in the window.
+- The file has `version = 1`. Discard keeps unknown keys when it writes. An invalid value falls back to its default for that key only, and the window shows the error. A bad file never blocks startup.
+- Per-agent and per-project settings stay in their existing stores.
+- **Plugin settings.** A plugin declares typed fields in `plugin.toml` (bool, string, number, choice). Rust renders them under Plugins > `<plugin name>`. Plugins cannot draw their own settings UI. Values live in a plugin namespace in `settings.toml`. A plugin reads them through `discard.settings`.
+
+### Structure and tests
+
+- `SettingsStore` and the `Action` list live in `discard-core` with no GPUI dependency. The Settings window is a second thin view in `discard-ui`. It shares the app's existing services.
+- TDD-first. Core logic has unit tests. Settings validation has failure tests: invalid values, unknown keys, version mismatch, a bad file at startup, a conflicting keybinding, and a policy the provider cannot enforce. UI tests stay thin.
+
 ## Milestones
 
 1. **M1** — GPUI shell, Claude provider, streaming chat, SQLite history, approvals.
@@ -144,6 +184,9 @@ Discard writes structured logs with secret redaction for provider, plugin, appro
 4. **M4** — Codex provider.
 5. **M5** — Agent-authored plugins with the full safety stack.
 6. **M6** — Worktrees per channel.
+7. **M7** — `Action` layer, `SettingsStore`, native menu bar, Settings window shell with General and Plugins pages. The plugin panel moves into Settings.
+8. **M8** — Context menus on message, code block, and channel row. Plugin menu items. Providers, Agents, and Appearance pages.
+9. **M9** — Remaining context menu targets. Keybindings, Memory, Workspaces, Logs (with the file sink), and Advanced pages.
 
 M1 and M2 come first so the plugin architecture shapes the UI from the start.
 
