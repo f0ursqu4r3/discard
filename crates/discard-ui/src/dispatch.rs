@@ -107,16 +107,12 @@ pub fn run(action: Action, cx: &mut App) {
     let view = main.as_ref().and_then(|(_, view)| view.upgrade());
     let turn_running = view.as_ref().is_some_and(|v| v.read(cx).turn_running());
     let (confirm_while_working, safe_mode) = match cx.try_global::<Shared>() {
-        Some(shared) => (
-            shared
-                .settings
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .settings()
-                .general
-                .confirm_while_working,
-            shared.load_report.safe_mode,
-        ),
+        Some(shared) => {
+            let mut store = shared.settings.lock().unwrap_or_else(|p| p.into_inner());
+            // Only the Settings window polls the file. Read it again here, so a hand edit applies while Settings is closed.
+            store.reload_if_changed();
+            (store.settings().general.confirm_while_working, shared.load_report.safe_mode)
+        }
         None => (true, false),
     };
     match plan(action, turn_running, confirm_while_working, safe_mode) {

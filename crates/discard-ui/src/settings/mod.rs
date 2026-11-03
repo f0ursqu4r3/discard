@@ -65,6 +65,11 @@ impl SettingsView {
         // The file can change on disk, and a review can arrive while this window is open.
         // Read the file again, and redraw when it changed, when plugin state changed, or when the review count changed.
         let settings = shared.settings.clone();
+        // Read the file now, so the first frame does not show values that are up to one poll old.
+        settings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .reload_if_changed();
         let plugins = shared.plugins.clone();
         let epoch = shared.plugin_epoch.clone();
         let mut seen_epoch = epoch.load(Ordering::SeqCst);
