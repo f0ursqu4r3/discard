@@ -39,6 +39,11 @@ pub fn problem_lines(
     lines
 }
 
+/// How many problems the main window counts: one for each problem line, and one for a notice.
+pub fn problem_count(lines: usize, has_notice: bool) -> usize {
+    lines + usize::from(has_notice)
+}
+
 /// The one line the main window shows: "N plugin problems".
 pub fn problem_summary(count: usize) -> String {
     match count {
@@ -49,7 +54,7 @@ pub fn problem_summary(count: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{problem_lines, problem_summary};
+    use super::{problem_count, problem_lines, problem_summary};
     use discard_lua::service::PluginStatus;
     use discard_lua::{LoadReport, PluginState};
     use std::collections::BTreeMap;
@@ -113,6 +118,18 @@ mod tests {
             problem_lines(&errors, &statuses, &LoadReport::default()),
             vec!["clock: boom".to_string(), "other: bad".to_string()]
         );
+    }
+
+    #[test]
+    fn a_notice_counts_as_one_problem() {
+        assert_eq!(problem_count(0, true), 1);
+        assert_eq!(problem_count(2, true), 3);
+    }
+
+    #[test]
+    fn no_lines_and_no_notice_is_zero_problems() {
+        assert_eq!(problem_count(0, false), 0);
+        assert_eq!(problem_count(2, false), 2);
     }
 
     #[test]

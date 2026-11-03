@@ -39,8 +39,16 @@ fn approve_review(view: &mut SettingsView, id: &str, cx: &mut Context<SettingsVi
 }
 
 fn reject_review(view: &mut SettingsView, id: &str, cx: &mut Context<SettingsView>) {
-    view.shared.plugins.reject(id);
+    // A rejected review is a user action that resolves the notice.
+    if view.shared.plugins.reject(id) {
+        set_notice(view, None);
+    }
     view.trusted.remove(id);
+    changed(view, cx);
+}
+
+fn dismiss_notice(view: &mut SettingsView, cx: &mut Context<SettingsView>) {
+    set_notice(view, None);
     changed(view, cx);
 }
 
@@ -342,13 +350,22 @@ pub(super) fn render(view: &mut SettingsView, cx: &mut Context<SettingsView>) ->
         })
         .when_some(notice, |c, text| {
             c.child(
-                div()
+                h_flex()
+                    .gap_2()
                     .p_2()
+                    .items_center()
                     .rounded_md()
                     .border_1()
                     .border_color(cx.theme().danger)
                     .text_sm()
-                    .child(text),
+                    .child(div().flex_1().child(text))
+                    .child(
+                        Button::new("dismiss-notice")
+                            .outline()
+                            .small()
+                            .label("Dismiss")
+                            .on_click(cx.listener(|this, _, _, cx| dismiss_notice(this, cx))),
+                    ),
             )
         })
         .child(

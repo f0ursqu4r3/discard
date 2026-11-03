@@ -5,7 +5,7 @@ use discard_core::event::{AgentStatus, ApprovalId};
 use discard_core::model::{Block, Message, Role};
 use discard_core::timeline::{ApprovalPrompt, ApprovalView};
 use crate::plugin_element::{ActionFactory, apply_theme, render_element};
-use crate::problems::{problem_lines, problem_summary};
+use crate::problems::{problem_count, problem_lines, problem_summary};
 use crate::settings::open_settings;
 use crate::shared::{PROTECTED_DEFAULT, Shared, hsla};
 use discard_core::settings_page::SettingsPage;
@@ -250,7 +250,7 @@ impl DiscardView {
         };
         let lines = problem_lines(&errors, &self.plugins.statuses(), &self.load_report);
         let has_notice = self.plugin_notice.lock().unwrap_or_else(|p| p.into_inner()).is_some();
-        let count = lines.len() + usize::from(has_notice);
+        let count = problem_count(lines.len(), has_notice);
         if count == 0 {
             return None;
         }
