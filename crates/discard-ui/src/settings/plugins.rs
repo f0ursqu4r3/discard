@@ -6,7 +6,9 @@ use crate::dispatch;
 use crate::problems::problem_lines;
 use discard_core::action::Action;
 use crate::shared::{PROTECTED_DEFAULT, hsla};
-use discard_lua::theme::{ProtectedPalette, protected_palette};
+use discard_lua::theme::{
+    MIN_BORDER_CONTRAST, MIN_CONTRAST, ProtectedPalette, Rgb, protected_accent, protected_palette,
+};
 use discard_lua::{PluginState, Review, ReviewKind};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
@@ -72,6 +74,11 @@ fn toggle_trust(view: &mut SettingsView, id: &str, cx: &mut Context<SettingsView
     cx.notify();
 }
 
+/// Fixed colors for added and removed diff lines and the full-access warning. Rust picks them, not the theme,
+/// because a plugin theme reaches this window and could set `success` or `danger` to the background.
+const ADDED: Rgb = Rgb(0x3f, 0xb9, 0x50);
+const REMOVED: Rgb = Rgb(0xf8, 0x51, 0x49);
+
 fn muted(text: &str, cx: &App) -> Div {
     div()
         .text_sm()
@@ -92,14 +99,16 @@ fn review_card(
         ReviewKind::New => "New plugin",
         ReviewKind::Update => "Update",
     };
+    let added = hsla(protected_accent(&palette, ADDED, MIN_CONTRAST));
+    let removed = hsla(protected_accent(&palette, REMOVED, MIN_CONTRAST));
     let diff_lines: Vec<AnyElement> = review
         .diff
         .lines()
         .map(|line| {
             let color = if line.starts_with('+') && !line.starts_with("+++") {
-                cx.theme().success
+                added
             } else if line.starts_with('-') && !line.starts_with("---") {
-                cx.theme().danger
+                removed
             } else {
                 hsla(palette.foreground)
             };
@@ -166,7 +175,7 @@ fn review_card(
                     .p_2()
                     .rounded_md()
                     .border_1()
-                    .border_color(cx.theme().danger)
+                    .border_color(hsla(protected_accent(&palette, REMOVED, MIN_BORDER_CONTRAST)))
                     .font_weight(FontWeight::BOLD)
                     .child("FULL LOCAL ACCESS: this plugin can run programs. A program can read your files, use the network, and start other programs."),
             )
@@ -357,7 +366,9 @@ pub(super) fn render(view: &mut SettingsView, cx: &mut Context<SettingsView>) ->
                     .items_center()
                     .rounded_md()
                     .border_1()
-                    .border_color(cx.theme().danger)
+                    .border_color(hsla(palette.border))
+                    .bg(hsla(palette.background))
+                    .text_color(hsla(palette.foreground))
                     .text_sm()
                     .child(div().flex_1().child(text))
                     .child(

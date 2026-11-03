@@ -162,8 +162,10 @@ pub struct ProtectedPalette {
     pub border: Rgb,
 }
 
+/// The lowest contrast a border needs against its background (WCAG non-text contrast).
+pub const MIN_BORDER_CONTRAST: f64 = 3.0;
+
 pub fn protected_palette(theme: &ThemeOverrides, default: ProtectedPalette) -> ProtectedPalette {
-    const MIN_BORDER_CONTRAST: f64 = 3.0;
     let background = theme.color("background").unwrap_or(default.background);
     let preferred = theme.color("foreground").unwrap_or(default.foreground);
     let foreground = readable_foreground(background, preferred);
@@ -173,6 +175,12 @@ pub fn protected_palette(theme: &ThemeOverrides, default: ProtectedPalette) -> P
         _ => readable_foreground(background, default.border),
     };
     ProtectedPalette { background, foreground, border }
+}
+
+/// A color with a meaning (added, removed, warning) on a protected surface.
+/// `preferred` if it has `min_contrast` against the palette background. Otherwise the palette foreground, which always reads.
+pub fn protected_accent(palette: &ProtectedPalette, preferred: Rgb, min_contrast: f64) -> Rgb {
+    if contrast_ratio(preferred, palette.background) >= min_contrast { preferred } else { palette.foreground }
 }
 
 #[cfg(test)]
@@ -276,6 +284,32 @@ mod tests {
         t.set_color("warning", "#202020").unwrap();
         let p = protected_palette(&t, DEFAULT);
         assert!(contrast_ratio(p.border, p.background) >= 3.0, "{p:?}");
+    }
+
+    #[test]
+    fn an_accent_keeps_its_color_when_it_reads_on_the_protected_background() {
+        let green = Rgb(0x3f, 0xb9, 0x50);
+        assert_eq!(protected_accent(&DEFAULT, green, MIN_CONTRAST), green);
+    }
+
+    #[test]
+    fn an_accent_falls_back_to_the_protected_foreground_when_contrast_is_too_low() {
+        let mut t = ThemeOverrides::default();
+        t.set_color("background", "#3fb950").unwrap(); // the same green as the accent
+        let p = protected_palette(&t, DEFAULT);
+        let green = Rgb(0x3f, 0xb9, 0x50);
+        assert_eq!(protected_accent(&p, green, MIN_CONTRAST), p.foreground);
+        assert!(contrast_ratio(protected_accent(&p, green, MIN_CONTRAST), p.background) >= MIN_CONTRAST);
+    }
+
+    #[test]
+    fn an_accent_border_needs_only_border_contrast() {
+        // About 3.8:1 on the default background: enough for a border, not for text.
+        let mid = Rgb(0x78, 0x78, 0x78);
+        let ratio = contrast_ratio(mid, DEFAULT.background);
+        assert!((MIN_BORDER_CONTRAST..MIN_CONTRAST).contains(&ratio), "{ratio}");
+        assert_eq!(protected_accent(&DEFAULT, mid, MIN_BORDER_CONTRAST), mid);
+        assert_eq!(protected_accent(&DEFAULT, mid, MIN_CONTRAST), DEFAULT.foreground);
     }
 
     #[test]
