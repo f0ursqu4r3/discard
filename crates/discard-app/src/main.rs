@@ -4,6 +4,7 @@ mod args;
 mod keys;
 mod plugin_events;
 mod plugin_memory;
+mod relaunch;
 
 use discard_core::bootstrap::{Role, WorkspaceChoice};
 use discard_core::engine::Engine;
@@ -19,7 +20,8 @@ use discard_mcp::MemoryRuntime;
 use discard_core::provider::Provider;
 use discard_providers::claude::ClaudeProvider;
 use discard_providers::codex::CodexProvider;
-use discard_ui::ViewData;
+use discard_core::settings::SettingsStore;
+use discard_ui::{RunOutcome, ViewData};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -50,7 +52,20 @@ fn provider_for(name: &str) -> Result<Arc<dyn Provider>, String> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    let options = match args::parse(&argv, std::env::var("DISCARD_PROVIDER").ok().as_deref()) {
+    // Settings live in the data directory, so it must exist before the arguments are parsed.
+    // A bad settings file never stops startup: the store falls back to defaults.
+    let data_dir = data_dir();
+    std::fs::create_dir_all(&data_dir)?;
+    logging::init();
+    let settings = SettingsStore::open(&data_dir.join("settings.toml"));
+    for issue in settings.issues() {
+        warn!(key = %issue.key, message = %issue.message, "settings issue");
+    }
+    // Precedence: the `--provider` flag (handled in `parse`), then `$DISCARD_PROVIDER`, then settings.
+    let default_provider =
+        args::default_provider(std::env::var("DISCARD_PROVIDER").ok().as_deref(), &settings.settings().general.default_provider);
+    let settings = Arc::new(Mutex::new(settings));
+    let options = match args::parse(&argv, Some(&default_provider)) {
         Ok(args::Parsed::Run(options)) => options,
         Ok(args::Parsed::Help) => {
             print!("{}", args::USAGE);
@@ -61,10 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(2);
         }
     };
-    logging::init();
 
-    let data_dir = data_dir();
-    std::fs::create_dir_all(&data_dir)?;
     let project_dir = std::env::current_dir()?;
     let store = Arc::new(Mutex::new(Store::open(&data_dir.join("discard.db"))?));
 
@@ -155,7 +167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     runtime.spawn(engine.run(commands_rx, updates_tx));
 
-    discard_ui::run(
+    let outcome = discard_ui::run(
         ViewData {
             project_name: workspace.project.name,
             channel_name: workspace.channel.name,
@@ -167,6 +179,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         UiState::new(workspace.channel.id, history),
         commands_tx,
         updates_rx,
+        settings,
     );
+    if let RunOutcome::Relaunch { safe_mode } = outcome {
+        let spawned = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).args(relaunch::args(&argv, safe_mode)).spawn());
+        if let Err(e) = spawned {
+            warn!(error = %e, "could not relaunch Discard");
+        }
+    }
     Ok(())
 }

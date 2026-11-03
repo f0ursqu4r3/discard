@@ -26,6 +26,14 @@ pub const USAGE: &str = "Usage: discard [--provider claude|codex] [--builder] [-
   --safe-mode       Start with all user plugins disabled\n\
   --help            Show this help\n";
 
+/// The provider used when no `--provider` flag is given: a non-empty `$DISCARD_PROVIDER` wins, else the settings value.
+pub fn default_provider(env: Option<&str>, settings: &str) -> String {
+    match env.filter(|p| !p.is_empty()) {
+        Some(name) => name.to_string(),
+        None => settings.to_string(),
+    }
+}
+
 /// Parse arguments (without the program name). `env_provider` is the value of `$DISCARD_PROVIDER`.
 pub fn parse(args: &[String], env_provider: Option<&str>) -> Result<Parsed, String> {
     let valid = discard_core::bootstrap::PROVIDERS;
@@ -112,6 +120,17 @@ mod tests {
     #[test]
     fn an_empty_environment_value_is_ignored() {
         assert_eq!(run(&[], Some("")), opts("claude", false));
+    }
+
+    #[test]
+    fn env_provider_beats_settings() {
+        assert_eq!(default_provider(Some("codex"), "claude"), "codex");
+    }
+
+    #[test]
+    fn empty_env_falls_to_settings() {
+        assert_eq!(default_provider(Some(""), "codex"), "codex");
+        assert_eq!(default_provider(None, "codex"), "codex");
     }
 
     #[test]
