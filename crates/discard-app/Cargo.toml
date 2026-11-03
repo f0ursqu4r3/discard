@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 discard-core.workspace = true
+discard-lua = { path = "../discard-lua" }
 discard-providers.workspace = true
 discard-ui = { path = "../discard-ui" }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

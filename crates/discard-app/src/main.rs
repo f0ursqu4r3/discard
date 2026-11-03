@@ -4,6 +4,7 @@ use discard_core::engine::Engine;
 use discard_core::logging;
 use discard_core::store::Store;
 use discard_core::ui_state::UiState;
+use discard_lua::{PluginLimits, PluginManager};
 use discard_providers::claude::ClaudeProvider;
 use discard_ui::ViewData;
 use std::collections::HashSet;
@@ -62,6 +63,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     runtime.spawn(engine.run(commands_rx, updates_tx));
 
+    // Bundled plugins first. User plugins arrive with the approval flow in M5.
+    let mut plugins = PluginManager::new(PluginLimits::default());
+    plugins.load(discard_lua::bundled::default_ui())?;
+
     discard_ui::run(
         ViewData {
             project_name: workspace.project.name,
@@ -69,6 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             agent_name: workspace.agent.name,
             provider_label: workspace.agent.provider,
         },
+        plugins,
         UiState::new(workspace.channel.id, history),
         commands_tx,
         updates_rx,

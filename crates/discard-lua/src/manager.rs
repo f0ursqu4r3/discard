@@ -1,0 +1,317 @@
+//! Owns every loaded plugin. Resolves slots (the last plugin to register a slot wins, and an earlier one
+//! or the built-in Rust view takes over if it fails), merges themes, and tracks errors for the error badge.
+
+use crate::element::Element;
+use crate::runtime::{HookResult, LoadedInfo, PluginError, PluginHandle, PluginLimits, Status};
+use crate::snapshot::Snapshot;
+use crate::theme::ThemeOverrides;
+use std::collections::BTreeMap;
+
+/// The result of rendering a slot: which plugin produced it, so UI actions can be routed back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rendered {
+    pub plugin: String,
+    pub element: Element,
+}
+
+struct Entry {
+    handle: PluginHandle,
+    info: LoadedInfo,
+    last_error: Option<String>,
+}
+
+pub struct PluginManager {
+    limits: PluginLimits,
+    plugins: Vec<Entry>,
+}
+
+impl PluginManager {
+    pub fn new(limits: PluginLimits) -> Self {
+        Self { limits, plugins: Vec::new() }
+    }
+
+    /// Load a plugin. A plugin with the same name is replaced. Later plugins win over earlier ones.
+    pub fn load(&mut self, snapshot: Snapshot) -> Result<LoadedInfo, PluginError> {
+        // Spawn first. If it fails, nothing changes and an older version of the plugin keeps running.
+        let (handle, info) = PluginHandle::spawn(snapshot, self.limits.clone())?;
+        let entry = Entry { handle, info: info.clone(), last_error: None };
+        match self.plugins.iter().position(|e| e.info.manifest.name == info.manifest.name) {
+            Some(i) => {
+                let old = std::mem::replace(&mut self.plugins[i], entry);
+                old.handle.shutdown();
+            }
+            None => self.plugins.push(entry),
+        }
+        Ok(info)
+    }
+
+    pub fn unload(&mut self, name: &str) -> bool {
+        match self.plugins.iter().position(|e| e.info.manifest.name == name) {
+            Some(i) => {
+                self.plugins.remove(i).handle.shutdown();
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn names(&self) -> Vec<String> {
+        self.plugins.iter().map(|e| e.info.manifest.name.clone()).collect()
+    }
+
+    pub fn info(&self, name: &str) -> Option<&LoadedInfo> {
+        self.plugins.iter().find(|e| e.info.manifest.name == name).map(|e| &e.info)
+    }
+
+    /// Render a slot. Tries the last registered plugin first. `None` means the built-in view should draw it.
+    pub fn render_slot(&mut self, slot: &str, state: &serde_json::Value) -> Option<Rendered> {
+        for entry in self.plugins.iter_mut().rev() {
+            if !entry.info.slots.iter().any(|n| n == slot) || entry.handle.status() != Status::Running {
+                continue;
+            }
+            match entry.handle.render(slot, state) {
+                Ok(element) => {
+                    entry.last_error = None;
+                    return Some(Rendered { plugin: entry.info.manifest.name.clone(), element });
+                }
+                Err(e) => entry.last_error = Some(e.to_string()),
+            }
+        }
+        None
+    }
+
+    /// Merge the themes of all running plugins, in load order.
+    pub fn theme(&self) -> ThemeOverrides {
+        let mut merged = ThemeOverrides::default();
+        for entry in self.plugins.iter().filter(|e| e.handle.status() == Status::Running) {
+            merged.merge(&entry.info.theme);
+        }
+        merged
+    }
+
+    pub fn run_action(&mut self, plugin: &str, id: &str) -> Result<(), PluginError> {
+        let entry = self
+            .plugins
+            .iter_mut()
+            .find(|e| e.info.manifest.name == plugin)
+            .ok_or_else(|| PluginError::NotRegistered { kind: "plugin", name: plugin.to_string() })?;
+        let result = entry.handle.run_action(id);
+        if let Err(e) = &result {
+            entry.last_error = Some(e.to_string());
+        }
+        result
+    }
+
+    /// Run a slash command. The first plugin that registered it handles it.
+    pub fn run_command(&mut self, name: &str, args: &str) -> Option<Result<Option<String>, PluginError>> {
+        let entry = self.plugins.iter_mut().find(|e| e.info.commands.iter().any(|c| c == name))?;
+        let result = entry.handle.run_command(name, args);
+        if let Err(e) = &result {
+            entry.last_error = Some(e.to_string());
+        }
+        Some(result)
+    }
+
+    pub fn hook(&mut self, event: &str, payload: &serde_json::Value) -> Vec<(String, Result<HookResult, PluginError>)> {
+        self.plugins
+            .iter_mut()
+            .filter(|e| e.info.events.iter().any(|n| n == event))
+            .map(|e| {
+                let result = e.handle.hook(event, payload);
+                if let Err(err) = &result {
+                    e.last_error = Some(err.to_string());
+                }
+                (e.info.manifest.name.clone(), result)
+            })
+            .collect()
+    }
+
+    pub fn emit(&self, event: &str, payload: &serde_json::Value) {
+        for e in &self.plugins {
+            if e.info.events.iter().any(|n| n == event) {
+                e.handle.emit(event, payload);
+            }
+        }
+    }
+
+    /// Plugins that failed, for the Rust-rendered plugin error list.
+    pub fn errors(&self) -> BTreeMap<String, String> {
+        self.plugins
+            .iter()
+            .filter_map(|e| {
+                let message = match e.handle.status() {
+                    Status::Terminated(reason) => Some(reason),
+                    Status::Running => e.last_error.clone(),
+                };
+                message.map(|m| (e.info.manifest.name.clone(), m))
+            })
+            .collect()
+    }
+
+    pub fn status(&self, name: &str) -> Option<Status> {
+        self.plugins.iter().find(|e| e.info.manifest.name == name).map(|e| e.handle.status())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::element::{Node, Tag};
+    use crate::theme::Rgb;
+    use serde_json::json;
+    use std::time::Duration;
+
+    fn plugin(name: &str, caps: &str, init: &str) -> Snapshot {
+        let manifest = format!("name = \"{name}\"\nversion = \"1\"\napi = \"1\"\n{caps}");
+        Snapshot::from_files(
+            [("plugin.toml".to_string(), manifest.into_bytes()), ("init.lua".to_string(), init.as_bytes().to_vec())].into(),
+        )
+    }
+
+    const UI: &str = "[capabilities]\nui = true\n";
+
+    fn manager() -> PluginManager {
+        PluginManager::new(PluginLimits { call_budget: Duration::from_millis(150), ..PluginLimits::default() })
+    }
+
+    fn text_slot(slot: &str, text: &str) -> String {
+        format!("discard.slot(\"{slot}\", function() return {{ \"text\", \"{text}\" }} end)")
+    }
+
+    fn first_text(r: &Rendered) -> String {
+        match &r.element.children[0] {
+            Node::Text(t) => t.clone(),
+            _ => String::new(),
+        }
+    }
+
+    #[test]
+    fn the_last_plugin_to_register_a_slot_wins() {
+        let mut m = manager();
+        m.load(plugin("one", UI, &text_slot("header", "from one"))).unwrap();
+        m.load(plugin("two", UI, &text_slot("header", "from two"))).unwrap();
+        let r = m.render_slot("header", &json!({})).unwrap();
+        assert_eq!((r.plugin.as_str(), first_text(&r).as_str()), ("two", "from two"));
+        assert_eq!(r.element.tag, Tag::Text);
+    }
+
+    #[test]
+    fn an_unregistered_slot_falls_through_to_the_builtin_view() {
+        let mut m = manager();
+        m.load(plugin("one", UI, &text_slot("header", "x"))).unwrap();
+        assert_eq!(m.render_slot("footer", &json!({})), None);
+        assert_eq!(manager().render_slot("header", &json!({})), None);
+    }
+
+    #[test]
+    fn a_failing_plugin_falls_back_to_the_previous_one_and_is_listed_as_failed() {
+        let mut m = manager();
+        m.load(plugin("good", UI, &text_slot("header", "good"))).unwrap();
+        m.load(plugin("bad", UI, "discard.slot(\"header\", function() error(\"kaboom\") end)")).unwrap();
+        let r = m.render_slot("header", &json!({})).unwrap();
+        assert_eq!(r.plugin, "good");
+        assert!(m.errors()["bad"].contains("kaboom"));
+        assert!(!m.errors().contains_key("good"));
+    }
+
+    #[test]
+    fn when_every_provider_fails_the_builtin_view_takes_over() {
+        let mut m = manager();
+        m.load(plugin("bad", UI, "discard.slot(\"header\", function() error(\"x\") end)")).unwrap();
+        assert_eq!(m.render_slot("header", &json!({})), None);
+    }
+
+    #[test]
+    fn a_successful_render_clears_that_plugins_error() {
+        let mut m = manager();
+        m.load(plugin("flaky", UI, "local n = 0 discard.slot(\"h\", function() n = n + 1 if n == 1 then error(\"first\") end return { \"text\", \"ok\" } end)")).unwrap();
+        assert_eq!(m.render_slot("h", &json!({})), None);
+        assert!(m.errors().contains_key("flaky"));
+        assert!(m.render_slot("h", &json!({})).is_some());
+        assert!(m.errors().is_empty());
+    }
+
+    #[test]
+    fn a_terminated_plugin_is_skipped_and_its_theme_is_dropped() {
+        let mut m = manager();
+        m.load(plugin("themed", UI, "discard.theme({ primary = \"#111111\" }) discard.slot(\"s\", function() while true do end end)")).unwrap();
+        assert_eq!(m.theme().color("primary"), Some(Rgb(0x11, 0x11, 0x11)));
+        assert_eq!(m.render_slot("s", &json!({})), None);
+        assert!(matches!(m.status("themed"), Some(Status::Terminated(_))));
+        assert_eq!(m.theme().color("primary"), None);
+        assert!(m.errors().contains_key("themed"));
+    }
+
+    #[test]
+    fn themes_merge_in_load_order() {
+        let mut m = manager();
+        m.load(plugin("a", UI, "discard.theme({ primary = \"#111111\", border = \"#222222\" })")).unwrap();
+        m.load(plugin("b", UI, "discard.theme({ primary = \"#333333\", radius = 4 })")).unwrap();
+        let t = m.theme();
+        assert_eq!(t.color("primary"), Some(Rgb(0x33, 0x33, 0x33)));
+        assert_eq!(t.color("border"), Some(Rgb(0x22, 0x22, 0x22)));
+        assert_eq!(t.radius(), Some(4.0));
+    }
+
+    #[test]
+    fn reloading_a_plugin_replaces_it_in_place() {
+        let mut m = manager();
+        m.load(plugin("a", UI, &text_slot("h", "v1"))).unwrap();
+        m.load(plugin("b", UI, &text_slot("other", "x"))).unwrap();
+        m.load(plugin("a", UI, &text_slot("h", "v2"))).unwrap();
+        assert_eq!(m.names(), ["a", "b"], "order is kept so precedence does not change");
+        assert_eq!(first_text(&m.render_slot("h", &json!({})).unwrap()), "v2");
+    }
+
+    #[test]
+    fn a_failed_load_changes_nothing_and_keeps_the_old_version_running() {
+        let mut m = manager();
+        m.load(plugin("a", UI, &text_slot("h", "v1"))).unwrap();
+        assert!(m.load(plugin("a", UI, "this is not lua")).is_err());
+        assert_eq!(first_text(&m.render_slot("h", &json!({})).unwrap()), "v1");
+        assert!(m.load(plugin("new", UI, "this is not lua")).is_err());
+        assert_eq!(m.names(), ["a"]);
+    }
+
+    #[test]
+    fn unloading_removes_the_plugin() {
+        let mut m = manager();
+        m.load(plugin("a", UI, &text_slot("h", "v1"))).unwrap();
+        assert!(m.unload("a"));
+        assert!(!m.unload("a"));
+        assert_eq!(m.render_slot("h", &json!({})), None);
+    }
+
+    #[test]
+    fn actions_go_to_the_named_plugin() {
+        let mut m = manager();
+        m.load(plugin("a", UI, "n = 0 discard.action(\"go\", function() n = n + 1 end) discard.slot(\"s\", function() return { \"text\", n } end)")).unwrap();
+        m.load(plugin("b", UI, "discard.action(\"go\", function() error(\"b ran\") end)")).unwrap();
+        m.run_action("a", "go").unwrap();
+        assert_eq!(first_text(&m.render_slot("s", &json!({})).unwrap()), "1");
+        assert!(m.run_action("b", "go").is_err());
+        assert_eq!(m.run_action("zzz", "go"), Err(PluginError::NotRegistered { kind: "plugin", name: "zzz".into() }));
+    }
+
+    #[test]
+    fn commands_run_in_the_first_plugin_that_has_them() {
+        let mut m = manager();
+        m.load(plugin("a", UI, "discard.command(\"hi\", function() return \"a\" end)")).unwrap();
+        m.load(plugin("b", UI, "discard.command(\"hi\", function() return \"b\" end)")).unwrap();
+        assert_eq!(m.run_command("hi", "").unwrap().unwrap().as_deref(), Some("a"));
+        assert!(m.run_command("nope", "").is_none());
+    }
+
+    #[test]
+    fn hooks_collect_one_result_per_plugin_that_handles_the_event() {
+        let mut m = manager();
+        m.load(plugin("a", UI, "discard.on(\"t\", function() return { block = true, reason = \"a says no\" } end)")).unwrap();
+        m.load(plugin("b", UI, "discard.on(\"t\", function() error(\"b broke\") end)")).unwrap();
+        m.load(plugin("c", UI, "")).unwrap();
+        let results = m.hook("t", &json!({}));
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "a");
+        assert!(results[0].1.as_ref().unwrap().block);
+        assert!(results[1].1.is_err(), "the caller sees the error and can fail closed");
+    }
+}

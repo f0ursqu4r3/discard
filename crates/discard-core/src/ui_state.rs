@@ -120,6 +120,32 @@ impl UiState {
     pub fn pending_approvals(&self) -> usize {
         self.live.pending_approvals()
     }
+
+    /// The state a plugin's `render(state)` function receives for UI slots.
+    pub fn slot_state(&self, labels: &SlotLabels) -> serde_json::Value {
+        let status = match self.agent_status() {
+            AgentStatus::Idle => "idle",
+            AgentStatus::Working => "working",
+            AgentStatus::AwaitingApproval => "awaiting_approval",
+            AgentStatus::Offline => "offline",
+        };
+        serde_json::json!({
+            "project": labels.project,
+            "channel": labels.channel,
+            "pending_approvals": self.pending_approvals(),
+            "turn_running": self.turn_running,
+            "agent": { "name": labels.agent_name, "provider": labels.provider, "status": status },
+        })
+    }
+}
+
+/// Names the engine knows and the UI state does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotLabels {
+    pub project: String,
+    pub channel: String,
+    pub agent_name: String,
+    pub provider: String,
 }
 
 #[cfg(test)]
@@ -237,6 +263,31 @@ mod tests {
         assert_eq!(s.notice(), Some("boom"));
         s.user_sent("retry");
         assert_eq!(s.notice(), None);
+    }
+
+    #[test]
+    fn slot_state_describes_the_channel_agent_and_pending_approvals() {
+        let mut s = state();
+        let labels = SlotLabels { project: "demo".into(), channel: "general".into(), agent_name: "Claude".into(), provider: "claude".into() };
+        assert_eq!(
+            s.slot_state(&labels),
+            serde_json::json!({
+                "project": "demo", "channel": "general", "pending_approvals": 0,
+                "turn_running": false,
+                "agent": { "name": "Claude", "provider": "claude", "status": "idle" },
+            })
+        );
+        s.user_sent("hi");
+        s.apply(ev(EventKind::ApprovalRequest {
+            approval_id: ApprovalId::new(),
+            call_id: "c".into(),
+            tool: "Bash".into(),
+            input: serde_json::json!({}),
+        }));
+        let v = s.slot_state(&labels);
+        assert_eq!(v["pending_approvals"], 1);
+        assert_eq!(v["agent"]["status"], "awaiting_approval");
+        assert_eq!(v["turn_running"], true);
     }
 
     #[test]

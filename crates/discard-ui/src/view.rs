@@ -4,7 +4,12 @@ use discard_core::approval::Decision;
 use discard_core::event::{AgentStatus, ApprovalId};
 use discard_core::model::{Block, Message, Role};
 use discard_core::timeline::{ApprovalPrompt, ApprovalView};
-use discard_core::ui_state::{Command, UiState, Update};
+use crate::plugin_element::{ActionFactory, apply_theme, render_element};
+use discard_core::ui_state::{Command, SlotLabels, UiState, Update};
+use discard_lua::theme::{ProtectedPalette, Rgb, protected_palette};
+use discard_lua::{PluginManager, Rendered};
+use std::collections::HashMap;
+use std::rc::Rc;
 use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::badge::Badge;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -24,8 +29,21 @@ pub struct ViewData {
     pub provider_label: String,
 }
 
+/// Colors for protected surfaces when the theme says nothing.
+const PROTECTED_DEFAULT: ProtectedPalette = ProtectedPalette {
+    background: Rgb(0x1e, 0x1e, 0x1e),
+    foreground: Rgb(0xf0, 0xf0, 0xf0),
+    border: Rgb(0xff, 0xaa, 0x00),
+};
+
+fn hsla(c: Rgb) -> Hsla {
+    Rgba { r: f32::from(c.0) / 255.0, g: f32::from(c.1) / 255.0, b: f32::from(c.2) / 255.0, a: 1.0 }.into()
+}
+
 pub struct DiscardView {
     data: ViewData,
+    plugins: PluginManager,
+    slot_cache: HashMap<&'static str, (String, Option<Rendered>)>,
     state: UiState,
     commands: UnboundedSender<Command>,
     composer: Entity<InputState>,
@@ -35,6 +53,7 @@ pub struct DiscardView {
 impl DiscardView {
     pub fn new(
         data: ViewData,
+        plugins: PluginManager,
         state: UiState,
         commands: UnboundedSender<Command>,
         mut updates: UnboundedReceiver<Update>,
@@ -65,7 +84,8 @@ impl DiscardView {
         })
         .detach();
 
-        Self { data, state, commands, composer, _composer_events: events }
+        apply_theme(&plugins.theme(), cx);
+        Self { data, plugins, slot_cache: HashMap::new(), state, commands, composer, _composer_events: events }
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -86,6 +106,73 @@ impl DiscardView {
 
     fn cancel(&mut self) {
         let _ = self.commands.send(Command::Cancel);
+    }
+
+    fn labels(&self) -> SlotLabels {
+        SlotLabels {
+            project: self.data.project_name.clone(),
+            channel: self.data.channel_name.clone(),
+            agent_name: self.data.agent_name.clone(),
+            provider: self.data.provider_label.clone(),
+        }
+    }
+
+    /// Render a slot with the plugin that owns it. `None` means the built-in view draws it.
+    fn plugin_slot(&mut self, slot: &'static str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let state = self.state.slot_state(&self.labels());
+        let key = state.to_string();
+        let rendered = match self.slot_cache.get(slot) {
+            Some((cached_key, rendered)) if *cached_key == key => rendered.clone(),
+            _ => {
+                let rendered = self.plugins.render_slot(slot, &state);
+                self.slot_cache.insert(slot, (key, rendered.clone()));
+                rendered
+            }
+        }?;
+        let this = cx.entity();
+        let plugin = rendered.plugin.clone();
+        let factory: ActionFactory = Rc::new(move |action: &str| {
+            let (this, plugin, action) = (this.clone(), plugin.clone(), action.to_string());
+            Box::new(move |_, _, cx| {
+                this.update(cx, |view, cx| view.plugin_action(&plugin, &action, cx));
+            })
+        });
+        Some(render_element(&rendered.element, &rendered.plugin, &factory, cx))
+    }
+
+    fn plugin_action(&mut self, plugin: &str, action: &str, cx: &mut Context<Self>) {
+        if let Err(e) = self.plugins.run_action(plugin, action) {
+            tracing::warn!(plugin, action, error = %e, "plugin action failed");
+        }
+        // The plugin may have changed its own state, so its slots must render again.
+        self.slot_cache.clear();
+        cx.notify();
+    }
+
+    /// Rust-rendered list of plugins that failed. Plugins cannot hide or replace it.
+    fn plugin_errors(&self) -> Option<AnyElement> {
+        let errors = self.plugins.errors();
+        if errors.is_empty() {
+            return None;
+        }
+        let lines: Vec<String> = errors.iter().map(|(name, msg)| format!("{name}: {}", msg.lines().next().unwrap_or(""))).collect();
+        let palette = protected_palette(&self.plugins.theme(), PROTECTED_DEFAULT);
+        Some(
+            v_flex()
+                .mx_4()
+                .mb_2()
+                .p_2()
+                .gap_1()
+                .rounded_md()
+                .border_1()
+                .border_color(hsla(palette.border))
+                .bg(hsla(palette.background))
+                .text_color(hsla(palette.foreground))
+                .text_sm()
+                .child(div().font_weight(FontWeight::SEMIBOLD).child("Plugin problems"))
+                .children(lines)
+                .into_any_element(),
+        )
     }
 }
 
@@ -119,7 +206,7 @@ impl DiscardView {
             .bg(cx.theme().sidebar)
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
-            .child(Avatar::new().name(self.data.project_name.clone()).large())
+            .child(Avatar::new().name(self.data.project_name.clone()))
     }
 
     fn channel_list(&self, cx: &App) -> impl IntoElement {
@@ -258,12 +345,16 @@ impl DiscardView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let view = prompt.as_ref().map(|p| p.view);
+        // Protected surface: plugin themes can recolor it, but it always stays readable.
+        let palette = protected_palette(&self.plugins.theme(), PROTECTED_DEFAULT);
         let card = v_flex()
             .gap_2()
             .p_3()
             .rounded_md()
             .border_1()
-            .border_color(cx.theme().warning)
+            .border_color(hsla(palette.border))
+            .bg(hsla(palette.background))
+            .text_color(hsla(palette.foreground))
             .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{tool} wants to run")))
             .child(div().font_family("Menlo").text_sm().child(summary.to_string()));
         match view {
@@ -368,6 +459,15 @@ impl DiscardView {
 impl Render for DiscardView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let history: Vec<Message> = self.state.history().to_vec();
+        let header = match self.plugin_slot("channel_header", cx) {
+            Some(element) => element,
+            None => self.header(cx).into_any_element(),
+        };
+        let members = match self.plugin_slot("member_list", cx) {
+            Some(element) => element,
+            None => self.member_list(cx).into_any_element(),
+        };
+        let plugin_errors = self.plugin_errors();
         let rows: Vec<AnyElement> = history.iter().enumerate().map(|(i, m)| self.message_row(m, i, cx)).collect();
         let live = self.live_row(cx);
         let running = self.state.turn_running();
@@ -377,7 +477,7 @@ impl Render for DiscardView {
             .flex_1()
             .min_w_0()
             .h_full()
-            .child(self.header(cx))
+            .child(header)
             .child(
                 v_flex()
                     .id("messages")
@@ -387,6 +487,7 @@ impl Render for DiscardView {
                     .children(rows)
                     .children(live),
             )
+            .children(plugin_errors)
             .when_some(notice, |col, text| {
                 col.child(
                     div()
@@ -433,6 +534,6 @@ impl Render for DiscardView {
             .child(self.server_rail(cx))
             .child(self.channel_list(cx))
             .child(main)
-            .child(self.member_list(cx))
+            .child(members)
     }
 }

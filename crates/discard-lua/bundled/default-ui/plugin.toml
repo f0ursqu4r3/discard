@@ -1,0 +1,7 @@
+name = "default-ui"
+version = "0.1.0"
+api = "1"
+description = "Discard's default channel header and member list."
+
+[capabilities]
+ui = true
