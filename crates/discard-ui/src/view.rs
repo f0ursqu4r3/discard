@@ -8,10 +8,8 @@ use crate::dispatch::{self, Confirm};
 use crate::menus;
 use crate::plugin_element::{ActionFactory, apply_theme, render_element};
 use crate::problems::{problem_count, problem_lines, problem_summary};
-use crate::settings::open_settings;
 use discard_core::action::{Action, MenuContext};
 use crate::shared::{PROTECTED_DEFAULT, Shared, hsla};
-use discard_core::settings_page::SettingsPage;
 use discard_core::ui_state::{Command, SlotLabels, UiState, Update};
 use discard_lua::theme::protected_palette;
 use discard_lua::{LoadReport, PluginService, Rendered};
@@ -287,7 +285,7 @@ impl DiscardView {
                         .primary()
                         .small()
                         .label("Review")
-                        .on_click(|_, _, cx| open_settings(SettingsPage::Plugins, cx)),
+                        .on_click(|_, _, cx| dispatch::run(Action::ReviewPlugins, cx)),
                 )
                 .into_any_element(),
         )
@@ -363,7 +361,7 @@ impl DiscardView {
                         .outline()
                         .small()
                         .label("Details")
-                        .on_click(|_, _, cx| open_settings(SettingsPage::Plugins, cx)),
+                        .on_click(|_, _, cx| dispatch::run(Action::ShowPluginErrors, cx)),
                 )
                 .into_any_element(),
         )
