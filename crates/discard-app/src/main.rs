@@ -23,7 +23,7 @@ use discard_providers::codex::CodexProvider;
 use discard_core::settings::SettingsStore;
 use discard_ui::{RunOutcome, ViewData};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -50,21 +50,20 @@ fn provider_for(name: &str) -> Result<Arc<dyn Provider>, String> {
     }
 }
 
+/// Read the settings from the data directory. This creates nothing: `SettingsStore::open` only reads.
+/// A bad or missing file gives defaults, so it never stops startup.
+fn open_settings(data_dir: &Path) -> SettingsStore {
+    SettingsStore::open(&data_dir.join("settings.toml"))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    // Settings live in the data directory, so it must exist before the arguments are parsed.
-    // A bad settings file never stops startup: the store falls back to defaults.
+    // Opening the store reads only. `--help` and bad arguments must not create the data directory.
     let data_dir = data_dir();
-    std::fs::create_dir_all(&data_dir)?;
-    logging::init();
-    let settings = SettingsStore::open(&data_dir.join("settings.toml"));
-    for issue in settings.issues() {
-        warn!(key = %issue.key, message = %issue.message, "settings issue");
-    }
+    let settings = open_settings(&data_dir);
     // Precedence: the `--provider` flag (handled in `parse`), then `$DISCARD_PROVIDER`, then settings.
     let default_provider =
         args::default_provider(std::env::var("DISCARD_PROVIDER").ok().as_deref(), &settings.settings().general.default_provider);
-    let settings = Arc::new(Mutex::new(settings));
     let options = match args::parse(&argv, Some(&default_provider)) {
         Ok(args::Parsed::Run(options)) => options,
         Ok(args::Parsed::Help) => {
@@ -76,7 +75,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(2);
         }
     };
+    logging::init();
+    for issue in settings.issues() {
+        warn!(key = %issue.key, message = %issue.message, "settings issue");
+    }
+    std::fs::create_dir_all(&data_dir)?;
 
+    // `run_app` owns the store, the memory runtime, the provider processes and the tokio runtime.
+    // They are all dropped when it returns, so the relaunched process can take over their files and socket.
+    let outcome = run_app(&options, &data_dir, settings)?;
+    if let RunOutcome::Relaunch { safe_mode } = outcome {
+        let spawned = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).args(relaunch::args(&argv, safe_mode)).spawn());
+        if let Err(e) = spawned {
+            warn!(error = %e, "could not relaunch Discard");
+        }
+    }
+    Ok(())
+}
+
+fn run_app(options: &args::Options, data_dir: &Path, settings: SettingsStore) -> Result<RunOutcome, Box<dyn std::error::Error>> {
+    let settings = Arc::new(Mutex::new(settings));
     let project_dir = std::env::current_dir()?;
     let store = Arc::new(Mutex::new(Store::open(&data_dir.join("discard.db"))?));
 
@@ -116,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => warn!(error = %e, "could not reconcile the memory index"),
     }
     // Plugins. The bundled UI loads first. User plugins load only if their bytes match a signed approval.
-    let keys = keys::choose(std::env::var("DISCARD_PLUGIN_PASSPHRASE").ok().as_deref(), &data_dir, keys::system_store());
+    let keys = keys::choose(std::env::var("DISCARD_PLUGIN_PASSPHRASE").ok().as_deref(), data_dir, keys::system_store());
     let ledger = Ledger::open(&data_dir.join("plugins.db"), keys)?;
     // Approved plugins get the files and memory their manifests ask for. Drafts are tested in a manager with none.
     let plugin_memory = Arc::new(plugin_memory::PluginMemory::new(
@@ -126,7 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
     let manager = Arc::new(Mutex::new(PluginManager::with_host(PluginLimits::default(), Host::live(Some(plugin_memory)))));
     manager.lock().unwrap_or_else(|p| p.into_inner()).load(discard_lua::bundled::default_ui())?;
-    let plugins = Arc::new(PluginService::new(&data_dir, ledger, Arc::clone(&manager), options.safe_mode)?);
+    let plugins = Arc::new(PluginService::new(data_dir, ledger, Arc::clone(&manager), options.safe_mode)?);
     let load_report = plugins.load_all();
     info!(
         loaded = ?load_report.loaded,
@@ -167,7 +185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     runtime.spawn(engine.run(commands_rx, updates_tx));
 
-    let outcome = discard_ui::run(
+    Ok(discard_ui::run(
         ViewData {
             project_name: workspace.project.name,
             channel_name: workspace.channel.name,
@@ -180,12 +198,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         commands_tx,
         updates_rx,
         settings,
-    );
-    if let RunOutcome::Relaunch { safe_mode } = outcome {
-        let spawned = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).args(relaunch::args(&argv, safe_mode)).spawn());
-        if let Err(e) = spawned {
-            warn!(error = %e, "could not relaunch Discard");
-        }
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opening_settings_in_a_missing_directory_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("missing").join(".discard");
+        let store = open_settings(&data_dir);
+        assert_eq!(store.settings().general.default_provider, "claude");
+        assert!(!tmp.path().join("missing").exists(), "opening the settings must not create the data directory");
     }
-    Ok(())
 }
