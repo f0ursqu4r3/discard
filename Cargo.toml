@@ -1,6 +1,30 @@
-[package]
-name = "discard"
+[workspace]
+resolver = "3"
+members = [
+    "crates/discard-core",
+    "crates/discard-providers",
+    "crates/discard-lua",
+    "crates/discard-ui",
+    "crates/discard-app",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
-[dependencies]
+[workspace.dependencies]
+async-trait = "0.1"
+nix = { version = "0.30", features = ["signal"] }
+regex = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+discard-core = { path = "crates/discard-core" }
+discard-providers = { path = "crates/discard-providers" }

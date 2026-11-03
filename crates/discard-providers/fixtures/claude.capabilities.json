@@ -1,0 +1,13 @@
+{
+  "provider": "claude",
+  "matrix_version": 1,
+  "cli_version": "2.1.317",
+  "capabilities": {
+    "interactive_approvals": true,
+    "tool_call_visibility": true,
+    "per_session_mcp": true,
+    "session_resume": true,
+    "cancellation": true,
+    "pre_execution_blocking": true
+  }
+}
