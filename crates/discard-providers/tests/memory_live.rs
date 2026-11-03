@@ -11,7 +11,9 @@ use discard_core::model::{AgentId, Channel, ChannelId, Project, ProjectId, Works
 use discard_core::store::Store;
 use discard_core::ui_state::{Command, Update};
 use discard_mcp::MemoryRuntime;
+use discard_core::provider::Provider;
 use discard_providers::claude::ClaudeProvider;
+use discard_providers::codex::CodexProvider;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -38,6 +40,16 @@ async fn turn(commands: &mpsc::UnboundedSender<Command>, updates: &mut mpsc::Unb
 #[tokio::test]
 #[ignore = "uses the real claude CLI and the logged-in subscription"]
 async fn real_claude_saves_and_recalls_memory_through_discard() {
+    save_and_recall(Arc::new(ClaudeProvider::new("claude")), Some("haiku")).await;
+}
+
+#[tokio::test]
+#[ignore = "uses the real codex CLI and the logged-in subscription"]
+async fn real_codex_saves_and_recalls_memory_through_discard() {
+    save_and_recall(Arc::new(CodexProvider::new("codex")), None).await;
+}
+
+async fn save_and_recall(provider: Arc<dyn Provider>, model: Option<&str>) {
     let dir = tempfile::tempdir().unwrap();
     let project_dir = dir.path().join("proj");
     std::fs::create_dir_all(&project_dir).unwrap();
@@ -46,7 +58,7 @@ async fn real_claude_saves_and_recalls_memory_through_discard() {
     let project = Project { id: ProjectId::new(), name: "p".into(), path: project_dir.to_string_lossy().into() };
     db.insert_project(&project).unwrap();
     let agent_id = AgentId::new();
-    db.insert_agent(&agent_id, &AgentConfig { name: "Scout".into(), avatar: None, provider: "claude".into(), model: Some("haiku".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask }).unwrap();
+    db.insert_agent(&agent_id, &AgentConfig { name: "Scout".into(), avatar: None, provider: "any".into(), model: model.map(str::to_string), system_prompt: String::new(), policy: ApprovalPolicy::Ask }).unwrap();
     let channel = Channel { id: ChannelId::new(), project_id: project.id.clone(), name: "c".into(), agent_id: agent_id.clone(), workspace_mode: WorkspaceMode::MainCheckout };
     db.insert_channel(&channel).unwrap();
     let session = SessionId::new();
@@ -61,11 +73,11 @@ async fn real_claude_saves_and_recalls_memory_through_discard() {
         agent_id: agent_id.clone(),
         project_id: project.id.clone(),
         memory: Some(memory),
-        provider: Arc::new(ClaudeProvider::new("claude")),
+        provider,
         channel_id: channel.id.clone(),
         session_id: session,
         cwd: project_dir,
-        model: Some("haiku".into()),
+        model: model.map(str::to_string),
         system_prompt: None,
         policy: ApprovalPolicy::Ask,
     };

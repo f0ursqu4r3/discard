@@ -1,5 +1,7 @@
 //! Discard: an agent harness with a Discord-style interface.
 
+mod args;
+
 use discard_core::engine::Engine;
 use discard_core::logging;
 use discard_core::store::Store;
@@ -7,7 +9,9 @@ use discard_core::ui_state::UiState;
 use discard_core::memory::MemoryStore;
 use discard_lua::{PluginLimits, PluginManager};
 use discard_mcp::MemoryRuntime;
+use discard_core::provider::Provider;
 use discard_providers::claude::ClaudeProvider;
+use discard_providers::codex::CodexProvider;
 use discard_ui::ViewData;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -24,7 +28,28 @@ fn data_dir() -> PathBuf {
     home.join(".discard")
 }
 
+/// The provider implementation for an agent's `provider` name.
+fn provider_for(name: &str) -> Result<Arc<dyn Provider>, String> {
+    match name {
+        "claude" => Ok(Arc::new(ClaudeProvider::new("claude"))),
+        "codex" => Ok(Arc::new(CodexProvider::new("codex"))),
+        other => Err(format!("unknown provider `{other}`")),
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let options = match args::parse(&argv, std::env::var("DISCARD_PROVIDER").ok().as_deref()) {
+        Ok(args::Parsed::Run(options)) => options,
+        Ok(args::Parsed::Help) => {
+            print!("{}", args::USAGE);
+            return Ok(());
+        }
+        Err(message) => {
+            eprintln!("discard: {message}\n\n{}", args::USAGE);
+            std::process::exit(2);
+        }
+    };
     logging::init();
 
     let data_dir = data_dir();
@@ -42,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let workspace = discard_core::bootstrap::ensure_workspace(&store, &project_dir)?;
+    let workspace = discard_core::bootstrap::ensure_workspace(&store, &project_dir, &options.provider)?;
     let history = store.messages_for_channel(&workspace.channel.id)?;
     info!(project = %workspace.project.name, channel = %workspace.channel.name, "workspace ready");
 
@@ -67,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent_id: workspace.channel.agent_id.clone(),
         project_id: workspace.project.id.clone(),
         memory: Some(memory),
-        provider: Arc::new(ClaudeProvider::new("claude")),
+        provider: provider_for(&workspace.agent.provider)?,
         channel_id: workspace.channel.id.clone(),
         session_id: workspace.session_id.clone(),
         cwd: project_dir,

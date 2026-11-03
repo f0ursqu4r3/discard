@@ -2,6 +2,7 @@
 
 use discard_core::capability::{ApprovalPolicy, CapabilityMatrix, EnforcementMode, HookKind, HookMode};
 use discard_providers::claude::ClaudeProvider;
+use discard_providers::codex::CodexProvider;
 use discard_core::provider::Provider;
 
 const CLAUDE: &str = include_str!("../fixtures/claude.capabilities.json");
@@ -17,10 +18,11 @@ fn claude_matrix_loads_and_matches_the_provider() {
 }
 
 #[test]
-fn codex_matrix_is_conservative_until_the_m4_spike_verifies_it() {
+fn codex_matrix_loads_matches_the_provider_and_records_the_verified_capabilities() {
     let m = CapabilityMatrix::from_json(CODEX).unwrap();
     assert_eq!(m.provider, "codex");
-    assert!(m.enforcement_for(ApprovalPolicy::Ask).is_err(), "unverified approvals must fail closed");
-    assert_eq!(m.enforcement_for(ApprovalPolicy::DenyAll), Ok(EnforcementMode::ProviderDenies));
-    assert_eq!(m.hook_mode(HookKind::BlockToolCall), HookMode::ObserveOnly);
+    assert_eq!(&m, CodexProvider::new("codex").capabilities());
+    assert!(m.matrix_version >= 2, "version 2 is the first matrix verified against a live app-server");
+    assert_eq!(m.enforcement_for(ApprovalPolicy::Ask), Ok(EnforcementMode::HostPrompts));
+    assert_eq!(m.hook_mode(HookKind::BlockToolCall), HookMode::Active);
 }

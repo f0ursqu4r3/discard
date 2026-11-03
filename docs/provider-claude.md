@@ -63,10 +63,6 @@ Every emitted event keeps the original JSON line in `raw`.
 - `tests/claude_live.rs`: `#[ignore]` tests against the real CLI. They use one small Haiku turn each.
   Run: `cargo test -p discard-providers --test claude_live -- --ignored`.
 
-## Codex (best effort, not verified)
+## Codex
 
-`crates/discard-providers/fixtures/codex.capabilities.json` is built from `--help` output only.
-`codex exec --json` prints JSONL events and supports `exec resume`, but it has no interactive approval
-channel. `codex app-server` is the candidate for interactive approvals, and it can generate a JSON schema
-of its protocol (`codex app-server generate-json-schema`). The matrix marks approvals, per-session MCP,
-and pre-execution blocking as `false` so that Discard fails closed. The M4 spike must verify these.
+See `docs/provider-codex.md`. The Codex matrix was verified against a live `codex app-server` in M4.
