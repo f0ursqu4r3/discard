@@ -5,6 +5,9 @@ use discard_core::event::{AgentStatus, ApprovalId};
 use discard_core::model::{Block, Message, Role};
 use discard_core::timeline::{ApprovalPrompt, ApprovalView};
 use crate::plugin_element::{ActionFactory, apply_theme, render_element};
+use crate::settings::open_settings;
+use crate::shared::Shared;
+use discard_core::settings_page::SettingsPage;
 use discard_core::ui_state::{Command, SlotLabels, UiState, Update};
 use discard_lua::theme::{ProtectedPalette, Rgb, protected_palette};
 use discard_lua::{LoadReport, PluginService, PluginState, Rendered, Review, ReviewKind};
@@ -50,7 +53,7 @@ pub struct DiscardView {
     data: ViewData,
     plugins: Arc<PluginService>,
     /// What happened when user plugins were loaded at startup.
-    load_report: LoadReport,
+    load_report: Rc<LoadReport>,
     /// The plugin panel (review screen and plugin list) is open. Rust draws it. Plugins cannot change it.
     show_plugins: bool,
     /// Review IDs where the user switched on "trust future edits".
@@ -66,8 +69,7 @@ pub struct DiscardView {
 /// Everything the window needs from the app to start.
 pub struct ViewInit {
     pub data: ViewData,
-    pub plugins: Arc<PluginService>,
-    pub load_report: LoadReport,
+    pub shared: Shared,
     pub state: UiState,
     pub commands: UnboundedSender<Command>,
     pub updates: UnboundedReceiver<Update>,
@@ -75,7 +77,8 @@ pub struct ViewInit {
 
 impl DiscardView {
     pub fn new(init: ViewInit, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let ViewInit { data, plugins, load_report, state, commands, mut updates } = init;
+        let ViewInit { data, shared, state, commands, mut updates } = init;
+        let Shared { plugins, load_report, .. } = shared;
         let placeholder = format!("Message #{}", data.channel_name);
         let composer = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         let events = cx.subscribe_in(&composer, window, |this, _, event: &InputEvent, window, cx| {
@@ -523,8 +526,8 @@ impl DiscardView {
             )
             .child(div().flex_1())
             .child(
-                // Rust draws this entry point, so a plugin cannot hide the way to review plugins.
-                div().p_2().child(
+                // Rust draws these entry points, so a plugin cannot hide the way to review plugins or open Settings.
+                v_flex().p_2().gap_2().child(
                     Button::new("plugins-open")
                         .outline()
                         .small()
@@ -537,6 +540,14 @@ impl DiscardView {
                             this.show_plugins = !this.show_plugins;
                             cx.notify();
                         })),
+                )
+                .child(
+                    Button::new("settings-open")
+                        .outline()
+                        .small()
+                        .w_full()
+                        .label("Settings")
+                        .on_click(|_, _, cx| open_settings(SettingsPage::General, cx)),
                 ),
             )
     }

@@ -1,0 +1,308 @@
+//! The Settings window: a second OS window with a sidebar, a search box, and one page at a time.
+
+mod general;
+
+use crate::shared::Shared;
+use discard_core::settings_page::{SettingsPage, search};
+use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::{h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+use std::time::Duration;
+
+/// How often the window checks `settings.toml` for edits made outside it.
+const POLL_INTERVAL: Duration = Duration::from_millis(700);
+
+/// One sidebar row. A page with no body shows greyed, tagged "Soon", and cannot be clicked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SidebarEntry {
+    page: SettingsPage,
+    clickable: bool,
+}
+
+/// The pages the search keeps, in sidebar order.
+fn sidebar_entries(query: &str) -> Vec<SidebarEntry> {
+    search(query)
+        .into_iter()
+        .map(|page| SidebarEntry {
+            page,
+            clickable: page.is_available(),
+        })
+        .collect()
+}
+
+pub struct SettingsView {
+    shared: Shared,
+    page: SettingsPage,
+    search: Entity<InputState>,
+    query: String,
+    /// The last error from a General page change. `None` after a change succeeds.
+    general_error: Option<String>,
+    _search_events: Subscription,
+}
+
+impl SettingsView {
+    pub fn new(
+        shared: Shared,
+        page: SettingsPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search settings"));
+        let events = cx.subscribe_in(&search, window, |this, input, event: &InputEvent, _, cx| {
+            if let InputEvent::Change = event {
+                this.query = input.read(cx).value().to_string();
+                cx.notify();
+            }
+        });
+
+        // The file can change on disk. Read it again and redraw when it did.
+        let settings = shared.settings.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(POLL_INTERVAL).await;
+                let changed = settings
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .reload_if_changed();
+                let alive = this
+                    .update(cx, |_, cx| {
+                        if changed {
+                            cx.notify();
+                        }
+                    })
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        Self {
+            shared,
+            page,
+            search,
+            query: String::new(),
+            general_error: None,
+            _search_events: events,
+        }
+    }
+
+    /// Show `page` and clear the search, so the page is in the sidebar. A page with no body is ignored.
+    pub fn show_page(&mut self, page: SettingsPage, window: &mut Window, cx: &mut Context<Self>) {
+        if !page.is_available() {
+            return;
+        }
+        self.page = page;
+        self.query.clear();
+        self.search
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        cx.notify();
+    }
+
+    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let entries = sidebar_entries(&self.query);
+        let none = entries.is_empty();
+        let rows: Vec<AnyElement> = entries
+            .into_iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                let SidebarEntry { page, clickable } = entry;
+                let selected = page == self.page;
+                let row = h_flex()
+                    .id(("settings-page", i))
+                    .px_2()
+                    .py_1()
+                    .gap_2()
+                    .items_center()
+                    .rounded_md()
+                    .child(div().flex_1().child(page.title()));
+                if clickable {
+                    row.cursor_pointer()
+                        .when(selected, |r| {
+                            r.bg(cx.theme().sidebar_accent)
+                                .text_color(cx.theme().sidebar_accent_foreground)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.page = page;
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                } else {
+                    row.text_color(cx.theme().muted_foreground)
+                        .child(soon_tag(cx))
+                        .into_any_element()
+                }
+            })
+            .collect();
+        v_flex()
+            .w(px(220.))
+            .h_full()
+            .flex_none()
+            .gap_2()
+            .p_2()
+            .bg(cx.theme().sidebar)
+            .text_color(cx.theme().sidebar_foreground)
+            .border_r_1()
+            .border_color(cx.theme().sidebar_border)
+            .child(Input::new(&self.search))
+            .children(rows)
+            .when(none, |c| {
+                c.child(
+                    div()
+                        .px_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("No matching settings"),
+                )
+            })
+    }
+
+    fn content(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let body = match self.page {
+            SettingsPage::General => general::render(self, cx),
+            SettingsPage::Plugins => plugins_stub(cx),
+            _ => div()
+                .text_color(cx.theme().muted_foreground)
+                .child("Soon")
+                .into_any_element(),
+        };
+        v_flex()
+            .id("settings-content")
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_y_scroll()
+            .p_6()
+            .gap_4()
+            .child(
+                div()
+                    .text_xl()
+                    .font_weight(FontWeight::BOLD)
+                    .child(self.page.title()),
+            )
+            .child(body)
+            .into_any_element()
+    }
+}
+
+impl Render for SettingsView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .size_full()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .child(self.sidebar(cx))
+            .child(self.content(cx))
+    }
+}
+
+/// The small "Soon" tag on a greyed row.
+fn soon_tag(cx: &App) -> Div {
+    div()
+        .px_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(cx.theme().border)
+        .text_xs()
+        .child("Soon")
+}
+
+/// Task 6 moves the plugin panel here.
+fn plugins_stub(cx: &App) -> AnyElement {
+    div()
+        .text_color(cx.theme().muted_foreground)
+        .child("Moves here in Task 6")
+        .into_any_element()
+}
+
+/// The open Settings window. A second `open_settings` call reuses it.
+struct OpenSettings {
+    handle: AnyWindowHandle,
+    /// Weak, so the closed window's view can drop and stop its polling task.
+    view: WeakEntity<SettingsView>,
+}
+
+impl Global for OpenSettings {}
+
+/// Open the Settings window on `page`. When one is open, activate it and switch its page.
+pub fn open_settings(page: SettingsPage, cx: &mut App) {
+    let existing = cx
+        .try_global::<OpenSettings>()
+        .map(|open| (open.handle, open.view.clone()));
+    if let Some((handle, view)) = existing {
+        // An error here means the window was closed.
+        let reused = handle.update(cx, |_, window, cx| {
+            window.activate_window();
+            view.update(cx, |view, cx| view.show_page(page, window, cx))
+        });
+        if matches!(reused, Ok(Ok(()))) {
+            return;
+        }
+    }
+
+    let Some(shared) = cx.try_global::<Shared>().cloned() else {
+        tracing::warn!("cannot open Settings: the shared state is missing");
+        return;
+    };
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::centered(size(px(820.), px(560.)), cx)),
+        titlebar: Some(TitlebarOptions {
+            title: Some("Settings".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    match gpui_kit::open_window(options, cx, move |window, cx| {
+        cx.new(|cx| SettingsView::new(shared, page, window, cx))
+    }) {
+        Ok((handle, view)) => {
+            cx.set_global(OpenSettings {
+                handle,
+                view: view.downgrade(),
+            });
+            cx.activate(true);
+        }
+        Err(e) => tracing::warn!(error = %e, "could not open the Settings window"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Import by name: `use super::*` would bring in GPUI's `test` macro and shadow the built-in `#[test]`.
+    use super::{SidebarEntry, sidebar_entries};
+    use discard_core::settings_page::SettingsPage;
+
+    #[test]
+    fn empty_query_lists_every_page_and_only_available_ones_click() {
+        let entries = sidebar_entries("");
+        assert_eq!(entries.len(), SettingsPage::all().len());
+        for entry in entries {
+            assert_eq!(entry.clickable, entry.page.is_available());
+        }
+    }
+
+    #[test]
+    fn search_keeps_unavailable_pages_not_clickable() {
+        assert_eq!(
+            sidebar_entries("provider"),
+            vec![
+                SidebarEntry {
+                    page: SettingsPage::General,
+                    clickable: true
+                },
+                SidebarEntry {
+                    page: SettingsPage::Providers,
+                    clickable: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn no_match_gives_no_entries() {
+        assert!(sidebar_entries("zzz").is_empty());
+    }
+}

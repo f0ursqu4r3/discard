@@ -1,6 +1,11 @@
 //! The pages of the Settings window and the sidebar search over them.
 //! Pure logic. The GPUI layer renders the sidebar from `SettingsPage::all`.
 
+/// Field labels of the General page. The search index and the page share them.
+pub const LABEL_DEFAULT_PROVIDER: &str = "Default provider";
+pub const LABEL_CONFIRM_WHILE_WORKING: &str = "Confirm while working";
+pub const LABEL_REOPEN_LAST_CHANNEL: &str = "Reopen last channel";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
     General,
@@ -55,9 +60,9 @@ impl SettingsPage {
     fn field_labels(self) -> &'static [&'static str] {
         match self {
             SettingsPage::General => &[
-                "Default provider",
-                "Confirm while working",
-                "Reopen last channel",
+                LABEL_DEFAULT_PROVIDER,
+                LABEL_CONFIRM_WHILE_WORKING,
+                LABEL_REOPEN_LAST_CHANNEL,
             ],
             SettingsPage::Plugins => &[
                 "Safe mode",
@@ -145,6 +150,17 @@ mod tests {
     fn search_is_case_insensitive() {
         assert_eq!(search("PROVIDER"), search("provider"));
         assert_eq!(search("SaFe MoDe"), vec![SettingsPage::Plugins]);
+    }
+
+    #[test]
+    fn every_general_label_matches_the_general_page() {
+        for label in [
+            LABEL_DEFAULT_PROVIDER,
+            LABEL_CONFIRM_WHILE_WORKING,
+            LABEL_REOPEN_LAST_CHANNEL,
+        ] {
+            assert!(search(label).contains(&SettingsPage::General), "{label}");
+        }
     }
 
     #[test]
