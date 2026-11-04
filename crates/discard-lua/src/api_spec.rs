@@ -115,7 +115,7 @@ pub fn tag_props(tag: Tag) -> &'static [(&'static str, &'static str, &'static st
             ("on_click", "string", "The id of an action registered with `discard.action`."),
             ("variant", "\"primary\" | \"danger\" | \"success\" | \"outline\"", "Button style."),
         ],
-        Tag::Avatar => &[("name", "string", "Name used for the initials."), ("size", "\"small\" | \"large\"", "Avatar size."), ("status", "color token", "Presence dot color, by theme token name.")],
+        Tag::Avatar => &[("name", "string", "Name used for the initials."), ("size", "\"small\" | \"large\"", "Avatar size."), ("status", "color token", "Presence dot color, by theme token name. The ring uses the sidebar color, so use it in sidebar slots.")],
         Tag::Badge => &[("count", "number", "The number to show.")],
         Tag::Divider | Tag::Spacer => &[],
         Tag::Dot => &[("color", "color token", "Dot color.")],
@@ -335,6 +335,7 @@ mod tests {
     #[test]
     fn avatar_status_is_in_generated_docs() {
         assert!(markdown().contains("`status` (color token)"));
+        assert!(markdown().contains("The ring uses the sidebar color, so use it in sidebar slots."));
         assert!(luau_types().contains("status: color token"));
     }
 

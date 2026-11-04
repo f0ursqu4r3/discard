@@ -14,7 +14,7 @@ use discard_core::action::{MenuTarget, PluginMenuItem};
 use discard_core::context_menu::{ContextTarget, context_menu, message_text};
 use gpui_kit::component::menu::ContextMenuExt as _;
 use crate::shared::{PROTECTED_DEFAULT, Shared, hsla};
-use discard_core::ui_state::{Command, SlotLabels, UiState, Update, continues_group, first_unread_index};
+use discard_core::ui_state::{Command, SlotLabels, UiState, Update, continues_group, first_unread_index, new_divider_anchor, startup_marker};
 use discard_core::settings::SettingsStore;
 use discard_lua::theme::{ProtectedPalette, ThemeOverrides, protected_palette, protected_accent, MIN_CONTRAST};
 use discard_core::diff::{classify_line, looks_like_unified_diff, LineKind};
@@ -48,9 +48,13 @@ fn save_panel_widths(visible: bool, count: usize) -> bool { visible && count == 
 
 fn may_send(archived: bool, text: &str) -> bool { !archived && !text.trim().is_empty() }
 
-/// Whether the server has unread agent messages in its channel.
-fn server_has_unread(messages: &[Message], last_read: Option<&str>) -> bool {
-    first_unread_index(messages, last_read).is_some()
+fn channel_indicators(messages: &[Message], marker: Option<&str>, pending: usize) -> (bool, usize) {
+    (first_unread_index(messages, marker).is_some(), pending)
+}
+
+fn settings_target(count: usize) -> (Action, String) {
+    if count > 0 { (Action::ReviewPlugins, format!("Review plugins ({count})")) }
+    else { (Action::OpenSettings, "Settings".into()) }
 }
 
 /// Up to two capital letters for a server icon. Words split on anything that is not a letter or digit.
@@ -103,7 +107,10 @@ pub struct DiscardView {
     window_state: Arc<Mutex<StateStore>>,
     _composer_events: Subscription,
     _window_activation: Subscription,
-    initial_history_len: usize,
+    new_divider: Option<String>,
+    last_marker_attempt: Option<String>,
+    member_list_visible: bool,
+    _scroller_observer: Subscription,
     /// A Quit or relaunch that waits for the user to confirm it. The main window draws the notice.
     pending_confirm: Option<Confirm>,
     archived: bool,
@@ -131,14 +138,17 @@ impl DiscardView {
         let placeholder = format!("Message #{}", data.channel_name);
         let composer = cx.new(|cx| TextareaState::new(window, cx).placeholder(placeholder).auto_grow(1, 6).submit_on_enter(true));
         let scroller = cx.new(|cx| MessageScrollerState::new(row_count(state.history().len(), state.turn_running()), cx));
-        let initial_history_len = state.history().len();
-        {
+        let (new_divider, member_list_visible, last_marker_attempt) = {
+            let mut last_marker_attempt = None;
             let mut store = window_state.lock().unwrap_or_else(|p| p.into_inner());
-            if !state.history().iter().any(|message| store.state().last_read.get(&channel_id.0) == Some(&message.id.0))
-                && let Some(last) = state.history().last() {
-                let _ = store.set_last_read(&channel_id.0, &last.id.0);
+            if let Some(last) = startup_marker(state.history(), store.last_read(&channel_id.0)) {
+                last_marker_attempt = Some(last.clone());
+                if let Err(error) = store.set_last_read(&channel_id.0, &last) {
+                    tracing::warn!(%error, "cannot reset read state");
+                }
             }
-        }
+            (new_divider_anchor(state.history(), store.last_read(&channel_id.0), None, false), store.member_list_visible(), last_marker_attempt)
+        };
         let handle = window.window_handle();
         let bounds_store = Arc::clone(&window_state);
         cx.spawn(async move |this, cx| {
@@ -154,7 +164,14 @@ impl DiscardView {
                 }
             }
         }).detach();
-        let window_activation = cx.observe_window_activation(window, |_, _, cx| cx.notify());
+        let window_activation = cx.observe_window_activation(window, |this, window, cx| {
+            this.sync_read_marker(window, cx);
+            cx.notify();
+        });
+        let scroller_observer = cx.observe_in(&scroller, window, |this, _, window, cx| {
+            this.sync_read_marker(window, cx);
+            cx.notify();
+        });
         let events = cx.subscribe_in(&composer, window, |this, _, event: &InputEvent, window, cx| {
             if let InputEvent::PressEnter { shift: false, .. } = event {
                 this.send(window, cx);
@@ -165,17 +182,23 @@ impl DiscardView {
         // Pump engine updates into the view. `recv` is runtime-agnostic, so GPUI's executor can await it.
         cx.spawn(async move |this, cx| {
             while let Some(update) = updates.recv().await {
-                let alive = this
+                let alive = handle.update(cx, |_, window, cx| this
                     .update(cx, |view, cx| {
+                        let previous_len = view.state.history().len();
+                        let previous_id = view.state.history().last().map(|message| message.id.0.clone());
                         view.state.apply(update);
+                        if (!window.is_window_active() || view.scroller.read(cx).is_scrolled_up())
+                            && view.state.history().len() > previous_len {
+                            view.new_divider = new_divider_anchor(view.state.history(), previous_id.as_deref(), view.new_divider.as_deref(), false);
+                        }
+                        view.sync_read_marker(window, cx);
                         if should_clear_confirm(view.state.turn_running(), view.pending_confirm.is_some()) { view.pending_confirm = None; }
                         view.sync_scroller(cx);
                         // The pending-review count comes from the poller. Here only `turn_running` can move.
                         let pending_reviews = view.menu_ctx.pending_reviews;
                         view.refresh_menus(pending_reviews, cx);
                         cx.notify();
-                    })
-                    .is_ok();
+                    }).is_ok()).unwrap_or(false);
                 if !alive {
                     break;
                 }
@@ -249,7 +272,10 @@ impl DiscardView {
             window_state,
             _composer_events: events,
             _window_activation: window_activation,
-            initial_history_len,
+            new_divider,
+            last_marker_attempt,
+            member_list_visible,
+            _scroller_observer: scroller_observer,
             pending_confirm: None,
             archived: false,
             archive_busy: false,
@@ -307,6 +333,18 @@ impl DiscardView {
         }
     }
 
+    fn sync_read_marker(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !window.is_window_active() || self.scroller.read(cx).is_scrolled_up() { return; }
+        let Some(last) = self.state.history().last() else { return; };
+        let id = &last.id.0;
+        let mut store = self.window_state.lock().unwrap_or_else(|p| p.into_inner());
+        if store.last_read(&self.channel_id) == Some(id) || self.last_marker_attempt.as_deref() == Some(id) { return; }
+        self.last_marker_attempt = Some(id.clone());
+        if let Err(error) = store.set_last_read(&self.channel_id, id) {
+            tracing::warn!(%error, "cannot save read state");
+        }
+    }
+
     fn sync_scroller(&mut self, cx: &mut Context<Self>) {
         let count = row_count(self.state.history().len(), self.state.turn_running());
         self.scroller.update(cx, |state, cx| {
@@ -323,6 +361,7 @@ impl DiscardView {
         if !may_send(self.archived || self.archive_busy || self.pending_archive.is_some(), text) || self.state.turn_running() {
             return;
         }
+        self.new_divider = new_divider_anchor(self.state.history(), None, self.new_divider.as_deref(), true);
         self.state.user_sent(text);
         self.sync_scroller(cx);
         let _ = self.commands.send(Command::Send(text.to_string()));
@@ -555,12 +594,12 @@ fn status_label(status: AgentStatus) -> &'static str {
 impl DiscardView {
     /// Toggle and save the member list visibility.
     pub(crate) fn toggle_member_list(&mut self, cx: &mut Context<Self>) {
+        self.member_list_visible = !self.member_list_visible;
+        cx.notify();
         let mut store = self.window_state.lock().unwrap_or_else(|p| p.into_inner());
-        let visible = !store.state().member_list_visible;
-        if let Err(error) = store.set_member_list_visible(visible) {
+        if let Err(error) = store.set_member_list_visible(self.member_list_visible) {
             tracing::warn!(%error, "cannot save member list visibility");
         }
-        cx.notify();
     }
 
     /// `units` of GPUI's 4 px spacing step, times the spacing scale.
@@ -568,15 +607,18 @@ impl DiscardView {
         px(units * 4.0 * self.scales.1)
     }
 
-    fn server_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let marker = self.window_state.lock().unwrap_or_else(|p| p.into_inner()).state().last_read.get(&self.channel_id).cloned();
-        let unread = server_has_unread(self.state.history(), marker.as_deref());
-        let pending = self.state.pending_approvals();
+    fn count_badge(&self, count: usize, cx: &App) -> Div {
+        div().px(self.space(1.0)).rounded_full().bg(cx.theme().warning)
+            .text_color(cx.theme().warning_foreground).text_xs().child(count.to_string())
+    }
+
+    fn server_rail(&self, (unread, pending): (bool, usize), cx: &mut Context<Self>) -> impl IntoElement {
         let initials = server_initials(&self.data.project_name);
         let selected = true;
         let pill_height = server_pill_height(selected, self.server_hovered, unread);
         let project_name = self.data.project_name.clone();
         let review_count = self.plugins.pending().len();
+        let (settings_action, settings_tooltip) = settings_target(review_count);
         let size = self.space(SERVER_ICON_UNITS);
         v_flex()
             .w(px(72.))
@@ -601,25 +643,18 @@ impl DiscardView {
                                 .rounded(self.space(SERVER_ICON_UNITS * 0.3))
                                 .bg(cx.theme().primary).text_color(cx.theme().primary_foreground)
                                 .font_weight(FontWeight::BOLD).child(initials))
-                            .when(pending > 0, |icon| icon.child(div().absolute().bottom_0().right_0()
-                                .px(self.space(1.0)).rounded_full().bg(cx.theme().warning)
-                                .text_color(cx.theme().warning_foreground).text_xs().child(pending.to_string()))))
+                            .when(pending > 0, |icon| icon.child(self.count_badge(pending, cx).absolute().bottom_0().right_0())))
                     )
             )
             .child(div().flex_1())
             .child(div().relative().child(
                 Button::new("settings-open").ghost().icon(IconName::Settings)
-                    .tooltip("Settings")
-                    .on_click(|_, _, cx| dispatch::run(Action::OpenSettings, cx))
-            ).when(review_count > 0, |icon| icon.child(div().absolute().top_0().right_0()
-                .px(self.space(1.0)).rounded_full().bg(cx.theme().warning)
-                .text_color(cx.theme().warning_foreground).text_xs().child(review_count.to_string()))))
+                    .tooltip(settings_tooltip)
+                    .on_click(move |_, _, cx| dispatch::run(settings_action, cx))
+            ).when(review_count > 0, |icon| icon.child(self.count_badge(review_count, cx).absolute().top_0().right_0())))
     }
 
-    fn channel_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let marker = self.window_state.lock().unwrap_or_else(|p| p.into_inner()).state().last_read.get(&self.channel_id).cloned();
-        let unread = server_has_unread(self.state.history(), marker.as_deref());
-        let pending = self.state.pending_approvals();
+    fn channel_list(&self, (unread, pending): (bool, usize), cx: &mut Context<Self>) -> impl IntoElement {
         let selected = true;
         let hover = cx.theme().sidebar_accent;
         v_flex()
@@ -660,8 +695,7 @@ impl DiscardView {
                             .when(!selected && unread, |name| name.text_color(cx.theme().sidebar_foreground))
                             .when(!selected && !unread, |name| name.text_color(cx.theme().muted_foreground))
                             .child(format!("# {}", self.data.channel_name)))
-                        .when(pending > 0, |row| row.child(div().px(self.space(1.0)).rounded_full().bg(cx.theme().warning)
-                            .text_color(cx.theme().warning_foreground).text_xs().child(pending.to_string())))
+                        .when(pending > 0, |row| row.child(self.count_badge(pending, cx)))
                         .context_menu({ let target = ContextTarget::Channel { id: self.channel_id.clone() }; menus::to_popup(context_menu(&target, &self.menu_ctx), target) }),
                 ),
             )
@@ -912,11 +946,7 @@ impl DiscardView {
             )
             .child(div().absolute().top_0().right_0().invisible().group_hover("message-row", |style| style.visible()).child(Button::new(("copy-message", row)).small().label("Copy").disabled(!matches!(copy_target, ContextTarget::Message { has_text: true, .. })).on_click(move |_, _, cx| dispatch::run_on(Action::CopyMessageText, Some(copy_target.clone()), cx))))
             .context_menu(menus::to_popup(context_menu(&target, &self.menu_ctx), target));
-        let marker = self.window_state.lock().unwrap_or_else(|p| p.into_inner()).state().last_read.get(&self.channel_id).cloned();
-        let unread = first_unread_index(self.state.history(), marker.as_deref()) == Some(row);
-        let row_element = if row >= self.initial_history_len && !message.blocks.iter().any(|block| matches!(block, Block::Approval { .. })) && !cx.reduce_motion() {
-            row_element.with_animation(("message-fade", row), Animation::new(Duration::from_millis(150)), |element, delta| element.opacity(delta)).into_any_element()
-        } else { row_element.into_any_element() };
+        let unread = self.new_divider.as_deref() == Some(message.id.0.as_str());
         v_flex().when(unread, |col| col.child(h_flex().gap(self.space(2.0)).px(self.space(4.0)).items_center().text_sm().text_color(cx.theme().primary).child(div().flex_1().border_t_1().border_color(cx.theme().primary)).child("New"))).child(row_element).into_any_element()
     }
 
@@ -951,21 +981,12 @@ impl DiscardView {
                         .child(div().text_color(cx.theme().muted_foreground).child("▍")),
                 )
                 ;
-        let reduced = self.state.live_blocks().iter().any(|block| matches!(block, Block::Approval { .. })) || cx.reduce_motion();
-        Some(if reduced { live.into_any_element() } else { live.with_animation(("live-fade", base), Animation::new(Duration::from_millis(150)), |element, delta| element.opacity(delta)).into_any_element() })
+        Some(live.into_any_element())
     }
 }
 
 impl Render for DiscardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if window.is_window_active() && !self.scroller.read(cx).is_scrolled_up()
-            && let Some(last) = self.state.history().last() {
-            let mut store = self.window_state.lock().unwrap_or_else(|p| p.into_inner());
-            if store.state().last_read.get(&self.channel_id) != Some(&last.id.0)
-                && let Err(error) = store.set_last_read(&self.channel_id, &last.id.0) {
-                tracing::warn!(%error, "cannot save read state");
-            }
-        }
         self.scales = self.appearance.lock().unwrap_or_else(|p| p.into_inner()).scales();
         window.set_rem_size(px(16.0 * self.scales.0));
         // Give `ui_inspect` the state plugins draw with, and revert plugins that keep failing.
@@ -1004,7 +1025,7 @@ impl Render for DiscardView {
         let composer_disabled = self.archived || self.archive_busy || self.pending_archive.is_some();
         let can_send = may_send(composer_disabled, self.composer.read(cx).value().as_ref());
 
-        let visible = self.window_state.lock().unwrap_or_else(|p| p.into_inner()).state().member_list_visible;
+        let visible = self.member_list_visible;
         let main = v_flex()
             .flex_1()
             .min_w_0()
@@ -1066,30 +1087,30 @@ impl Render for DiscardView {
                     }),
             );
 
-        let layout = self.window_state.lock().unwrap_or_else(|p| p.into_inner()).state();
-        let widths = layout.panels;
-        let visible = layout.member_list_visible;
+        let (widths, indicators) = {
+            let store = self.window_state.lock().unwrap_or_else(|p| p.into_inner());
+            (store.panels(), channel_indicators(self.state.history(), store.last_read(&self.channel_id), self.state.pending_approvals()))
+        };
         let store = Arc::clone(&self.window_state);
         let panels = h_resizable(if visible { "main-panels" } else { "main-panels-hidden" })
             .on_resize(move |state, _, cx| {
                 let sizes = state.read(cx).sizes();
                 if save_panel_widths(visible, sizes.len()) {
                     let mut store = store.lock().unwrap_or_else(|p| p.into_inner());
-                    if !store.state().member_list_visible { return; }
                     let panels = PanelWidths { channel_list: f32::from(sizes[0]), member_list: f32::from(sizes[2]) };
                     if let Err(error) = store.set_panels(panels) {
                         tracing::warn!(%error, "cannot save panel widths");
                     }
                 }
             })
-            .child(resizable_panel().size(px(widths.channel_list)).size_range(px(MIN_PANEL_WIDTH)..px(MAX_PANEL_WIDTH)).fixed().child(self.channel_list(cx)))
+            .child(resizable_panel().size(px(widths.channel_list)).size_range(px(MIN_PANEL_WIDTH)..px(MAX_PANEL_WIDTH)).fixed().child(self.channel_list(indicators, cx)))
             .child(resizable_panel().child(main))
             .when(visible, |panels| panels.child(resizable_panel().size(px(widths.member_list)).size_range(px(MIN_PANEL_WIDTH)..px(MAX_PANEL_WIDTH)).fixed().child(members)));
         h_flex()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(self.server_rail(cx))
+            .child(self.server_rail(indicators, cx))
             .child(div().flex_1().min_w_0().h_full().child(panels))
     }
 }
@@ -1146,19 +1167,25 @@ mod tests {
     }
 
     #[test]
-    fn server_unread_dot_requires_an_agent_message_after_a_known_marker() {
+    fn channel_indicators_report_unread_and_pending() {
         use discard_core::model::{ChannelId, Message, MessageId, Role};
         let channel = ChannelId::new();
         let make = |id: &str, role| Message { id: MessageId(id.into()), channel_id: channel.clone(), role, blocks: vec![] };
         let messages = vec![make("a", Role::User), make("b", Role::Agent), make("c", Role::User)];
-        assert!(!super::server_has_unread(&[], Some("a")));
-        assert!(!super::server_has_unread(&messages[..1], Some("a")));
-        assert!(!super::server_has_unread(&messages, None));
-        assert!(!super::server_has_unread(&messages, Some("missing")));
-        assert!(super::server_has_unread(&messages, Some("a")));
-        assert!(!super::server_has_unread(&messages, Some("b")));
-        assert!(!super::server_has_unread(&messages, Some("c")));
+        assert_eq!(super::channel_indicators(&[], Some("a"), 2), (false, 2));
+        assert!(!super::channel_indicators(&messages[..1], Some("a"), 0).0);
+        assert!(super::channel_indicators(&messages, None, 0).0);
+        assert!(!super::channel_indicators(&messages, Some("missing"), 0).0);
+        assert!(super::channel_indicators(&messages, Some("a"), 0).0);
+        assert!(!super::channel_indicators(&messages, Some("b"), 0).0);
+        assert!(!super::channel_indicators(&messages, Some("c"), 0).0);
     }
+    #[test]
+    fn settings_button_targets_pending_reviews() {
+        assert_eq!(super::settings_target(0), (discard_core::action::Action::OpenSettings, "Settings".into()));
+        assert_eq!(super::settings_target(3), (discard_core::action::Action::ReviewPlugins, "Review plugins (3)".into()));
+    }
+
     #[test]
     fn send_is_ignored_after_archive() {
         assert!(!super::may_send(true, "hello"));

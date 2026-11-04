@@ -100,6 +100,12 @@ impl StateStore {
         self.state.clone()
     }
 
+    pub fn last_read(&self, channel: &str) -> Option<&str> { self.state.last_read.get(channel).map(String::as_str) }
+
+    pub fn member_list_visible(&self) -> bool { self.state.member_list_visible }
+
+    pub fn panels(&self) -> PanelWidths { self.state.panels }
+
     /// Save the window position and size.
     pub fn set_bounds(&mut self, bounds: Bounds) -> Result<(), String> {
         let all = [bounds.x, bounds.y, bounds.width, bounds.height];
@@ -265,6 +271,18 @@ mod tests {
         assert_eq!(shown.panels, hidden.panels);
         fs::write(&path, "[layout]\nmember_list_visible = \"no\"\n").unwrap();
         assert!(StateStore::open(&path).state().member_list_visible);
+    }
+
+    #[test]
+    fn accessors_return_current_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&path_in(&dir));
+        assert_eq!(store.last_read("general"), None);
+        assert!(store.member_list_visible());
+        store.set_last_read("general", "one").unwrap();
+        store.set_member_list_visible(false).unwrap();
+        assert_eq!(store.last_read("general"), Some("one"));
+        assert!(!store.member_list_visible());
     }
 
     #[test]

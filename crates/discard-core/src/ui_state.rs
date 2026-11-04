@@ -11,8 +11,25 @@ pub fn continues_group(previous: Option<Role>, role: Role) -> bool { previous ==
 
 /// The first unread agent message after a known read marker.
 pub fn first_unread_index(messages: &[Message], last_read: Option<&str>) -> Option<usize> {
-    let marker = messages.iter().position(|message| Some(message.id.0.as_str()) == last_read)?;
-    messages.iter().enumerate().skip(marker + 1).find(|(_, message)| message.role == Role::Agent).map(|(index, _)| index)
+    let start = match last_read { Some(id) => messages.iter().position(|message| message.id.0 == id)? + 1, None => 0 };
+    messages.iter().enumerate().skip(start).find(|(_, message)| message.role == Role::Agent).map(|(index, _)| index)
+}
+
+/// The marker to save at startup, if any. A channel that already has history and no usable marker
+/// (a first run of this feature, or a marker whose message is gone) counts as read, so old messages
+/// do not show as unread. An empty history keeps `None`, so the first reply counts as unread.
+pub fn startup_marker(messages: &[Message], last_read: Option<&str>) -> Option<String> {
+    let known = last_read.is_some_and(|id| messages.iter().any(|message| message.id.0 == id));
+    if known { None } else { messages.last().map(|message| message.id.0.clone()) }
+}
+
+/// Keep the first unread message anchored until the user sends or it leaves history.
+pub fn new_divider_anchor(messages: &[Message], last_read: Option<&str>, anchor: Option<&str>, sent: bool) -> Option<String> {
+    if sent { return None; }
+    if let Some(id) = anchor {
+        return messages.iter().any(|message| message.id.0 == id).then(|| id.to_owned());
+    }
+    first_unread_index(messages, last_read).map(|index| messages[index].id.0.clone())
 }
 
 /// From the UI to the engine.
@@ -170,10 +187,39 @@ mod tests {
         let make = |id: &str, role| Message { id: MessageId(id.into()), channel_id: channel.clone(), role, blocks: vec![] };
         let messages = vec![make("a", Role::User), make("b", Role::Agent), make("c", Role::Agent)];
         assert_eq!(first_unread_index(&[], Some("a")), None);
-        assert_eq!(first_unread_index(&messages, None), None);
+        assert_eq!(first_unread_index(&[], None), None);
+        assert_eq!(first_unread_index(&messages[..1], None), None);
+        assert_eq!(first_unread_index(&messages, None), Some(1));
         assert_eq!(first_unread_index(&messages, Some("missing")), None);
         assert_eq!(first_unread_index(&messages, Some("a")), Some(1));
         assert_eq!(first_unread_index(&messages, Some("c")), None);
+    }
+
+    #[test]
+    fn startup_marks_old_history_as_read_but_keeps_an_empty_channel_unread() {
+        let channel = ChannelId::new();
+        let make = |id: &str, role| Message { id: MessageId(id.into()), channel_id: channel.clone(), role, blocks: vec![] };
+        let messages = vec![make("a", Role::User), make("b", Role::Agent), make("c", Role::Agent)];
+        assert_eq!(startup_marker(&[], None), None, "empty history: nothing to save");
+        assert_eq!(startup_marker(&[], Some("a")), None, "empty history: nothing to save");
+        assert_eq!(startup_marker(&messages, None), Some("c".into()), "no marker: all read");
+        assert_eq!(startup_marker(&messages, Some("missing")), Some("c".into()), "unknown marker: all read");
+        assert_eq!(startup_marker(&messages, Some("a")), None, "a known marker is kept");
+        assert_eq!(startup_marker(&messages, Some("c")), None, "a known marker is kept");
+    }
+
+    #[test]
+    fn divider_anchor_tracks_unread_until_send_or_removal() {
+        let channel = ChannelId::new();
+        let make = |id: &str, role| Message { id: MessageId(id.into()), channel_id: channel.clone(), role, blocks: vec![] };
+        let messages = vec![make("a", Role::User), make("b", Role::Agent), make("c", Role::Agent)];
+        assert_eq!(new_divider_anchor(&messages, Some("c"), None, false), None);
+        assert_eq!(new_divider_anchor(&messages, Some("a"), None, false), Some("b".into()));
+        assert_eq!(new_divider_anchor(&messages, Some("c"), Some("b"), false), Some("b".into()));
+        assert_eq!(new_divider_anchor(&messages, Some("a"), Some("b"), true), None);
+        // After a send, an older unread message must not become the anchor again.
+        assert_eq!(new_divider_anchor(&messages, Some("b"), None, false), Some("c".into()));
+        assert_eq!(new_divider_anchor(&messages[..1], Some("a"), Some("b"), false), None);
     }
 
     #[test]
