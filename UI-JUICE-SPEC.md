@@ -48,7 +48,7 @@ File: `view.rs` (the composer block in `render`).
 
 File: `view.rs` (`server_rail`).
 - A left-edge pill beside the server icon: tall for selected, small for unread, hidden otherwise.
-- On hover the icon changes from round to rounded-square.
+- Server icons are squircles (a rounded square with a large corner radius), not circles. This includes the project avatar. Use a radius token, or one shared constant if no token fits. On hover and when selected, the corner radius gets tighter.
 - A count badge on the icon for pending approvals (warning token). It outranks the unread pill.
 - Keep the existing server context menu.
 
