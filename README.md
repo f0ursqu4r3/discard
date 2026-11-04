@@ -45,7 +45,8 @@ cargo test -p discard-providers --test worktree_live  -- --ignored
 
 ## Docs
 
-- `PLAN.md` and `PLAN-REVIEW-LOG.md`: the design and its review.
+- `PLAN.md`: the design and the milestone list.
 - `docs/provider-claude.md`, `docs/provider-codex.md`: what was learned about each CLI.
 - `docs/memory.md`, `docs/plugins.md`, `docs/worktrees.md`: how each part works and its limits.
 - `docs/settings.md`: the settings file, the menu bar, key bindings, and the Settings window.
+- `docs/ui-juice-spec.md`: the UI polish spec (surfaces 1 to 5 and the chrome changes).
