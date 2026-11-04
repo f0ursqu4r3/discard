@@ -58,6 +58,7 @@ File: `view.rs` (`channel_list`).
 - Row states: hover, selected, unread (bold name plus a small dot on the left edge).
 - A count badge for pending approvals (warning token). It outranks the unread dot.
 - Keep the Plugins and Settings buttons and the channel context menu.
+- **Panel fill bug (fix here, covers both side panels).** When the user drags a side-panel divider to make a panel wider, the panel's content keeps its old width and a dark strip shows beside it. Repro: write `[layout]\nchannel_list_width = 240.0\nmember_list_width = 366.0\n` to `$DISCARD_HOME/state.toml`, start the app, and the member list content does not fill its 366 pt panel. The channel list can show the same fault. Find the cause in the panel code in `render` and in `channel_list` and `member_list`. Make the content of both side panels fill the panel width at every allowed width (`MIN_PANEL_WIDTH` to `MAX_PANEL_WIDTH`). Do not change the saved-width logic.
 
 ### Surface 5 — Member list
 
