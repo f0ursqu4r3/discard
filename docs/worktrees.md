@@ -28,6 +28,10 @@ other. Worktrees live under `$DISCARD_HOME/worktrees/` (default `~/.discard/work
   old directory. The new session does not carry over the old conversation. A "confirm a summary first" screen is
   not built yet.
 
+## Branch list
+
+The channel list shows local branches and marks the main checkout and other worktrees. The list is read-only.
+
 ## Archiving
 
 `GitWorkspace::archive` removes a channel's worktree only if all of these are true: no uncommitted changes, no

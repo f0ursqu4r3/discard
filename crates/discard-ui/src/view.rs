@@ -4,6 +4,7 @@ use discard_core::approval::Decision;
 use discard_core::event::{AgentStatus, ApprovalId};
 use discard_core::model::{Block, Message, Role};
 use discard_core::timeline::{ApprovalPrompt, ApprovalView};
+use discard_core::worktree::{BranchEntry, list_branches};
 use crate::dispatch::{self, Confirm};
 use crate::menus;
 use crate::appearance::{self, AppearanceState};
@@ -86,6 +87,8 @@ pub struct ViewData {
 
 pub struct DiscardView {
     data: ViewData,
+    branches: Vec<BranchEntry>,
+    branch_refresh: u64,
     server_hovered: bool,
     plugins: Arc<PluginService>,
     /// What happened when user plugins were loaded at startup.
@@ -150,6 +153,14 @@ impl DiscardView {
             (new_divider_anchor(state.history(), store.last_read(&channel_id.0), None, false), store.member_list_visible(), last_marker_attempt)
         };
         let handle = window.window_handle();
+        let project_path = data.project_path.clone();
+        cx.spawn(async move |this, cx| {
+            let task = cx.background_spawn(async move { list_branches(std::path::Path::new(&project_path)) });
+            let result = task.await;
+            let _ = this.update(cx, |view, cx| {
+                if view.branch_refresh == 0 { view.set_branches(result, cx); }
+            });
+        }).detach();
         let bounds_store = Arc::clone(&window_state);
         cx.spawn(async move |this, cx| {
             loop {
@@ -186,7 +197,9 @@ impl DiscardView {
                     .update(cx, |view, cx| {
                         let previous_len = view.state.history().len();
                         let previous_id = view.state.history().last().map(|message| message.id.0.clone());
+                        let was_running = view.state.turn_running();
                         view.state.apply(update);
+                        if was_running && !view.state.turn_running() { view.refresh_branches(cx); }
                         if (!window.is_window_active() || view.scroller.read(cx).is_scrolled_up())
                             && view.state.history().len() > previous_len {
                             view.new_divider = new_divider_anchor(view.state.history(), previous_id.as_deref(), view.new_divider.as_deref(), false);
@@ -256,6 +269,8 @@ impl DiscardView {
 
         Self {
             data,
+            branches: Vec::new(),
+            branch_refresh: 0,
             server_hovered: false,
             plugins,
             load_report,
@@ -592,6 +607,27 @@ fn status_label(status: AgentStatus) -> &'static str {
 }
 
 impl DiscardView {
+    fn set_branches(&mut self, result: discard_core::worktree::Result<Vec<BranchEntry>>, cx: &mut Context<Self>) {
+        self.branches = result.unwrap_or_else(|error| {
+            tracing::warn!(%error, "cannot list branches");
+            Vec::new()
+        });
+        cx.notify();
+    }
+
+    fn refresh_branches(&mut self, cx: &mut Context<Self>) {
+        self.branch_refresh += 1;
+        let generation = self.branch_refresh;
+        let path = self.data.project_path.clone();
+        cx.spawn(async move |this, cx| {
+            let task = cx.background_spawn(async move { list_branches(std::path::Path::new(&path)) });
+            let result = task.await;
+            let _ = this.update(cx, |view, cx| {
+                if view.branch_refresh == generation { view.set_branches(result, cx); }
+            });
+        }).detach();
+    }
+
     /// Toggle and save the member list visibility.
     pub(crate) fn toggle_member_list(&mut self, cx: &mut Context<Self>) {
         self.member_list_visible = !self.member_list_visible;
@@ -699,6 +735,17 @@ impl DiscardView {
                         .context_menu({ let target = ContextTarget::Channel { id: self.channel_id.clone() }; menus::to_popup(context_menu(&target, &self.menu_ctx), target) }),
                 ),
             )
+            .when(!self.branches.is_empty(), |panel| panel.child(
+                v_flex().id("branch-list").flex_1().min_h_0().overflow_y_scroll().px(self.space(4.0))
+                    .child(div().pt(self.space(2.0)).pb(self.space(1.0)).text_xs().text_color(cx.theme().muted_foreground).child("BRANCHES"))
+                    .children(self.branches.iter().map(|entry| {
+                        let tag = if entry.is_main_checkout { "main" } else if entry.worktree.is_some() { "worktree" } else { "" };
+                        h_flex().w_full().min_w_0().items_center().gap(self.space(2.0)).py(self.space(1.0)).text_sm()
+                            .text_color(if entry.worktree.is_some() { cx.theme().sidebar_foreground } else { cx.theme().muted_foreground })
+                            .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(entry.branch.clone()))
+                            .child(div().flex_none().text_xs().child(tag))
+                    }))
+            ))
 
     }
 
