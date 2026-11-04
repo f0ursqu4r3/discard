@@ -39,6 +39,26 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 fn may_send(archived: bool, text: &str) -> bool { !archived && !text.trim().is_empty() }
 
+/// Whether the server has unread agent messages in its channel.
+fn server_has_unread(messages: &[Message], last_read: Option<&str>) -> bool {
+    first_unread_index(messages, last_read).is_some()
+}
+
+/// Up to two capital letters for a server icon. Words split on anything that is not a letter or digit.
+/// A one-word name gives its first two letters.
+fn server_initials(name: &str) -> String {
+    let words: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let letters: Vec<char> = match words.as_slice() {
+        [] => Vec::new(),
+        [one] => one.chars().take(2).collect(),
+        [first, second, ..] => first.chars().take(1).chain(second.chars().take(1)).collect(),
+    };
+    letters.into_iter().flat_map(char::to_uppercase).collect()
+}
+
+// Icon dimensions use the same spacing scale as the rest of the window.
+const SERVER_ICON_UNITS: f32 = 12.0;
+
 /// Static labels the window shows. The engine owns the real data.
 #[derive(Debug, Clone)]
 pub struct ViewData {
@@ -522,6 +542,12 @@ impl DiscardView {
     }
 
     fn server_rail(&self, cx: &App) -> impl IntoElement {
+        let marker = self.window_state.lock().unwrap_or_else(|p| p.into_inner()).state().last_read.get(&self.channel_id).cloned();
+        let unread = server_has_unread(self.state.history(), marker.as_deref());
+        let pending = self.state.pending_approvals();
+        let initials = server_initials(&self.data.project_name);
+        let size = self.space(SERVER_ICON_UNITS);
+        let hover_radius = self.space(SERVER_ICON_UNITS * 0.2);
         v_flex()
             .w(px(72.))
             .h_full()
@@ -532,7 +558,23 @@ impl DiscardView {
             .bg(cx.theme().sidebar)
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
-            .child(div().id("server-icon").child(Avatar::new().name(self.data.project_name.clone())).context_menu({ let target=ContextTarget::Server {id:self.data.project_id.clone(),name:self.data.project_name.clone(),path:self.data.project_path.clone()}; menus::to_popup(context_menu(&target,&self.menu_ctx),target) }))
+            .child(
+                h_flex().relative().w_full().items_center().justify_center()
+                    .child(div().absolute().left_0().w(self.space(1.0)).h(self.space(8.0)).rounded_full().bg(cx.theme().sidebar_foreground))
+                    .child(
+                        div().id("server-icon").relative().size(size)
+                            .context_menu({ let target=ContextTarget::Server {id:self.data.project_id.clone(),name:self.data.project_name.clone(),path:self.data.project_path.clone()}; menus::to_popup(context_menu(&target,&self.menu_ctx),target) })
+                            .child(div().id("server-avatar").size_full().flex().items_center().justify_center()
+                                .rounded(self.space(SERVER_ICON_UNITS * 0.3))
+                                .hover(move |style| style.rounded(hover_radius))
+                                .bg(cx.theme().primary).text_color(cx.theme().primary_foreground)
+                                .font_weight(FontWeight::BOLD).child(initials))
+                            .when(unread, |icon| icon.child(div().absolute().top_0().right_0().size(self.space(2.0)).rounded_full().border_1().border_color(cx.theme().sidebar).bg(cx.theme().primary)))
+                            .when(pending > 0, |icon| icon.child(div().absolute().bottom_0().right_0()
+                                .px(self.space(1.0)).rounded_full().bg(cx.theme().warning)
+                                .text_color(cx.theme().warning_foreground).text_xs().child(pending.to_string())))
+                    )
+            )
     }
 
     fn channel_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1014,6 +1056,30 @@ fn should_clear_confirm(turn_running: bool, pending: bool) -> bool { !turn_runni
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn server_initials_use_words_or_the_first_two_letters() {
+        assert_eq!(super::server_initials("discard.ui-juice"), "DU");
+        assert_eq!(super::server_initials("My Project"), "MP");
+        assert_eq!(super::server_initials("discard"), "DI");
+        assert_eq!(super::server_initials("x"), "X");
+        assert_eq!(super::server_initials("  ..  "), "");
+        assert_eq!(super::server_initials(""), "");
+    }
+
+    #[test]
+    fn server_unread_dot_requires_an_agent_message_after_a_known_marker() {
+        use discard_core::model::{ChannelId, Message, MessageId, Role};
+        let channel = ChannelId::new();
+        let make = |id: &str, role| Message { id: MessageId(id.into()), channel_id: channel.clone(), role, blocks: vec![] };
+        let messages = vec![make("a", Role::User), make("b", Role::Agent), make("c", Role::User)];
+        assert!(!super::server_has_unread(&[], Some("a")));
+        assert!(!super::server_has_unread(&messages[..1], Some("a")));
+        assert!(!super::server_has_unread(&messages, None));
+        assert!(!super::server_has_unread(&messages, Some("missing")));
+        assert!(super::server_has_unread(&messages, Some("a")));
+        assert!(!super::server_has_unread(&messages, Some("b")));
+        assert!(!super::server_has_unread(&messages, Some("c")));
+    }
     #[test]
     fn send_is_ignored_after_archive() {
         assert!(!super::may_send(true, "hello"));
