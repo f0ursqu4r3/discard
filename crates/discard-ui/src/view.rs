@@ -137,7 +137,7 @@ impl DiscardView {
         let Shared { plugins, load_report, plugin_epoch, plugin_notice, settings, appearance, channel_id, .. } = shared;
         let placeholder = format!("Message #{}", data.channel_name);
         let composer = cx.new(|cx| TextareaState::new(window, cx).placeholder(placeholder).auto_grow(1, 6).submit_on_enter(true));
-        let scroller = cx.new(|cx| MessageScrollerState::new(row_count(state.history().len(), state.turn_running()), cx));
+        let scroller = cx.new(|cx| MessageScrollerState::new(row_count(state.history().len(), has_live_row(state.turn_running(), state.live_blocks().len())), cx));
         let (new_divider, member_list_visible, last_marker_attempt) = {
             let mut last_marker_attempt = None;
             let mut store = window_state.lock().unwrap_or_else(|p| p.into_inner());
@@ -346,7 +346,7 @@ impl DiscardView {
     }
 
     fn sync_scroller(&mut self, cx: &mut Context<Self>) {
-        let count = row_count(self.state.history().len(), self.state.turn_running());
+        let count = row_count(self.state.history().len(), has_live_row(self.state.turn_running(), self.state.live_blocks().len()));
         self.scroller.update(cx, |state, cx| {
             let old = state.item_count();
             if count > old { state.append(count - old, cx); }
@@ -951,7 +951,7 @@ impl DiscardView {
     }
 
     fn live_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.state.turn_running() {
+        if !has_live_row(self.state.turn_running(), self.state.live_blocks().len()) {
             return None;
         }
         let base = self.state.history().len() + 1;
@@ -1021,6 +1021,7 @@ impl Render for DiscardView {
             }).unwrap_or_else(|_| div().into_any_element())
         }).scrollbar(true).with_jump_button_renderer(|button| button.label("Jump to latest"));
         let running = self.state.turn_running();
+        let thinking = thinking_line(running, &[self.data.agent_name.as_str()]);
         let notice = self.state.notice().map(str::to_string);
         let composer_disabled = self.archived || self.archive_busy || self.pending_archive.is_some();
         let can_send = may_send(composer_disabled, self.composer.read(cx).value().as_ref());
@@ -1041,6 +1042,7 @@ impl Render for DiscardView {
             .children(self.archive_notice())
             .children(review_banner)
             .children(plugin_problem_line)
+            .when_some(thinking, |col, text| col.child(div().px(self.space(4.0)).py(self.space(1.0)).text_sm().text_color(cx.theme().muted_foreground).child(text)))
             .when_some(notice, |col, text| {
                 col.child(
                     div()
@@ -1115,8 +1117,22 @@ impl Render for DiscardView {
     }
 }
 
-/// The rows the message pane shows: each message, plus the live row while a turn runs.
-fn row_count(history: usize, turn_running: bool) -> usize { history + usize::from(turn_running) }
+/// The live row shows only while a turn runs and the agent has produced output. Before that, the thinking line shows.
+fn has_live_row(turn_running: bool, live_blocks: usize) -> bool { turn_running && live_blocks > 0 }
+
+/// The rows the message pane shows: each message, plus the live row when it shows.
+fn row_count(history: usize, live_row: bool) -> usize { history + usize::from(live_row) }
+
+/// The line above the composer while agents work. `None` when no turn runs.
+fn thinking_line(turn_running: bool, agents: &[&str]) -> Option<String> {
+    if !turn_running { return None; }
+    match agents {
+        [] => None,
+        [one] => Some(format!("{one} is thinking...")),
+        [first, second] => Some(format!("{first} and {second} are thinking...")),
+        [first, second, rest @ ..] => Some(format!("{first}, {second} and {} more are thinking...", rest.len())),
+    }
+}
 
 /// A Quit or relaunch confirm only makes sense while a turn runs. Drop it when the turn has ended.
 fn should_clear_confirm(turn_running: bool, pending: bool) -> bool { !turn_running && pending }
@@ -1192,13 +1208,30 @@ mod tests {
         assert!(!super::may_send(false, "  "));
         assert!(super::may_send(false, "hello"));
     }
-    use super::{row_count, should_clear_confirm};
+    use super::{has_live_row, row_count, should_clear_confirm, thinking_line};
 
     #[test]
     fn counts_history_and_live_row() {
         assert_eq!(row_count(0, false), 0);
         assert_eq!(row_count(3, false), 3);
         assert_eq!(row_count(3, true), 4);
+    }
+
+    #[test]
+    fn live_row_waits_for_output() {
+        assert!(!has_live_row(false, 0));
+        assert!(!has_live_row(false, 2));
+        assert!(!has_live_row(true, 0));
+        assert!(has_live_row(true, 1));
+    }
+
+    #[test]
+    fn thinking_line_names_the_agents() {
+        assert_eq!(thinking_line(false, &["Claude"]), None);
+        assert_eq!(thinking_line(true, &[]), None);
+        assert_eq!(thinking_line(true, &["Claude"]).as_deref(), Some("Claude is thinking..."));
+        assert_eq!(thinking_line(true, &["Claude", "Codex"]).as_deref(), Some("Claude and Codex are thinking..."));
+        assert_eq!(thinking_line(true, &["A", "B", "C", "D"]).as_deref(), Some("A, B and 2 more are thinking..."));
     }
 
     #[test]
