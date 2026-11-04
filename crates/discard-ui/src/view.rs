@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::badge::Badge;
+use gpui_kit::component::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
@@ -36,6 +37,14 @@ use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+
+/// Height of a server pill in spacing units.
+fn server_pill_height(selected: bool, hovered: bool, unread: bool) -> f32 {
+    if selected { 8.0 } else if hovered { 4.0 } else if unread { 2.0 } else { 0.0 }
+}
+
+/// Save widths only for the complete visible layout.
+fn save_panel_widths(visible: bool, count: usize) -> bool { visible && count == 3 }
 
 fn may_send(archived: bool, text: &str) -> bool { !archived && !text.trim().is_empty() }
 
@@ -73,6 +82,7 @@ pub struct ViewData {
 
 pub struct DiscardView {
     data: ViewData,
+    server_hovered: bool,
     plugins: Arc<PluginService>,
     /// What happened when user plugins were loaded at startup.
     load_report: Rc<LoadReport>,
@@ -223,6 +233,7 @@ impl DiscardView {
 
         Self {
             data,
+            server_hovered: false,
             plugins,
             load_report,
             plugin_epoch,
@@ -542,18 +553,31 @@ fn status_label(status: AgentStatus) -> &'static str {
 }
 
 impl DiscardView {
+    /// Toggle and save the member list visibility.
+    pub(crate) fn toggle_member_list(&mut self, cx: &mut Context<Self>) {
+        let mut store = self.window_state.lock().unwrap_or_else(|p| p.into_inner());
+        let visible = !store.state().member_list_visible;
+        if let Err(error) = store.set_member_list_visible(visible) {
+            tracing::warn!(%error, "cannot save member list visibility");
+        }
+        cx.notify();
+    }
+
     /// `units` of GPUI's 4 px spacing step, times the spacing scale.
     fn space(&self, units: f32) -> Pixels {
         px(units * 4.0 * self.scales.1)
     }
 
-    fn server_rail(&self, cx: &App) -> impl IntoElement {
+    fn server_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let marker = self.window_state.lock().unwrap_or_else(|p| p.into_inner()).state().last_read.get(&self.channel_id).cloned();
         let unread = server_has_unread(self.state.history(), marker.as_deref());
         let pending = self.state.pending_approvals();
         let initials = server_initials(&self.data.project_name);
+        let selected = true;
+        let pill_height = server_pill_height(selected, self.server_hovered, unread);
+        let project_name = self.data.project_name.clone();
+        let review_count = self.plugins.pending().len();
         let size = self.space(SERVER_ICON_UNITS);
-        let hover_radius = self.space(SERVER_ICON_UNITS * 0.2);
         v_flex()
             .w(px(72.))
             .h_full()
@@ -565,22 +589,31 @@ impl DiscardView {
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
             .child(
-                h_flex().relative().w_full().items_center().justify_center()
-                    .child(div().absolute().left_0().w(self.space(1.0)).h(self.space(8.0)).rounded_full().bg(cx.theme().sidebar_foreground))
+                h_flex().id("server-wrapper").relative().w_full().items_center().justify_center()
+                    .on_hover(cx.listener(|this, hovered, _, cx| { this.server_hovered = *hovered; cx.notify(); }))
+                    .child(div().absolute().left_0().w(self.space(1.0)).h(self.space(pill_height)).rounded_full().bg(cx.theme().sidebar_foreground))
                     .child(
-                        div().id("server-icon").relative().size(size)
+                        Button::new("server-tooltip").ghost().size(size).p_0()
+                            .tooltip(project_name).tooltip_placement(gpui_kit::component::Placement::Right)
+                            .child(div().id("server-icon").relative().size(size)
                             .context_menu({ let target=ContextTarget::Server {id:self.data.project_id.clone(),name:self.data.project_name.clone(),path:self.data.project_path.clone()}; menus::to_popup(context_menu(&target,&self.menu_ctx),target) })
                             .child(div().id("server-avatar").size_full().flex().items_center().justify_center()
                                 .rounded(self.space(SERVER_ICON_UNITS * 0.3))
-                                .hover(move |style| style.rounded(hover_radius))
                                 .bg(cx.theme().primary).text_color(cx.theme().primary_foreground)
                                 .font_weight(FontWeight::BOLD).child(initials))
-                            .when(unread, |icon| icon.child(div().absolute().top_0().right_0().size(self.space(2.0)).rounded_full().border_1().border_color(cx.theme().sidebar).bg(cx.theme().primary)))
                             .when(pending > 0, |icon| icon.child(div().absolute().bottom_0().right_0()
                                 .px(self.space(1.0)).rounded_full().bg(cx.theme().warning)
-                                .text_color(cx.theme().warning_foreground).text_xs().child(pending.to_string())))
+                                .text_color(cx.theme().warning_foreground).text_xs().child(pending.to_string()))))
                     )
             )
+            .child(div().flex_1())
+            .child(div().relative().child(
+                Button::new("settings-open").ghost().icon(IconName::Settings)
+                    .tooltip("Settings")
+                    .on_click(|_, _, cx| dispatch::run(Action::OpenSettings, cx))
+            ).when(review_count > 0, |icon| icon.child(div().absolute().top_0().right_0()
+                .px(self.space(1.0)).rounded_full().bg(cx.theme().warning)
+                .text_color(cx.theme().warning_foreground).text_xs().child(review_count.to_string()))))
     }
 
     fn channel_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -608,8 +641,8 @@ impl DiscardView {
             )
             .child(
                 div().relative().p(self.space(2.0))
-                    .when(unread && pending == 0, |row| row.child(
-                        div().absolute().left_0().top_1_2().size(self.space(1.5)).rounded_full().bg(cx.theme().sidebar_foreground)
+                    .when(unread, |row| row.child(
+                        div().absolute().left_0().top_1_2().mt(-self.space(0.75)).size(self.space(1.5)).rounded_full().bg(cx.theme().sidebar_foreground)
                     ))
                     .child(
                     h_flex()
@@ -622,35 +655,17 @@ impl DiscardView {
                         .rounded_md()
                         .when(selected, |row| row.bg(cx.theme().sidebar_accent).text_color(cx.theme().sidebar_accent_foreground))
                         .when(!selected, |row| row.hover(move |style| style.bg(hover)))
-                        .child(div().flex_1().min_w_0().when(unread, |name| name.font_weight(FontWeight::BOLD)).child(format!("# {}", self.data.channel_name)))
+                        .child(div().flex_1().min_w_0()
+                            .when(unread, |name| name.font_weight(FontWeight::BOLD))
+                            .when(!selected && unread, |name| name.text_color(cx.theme().sidebar_foreground))
+                            .when(!selected && !unread, |name| name.text_color(cx.theme().muted_foreground))
+                            .child(format!("# {}", self.data.channel_name)))
                         .when(pending > 0, |row| row.child(div().px(self.space(1.0)).rounded_full().bg(cx.theme().warning)
                             .text_color(cx.theme().warning_foreground).text_xs().child(pending.to_string())))
                         .context_menu({ let target = ContextTarget::Channel { id: self.channel_id.clone() }; menus::to_popup(context_menu(&target, &self.menu_ctx), target) }),
                 ),
             )
-            .child(div().flex_1())
-            .child(
-                // Rust draws these entry points, so a plugin cannot hide the way to review plugins or open Settings.
-                v_flex().p(self.space(2.0)).gap(self.space(2.0)).child(
-                    Button::new("plugins-open")
-                        .outline()
-                        .small()
-                        .w_full()
-                        .label(match self.plugins.pending().len() {
-                            0 => "Plugins".to_string(),
-                            n => format!("Plugins ({n} to review)"),
-                        })
-                        .on_click(|_, _, cx| dispatch::run(Action::ReviewPlugins, cx)),
-                )
-                .child(
-                    Button::new("settings-open")
-                        .outline()
-                        .small()
-                        .w_full()
-                        .label("Settings")
-                        .on_click(|_, _, cx| dispatch::run(Action::OpenSettings, cx)),
-                ),
-            )
+
     }
 
     fn member_list(&self, cx: &App) -> impl IntoElement {
@@ -988,11 +1003,17 @@ impl Render for DiscardView {
         let composer_disabled = self.archived || self.archive_busy || self.pending_archive.is_some();
         let can_send = may_send(composer_disabled, self.composer.read(cx).value().as_ref());
 
+        let visible = self.window_state.lock().unwrap_or_else(|p| p.into_inner()).state().member_list_visible;
         let main = v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
-            .child(header)
+            .child(h_flex().w_full().items_stretch()
+                .child(div().flex_1().min_w_0().child(header))
+                .child(div().flex().items_center().border_b_1().border_color(cx.theme().border)
+                    .child(Button::new("member-list-toggle").ghost().icon(IconName::PanelRight)
+                        .tooltip(if visible { "Hide member list" } else { "Show member list" })
+                        .on_click(|_, _, cx| dispatch::run(Action::ToggleMemberList, cx)))))
             .child(div().flex_1().min_h_0().child(scroller))
             .children(confirm_notice)
             .children(self.archive_notice())
@@ -1044,21 +1065,25 @@ impl Render for DiscardView {
                     }),
             );
 
-        let widths = self.window_state.lock().unwrap_or_else(|p| p.into_inner()).state().panels;
+        let layout = self.window_state.lock().unwrap_or_else(|p| p.into_inner()).state();
+        let widths = layout.panels;
+        let visible = layout.member_list_visible;
         let store = Arc::clone(&self.window_state);
-        let panels = h_resizable("main-panels")
+        let panels = h_resizable(if visible { "main-panels" } else { "main-panels-hidden" })
             .on_resize(move |state, _, cx| {
                 let sizes = state.read(cx).sizes();
-                if sizes.len() == 3 {
+                if save_panel_widths(visible, sizes.len()) {
+                    let mut store = store.lock().unwrap_or_else(|p| p.into_inner());
+                    if !store.state().member_list_visible { return; }
                     let panels = PanelWidths { channel_list: f32::from(sizes[0]), member_list: f32::from(sizes[2]) };
-                    if let Err(error) = store.lock().unwrap_or_else(|p| p.into_inner()).set_panels(panels) {
+                    if let Err(error) = store.set_panels(panels) {
                         tracing::warn!(%error, "cannot save panel widths");
                     }
                 }
             })
             .child(resizable_panel().size(px(widths.channel_list)).size_range(px(MIN_PANEL_WIDTH)..px(MAX_PANEL_WIDTH)).fixed().child(self.channel_list(cx)))
             .child(resizable_panel().child(main))
-            .child(resizable_panel().size(px(widths.member_list)).size_range(px(MIN_PANEL_WIDTH)..px(MAX_PANEL_WIDTH)).fixed().child(members));
+            .when(visible, |panels| panels.child(resizable_panel().size(px(widths.member_list)).size_range(px(MIN_PANEL_WIDTH)..px(MAX_PANEL_WIDTH)).fixed().child(members)));
         h_flex()
             .size_full()
             .bg(cx.theme().background)
@@ -1076,6 +1101,39 @@ fn should_clear_confirm(turn_running: bool, pending: bool) -> bool { !turn_runni
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn chrome_icons_are_in_the_default_bundle() {
+        use gpui_kit::AssetSource as _;
+        use gpui_kit::assets::{Assets, IconNamed};
+        for name in [super::IconName::Settings, super::IconName::PanelRight] {
+            let svg = Assets.load(name.path().as_ref()).unwrap().expect("icon is in the default bundle");
+            assert!(svg.starts_with(b"<svg"));
+        }
+    }
+
+    #[test]
+    fn server_pill_heights_cover_selection_hover_and_unread() {
+        for (selected, hovered, unread, height) in [
+            (false, false, false, 0.0),
+            (false, false, true, 2.0),
+            (false, true, false, 4.0),
+            (false, true, true, 4.0),
+            (true, false, false, 8.0),
+            (true, false, true, 8.0),
+            (true, true, false, 8.0),
+            (true, true, true, 8.0),
+        ] {
+            assert_eq!(super::server_pill_height(selected, hovered, unread), height);
+        }
+    }
+
+    #[test]
+    fn widths_are_saved_only_for_visible_three_panel_layouts() {
+        assert!(!super::save_panel_widths(false, 2));
+        assert!(!super::save_panel_widths(false, 3));
+        assert!(!super::save_panel_widths(true, 2));
+        assert!(super::save_panel_widths(true, 3));
+    }
     #[test]
     fn server_initials_use_words_or_the_first_two_letters() {
         assert_eq!(super::server_initials("discard.ui-juice"), "DU");

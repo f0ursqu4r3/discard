@@ -47,7 +47,8 @@ pub fn run(
     memory: Arc<discard_core::memory::MemoryStore>,
 ) {
     // On macOS `cx.quit()` ends the process inside this call, so nothing after it may matter.
-    application().run(move |cx| {
+    // Register the icon bundle. Without it, every icon drawn from a path (buttons, menus, checkmarks) is blank.
+    application().with_assets(gpui_kit::assets::Assets).run(move |cx| {
         init(cx);
         cx.set_global(dispatch::Relauncher(relaunch));
         // Bind keys before the first menu install, so the menu shows each shortcut.

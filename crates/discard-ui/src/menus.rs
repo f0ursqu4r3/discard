@@ -70,6 +70,7 @@ action_types!(
     CopyCode,
     CopyChannelName,
     OpenSettings,
+    ToggleMemberList,
     Quit,
     CancelTurn,
     ReviewPlugins,

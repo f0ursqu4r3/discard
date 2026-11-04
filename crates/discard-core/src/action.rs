@@ -9,6 +9,7 @@ pub enum Action {
     CopyCode,
     CopyChannelName,
     OpenSettings,
+    ToggleMemberList,
     Quit,
     CancelTurn,
     ReviewPlugins,
@@ -45,6 +46,7 @@ impl Action {
             Action::CopyCode => "copy_code",
             Action::CopyChannelName => "copy_channel_name",
             Action::OpenSettings => "open_settings",
+            Action::ToggleMemberList => "toggle_member_list",
             Action::Quit => "quit",
             Action::CancelTurn => "cancel_turn",
             Action::ReviewPlugins => "review_plugins",
@@ -75,6 +77,7 @@ impl Action {
             Self::CopyCode => "Copy Code",
             Self::CopyChannelName => "Copy Channel Name",
             Self::OpenSettings => "Settings",
+            Self::ToggleMemberList => "Toggle Member List",
             Self::Quit => "Quit",
             Self::CancelTurn => "Cancel Turn",
             Self::ReviewPlugins => "Review Plugins",
@@ -108,6 +111,7 @@ impl Action {
             Action::CopyCode,
             Action::CopyChannelName,
             Action::OpenSettings,
+            Action::ToggleMemberList,
             Action::Quit,
             Action::CancelTurn,
             Action::ReviewPlugins,
@@ -271,7 +275,7 @@ pub fn menu_bar(ctx: &MenuContext) -> Vec<MenuSpec> {
                 MenuEntry::Standard(StandardItem::SelectAll),
             ],
         },
-        MenuSpec { title: "View", entries: vec![future("Switch Channel…")] },
+        MenuSpec { title: "View", entries: vec![future("Switch Channel…"), action("Toggle Member List", Action::ToggleMemberList)] },
         MenuSpec {
             title: "Plugins",
             entries: vec![
@@ -486,6 +490,11 @@ mod tests {
             .position(|e| matches!(e, MenuEntry::Action { action: Action::HideApp, .. }))
             .expect("Hide Discard");
         assert!(services < hide, "Services comes before Hide Discard");
+    }
+
+    #[test]
+    fn view_menu_contains_the_member_list_toggle() {
+        assert_eq!(actions_in("View"), [("Toggle Member List".to_string(), Action::ToggleMemberList)]);
     }
 
     #[test]

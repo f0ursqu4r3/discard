@@ -61,12 +61,19 @@ impl Default for PanelWidths {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WindowState {
     /// `None` until a window position was saved.
     pub bounds: Option<Bounds>,
     pub panels: PanelWidths,
+    pub member_list_visible: bool,
     pub last_read: BTreeMap<String, String>,
+}
+
+impl Default for WindowState {
+    fn default() -> Self {
+        Self { bounds: None, panels: PanelWidths::default(), member_list_visible: true, last_read: BTreeMap::new() }
+    }
 }
 
 /// A state file on disk. A missing or bad file gives defaults.
@@ -114,6 +121,11 @@ impl StateStore {
             },
             ..self.state.clone()
         })
+    }
+
+    /// Save whether the member list is visible.
+    pub fn set_member_list_visible(&mut self, visible: bool) -> Result<(), String> {
+        self.save(WindowState { member_list_visible: visible, ..self.state.clone() })
     }
 
     /// Save the last read message for a channel.
@@ -164,8 +176,8 @@ fn render(state: &WindowState) -> String {
         ));
     }
     text.push_str(&format!(
-        "\n[layout]\nchannel_list_width = {:?}\nmember_list_width = {:?}\n",
-        state.panels.channel_list, state.panels.member_list
+        "\n[layout]\nchannel_list_width = {:?}\nmember_list_width = {:?}\nmember_list_visible = {}\n",
+        state.panels.channel_list, state.panels.member_list, state.member_list_visible
     ));
     if !state.last_read.is_empty() {
         let values: toml::Table = state.last_read.iter().map(|(key, value)| (key.clone(), toml::Value::String(value.clone()))).collect();
@@ -205,6 +217,7 @@ fn read_state(table: &toml::Table) -> WindowState {
     WindowState {
         last_read,
         bounds,
+        member_list_visible: layout.and_then(|l| l.get("member_list_visible")).and_then(toml::Value::as_bool).unwrap_or(true),
         panels: PanelWidths {
             channel_list: width("channel_list_width"),
             member_list: width("member_list_width"),
@@ -233,6 +246,25 @@ mod tests {
         assert_eq!(store.state().panels.channel_list, 240.0);
         assert_eq!(store.state().bounds, None);
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn member_list_visibility_persists_and_bad_values_default_to_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        let mut store = StateStore::open(&path);
+        assert!(store.state().member_list_visible);
+        store.set_panels(PanelWidths { channel_list: 300.0, member_list: 366.0 }).unwrap();
+        store.set_member_list_visible(false).unwrap();
+        let hidden = StateStore::open(&path).state();
+        assert!(!hidden.member_list_visible);
+        assert_eq!(hidden.panels, PanelWidths { channel_list: 300.0, member_list: 366.0 });
+        store.set_member_list_visible(true).unwrap();
+        let shown = StateStore::open(&path).state();
+        assert!(shown.member_list_visible);
+        assert_eq!(shown.panels, hidden.panels);
+        fs::write(&path, "[layout]\nmember_list_visible = \"no\"\n").unwrap();
+        assert!(StateStore::open(&path).state().member_list_visible);
     }
 
     #[test]

@@ -37,6 +37,7 @@ impl Confirm {
 pub(crate) enum Plan {
     OpenSettings(SettingsPage),
     CancelTurn,
+    ToggleMemberList,
     /// End the process now.
     Perform(Confirm),
     /// Show the confirm notice in the main window.
@@ -103,6 +104,7 @@ pub(crate) fn plan(
     let ending = match action {
         Action::ArchiveChannel | Action::CopyMessageText | Action::CopyCode | Action::CopyChannelName | Action::CopyDiff | Action::CopyToolInput | Action::CopyToolOutput | Action::CopyAgentName | Action::CopyProjectName | Action::CopyProjectPath => return Plan::Nothing,
         Action::OpenSettings => return Plan::OpenSettings(SettingsPage::General),
+        Action::ToggleMemberList => return Plan::ToggleMemberList,
         Action::OpenAgentSettings => return Plan::OpenSettings(SettingsPage::Agents),
         Action::OpenWorkspaceSettings => return Plan::OpenSettings(SettingsPage::Workspaces),
         Action::ReviewPlugins | Action::ShowPluginErrors => {
@@ -230,6 +232,9 @@ pub fn run_on(action: Action, target: Option<ContextTarget>, cx: &mut App) {
                     cx.notify();
                 });
             }
+        }
+        Plan::ToggleMemberList => {
+            if let Some(view) = state.view { view.update(cx, |view, cx| view.toggle_member_list(cx)); }
         }
         Plan::Perform(ending) => perform(ending, cx),
         Plan::Ask(ending) => ask(ending, state, cx),
