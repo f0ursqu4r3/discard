@@ -2,6 +2,7 @@
 //! The app writes this file. `settings.toml` is for the user to edit.
 
 use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
 
 /// The default width of the channel list and the member list.
 pub const DEFAULT_PANEL_WIDTH: f32 = 240.0;
@@ -60,11 +61,12 @@ impl Default for PanelWidths {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct WindowState {
     /// `None` until a window position was saved.
     pub bounds: Option<Bounds>,
     pub panels: PanelWidths,
+    pub last_read: BTreeMap<String, String>,
 }
 
 /// A state file on disk. A missing or bad file gives defaults.
@@ -88,7 +90,7 @@ impl StateStore {
     }
 
     pub fn state(&self) -> WindowState {
-        self.state
+        self.state.clone()
     }
 
     /// Save the window position and size.
@@ -99,7 +101,7 @@ impl StateStore {
         }
         self.save(WindowState {
             bounds: Some(bounds),
-            ..self.state
+            ..self.state.clone()
         })
     }
 
@@ -110,8 +112,15 @@ impl StateStore {
                 channel_list: clamp_width(panels.channel_list),
                 member_list: clamp_width(panels.member_list),
             },
-            ..self.state
+            ..self.state.clone()
         })
+    }
+
+    /// Save the last read message for a channel.
+    pub fn set_last_read(&mut self, channel: &str, message: &str) -> Result<(), String> {
+        let mut next = self.state.clone();
+        next.last_read.insert(channel.to_owned(), message.to_owned());
+        self.save(next)
     }
 
     /// Write `next`. On error, the file and the in-memory state stay as they were.
@@ -158,6 +167,11 @@ fn render(state: &WindowState) -> String {
         "\n[layout]\nchannel_list_width = {:?}\nmember_list_width = {:?}\n",
         state.panels.channel_list, state.panels.member_list
     ));
+    if !state.last_read.is_empty() {
+        let values: toml::Table = state.last_read.iter().map(|(key, value)| (key.clone(), toml::Value::String(value.clone()))).collect();
+        text.push_str("\n[last_read]\n");
+        text.push_str(&toml::to_string(&values).expect("strings serialize"));
+    }
     text
 }
 
@@ -187,7 +201,9 @@ fn read_state(table: &toml::Table) -> WindowState {
             .and_then(|l| number(l.get(key)))
             .map_or(DEFAULT_PANEL_WIDTH, clamp_width)
     };
+    let last_read = table.get("last_read").and_then(toml::Value::as_table).map(|values| values.iter().filter_map(|(key, value)| value.as_str().filter(|s| !s.is_empty()).map(|s| (key.clone(), s.to_owned()))).collect()).unwrap_or_default();
     WindowState {
+        last_read,
         bounds,
         panels: PanelWidths {
             channel_list: width("channel_list_width"),
@@ -217,6 +233,17 @@ mod tests {
         assert_eq!(store.state().panels.channel_list, 240.0);
         assert_eq!(store.state().bounds, None);
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn read_markers_persist_and_bad_values_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        let mut store = StateStore::open(&path);
+        store.set_last_read("general", "message-1").unwrap();
+        assert_eq!(StateStore::open(&path).state().last_read.get("general").map(String::as_str), Some("message-1"));
+        fs::write(&path, "[last_read]\ngeneral = 42\n").unwrap();
+        assert!(StateStore::open(&path).state().last_read.is_empty());
     }
 
     #[test]

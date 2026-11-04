@@ -6,6 +6,15 @@ use crate::event::{AgentStatus, ApprovalId, Event};
 use crate::model::{Block, ChannelId, Message, MessageId, Role};
 use crate::timeline::{ApprovalPrompt, Timeline};
 
+/// Whether a message continues the previous author's group.
+pub fn continues_group(previous: Option<Role>, role: Role) -> bool { previous == Some(role) }
+
+/// The first unread agent message after a known read marker.
+pub fn first_unread_index(messages: &[Message], last_read: Option<&str>) -> Option<usize> {
+    let marker = messages.iter().position(|message| Some(message.id.0.as_str()) == last_read)?;
+    messages.iter().enumerate().skip(marker + 1).find(|(_, message)| message.role == Role::Agent).map(|(index, _)| index)
+}
+
 /// From the UI to the engine.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
@@ -154,6 +163,25 @@ pub struct SlotLabels {
 mod tests {
     use super::*;
     use crate::event::{EventId, EventKind, SessionId};
+
+    #[test]
+    fn unread_starts_after_known_read_message_and_only_counts_agents() {
+        let channel = ChannelId::new();
+        let make = |id: &str, role| Message { id: MessageId(id.into()), channel_id: channel.clone(), role, blocks: vec![] };
+        let messages = vec![make("a", Role::User), make("b", Role::Agent), make("c", Role::Agent)];
+        assert_eq!(first_unread_index(&[], Some("a")), None);
+        assert_eq!(first_unread_index(&messages, None), None);
+        assert_eq!(first_unread_index(&messages, Some("missing")), None);
+        assert_eq!(first_unread_index(&messages, Some("a")), Some(1));
+        assert_eq!(first_unread_index(&messages, Some("c")), None);
+    }
+
+    #[test]
+    fn groups_only_adjacent_matching_roles() {
+        assert!(!continues_group(None, Role::Agent));
+        assert!(continues_group(Some(Role::Agent), Role::Agent));
+        assert!(!continues_group(Some(Role::User), Role::Agent));
+    }
 
     fn ev(kind: EventKind) -> Update {
         Update::Event(Box::new(Event { id: EventId::new(), session_id: SessionId::new(), seq: 1, kind, raw: None }))

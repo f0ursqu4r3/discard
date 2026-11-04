@@ -14,7 +14,7 @@ use discard_core::action::{MenuTarget, PluginMenuItem};
 use discard_core::context_menu::{ContextTarget, context_menu, message_text};
 use gpui_kit::component::menu::ContextMenuExt as _;
 use crate::shared::{PROTECTED_DEFAULT, Shared, hsla};
-use discard_core::ui_state::{Command, SlotLabels, UiState, Update};
+use discard_core::ui_state::{Command, SlotLabels, UiState, Update, continues_group, first_unread_index};
 use discard_core::settings::SettingsStore;
 use discard_lua::theme::{ProtectedPalette, ThemeOverrides, protected_palette, protected_accent, MIN_CONTRAST};
 use discard_core::diff::{classify_line, looks_like_unified_diff, LineKind};
@@ -72,6 +72,8 @@ pub struct DiscardView {
     scales: (f32, f32),
     window_state: Arc<Mutex<StateStore>>,
     _composer_events: Subscription,
+    _window_activation: Subscription,
+    initial_history_len: usize,
     /// A Quit or relaunch that waits for the user to confirm it. The main window draws the notice.
     pending_confirm: Option<Confirm>,
     archived: bool,
@@ -99,6 +101,14 @@ impl DiscardView {
         let placeholder = format!("Message #{}", data.channel_name);
         let composer = cx.new(|cx| TextareaState::new(window, cx).placeholder(placeholder).auto_grow(1, 6).submit_on_enter(true));
         let scroller = cx.new(|cx| MessageScrollerState::new(row_count(state.history().len(), state.turn_running()), cx));
+        let initial_history_len = state.history().len();
+        {
+            let mut store = window_state.lock().unwrap_or_else(|p| p.into_inner());
+            if !state.history().iter().any(|message| store.state().last_read.get(&channel_id.0) == Some(&message.id.0))
+                && let Some(last) = state.history().last() {
+                let _ = store.set_last_read(&channel_id.0, &last.id.0);
+            }
+        }
         let handle = window.window_handle();
         let bounds_store = Arc::clone(&window_state);
         cx.spawn(async move |this, cx| {
@@ -114,6 +124,7 @@ impl DiscardView {
                 }
             }
         }).detach();
+        let window_activation = cx.observe_window_activation(window, |_, _, cx| cx.notify());
         let events = cx.subscribe_in(&composer, window, |this, _, event: &InputEvent, window, cx| {
             if let InputEvent::PressEnter { shift: false, .. } = event {
                 this.send(window, cx);
@@ -205,6 +216,8 @@ impl DiscardView {
             scales: (1.0, 1.0),
             window_state,
             _composer_events: events,
+            _window_activation: window_activation,
+            initial_history_len,
             pending_confirm: None,
             archived: false,
             archive_busy: false,
@@ -687,12 +700,15 @@ impl DiscardView {
             Block::Code { language, text } => {
                 let diff = language.as_deref().is_some_and(|lang| lang.eq_ignore_ascii_case("diff") || lang.eq_ignore_ascii_case("patch"));
                 let content = if diff { self.diff_lines(text, true, cx) } else { div().child(text.clone()).into_any_element() };
-                with_menu(div().id(("code-block", index)).p(self.space(2.0)).rounded_md().bg(cx.theme().muted).font_family("Menlo").text_sm().child(content))
+                let copy = target.clone();
+                let header = h_flex().justify_between().items_center().child(language.clone().unwrap_or_else(|| "Code".into())).when_some(copy, |header, target| header.child(Button::new(("copy-code", index)).small().label("Copy").on_click(move |_, _, cx| dispatch::run_on(Action::CopyCode, Some(target.clone()), cx))));
+                with_menu(div().id(("code-block", index)).p(self.space(2.0)).rounded_md().bg(cx.theme().muted).text_sm().child(header).child(div().font_family("Menlo").child(content)))
             }
-            Block::Diff { text } => with_menu(
-                div().id(("diff-block", index)).p(self.space(2.0)).rounded_md().bg(cx.theme().muted)
-                    .font_family("Menlo").text_sm().child(self.diff_lines(text, true, cx)),
-            ),
+            Block::Diff { text } => {
+                let copy = target.clone();
+                let header = h_flex().justify_between().items_center().child("Diff").when_some(copy, |header, target| header.child(Button::new(("copy-diff", index)).small().label("Copy").on_click(move |_, _, cx| dispatch::run_on(Action::CopyDiff, Some(target.clone()), cx))));
+                with_menu(div().id(("diff-block", index)).p(self.space(2.0)).rounded_md().bg(cx.theme().muted).text_sm().child(header).child(div().font_family("Menlo").child(self.diff_lines(text, true, cx))))
+            },
             Block::ToolCall { name, input, output, .. } => {
                 let summary = discard_core::timeline::summarize_input(name, input);
                 let element = v_flex()
@@ -700,8 +716,8 @@ impl DiscardView {
                     .gap(self.space(1.0))
                     .p(self.space(2.0))
                     .rounded_md()
-                    .border_1()
-                    .border_color(cx.theme().border)
+                    .border_l_2()
+                    .border_color(cx.theme().primary)
                     .child(
                         div()
                             .text_sm()
@@ -794,23 +810,35 @@ impl DiscardView {
             .enumerate()
             .map(|(i, b)| self.render_block(b, row * 1000 + i, Some((message.id.0.as_str(), i)), cx))
             .collect();
-        h_flex()
+        let grouped = continues_group(row.checked_sub(1).and_then(|i| self.state.history().get(i)).map(|m| m.role), message.role);
+        let target = ContextTarget::Message { id: message.id.0.clone(), has_text: !message_text(&message.blocks).is_empty() };
+        let copy_target = target.clone();
+        let row_element = h_flex()
             .id(("message-row", row))
+            .relative()
+            .group("message-row")
+            .hover(|style| style.bg(cx.theme().list_hover))
             .gap(self.space(3.0))
             .px(self.space(4.0))
             .py(self.space(2.0))
             .items_start()
-            .child(Avatar::new().name(author.clone()))
+            .child(div().w(self.space(10.0)).flex_none().when(!grouped, |el| el.child(Avatar::new().name(author.clone()))))
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
                     .gap(self.space(1.0))
-                    .child(div().font_weight(FontWeight::BOLD).child(author))
+                    .when(!grouped, |col| col.child(div().font_weight(FontWeight::BOLD).child(author)))
                     .children(blocks),
             )
-            .context_menu({ let target = ContextTarget::Message { id: message.id.0.clone(), has_text: !message_text(&message.blocks).is_empty() }; menus::to_popup(context_menu(&target, &self.menu_ctx), target) })
-            .into_any_element()
+            .child(div().absolute().top_0().right_0().invisible().group_hover("message-row", |style| style.visible()).child(Button::new(("copy-message", row)).small().label("Copy").disabled(!matches!(copy_target, ContextTarget::Message { has_text: true, .. })).on_click(move |_, _, cx| dispatch::run_on(Action::CopyMessageText, Some(copy_target.clone()), cx))))
+            .context_menu(menus::to_popup(context_menu(&target, &self.menu_ctx), target));
+        let marker = self.window_state.lock().unwrap_or_else(|p| p.into_inner()).state().last_read.get(&self.channel_id).cloned();
+        let unread = first_unread_index(self.state.history(), marker.as_deref()) == Some(row);
+        let row_element = if row >= self.initial_history_len && !message.blocks.iter().any(|block| matches!(block, Block::Approval { .. })) && !cx.reduce_motion() {
+            row_element.with_animation(("message-fade", row), Animation::new(Duration::from_millis(150)), |element, delta| element.opacity(delta)).into_any_element()
+        } else { row_element.into_any_element() };
+        v_flex().when(unread, |col| col.child(h_flex().gap(self.space(2.0)).px(self.space(4.0)).items_center().text_sm().text_color(cx.theme().primary).child(div().flex_1().border_t_1().border_color(cx.theme().primary)).child("New"))).child(row_element).into_any_element()
     }
 
     fn live_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -825,28 +853,40 @@ impl DiscardView {
             .enumerate()
             .map(|(i, b)| self.render_block(b, base * 1000 + i, None, cx))
             .collect();
-        Some(
-            h_flex()
+        let grouped = continues_group(self.state.history().last().map(|message| message.role), Role::Agent);
+        let live = h_flex()
+                .id("live-message-row")
+                .hover(|style| style.bg(cx.theme().list_hover))
                 .gap(self.space(3.0))
                 .px(self.space(4.0))
                 .py(self.space(2.0))
                 .items_start()
-                .child(Avatar::new().name(self.data.agent_name.clone()))
+                .child(div().w(self.space(10.0)).flex_none().when(!grouped, |el| el.child(Avatar::new().name(self.data.agent_name.clone()))))
                 .child(
                     v_flex()
                         .flex_1()
                         .min_w_0()
                         .gap(self.space(1.0))
-                        .child(div().font_weight(FontWeight::BOLD).child(self.data.agent_name.clone()))
-                        .children(blocks),
+                        .when(!grouped, |col| col.child(div().font_weight(FontWeight::BOLD).child(self.data.agent_name.clone())))
+                        .children(blocks)
+                        .child(div().text_color(cx.theme().muted_foreground).child("▍")),
                 )
-                .into_any_element(),
-        )
+                ;
+        let reduced = self.state.live_blocks().iter().any(|block| matches!(block, Block::Approval { .. })) || cx.reduce_motion();
+        Some(if reduced { live.into_any_element() } else { live.with_animation(("live-fade", base), Animation::new(Duration::from_millis(150)), |element, delta| element.opacity(delta)).into_any_element() })
     }
 }
 
 impl Render for DiscardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if window.is_window_active() && !self.scroller.read(cx).is_scrolled_up()
+            && let Some(last) = self.state.history().last() {
+            let mut store = self.window_state.lock().unwrap_or_else(|p| p.into_inner());
+            if store.state().last_read.get(&self.channel_id) != Some(&last.id.0)
+                && let Err(error) = store.set_last_read(&self.channel_id, &last.id.0) {
+                tracing::warn!(%error, "cannot save read state");
+            }
+        }
         self.scales = self.appearance.lock().unwrap_or_else(|p| p.into_inner()).scales();
         window.set_rem_size(px(16.0 * self.scales.0));
         // Give `ui_inspect` the state plugins draw with, and revert plugins that keep failing.
