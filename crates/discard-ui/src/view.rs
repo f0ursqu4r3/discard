@@ -129,6 +129,7 @@ impl DiscardView {
             if let InputEvent::PressEnter { shift: false, .. } = event {
                 this.send(window, cx);
             }
+            if matches!(event, InputEvent::Change) { cx.notify(); }
         });
 
         // Pump engine updates into the view. `recv` is runtime-agnostic, so GPUI's executor can await it.
@@ -922,6 +923,8 @@ impl Render for DiscardView {
         }).scrollbar(true).with_jump_button_renderer(|button| button.label("Jump to latest"));
         let running = self.state.turn_running();
         let notice = self.state.notice().map(str::to_string);
+        let composer_disabled = self.archived || self.archive_busy || self.pending_archive.is_some();
+        let can_send = may_send(composer_disabled, self.composer.read(cx).value().as_ref());
 
         let main = v_flex()
             .flex_1()
@@ -953,7 +956,13 @@ impl Render for DiscardView {
                     .items_center()
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .child(div().flex_1().child(Textarea::new(&self.composer).disabled(self.archived || self.archive_busy || self.pending_archive.is_some())))
+                    .child(div().flex_1().min_w_0().child(
+                        Textarea::new(&self.composer)
+                            .bg(cx.theme().muted)
+                            .border_color(cx.theme().border)
+                            .p(self.space(2.0))
+                            .disabled(composer_disabled),
+                    ))
                     .child(if running {
                         Button::new("cancel")
                             .danger()
@@ -967,7 +976,7 @@ impl Render for DiscardView {
                         Button::new("send")
                             .primary()
                             .label("Send")
-                            .disabled(self.archived || self.archive_busy || self.pending_archive.is_some())
+                            .disabled(!can_send)
                             .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
                             .into_any_element()
                     }),
