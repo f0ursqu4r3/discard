@@ -109,13 +109,22 @@ fn container<T: Styled + InteractiveElement + ParentElement>(mut d: T, e: &Eleme
     d
 }
 
-pub fn render_element(e: &Element, plugin: &str, actions: &ActionFactory, cx: &App) -> AnyElement {
+/// Draw an avatar with a presence dot and a sidebar-colored ring.
+pub(crate) fn avatar_with_status(avatar: Avatar, color: Hsla, dot_size: Pixels, cx: &App) -> impl IntoElement {
+    div().relative().child(avatar).child(
+        // Sit past the corner so the dot does not cover the initials.
+        div().absolute().bottom(px(-3.)).right(px(-3.)).size(dot_size).rounded_full()
+            .border_2().border_color(cx.theme().sidebar).bg(color),
+    )
+}
+
+pub fn render_element(e: &Element, plugin: &str, actions: &ActionFactory, dot_size: Pixels, cx: &App) -> AnyElement {
     let children = |actions: &ActionFactory| -> Vec<AnyElement> {
         e.children
             .iter()
             .map(|n| match n {
                 Node::Text(t) => div().child(t.clone()).into_any_element(),
-                Node::Element(inner) => render_element(inner, plugin, actions, cx),
+                Node::Element(inner) => render_element(inner, plugin, actions, dot_size, cx),
             })
             .collect()
     };
@@ -175,7 +184,10 @@ pub fn render_element(e: &Element, plugin: &str, actions: &ActionFactory, cx: &A
                 Some("large") => a.large(),
                 _ => a,
             };
-            a.into_any_element()
+            match text_prop(e, "status").and_then(|name| token_color(name, cx)) {
+                Some(color) => avatar_with_status(a, color, dot_size, cx).into_any_element(),
+                None => a.into_any_element(),
+            }
         }
         Tag::Badge => Badge::new().count(num(e, "count").unwrap_or(0.0).max(0.0) as usize).into_any_element(),
         Tag::Divider => div().h(px(1.)).w_full().bg(cx.theme().colors.border).into_any_element(),

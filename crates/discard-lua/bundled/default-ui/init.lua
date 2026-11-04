@@ -39,13 +39,12 @@ discard.slot("member_list", function(state)
     { "text", "AGENTS", size = "xs", color = "muted_foreground" },
     {
       "row", gap = 8, align = "center",
-      { "avatar", name = agent.name, size = "small" },
+      { "avatar", name = agent.name, size = "small", status = STATUS_COLOR[status] or "border" },
       {
         "column",
         { "text", agent.name },
         {
           "row", gap = 4, align = "center",
-          { "dot", color = STATUS_COLOR[status] or "border" },
           { "text", (STATUS_LABEL[status] or status) .. " · " .. agent.provider, size = "xs", color = "muted_foreground" },
         },
       },

@@ -90,7 +90,7 @@ pub enum ElementError {
     MissingTag,
     #[error("unknown tag `{0}`")]
     UnknownTag(String),
-    #[error("property `{0}` has an unsupported type")]
+    #[error("property `{0}` has an invalid value or unsupported type")]
     BadProp(String),
     #[error("child {0} is not an element or a string")]
     BadChild(usize),
@@ -146,6 +146,11 @@ fn element(value: &Value, depth: usize, nodes: &mut usize) -> Result<Element, El
             }
             _ => return Err(ElementError::BadProp(key)),
         };
+        if tag == Tag::Avatar && key == "status"
+            && !matches!(&prop, Prop::Text(name) if crate::theme::COLOR_TOKENS.contains(&name.as_str()))
+        {
+            return Err(ElementError::BadProp(key));
+        }
         props.insert(key, prop);
     }
 
@@ -177,6 +182,17 @@ mod tests {
         let lua = Lua::new();
         let v: Value = lua.load(src).eval().unwrap();
         from_lua(&v)
+    }
+
+    #[test]
+    fn avatar_status_accepts_theme_colors_and_rejects_other_values() {
+        for color in crate::theme::COLOR_TOKENS {
+            let e = eval(&format!(r#"return {{ "avatar", status = "{color}" }}"#)).unwrap();
+            assert_eq!(e.props["status"], Prop::Text((*color).into()));
+        }
+        for value in [r#""sparkle""#, "42", "true"] {
+            assert_eq!(eval(&format!(r#"return {{ "avatar", status = {value} }}"#)), Err(ElementError::BadProp("status".into())));
+        }
     }
 
     #[test]

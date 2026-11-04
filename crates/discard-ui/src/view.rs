@@ -373,7 +373,7 @@ impl DiscardView {
                 this.update(cx, |view, cx| view.plugin_action(&plugin, &action, cx));
             })
         });
-        Some(render_element(&rendered.element, &rendered.plugin, &factory, cx))
+        Some(render_element(&rendered.element, &rendered.plugin, &factory, self.space(2.5), cx))
     }
 
     fn plugin_action(&mut self, plugin: &str, action: &str, cx: &mut Context<Self>) {
@@ -687,7 +687,9 @@ impl DiscardView {
                     .gap(self.space(2.0))
                     .items_center()
                     .context_menu({ let target=ContextTarget::Agent {id:self.data.agent_id.clone(),name:self.data.agent_name.clone()}; menus::to_popup(context_menu(&target,&self.menu_ctx),target) })
-                    .child(Avatar::new().name(self.data.agent_name.clone()).small())
+                    .child(crate::plugin_element::avatar_with_status(
+                        Avatar::new().name(self.data.agent_name.clone()).small(), status_color(status, cx), self.space(2.5), cx,
+                    ))
                     .child(
                         v_flex()
                             .child(div().child(self.data.agent_name.clone()))
@@ -697,7 +699,6 @@ impl DiscardView {
                                     .items_center()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(div().size_2().rounded_full().bg(status_color(status, cx)))
                                     .child(format!("{} · {}", status_label(status), self.data.provider_label)),
                             ),
                     ),

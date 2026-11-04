@@ -79,13 +79,20 @@ mod tests {
             ("working", "Working · claude", "success"),
             ("awaiting_approval", "Waiting for approval · claude", "warning"),
             ("idle", "Idle · claude", "muted_foreground"),
+            ("offline", "Offline · claude", "border"),
+            ("unknown", "unknown · claude", "border"),
         ] {
             let r = m.render_slot("member_list", &state(0, status)).unwrap();
             let mut t = Vec::new();
             texts(&r.element, &mut t);
             assert!(t.contains(&"Claude".to_string()) && t.contains(&label.to_string()), "{t:?}");
-            let json = serde_json::to_string(&r.element).unwrap();
-            assert!(json.contains(&format!("\"color\":\"{color}\"")), "{status}: {json}");
+            let Node::Element(row) = &r.element.children[1] else { panic!() };
+            let Node::Element(avatar) = &row.children[0] else { panic!() };
+            assert_eq!(avatar.tag, Tag::Avatar);
+            assert_eq!(avatar.props.get("status"), Some(&Prop::Text(color.into())));
+            let Node::Element(column) = &row.children[1] else { panic!() };
+            let Node::Element(line) = &column.children[1] else { panic!() };
+            assert!(line.children.iter().all(|node| !matches!(node, Node::Element(e) if e.tag == Tag::Dot)));
         }
     }
 

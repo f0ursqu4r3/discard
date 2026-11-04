@@ -115,7 +115,7 @@ pub fn tag_props(tag: Tag) -> &'static [(&'static str, &'static str, &'static st
             ("on_click", "string", "The id of an action registered with `discard.action`."),
             ("variant", "\"primary\" | \"danger\" | \"success\" | \"outline\"", "Button style."),
         ],
-        Tag::Avatar => &[("name", "string", "Name used for the initials."), ("size", "\"small\" | \"large\"", "Avatar size.")],
+        Tag::Avatar => &[("name", "string", "Name used for the initials."), ("size", "\"small\" | \"large\"", "Avatar size."), ("status", "color token", "Presence dot color, by theme token name.")],
         Tag::Badge => &[("count", "number", "The number to show.")],
         Tag::Divider | Tag::Spacer => &[],
         Tag::Dot => &[("color", "color token", "Dot color.")],
@@ -129,6 +129,11 @@ pub fn luau_types() -> String {
     out.push_str(&format!("export type Tag = {tags}\n"));
     out.push_str("-- An element is `{ tag, prop = value, child, child, ... }`. Children are elements or strings.\n");
     out.push_str("export type Element = { [number]: any, [string]: any }\n\n");
+    out.push_str("-- Avatar properties:\n");
+    for (prop, ty, doc) in tag_props(Tag::Avatar) {
+        out.push_str(&format!("-- {prop}: {ty} — {doc}\n"));
+    }
+    out.push('\n');
     out.push_str("declare discard: {\n");
     for (name, ty, doc) in CONSTANTS {
         out.push_str(&format!("\t-- {doc}\n\t{name}: {ty},\n"));
@@ -325,6 +330,12 @@ mod tests {
         for tag in Tag::ALL {
             assert!(t.contains(&format!("\"{}\"", tag.name())), "missing tag {}", tag.name());
         }
+    }
+
+    #[test]
+    fn avatar_status_is_in_generated_docs() {
+        assert!(markdown().contains("`status` (color token)"));
+        assert!(luau_types().contains("status: color token"));
     }
 
     #[test]
