@@ -340,7 +340,7 @@ impl DiscardView {
     fn plugin_slot(&mut self, slot: &'static str, cx: &mut Context<Self>) -> Option<AnyElement> {
         let state = self.state.slot_state(&self.labels());
         let key = state.to_string();
-        let rendered = match self.slot_cache.get(slot) {
+        let mut rendered = match self.slot_cache.get(slot) {
             Some((cached_key, rendered)) if *cached_key == key => rendered.clone(),
             _ => {
                 let rendered = self.plugins.manager().lock().unwrap_or_else(|p| p.into_inner()).render_slot(slot, &state);
@@ -348,6 +348,12 @@ impl DiscardView {
                 rendered
             }
         }?;
+        // The member slot is a panel, so its root must track the divider width.
+        // A plugin can still set widths on elements inside that root.
+        if slot == "member_list" {
+            rendered.element.props.remove("width");
+            rendered.element.props.insert("grow".into(), discard_lua::element::Prop::Bool(true));
+        }
         let this = cx.entity();
         let plugin = rendered.plugin.clone();
         let factory: ActionFactory = Rc::new(move |action: &str| {
@@ -578,6 +584,11 @@ impl DiscardView {
     }
 
     fn channel_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let marker = self.window_state.lock().unwrap_or_else(|p| p.into_inner()).state().last_read.get(&self.channel_id).cloned();
+        let unread = server_has_unread(self.state.history(), marker.as_deref());
+        let pending = self.state.pending_approvals();
+        let selected = true;
+        let hover = cx.theme().sidebar_accent;
         v_flex()
             .w_full()
             .h_full()
@@ -596,15 +607,24 @@ impl DiscardView {
                     .child(self.data.project_name.clone()),
             )
             .child(
-                div().p(self.space(2.0)).child(
+                div().relative().p(self.space(2.0))
+                    .when(unread && pending == 0, |row| row.child(
+                        div().absolute().left_0().top_1_2().size(self.space(1.5)).rounded_full().bg(cx.theme().sidebar_foreground)
+                    ))
+                    .child(
                     h_flex()
                         .id("channel-row")
+                        .w_full()
+                        .items_center()
+                        .gap(self.space(2.0))
                         .px(self.space(2.0))
                         .py(self.space(1.0))
                         .rounded_md()
-                        .bg(cx.theme().sidebar_accent)
-                        .text_color(cx.theme().sidebar_accent_foreground)
-                        .child(format!("# {}", self.data.channel_name))
+                        .when(selected, |row| row.bg(cx.theme().sidebar_accent).text_color(cx.theme().sidebar_accent_foreground))
+                        .when(!selected, |row| row.hover(move |style| style.bg(hover)))
+                        .child(div().flex_1().min_w_0().when(unread, |name| name.font_weight(FontWeight::BOLD)).child(format!("# {}", self.data.channel_name)))
+                        .when(pending > 0, |row| row.child(div().px(self.space(1.0)).rounded_full().bg(cx.theme().warning)
+                            .text_color(cx.theme().warning_foreground).text_xs().child(pending.to_string())))
                         .context_menu({ let target = ContextTarget::Channel { id: self.channel_id.clone() }; menus::to_popup(context_menu(&target, &self.menu_ctx), target) }),
                 ),
             )

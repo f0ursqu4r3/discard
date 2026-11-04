@@ -34,7 +34,7 @@ discard.slot("member_list", function(state)
   local agent = state.agent
   local status = agent.status
   return {
-    "column", gap = 8, padding = 12, width = 240, height_full = true, border_left = true,
+    "column", gap = 8, padding = 12, grow = true, height_full = true, border_left = true,
     bg = "sidebar", color = "sidebar_foreground",
     { "text", "AGENTS", size = "xs", color = "muted_foreground" },
     {
