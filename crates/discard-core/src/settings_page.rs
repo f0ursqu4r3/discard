@@ -6,6 +6,17 @@ pub const LABEL_DEFAULT_PROVIDER: &str = "Default provider";
 pub const LABEL_CONFIRM_WHILE_WORKING: &str = "Confirm while working";
 pub const LABEL_REOPEN_LAST_CHANNEL: &str = "Reopen last channel";
 
+pub const LABEL_THEME_SOURCE: &str = "Theme source";
+pub const LABEL_LIGHT_THEME: &str = "Light theme";
+pub const LABEL_DARK_THEME: &str = "Dark theme";
+pub const LABEL_ONE_THEME: &str = "Use one theme for both";
+pub const LABEL_EDIT_COPY: &str = "Edit a copy";
+pub const LABEL_ACTIVE_THEME_FILE: &str = "Active theme file";
+pub const LABEL_GHOSTTY_CONFIG: &str = "Ghostty config";
+pub const LABEL_IGNORE_PLUGIN_THEMES: &str = "Ignore plugin themes";
+pub const LABEL_PLUGIN_OVERRIDES: &str = "Plugin overrides";
+pub const LABEL_SWATCHES: &str = "Swatches";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
     General,
@@ -53,7 +64,7 @@ impl SettingsPage {
 
     /// Only available pages have a body. The others show as "Soon".
     pub fn is_available(self) -> bool {
-        matches!(self, SettingsPage::General | SettingsPage::Plugins)
+        matches!(self, SettingsPage::General | SettingsPage::Appearance | SettingsPage::Plugins)
     }
 
     /// Field labels the search also matches. Pages with no body have none.
@@ -64,6 +75,7 @@ impl SettingsPage {
                 LABEL_CONFIRM_WHILE_WORKING,
                 LABEL_REOPEN_LAST_CHANNEL,
             ],
+            SettingsPage::Appearance => &[LABEL_THEME_SOURCE, LABEL_LIGHT_THEME, LABEL_DARK_THEME, LABEL_ONE_THEME, LABEL_EDIT_COPY, LABEL_ACTIVE_THEME_FILE, LABEL_GHOSTTY_CONFIG, LABEL_IGNORE_PLUGIN_THEMES, LABEL_PLUGIN_OVERRIDES, LABEL_SWATCHES],
             SettingsPage::Plugins => &[
                 "Safe mode",
                 "Review",
@@ -106,7 +118,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_has_ten_pages_and_two_are_available() {
+    fn all_has_ten_pages_and_three_are_available() {
         assert_eq!(SettingsPage::all().len(), 10);
         let available: Vec<_> = SettingsPage::all()
             .iter()
@@ -115,7 +127,7 @@ mod tests {
             .collect();
         assert_eq!(
             available,
-            vec![SettingsPage::General, SettingsPage::Plugins]
+            vec![SettingsPage::General, SettingsPage::Appearance, SettingsPage::Plugins]
         );
     }
 
@@ -160,6 +172,13 @@ mod tests {
             LABEL_REOPEN_LAST_CHANNEL,
         ] {
             assert!(search(label).contains(&SettingsPage::General), "{label}");
+        }
+    }
+
+    #[test]
+    fn appearance_fields_are_searchable() {
+        for label in ["Theme source", "Light theme", "Dark theme", "Use one theme for both", "Edit a copy", "Active theme file", "Ghostty config", "Ignore plugin themes", "Plugin overrides", "Swatches"] {
+            assert!(search(label).contains(&SettingsPage::Appearance), "{label}");
         }
     }
 

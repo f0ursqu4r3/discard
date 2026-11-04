@@ -98,6 +98,15 @@ pub fn map(colors: &ThemeColors) -> UiColors {
     }
 }
 
+/// The 16 palette colors, then background, foreground, and selection, each with a label.
+/// Unset palette colors use Ghostty's defaults.
+pub fn swatches(colors: &ThemeColors) -> Vec<(String, Rgb)> {
+    let mut result: Vec<_> = (0..16).map(|n| (n.to_string(), colors.palette[n].unwrap_or_else(|| default_palette(n)))).collect();
+    let ui = map(colors);
+    result.extend([("background".into(), ui.background), ("foreground".into(), ui.foreground), ("selection".into(), ui.selection)]);
+    result
+}
+
 fn default_palette(n: usize) -> Rgb {
     let value = DEFAULT_PALETTE[n];
     Rgb {
@@ -129,6 +138,17 @@ palette = 3=#ffff00
 palette = 4=#0000ff
 palette = 8=#999999
 ";
+
+    #[test]
+    fn swatches_include_defaults_and_theme_colors() {
+        let c = colors("palette = 1=#123456\nbackground = #010203\n");
+        let s = swatches(&c);
+        assert_eq!(s.len(), 19);
+        assert_eq!(s[0], ("0".into(), rgb(0x1d, 0x1f, 0x21)));
+        assert_eq!(s[1], ("1".into(), rgb(0x12, 0x34, 0x56)));
+        assert_eq!(s[16], ("background".into(), rgb(1, 2, 3)));
+        assert_eq!(s[18].1, map(&c).selection);
+    }
 
     #[test]
     fn plain_tokens_copy_the_theme() {

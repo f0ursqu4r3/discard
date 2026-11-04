@@ -209,6 +209,11 @@ impl AppearanceState {
         &self.live.resolved().theme_name
     }
 
+    /// The colors of the active theme file, before mapping.
+    pub fn colors(&self) -> &discard_core::ghostty::file::ThemeColors {
+        &self.live.resolved().colors
+    }
+
     pub fn problems(&self) -> &[ThemeProblem] {
         &self.live.resolved().problems
     }

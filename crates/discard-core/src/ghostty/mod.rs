@@ -3,6 +3,7 @@
 
 pub mod bundled;
 pub mod color;
+pub mod copy;
 pub mod file;
 pub mod live;
 pub mod lookup;

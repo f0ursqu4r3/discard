@@ -126,6 +126,17 @@ impl PluginManager {
         merged
     }
 
+    /// Each theme token a running plugin sets, with the plugin that wins it. Sorted by token.
+    pub fn theme_sources(&self) -> Vec<(String, String)> {
+        let mut sources = std::collections::BTreeMap::new();
+        for entry in self.plugins.iter().filter(|e| e.handle.status() == Status::Running) {
+            for token in entry.info.theme.token_names() {
+                sources.insert(token, entry.info.manifest.name.clone());
+            }
+        }
+        sources.into_iter().collect()
+    }
+
     pub fn run_action(&mut self, plugin: &str, id: &str) -> Result<(), PluginError> {
         let entry = self
             .plugins
@@ -336,6 +347,16 @@ mod tests {
         assert!(matches!(m.status("themed"), Some(Status::Terminated(_))));
         assert_eq!(m.theme().color("primary"), None);
         assert!(m.errors().contains_key("themed"));
+    }
+
+    #[test]
+    fn theme_sources_use_last_running_plugin_for_each_token() {
+        let mut m = manager();
+        m.load(plugin("a", UI, "discard.theme({ primary = \"#111111\", border = \"#222222\" })")).unwrap();
+        m.load(plugin("b", UI, "discard.theme({ primary = \"#333333\" }) discard.slot(\"s\", function() while true do end end)")).unwrap();
+        assert_eq!(m.theme_sources(), vec![("border".into(), "a".into()), ("primary".into(), "b".into())]);
+        m.render_slot("s", &json!({}));
+        assert_eq!(m.theme_sources(), vec![("border".into(), "a".into()), ("primary".into(), "a".into())]);
     }
 
     #[test]

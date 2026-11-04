@@ -156,7 +156,7 @@ fixes these keys: Cmd+Q, Cmd+, , Cmd+W, Cmd+H, Cmd+M, Cmd+C, Cmd+V, Cmd+X, Cmd+A
 - **Search.** The box above the list filters pages. A page stays if its title or one of its field labels contains the
   text. Case and spaces do not matter, so "rollback" finds "Roll back". "No matching settings" shows when nothing
   matches.
-- **Pages that work now:** General and Plugins. The other eight show greyed with a "Soon" tag. You cannot select them.
+- **Pages that work now:** General, Appearance, and Plugins. The other seven show greyed with a "Soon" tag. You cannot select them.
   They stay in the list when the search matches their title.
 
 ### General page
@@ -166,6 +166,22 @@ fixes these keys: Cmd+Q, Cmd+, , Cmd+W, Cmd+H, Cmd+M, Cmd+C, Cmd+V, Cmd+X, Cmd+A
 - **Confirm while working.** A switch. A note says it confirms Quit and the Safe Mode relaunch while a turn runs.
 - **Reopen last channel.** Greyed, "Soon". It has no setting yet.
 - A write error shows inline, and stays until the next change succeeds.
+
+### Appearance page
+
+From top to bottom:
+
+- **Theme source.** Default, Ghostty, or Custom. A line under the buttons says what each one does.
+- **Themes.** Shown only for Custom. Pick a light theme and a dark theme from searchable lists. Discard switches
+  between them with the system appearance. Turn on "Use one theme for both" to pick one theme. The lists group
+  themes as Yours, Ghostty, and Bundled. A name in an earlier group hides the same name in a later one.
+- **The active theme.** Its name and origin, with an "Edit a copy" button. The button copies the theme to
+  `$DISCARD_HOME/themes` and opens the copy in the default editor. It never overwrites an existing copy. A theme
+  given as an absolute path opens as it is. Under the name are the theme file path and the Ghostty config path.
+- **Swatches.** The 16 palette colors, then background, foreground, and selection.
+- **Ignore plugin themes.** Keeps the theme colors above, whatever plugins ask for.
+- **Plugin overrides.** Each theme token a plugin sets, with the plugin that wins it. Later plugins win.
+- Theme problems and write errors show at the top of the page.
 
 ### Plugins page
 
@@ -254,9 +270,9 @@ and the engine runs for it. A Mac app usually stays open with no window. Discard
 - After the first write to a file that could not be parsed, the "file" problem disappears. Discard does not tell you
   that the old text is now in `settings.toml.invalid`.
 - You cannot change any key yet. The keymap is in code.
-- Plugin menu items, context menus, and the Providers, Agents, and Appearance pages arrive in M8. The Keybindings,
+- Plugin menu items, context menus, and the Providers and Agents pages arrive in M8. The Keybindings,
   Memory, Workspaces, Logs, and Advanced pages arrive in M9. See `PLAN.md`.
-- Plugin-declared settings are not built. `settings.toml` holds only `version` and `general`. Unknown keys stay in the
+- Plugin-declared settings are not built. `settings.toml` holds `version`, `general`, and `appearance`. Unknown keys stay in the
   file, but nothing reads them.
 - The "Soon" sidebar rows and the greyed menu items have no tooltip.
 - The menu bar, the keys, the confirm notice, the relaunch, the single Settings window, and the Plugins page were

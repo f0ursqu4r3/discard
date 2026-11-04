@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub struct Shared {
+    pub discard_home: std::path::PathBuf,
     pub plugins: Arc<PluginService>,
     pub load_report: Rc<LoadReport>,
     pub settings: Arc<Mutex<SettingsStore>>,

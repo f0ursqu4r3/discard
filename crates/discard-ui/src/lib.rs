@@ -56,6 +56,7 @@ pub fn run(
             std::sync::Arc::new(std::sync::Mutex::new(state))
         };
         let shared = Shared {
+            discard_home,
             plugins,
             load_report: std::rc::Rc::new(load_report),
             settings,

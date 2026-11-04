@@ -515,6 +515,11 @@ impl PluginService {
         serde_json::json!({"state": state, "slots": slots})
     }
 
+    /// See `PluginManager::theme_sources`.
+    pub fn theme_sources(&self) -> Vec<(String, String)> {
+        self.manager.lock().unwrap_or_else(|p| p.into_inner()).theme_sources()
+    }
+
     pub fn manager(&self) -> &Arc<Mutex<PluginManager>> {
         &self.manager
     }

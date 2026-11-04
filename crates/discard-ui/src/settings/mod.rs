@@ -1,5 +1,6 @@
 //! The Settings window: a second OS window with a sidebar, a search box, and one page at a time.
 
+mod appearance;
 mod general;
 mod plugins;
 
@@ -42,6 +43,8 @@ pub struct SettingsView {
     query: String,
     /// The last error from a General page change. `None` after a change succeeds.
     general_error: Option<String>,
+    appearance_error: Option<String>,
+    pickers: appearance::Pickers,
     /// Review IDs where the user switched on "trust future edits".
     trusted: HashSet<String>,
     _search_events: Subscription,
@@ -100,12 +103,15 @@ impl SettingsView {
         })
         .detach();
 
+        let pickers = appearance::Pickers::new(&shared, window, cx);
         Self {
             shared,
             page,
             search,
             query: String::new(),
             general_error: None,
+            appearance_error: None,
+            pickers,
             trusted: HashSet::new(),
             _search_events: events,
         }
@@ -181,9 +187,10 @@ impl SettingsView {
             })
     }
 
-    fn content(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let body = match self.page {
             SettingsPage::General => general::render(self, cx),
+            SettingsPage::Appearance => appearance::render(self, window, cx),
             SettingsPage::Plugins => plugins::render(self, cx),
             _ => div()
                 .text_color(cx.theme().muted_foreground)
@@ -210,13 +217,13 @@ impl SettingsView {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(self.sidebar(cx))
-            .child(self.content(cx))
+            .child(self.content(window, cx))
     }
 }
 
@@ -335,6 +342,11 @@ mod tests {
         for entry in entries {
             assert_eq!(entry.clickable, entry.page.is_available());
         }
+    }
+
+    #[test]
+    fn appearance_search_finds_a_clickable_page() {
+        assert_eq!(sidebar_entries("theme source"), vec![SidebarEntry { page: SettingsPage::Appearance, clickable: true }]);
     }
 
     #[test]

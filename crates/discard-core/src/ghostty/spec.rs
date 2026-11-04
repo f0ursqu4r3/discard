@@ -49,6 +49,23 @@ impl ThemeSpec {
         }
     }
 
+    /// The same spec with another light theme. A single theme becomes a pair.
+    pub fn with_light(&self, name: &str) -> ThemeSpec {
+        ThemeSpec::Pair { light: name.into(), dark: self.name_for(Appearance::Dark).into() }
+    }
+    /// The same spec with another dark theme. A single theme becomes a pair.
+    pub fn with_dark(&self, name: &str) -> ThemeSpec {
+        ThemeSpec::Pair { light: self.name_for(Appearance::Light).into(), dark: name.into() }
+    }
+    /// One theme for both, the one that applies to `appearance`.
+    pub fn as_single(&self, appearance: Appearance) -> ThemeSpec {
+        ThemeSpec::Single(self.name_for(appearance).into())
+    }
+    /// A light and dark pair. A single theme is used for both.
+    pub fn as_pair(&self) -> ThemeSpec {
+        ThemeSpec::Pair { light: self.name_for(Appearance::Light).into(), dark: self.name_for(Appearance::Dark).into() }
+    }
+
     /// The value as Ghostty writes it.
     pub fn to_value(&self) -> String {
         match self {
@@ -67,6 +84,17 @@ mod tests {
             light: light.to_string(),
             dark: dark.to_string(),
         }
+    }
+
+    #[test]
+    fn editing_and_converting_specs_preserves_the_other_name() {
+        let one = ThemeSpec::Single("Old".into());
+        assert_eq!(one.with_light("New"), pair("New", "Old"));
+        assert_eq!(one.with_dark("New"), pair("Old", "New"));
+        assert_eq!(one.as_pair(), pair("Old", "Old"));
+        let two = pair("Light", "Dark");
+        assert_eq!(two.as_single(Appearance::Dark), ThemeSpec::Single("Dark".into()));
+        assert_eq!(two.as_single(Appearance::Light), ThemeSpec::Single("Light".into()));
     }
 
     #[test]

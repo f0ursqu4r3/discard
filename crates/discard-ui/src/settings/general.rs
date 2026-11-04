@@ -22,7 +22,7 @@ fn issue_lines(issues: &[SettingsIssue]) -> Vec<String> {
 }
 
 /// Write one change. The store reads the file again first, because `apply` does not check for edits made outside the window.
-fn apply_change(store: &mut SettingsStore, change: Change) -> Result<(), String> {
+pub(super) fn apply_change(store: &mut SettingsStore, change: Change) -> Result<(), String> {
     store.reload_if_changed();
     store.apply(change).map_err(|e| e.to_string())
 }
