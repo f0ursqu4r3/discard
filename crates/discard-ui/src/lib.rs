@@ -17,7 +17,9 @@ use appearance::AppearanceState;
 use discard_core::ghostty::live::LiveTheme;
 use discard_core::settings::SettingsStore;
 use discard_core::ui_state::{Command, UiState, Update};
-use gpui_kit::{AppContext as _, WindowOptions, application, init, open_window};
+use gpui_kit::{AppContext as _, WindowOptions, WindowBounds, Bounds, point, size, px, application, init, open_window};
+use discard_core::window_state::{StateStore, Bounds as SavedBounds};
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 /// Starts a process that runs Discard again after this one exits. The argument is the new safe-mode state.
@@ -55,6 +57,14 @@ pub fn run(
             appearance::apply(&state, cx);
             std::sync::Arc::new(std::sync::Mutex::new(state))
         };
+        let window_state = Arc::new(Mutex::new(StateStore::open(&discard_home.join("state.toml"))));
+        let saved = window_state.lock().unwrap_or_else(|p| p.into_inner()).state().bounds;
+        let displays: Vec<SavedBounds> = cx.displays().iter().map(|display| {
+            let b = display.bounds();
+            SavedBounds { x: f32::from(b.origin.x), y: f32::from(b.origin.y), width: f32::from(b.size.width), height: f32::from(b.size.height) }
+        }).collect();
+        let window_bounds = saved.filter(|b| b.is_restorable(&displays)).map(|b| WindowBounds::Windowed(Bounds::new(point(px(b.x), px(b.y)), size(px(b.width), px(b.height)))));
+        let options = WindowOptions { window_bounds, ..Default::default() };
         let shared = Shared {
             discard_home,
             plugins,
@@ -65,10 +75,10 @@ pub fn run(
             plugin_notice: std::sync::Arc::new(std::sync::Mutex::new(None)),
         };
         cx.set_global(shared.clone());
-        let (main_window, main_view) = open_window(WindowOptions::default(), cx, move |window, cx| {
+        let (main_window, main_view) = open_window(options, cx, move |window, cx| {
             // The red close button ends the app, so it follows the Quit confirm rule. `false` keeps the window open.
             window.on_window_should_close(cx, |_, cx| dispatch::main_window_should_close(cx));
-            cx.new(|cx| DiscardView::new(ViewInit { data, shared, state, commands, updates }, window, cx))
+            cx.new(|cx| DiscardView::new(ViewInit { data, shared, state, commands, updates, window_state }, window, cx))
         })
         .expect("failed to open the main window");
         cx.set_global(dispatch::MainWindow { handle: main_window, view: main_view.downgrade() });

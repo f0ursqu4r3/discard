@@ -186,13 +186,18 @@ impl AppearanceState {
         if !live_changed && !plugins_changed {
             return false;
         }
+        let old_scales = self.scales();
         self.plugin_theme = plugin_theme.clone();
         self.ignore_plugins = settings.ignore_plugin_themes;
         let (effective, radius) = compute(&self.live, &self.plugin_theme, self.ignore_plugins);
-        let changed = effective != self.effective || radius != self.radius;
+        let changed = effective != self.effective || radius != self.radius || old_scales != self.scales();
         self.effective = effective;
         self.radius = radius;
         changed
+    }
+
+    pub fn scales(&self) -> (f32, f32) {
+        scales(self.plugin_theme.font_scale(), self.plugin_theme.spacing_scale(), self.ignore_plugins)
     }
 
     pub fn effective(&self) -> &UiColors {
@@ -221,6 +226,12 @@ impl AppearanceState {
     /// The theme the protected surfaces use for their palette.
     pub fn protected_overrides(&self) -> ThemeOverrides {
         as_overrides(&self.effective)
+    }
+}
+
+fn scales(font: Option<f32>, spacing: Option<f32>, ignore: bool) -> (f32, f32) {
+    if ignore { (1.0, 1.0) } else {
+        (font.unwrap_or(1.0).clamp(0.8, 1.5), spacing.unwrap_or(1.0).clamp(0.5, 2.0))
     }
 }
 
@@ -346,6 +357,13 @@ mod tests {
         let mut overrides = ThemeOverrides::default();
         overrides.set_color(token, value).unwrap();
         overrides
+    }
+
+    #[test]
+    fn scale_defaults_ignore_and_clamps() {
+        assert_eq!(scales(None, None, false), (1.0, 1.0));
+        assert_eq!(scales(Some(1.5), Some(2.0), true), (1.0, 1.0));
+        assert_eq!(scales(Some(9.0), Some(0.1), false), (1.5, 0.5));
     }
 
     #[test]

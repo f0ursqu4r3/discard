@@ -75,6 +75,8 @@ impl SettingsView {
             .reload_if_changed();
         let plugins = shared.plugins.clone();
         let epoch = shared.plugin_epoch.clone();
+        let appearance = shared.appearance.clone();
+        let mut seen_scales = appearance.lock().unwrap_or_else(|p| p.into_inner()).scales();
         let mut seen_epoch = epoch.load(Ordering::SeqCst);
         let mut seen_pending = plugins.pending().len();
         cx.spawn(async move |this, cx| {
@@ -86,7 +88,9 @@ impl SettingsView {
                     .reload_if_changed();
                 let now_epoch = epoch.load(Ordering::SeqCst);
                 let now_pending = plugins.pending().len();
-                let plugins_changed = now_epoch != seen_epoch || now_pending != seen_pending;
+                let now_scales = appearance.lock().unwrap_or_else(|p| p.into_inner()).scales();
+                let plugins_changed = now_epoch != seen_epoch || now_pending != seen_pending || now_scales != seen_scales;
+                seen_scales = now_scales;
                 seen_epoch = now_epoch;
                 seen_pending = now_pending;
                 let alive = this
@@ -197,14 +201,15 @@ impl SettingsView {
                 .child("Soon")
                 .into_any_element(),
         };
+        let spacing = self.shared.appearance.lock().unwrap_or_else(|p| p.into_inner()).scales().1;
         v_flex()
             .id("settings-content")
             .flex_1()
             .min_w_0()
             .h_full()
             .overflow_y_scroll()
-            .p_6()
-            .gap_4()
+            .p(px(24.0 * spacing))
+            .gap(px(16.0 * spacing))
             .child(
                 div()
                     .text_xl()
@@ -218,6 +223,8 @@ impl SettingsView {
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let font_scale = self.shared.appearance.lock().unwrap_or_else(|p| p.into_inner()).scales().0;
+        window.set_rem_size(px(16.0 * font_scale));
         h_flex()
             .size_full()
             .bg(cx.theme().background)

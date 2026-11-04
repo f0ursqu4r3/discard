@@ -301,7 +301,12 @@ Discard colors the windows with a Ghostty theme. A plugin theme goes on top.
 - **A theme that fails.** A missing theme, a missing Ghostty config, or a bad value falls back to the default pair.
   A bad line in a theme file is skipped. The General page lists each problem with the file and line.
 
-## Window state (not used by the window yet)
+## Window state
 
-`$DISCARD_HOME/state.toml` holds the window position and size and the two panel widths (180 to 400, default 240).
-Discard writes this file. The code is built and tested. The window does not read or write it yet.
+`$DISCARD_HOME/state.toml` stores the main window position and size and the channel and member list widths.
+Discard restores bounds that are large enough and visible on a current display. Otherwise it opens the window centered.
+Drag the dividers to resize the lists from 180 to 400 pixels. Each list defaults to 240 pixels.
+Discard saves window changes and panel widths in this file.
+
+The composer sends with Enter. Shift+Enter inserts a newline.
+Plugin theme tokens `font_scale` and `spacing_scale` adjust text and spacing. Ignore plugin themes disables both tokens.

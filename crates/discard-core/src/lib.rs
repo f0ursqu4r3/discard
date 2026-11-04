@@ -25,3 +25,4 @@ pub mod settings;
 pub mod settings_page;
 pub mod ghostty;
 pub mod window_state;
+pub mod diff;

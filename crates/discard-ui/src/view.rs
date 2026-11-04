@@ -13,7 +13,8 @@ use discard_core::action::{Action, MenuContext};
 use crate::shared::{PROTECTED_DEFAULT, Shared, hsla};
 use discard_core::ui_state::{Command, SlotLabels, UiState, Update};
 use discard_core::settings::SettingsStore;
-use discard_lua::theme::{ThemeOverrides, protected_palette};
+use discard_lua::theme::{ProtectedPalette, ThemeOverrides, protected_palette, protected_accent, MIN_CONTRAST};
+use discard_core::diff::{classify_line, looks_like_unified_diff, LineKind};
 use discard_lua::{LoadReport, PluginService, Rendered};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -23,7 +24,10 @@ use std::time::Duration;
 use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::badge::Badge;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
+use gpui_kit::component::resizable::{h_resizable, resizable_panel};
+use discard_core::window_state::{StateStore, PanelWidths, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH};
 use gpui_kit::component::text::markdown;
 use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -54,7 +58,11 @@ pub struct DiscardView {
     slot_cache: HashMap<&'static str, (String, Option<Rendered>)>,
     state: UiState,
     commands: UnboundedSender<Command>,
-    composer: Entity<InputState>,
+    composer: Entity<TextareaState>,
+    scroller: Entity<MessageScrollerState>,
+    /// Font and spacing scale from the plugin theme. Set at the start of each render.
+    scales: (f32, f32),
+    window_state: Arc<Mutex<StateStore>>,
     _composer_events: Subscription,
     /// A Quit or relaunch that waits for the user to confirm it. The main window draws the notice.
     pending_confirm: Option<Confirm>,
@@ -69,14 +77,31 @@ pub struct ViewInit {
     pub state: UiState,
     pub commands: UnboundedSender<Command>,
     pub updates: UnboundedReceiver<Update>,
+    pub window_state: Arc<Mutex<StateStore>>,
 }
 
 impl DiscardView {
     pub fn new(init: ViewInit, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let ViewInit { data, shared, state, commands, mut updates } = init;
+        let ViewInit { data, shared, state, commands, mut updates, window_state } = init;
         let Shared { plugins, load_report, plugin_epoch, plugin_notice, settings, appearance, .. } = shared;
         let placeholder = format!("Message #{}", data.channel_name);
-        let composer = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        let composer = cx.new(|cx| TextareaState::new(window, cx).placeholder(placeholder).auto_grow(1, 6).submit_on_enter(true));
+        let scroller = cx.new(|cx| MessageScrollerState::new(row_count(state.history().len(), state.turn_running()), cx));
+        let handle = window.window_handle();
+        let bounds_store = Arc::clone(&window_state);
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(500)).await;
+                if this.upgrade().is_none() { break; }
+                let result = handle.update(cx, |_, window, _| window.window_bounds().get_bounds());
+                let Ok(b) = result else { break; };
+                let bounds = discard_core::window_state::Bounds { x: f32::from(b.origin.x), y: f32::from(b.origin.y), width: f32::from(b.size.width), height: f32::from(b.size.height) };
+                let mut store = bounds_store.lock().unwrap_or_else(|p| p.into_inner());
+                if store.state().bounds != Some(bounds) && let Err(error) = store.set_bounds(bounds) {
+                    tracing::warn!(%error, "cannot save window bounds");
+                }
+            }
+        }).detach();
         let events = cx.subscribe_in(&composer, window, |this, _, event: &InputEvent, window, cx| {
             if let InputEvent::PressEnter { shift: false, .. } = event {
                 this.send(window, cx);
@@ -89,6 +114,8 @@ impl DiscardView {
                 let alive = this
                     .update(cx, |view, cx| {
                         view.state.apply(update);
+                        if should_clear_confirm(view.state.turn_running(), view.pending_confirm.is_some()) { view.pending_confirm = None; }
+                        view.sync_scroller(cx);
                         // The pending-review count comes from the poller. Here only `turn_running` can move.
                         let pending_reviews = view.menu_ctx.pending_reviews;
                         view.refresh_menus(pending_reviews, cx);
@@ -160,6 +187,9 @@ impl DiscardView {
             state,
             commands,
             composer,
+            scroller,
+            scales: (1.0, 1.0),
+            window_state,
             _composer_events: events,
             pending_confirm: None,
             menu_ctx,
@@ -198,6 +228,16 @@ impl DiscardView {
         }
     }
 
+    fn sync_scroller(&mut self, cx: &mut Context<Self>) {
+        let count = row_count(self.state.history().len(), self.state.turn_running());
+        self.scroller.update(cx, |state, cx| {
+            let old = state.item_count();
+            if count > old { state.append(count - old, cx); }
+            else if count < old { state.splice(count..old, 0, cx); }
+            if count > 0 { state.remeasure_items(count - 1..count, cx); }
+        });
+    }
+
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).value().to_string();
         let text = text.trim();
@@ -205,6 +245,7 @@ impl DiscardView {
             return;
         }
         self.state.user_sent(text);
+        self.sync_scroller(cx);
         let _ = self.commands.send(Command::Send(text.to_string()));
         self.composer.update(cx, |input, cx| input.set_value("", window, cx));
         cx.notify();
@@ -278,6 +319,8 @@ impl DiscardView {
         let mut state = self.appearance.lock().unwrap_or_else(|p| p.into_inner());
         if state.update(&settings, system, &plugin_theme) {
             appearance::apply(&state, cx);
+            // Row heights depend on the font and spacing scale.
+            self.scroller.update(cx, |scroller, cx| scroller.remeasure(cx));
             cx.notify();
         }
     }
@@ -411,14 +454,19 @@ fn status_label(status: AgentStatus) -> &'static str {
 }
 
 impl DiscardView {
+    /// `units` of GPUI's 4 px spacing step, times the spacing scale.
+    fn space(&self, units: f32) -> Pixels {
+        px(units * 4.0 * self.scales.1)
+    }
+
     fn server_rail(&self, cx: &App) -> impl IntoElement {
         v_flex()
             .w(px(72.))
             .h_full()
             .flex_none()
             .items_center()
-            .py_3()
-            .gap_2()
+            .py(self.space(3.0))
+            .gap(self.space(2.0))
             .bg(cx.theme().sidebar)
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
@@ -427,7 +475,7 @@ impl DiscardView {
 
     fn channel_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
-            .w(px(240.))
+            .w_full()
             .h_full()
             .flex_none()
             .bg(cx.theme().sidebar)
@@ -436,18 +484,18 @@ impl DiscardView {
             .border_color(cx.theme().sidebar_border)
             .child(
                 div()
-                    .px_4()
-                    .py_3()
+                    .px(self.space(4.0))
+                    .py(self.space(3.0))
                     .font_weight(FontWeight::BOLD)
                     .border_b_1()
                     .border_color(cx.theme().sidebar_border)
                     .child(self.data.project_name.clone()),
             )
             .child(
-                div().p_2().child(
+                div().p(self.space(2.0)).child(
                     h_flex()
-                        .px_2()
-                        .py_1()
+                        .px(self.space(2.0))
+                        .py(self.space(1.0))
                         .rounded_md()
                         .bg(cx.theme().sidebar_accent)
                         .text_color(cx.theme().sidebar_accent_foreground)
@@ -457,7 +505,7 @@ impl DiscardView {
             .child(div().flex_1())
             .child(
                 // Rust draws these entry points, so a plugin cannot hide the way to review plugins or open Settings.
-                v_flex().p_2().gap_2().child(
+                v_flex().p(self.space(2.0)).gap(self.space(2.0)).child(
                     Button::new("plugins-open")
                         .outline()
                         .small()
@@ -482,11 +530,11 @@ impl DiscardView {
     fn member_list(&self, cx: &App) -> impl IntoElement {
         let status = self.state.agent_status();
         v_flex()
-            .w(px(240.))
+            .w_full()
             .h_full()
             .flex_none()
-            .gap_2()
-            .p_3()
+            .gap(self.space(2.0))
+            .p(self.space(3.0))
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
             .border_l_1()
@@ -494,7 +542,7 @@ impl DiscardView {
             .child(div().text_xs().text_color(cx.theme().muted_foreground).child("AGENTS"))
             .child(
                 h_flex()
-                    .gap_2()
+                    .gap(self.space(2.0))
                     .items_center()
                     .child(Avatar::new().name(self.data.agent_name.clone()).small())
                     .child(
@@ -502,7 +550,7 @@ impl DiscardView {
                             .child(div().child(self.data.agent_name.clone()))
                             .child(
                                 h_flex()
-                                    .gap_1()
+                                    .gap(self.space(1.0))
                                     .items_center()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
@@ -516,9 +564,9 @@ impl DiscardView {
     fn header(&self, cx: &App) -> impl IntoElement {
         let pending = self.state.pending_approvals();
         h_flex()
-            .px_4()
-            .py_3()
-            .gap_3()
+            .px(self.space(4.0))
+            .py(self.space(3.0))
+            .gap(self.space(3.0))
             .items_center()
             .border_b_1()
             .border_color(cx.theme().border)
@@ -527,7 +575,7 @@ impl DiscardView {
             .when(pending > 0, |row| {
                 row.child(
                     h_flex()
-                        .gap_2()
+                        .gap(self.space(2.0))
                         .items_center()
                         .text_color(cx.theme().warning)
                         .child(Badge::new().count(pending))
@@ -536,22 +584,49 @@ impl DiscardView {
             })
     }
 
+    /// `text` one line at a time, colored by diff line kind. The added and removed colors come from the
+    /// Ghostty theme and are pushed until they stay readable on what sits behind the text:
+    /// the code block's muted fill when `on_block` is true, the window background otherwise.
+    fn diff_lines(&self, text: &str, on_block: bool, cx: &App) -> AnyElement {
+        let appearance = self.appearance.lock().unwrap_or_else(|p| p.into_inner());
+        let ui = appearance.effective();
+        let behind = if on_block { ui.muted } else { ui.background };
+        let palette = ProtectedPalette {
+            background: appearance::to_lua(behind),
+            foreground: appearance::to_lua(ui.foreground),
+            border: appearance::to_lua(ui.border),
+        };
+        let clamp = |color| hsla(protected_accent(&palette, appearance::to_lua(color), MIN_CONTRAST));
+        let (added, removed) = (clamp(ui.diff_added), clamp(ui.diff_removed));
+        let lines = text.lines().map(|line| {
+            let color = match classify_line(line) {
+                LineKind::Added => Some(added),
+                LineKind::Removed => Some(removed),
+                LineKind::Hunk => Some(cx.theme().muted_foreground),
+                LineKind::Context => None,
+            };
+            // An empty line keeps its height.
+            let shown = if line.is_empty() { " " } else { line };
+            div().when_some(color, |row, color| row.text_color(color)).child(shown.to_string())
+        });
+        v_flex().children(lines).into_any_element()
+    }
+
     fn render_block(&self, block: &Block, index: usize, cx: &mut Context<Self>) -> AnyElement {
         match block {
             Block::Markdown { text } => div().child(markdown(text.clone())).into_any_element(),
-            Block::Code { text, .. } | Block::Diff { text } => div()
-                .p_2()
-                .rounded_md()
-                .bg(cx.theme().muted)
-                .font_family("Menlo")
-                .text_sm()
-                .child(text.clone())
-                .into_any_element(),
+            Block::Code { language, text } => {
+                let diff = language.as_deref().is_some_and(|lang| lang.eq_ignore_ascii_case("diff") || lang.eq_ignore_ascii_case("patch"));
+                let content = if diff { self.diff_lines(text, true, cx) } else { div().child(text.clone()).into_any_element() };
+                div().p(self.space(2.0)).rounded_md().bg(cx.theme().muted).font_family("Menlo").text_sm().child(content).into_any_element()
+            }
+            Block::Diff { text } => div().p(self.space(2.0)).rounded_md().bg(cx.theme().muted)
+                .font_family("Menlo").text_sm().child(self.diff_lines(text, true, cx)).into_any_element(),
             Block::ToolCall { name, input, output, .. } => {
                 let summary = discard_core::timeline::summarize_input(name, input);
                 v_flex()
-                    .gap_1()
-                    .p_2()
+                    .gap(self.space(1.0))
+                    .p(self.space(2.0))
                     .rounded_md()
                     .border_1()
                     .border_color(cx.theme().border)
@@ -563,7 +638,8 @@ impl DiscardView {
                     )
                     .when_some(output.as_ref(), |col, out| {
                         let shown: String = out.chars().take(400).collect();
-                        col.child(div().text_xs().text_color(cx.theme().muted_foreground).child(shown))
+                        let content = if looks_like_unified_diff(out) { self.diff_lines(&shown, false, cx) } else { div().child(shown).into_any_element() };
+                        col.child(div().text_xs().text_color(cx.theme().muted_foreground).child(content))
                     })
                     .into_any_element()
             }
@@ -647,16 +723,16 @@ impl DiscardView {
             .map(|(i, b)| self.render_block(b, row * 1000 + i, cx))
             .collect();
         h_flex()
-            .gap_3()
-            .px_4()
-            .py_2()
+            .gap(self.space(3.0))
+            .px(self.space(4.0))
+            .py(self.space(2.0))
             .items_start()
             .child(Avatar::new().name(author.clone()))
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap_1()
+                    .gap(self.space(1.0))
                     .child(div().font_weight(FontWeight::BOLD).child(author))
                     .children(blocks),
             )
@@ -677,16 +753,16 @@ impl DiscardView {
             .collect();
         Some(
             h_flex()
-                .gap_3()
-                .px_4()
-                .py_2()
+                .gap(self.space(3.0))
+                .px(self.space(4.0))
+                .py(self.space(2.0))
                 .items_start()
                 .child(Avatar::new().name(self.data.agent_name.clone()))
                 .child(
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .gap_1()
+                        .gap(self.space(1.0))
                         .child(div().font_weight(FontWeight::BOLD).child(self.data.agent_name.clone()))
                         .children(blocks),
                 )
@@ -696,7 +772,9 @@ impl DiscardView {
 }
 
 impl Render for DiscardView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.scales = self.appearance.lock().unwrap_or_else(|p| p.into_inner()).scales();
+        window.set_rem_size(px(16.0 * self.scales.0));
         // Give `ui_inspect` the state plugins draw with, and revert plugins that keep failing.
         self.plugins.set_ui_state(self.state.slot_state(&self.labels()));
         let reverted = self.plugins.maintain();
@@ -707,7 +785,6 @@ impl Render for DiscardView {
             // Tell the Plugins page. The main window's poller runs `after_plugin_change` once more, which is harmless.
             self.plugin_epoch.fetch_add(1, Ordering::SeqCst);
         }
-        let history: Vec<Message> = self.state.history().to_vec();
         let header = match self.plugin_slot("channel_header", cx) {
             Some(element) => element,
             None => self.header(cx).into_any_element(),
@@ -719,8 +796,16 @@ impl Render for DiscardView {
         let plugin_problem_line = self.plugin_problem_line();
         let review_banner = self.review_banner();
         let confirm_notice = self.confirm_notice();
-        let rows: Vec<AnyElement> = history.iter().enumerate().map(|(i, m)| self.message_row(m, i, cx)).collect();
-        let live = self.live_row(cx);
+        let weak = cx.weak_entity();
+        let scroller = MessageScroller::new("messages", self.scroller.clone(), move |index, _, cx| {
+            weak.update(cx, |view, cx| {
+                if let Some(message) = view.state.history().get(index).cloned() {
+                    view.message_row(&message, index, cx)
+                } else {
+                    view.live_row(cx).unwrap_or_else(|| div().into_any_element())
+                }
+            }).unwrap_or_else(|_| div().into_any_element())
+        }).scrollbar(true).with_jump_button_renderer(|button| button.label("Jump to latest"));
         let running = self.state.turn_running();
         let notice = self.state.notice().map(str::to_string);
 
@@ -729,7 +814,7 @@ impl Render for DiscardView {
             .min_w_0()
             .h_full()
             .child(header)
-            .child(v_flex().id("messages").flex_1().overflow_y_scroll().py_2().children(rows).children(live))
+            .child(div().flex_1().min_h_0().child(scroller))
             .children(confirm_notice)
             .children(review_banner)
             .children(plugin_problem_line)
@@ -748,12 +833,12 @@ impl Render for DiscardView {
             })
             .child(
                 h_flex()
-                    .gap_2()
-                    .p_3()
+                    .gap(self.space(2.0))
+                    .p(self.space(3.0))
                     .items_center()
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .child(div().flex_1().child(Input::new(&self.composer)))
+                    .child(div().flex_1().child(Textarea::new(&self.composer)))
                     .child(if running {
                         Button::new("cancel")
                             .danger()
@@ -772,13 +857,51 @@ impl Render for DiscardView {
                     }),
             );
 
+        let widths = self.window_state.lock().unwrap_or_else(|p| p.into_inner()).state().panels;
+        let store = Arc::clone(&self.window_state);
+        let panels = h_resizable("main-panels")
+            .on_resize(move |state, _, cx| {
+                let sizes = state.read(cx).sizes();
+                if sizes.len() == 3 {
+                    let panels = PanelWidths { channel_list: f32::from(sizes[0]), member_list: f32::from(sizes[2]) };
+                    if let Err(error) = store.lock().unwrap_or_else(|p| p.into_inner()).set_panels(panels) {
+                        tracing::warn!(%error, "cannot save panel widths");
+                    }
+                }
+            })
+            .child(resizable_panel().size(px(widths.channel_list)).size_range(px(MIN_PANEL_WIDTH)..px(MAX_PANEL_WIDTH)).fixed().child(self.channel_list(cx)))
+            .child(resizable_panel().child(main))
+            .child(resizable_panel().size(px(widths.member_list)).size_range(px(MIN_PANEL_WIDTH)..px(MAX_PANEL_WIDTH)).fixed().child(members));
         h_flex()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(self.server_rail(cx))
-            .child(self.channel_list(cx))
-            .child(main)
-            .child(members)
+            .child(div().flex_1().min_w_0().h_full().child(panels))
+    }
+}
+
+/// The rows the message pane shows: each message, plus the live row while a turn runs.
+fn row_count(history: usize, turn_running: bool) -> usize { history + usize::from(turn_running) }
+
+/// A Quit or relaunch confirm only makes sense while a turn runs. Drop it when the turn has ended.
+fn should_clear_confirm(turn_running: bool, pending: bool) -> bool { !turn_running && pending }
+
+#[cfg(test)]
+mod tests {
+    use super::{row_count, should_clear_confirm};
+
+    #[test]
+    fn counts_history_and_live_row() {
+        assert_eq!(row_count(0, false), 0);
+        assert_eq!(row_count(3, false), 3);
+        assert_eq!(row_count(3, true), 4);
+    }
+
+    #[test]
+    fn clears_pending_confirmation_when_turn_ends() {
+        assert!(should_clear_confirm(false, true));
+        assert!(!should_clear_confirm(true, true));
+        assert!(!should_clear_confirm(false, false));
     }
 }
