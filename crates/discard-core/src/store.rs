@@ -213,6 +213,40 @@ impl Store {
         Ok(AgentConfig::from_toml(&text)?)
     }
 
+    pub fn list_agents(&self) -> Result<Vec<(AgentId, AgentConfig)>> {
+        let mut statement = self.conn.prepare("SELECT id, config_toml FROM agents ORDER BY rowid")?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        let mut agents = Vec::new();
+        for row in rows {
+            let (id, config) = row?;
+            agents.push((AgentId(id), AgentConfig::from_toml(&config)?));
+        }
+        Ok(agents)
+    }
+
+    /// The first agent that a channel of `project` uses (archived channels count) with this provider and
+    /// `plugin_write` value. Agents are never shared between projects: agent-private memory is keyed by agent.
+    pub fn find_project_agent(&self, project: &ProjectId, provider: &str, plugin_write: bool) -> Result<Option<(AgentId, AgentConfig)>> {
+        let mut statement = self.conn.prepare(
+            "SELECT a.id, a.config_toml FROM channels c JOIN agents a ON a.id = c.agent_id WHERE c.project_id = ?1 ORDER BY c.ord",
+        )?;
+        let rows = statement.query_map(params![project.0], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (id, config) = row?;
+            let config = AgentConfig::from_toml(&config)?;
+            if config.provider == provider && config.plugin_write == plugin_write {
+                return Ok(Some((AgentId(id), config)));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn update_agent(&self, id: &AgentId, cfg: &AgentConfig) -> Result<()> {
+        let updated = self.conn.execute("UPDATE agents SET config_toml = ?1 WHERE id = ?2", params![cfg.to_toml()?, id.0])?;
+        if updated == 0 { return Err(StoreError::NotFound(format!("agent {}", id.0))); }
+        Ok(())
+    }
+
     pub fn insert_channel(&self, c: &Channel) -> Result<()> {
         self.conn.execute(
             "INSERT INTO channels (id, project_id, name, agent_id, workspace_mode) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -549,6 +583,48 @@ mod tests {
         let session = SessionId::new();
         store.create_session(&session, &channel.id).unwrap();
         Fixture { store, project, agent, channel, session }
+    }
+
+    #[test]
+    fn list_agents_returns_agents_in_insert_order() {
+        let f = fixture();
+        let mut config = f.store.load_agent(&f.agent).unwrap();
+        let second = AgentId::new();
+        config.plugin_write = true;
+        f.store.insert_agent(&second, &config).unwrap();
+        let agents = f.store.list_agents().unwrap();
+        assert_eq!(agents.iter().map(|(id, _)| id).collect::<Vec<_>>(), vec![&f.agent, &second]);
+    }
+
+    #[test]
+    fn find_project_agent_matches_provider_and_plugin_write_within_the_project_only() {
+        let f = fixture();
+        let mut builder = f.store.load_agent(&f.agent).unwrap();
+        builder.plugin_write = true;
+        let builder_id = AgentId::new();
+        f.store.insert_agent(&builder_id, &builder).unwrap();
+        f.store
+            .insert_channel(&Channel { id: ChannelId::new(), project_id: f.project.id.clone(), name: "b".into(), agent_id: builder_id.clone(), workspace_mode: WorkspaceMode::MainCheckout })
+            .unwrap();
+        let found = |provider, plugin_write| f.store.find_project_agent(&f.project.id, provider, plugin_write).unwrap().map(|(id, _)| id);
+        assert_eq!(found("claude", false), Some(f.agent.clone()));
+        assert_eq!(found("claude", true), Some(builder_id));
+        assert_eq!(found("unknown", false), None);
+        // An agent that no channel of the project uses is never found, and neither is another project's agent.
+        assert!(f.store.find_project_agent(&ProjectId::new(), "claude", false).unwrap().is_none());
+        // Archived channels still count.
+        f.store.archive_channel(&f.channel.id).unwrap();
+        assert_eq!(found("claude", false), Some(f.agent.clone()));
+    }
+
+    #[test]
+    fn update_agent_replaces_the_config_and_unknown_id_is_not_found() {
+        let f = fixture();
+        let mut config = f.store.load_agent(&f.agent).unwrap();
+        config.model = Some("new-model".into());
+        f.store.update_agent(&f.agent, &config).unwrap();
+        assert_eq!(f.store.load_agent(&f.agent).unwrap(), config);
+        assert!(matches!(f.store.update_agent(&AgentId::new(), &config), Err(StoreError::NotFound(_))));
     }
 
     fn stamp(seq: &mut Sequencer, s: &SessionId, text: &str) -> Event {

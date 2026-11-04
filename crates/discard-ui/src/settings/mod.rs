@@ -3,6 +3,8 @@
 mod appearance;
 mod general;
 mod plugins;
+mod providers;
+mod agents;
 
 use crate::shared::Shared;
 use discard_core::settings_page::{SettingsPage, search};
@@ -48,6 +50,8 @@ pub struct SettingsView {
     /// Review IDs where the user switched on "trust future edits".
     trusted: HashSet<String>,
     _search_events: Subscription,
+    agent_editor: agents::Editor,
+    _agent_input_events: Vec<Subscription>,
 }
 
 impl SettingsView {
@@ -76,6 +80,8 @@ impl SettingsView {
         let plugins = shared.plugins.clone();
         let epoch = shared.plugin_epoch.clone();
         let appearance = shared.appearance.clone();
+        let provider_statuses = shared.providers.iter().map(|p| p.setup.clone()).collect::<Vec<_>>();
+        let mut seen_statuses = Vec::new();
         let mut seen_scales = appearance.lock().unwrap_or_else(|p| p.into_inner()).scales();
         let mut seen_epoch = epoch.load(Ordering::SeqCst);
         let mut seen_pending = plugins.pending().len();
@@ -89,13 +95,16 @@ impl SettingsView {
                 let now_epoch = epoch.load(Ordering::SeqCst);
                 let now_pending = plugins.pending().len();
                 let now_scales = appearance.lock().unwrap_or_else(|p| p.into_inner()).scales();
+                let statuses = provider_statuses.iter().map(|s| s.lock().unwrap_or_else(|p| p.into_inner()).clone()).collect::<Vec<_>>();
+                let providers_changed = statuses != seen_statuses;
+                seen_statuses = statuses;
                 let plugins_changed = now_epoch != seen_epoch || now_pending != seen_pending || now_scales != seen_scales;
                 seen_scales = now_scales;
                 seen_epoch = now_epoch;
                 seen_pending = now_pending;
                 let alive = this
                     .update(cx, |_, cx| {
-                        if changed || plugins_changed {
+                        if changed || plugins_changed || providers_changed {
                             cx.notify();
                         }
                     })
@@ -108,6 +117,20 @@ impl SettingsView {
         .detach();
 
         let pickers = appearance::Pickers::new(&shared, window, cx);
+        let agent_editor = agents::Editor::new(window, cx);
+        let model_events = cx.subscribe_in(&agent_editor.model, window, |this, input, event: &InputEvent, _, cx| {
+            if let InputEvent::Change = event {
+                let value = input.read(cx).value().to_string();
+                if let Some((_, _, draft)) = &mut this.agent_editor.selected { draft.model = if value.is_empty() { None } else { Some(value) }; }
+                this.agent_editor.changed(); cx.notify();
+            }
+        });
+        let prompt_events = cx.subscribe_in(&agent_editor.prompt, window, |this, input, event: &InputEvent, _, cx| {
+            if let InputEvent::Change = event {
+                if let Some((_, _, draft)) = &mut this.agent_editor.selected { draft.system_prompt = input.read(cx).value().to_string(); }
+                this.agent_editor.changed(); cx.notify();
+            }
+        });
         Self {
             shared,
             page,
@@ -118,6 +141,8 @@ impl SettingsView {
             pickers,
             trusted: HashSet::new(),
             _search_events: events,
+            agent_editor,
+            _agent_input_events: vec![model_events, prompt_events],
         }
     }
 
@@ -196,6 +221,8 @@ impl SettingsView {
             SettingsPage::General => general::render(self, cx),
             SettingsPage::Appearance => appearance::render(self, window, cx),
             SettingsPage::Plugins => plugins::render(self, cx),
+            SettingsPage::Providers => providers::render(self, cx),
+            SettingsPage::Agents => agents::render(self, cx),
             _ => div()
                 .text_color(cx.theme().muted_foreground)
                 .child("Soon")
@@ -367,7 +394,7 @@ mod tests {
                 },
                 SidebarEntry {
                     page: SettingsPage::Providers,
-                    clickable: false
+                    clickable: true
                 },
             ]
         );

@@ -1397,6 +1397,7 @@ dependencies = [
  "discard-core",
  "discard-lua",
  "gpui-kit",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

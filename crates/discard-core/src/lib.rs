@@ -2,6 +2,9 @@
 //! policy, storage, and the provider trait. No GPUI dependency.
 
 pub mod action;
+pub mod context_menu;
+pub mod provider_page;
+pub mod agent_edit;
 pub mod event;
 pub mod approval;
 pub mod turn;

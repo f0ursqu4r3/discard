@@ -69,7 +69,9 @@ pub fn ensure_workspace(store: &Store, project_dir: &Path, provider: &str, role:
     let (channel, agent) = match found {
         Some(pair) => pair,
         None => {
-            // The default agent asks before it acts.
+            let (agent_id, agent) = if let Some(existing) = store.find_project_agent(&project.id, provider, role == Role::Builder)? {
+                existing
+            } else {
             let agent = AgentConfig {
                 name: if role == Role::Builder { "Builder".to_string() } else { display_name(provider) },
                 avatar: None,
@@ -81,6 +83,8 @@ pub fn ensure_workspace(store: &Store, project_dir: &Path, provider: &str, role:
             };
             let agent_id = AgentId::new();
             store.insert_agent(&agent_id, &agent)?;
+            (agent_id, agent)
+            };
             let channel = Channel {
                 id: ChannelId::new(),
                 project_id: project.id.clone(),
@@ -150,6 +154,42 @@ mod tests {
         assert_eq!(ws.agent.provider, "claude");
         assert_eq!(ws.agent.policy, ApprovalPolicy::Ask, "the default agent asks before acting");
         assert_eq!(store.latest_session(&ws.channel.id).unwrap(), Some(ws.session_id.clone()));
+    }
+
+    #[test]
+    fn after_archiving_the_only_channel_a_new_run_reuses_the_edited_agent() {
+        let store = Store::open_in_memory().unwrap();
+        let dir = PathBuf::from("/work/my-app");
+        let first = ensure_workspace(&store, &dir, "claude", Role::Default, WorkspaceChoice::Auto).unwrap();
+        let mut config = first.agent.clone();
+        config.model = Some("edited".into());
+        store.update_agent(&first.channel.agent_id, &config).unwrap();
+        store.archive_channel(&first.channel.id).unwrap();
+        let second = ensure_workspace(&store, &dir, "claude", Role::Default, WorkspaceChoice::Auto).unwrap();
+        assert_ne!(first.channel.id, second.channel.id);
+        assert_eq!(first.channel.agent_id, second.channel.agent_id);
+        assert_eq!(second.agent.model.as_deref(), Some("edited"));
+        assert_eq!(store.list_agents().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_new_project_never_reuses_another_projects_agent() {
+        let store = Store::open_in_memory().unwrap();
+        let first = ensure_workspace(&store, &PathBuf::from("/work/one"), "claude", Role::Default, WorkspaceChoice::Auto).unwrap();
+        let second = ensure_workspace(&store, &PathBuf::from("/work/two"), "claude", Role::Default, WorkspaceChoice::Auto).unwrap();
+        assert_ne!(first.channel.agent_id, second.channel.agent_id, "agent-private memory is keyed by agent");
+        assert_eq!(store.list_agents().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn archiving_in_one_project_does_not_hand_its_agent_to_another() {
+        let store = Store::open_in_memory().unwrap();
+        let one = ensure_workspace(&store, &PathBuf::from("/work/one"), "claude", Role::Default, WorkspaceChoice::Auto).unwrap();
+        store.archive_channel(&one.channel.id).unwrap();
+        let two = ensure_workspace(&store, &PathBuf::from("/work/two"), "claude", Role::Default, WorkspaceChoice::Auto).unwrap();
+        assert_ne!(one.channel.agent_id, two.channel.agent_id);
+        let again = ensure_workspace(&store, &PathBuf::from("/work/one"), "claude", Role::Default, WorkspaceChoice::Auto).unwrap();
+        assert_eq!(again.channel.agent_id, one.channel.agent_id, "the project's own agent comes back");
     }
 
     #[test]

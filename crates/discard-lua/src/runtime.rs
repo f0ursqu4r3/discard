@@ -72,7 +72,11 @@ pub struct LoadedInfo {
     pub commands: Vec<String>,
     pub actions: Vec<String>,
     pub events: Vec<String>,
+    pub menu_items: Vec<MenuItemInfo>,
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MenuItemInfo { pub target: String, pub label: String }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HookResult {
@@ -84,6 +88,7 @@ enum Request {
     Render { slot: String, state: serde_json::Value, reply: Sender<Result<Element, PluginError>> },
     Command { name: String, args: String, reply: Sender<Result<Option<String>, PluginError>> },
     Action { id: String, reply: Sender<Result<(), PluginError>> },
+    MenuItem { index: usize, kind: String, id: String, reply: Sender<Result<(), PluginError>> },
     Hook { event: String, payload: serde_json::Value, reply: Sender<Result<HookResult, PluginError>> },
     Event { event: String, payload: serde_json::Value },
 }
@@ -177,6 +182,10 @@ impl PluginHandle {
         self.call(|reply| Request::Action { id: id.into(), reply })
     }
 
+    pub fn run_menu_item(&self, index: usize, kind: &str, id: &str) -> Result<(), PluginError> {
+        self.call(|reply| Request::MenuItem { index, kind: kind.into(), id: id.into(), reply })
+    }
+
     /// Run `pre` style hooks: the first handler that returns `{ block = true }` wins.
     pub fn hook(&self, event: &str, payload: &serde_json::Value) -> Result<HookResult, PluginError> {
         self.call(|reply| Request::Hook { event: event.into(), payload: payload.clone(), reply })
@@ -229,6 +238,8 @@ struct Vm {
     slots: Table,
     commands: Table,
     actions: Table,
+    menu_items: Table,
+    menu_info: Arc<Mutex<Vec<MenuItemInfo>>>,
     events: Table,
     deadline: Arc<AtomicU64>,
     base: Instant,
@@ -276,6 +287,16 @@ impl Vm {
     fn action(&self, id: &str) -> Result<(), PluginError> {
         let f = self.lookup(&self.actions, "action", id)?;
         self.budgeted(|| f.call::<()>(()))
+    }
+
+    fn menu_item(&self, index: usize, kind: &str, id: &str) -> Result<(), PluginError> {
+        let f = self.menu_items.raw_get::<Function>(index + 1).map_err(|_| PluginError::NotRegistered { kind: "menu item", name: index.to_string() })?;
+        self.budgeted(|| {
+            let target = self.lua.create_table()?;
+            target.set("kind", kind)?;
+            target.set("id", id)?;
+            f.call::<()>(target)
+        })
     }
 
     fn handlers(&self, event: &str) -> Vec<Function> {
@@ -538,11 +559,26 @@ fn build(
     let theme = Arc::new(Mutex::new(ThemeOverrides::default()));
     let (slots, commands, actions, events) =
         (lua.create_table().map_err(load_err)?, lua.create_table().map_err(load_err)?, lua.create_table().map_err(load_err)?, lua.create_table().map_err(load_err)?);
+    let menu_items = lua.create_table().map_err(load_err)?;
+    let menu_info = Arc::new(Mutex::new(Vec::<MenuItemInfo>::new()));
 
     let api = lua.create_table().map_err(load_err)?;
     let setup = || -> mlua::Result<()> {
         api.set("api_version", API_VERSION)?;
         let ui = caps.ui;
+
+        let menu_t = menu_items.clone();
+        let info_t = Arc::clone(&menu_info);
+        api.set("menu_item", lua.create_function(move |_, (target, label, f): (String, String, Function)| {
+            need(ui, "ui", "discard.menu_item")?;
+            if !matches!(target.as_str(), "app" | "message" | "code_block" | "channel") { return Err(mlua::Error::runtime(format!("unknown menu target `{target}`"))); }
+            if label.is_empty() || label.chars().count() > 40 || label.chars().any(char::is_control) { return Err(mlua::Error::runtime("menu label must be 1 to 40 characters with no control characters")); }
+            let mut info = info_t.lock().unwrap_or_else(|p| p.into_inner());
+            if info.len() >= 8 { return Err(mlua::Error::runtime("too many menu items (max 8)")); }
+            menu_t.raw_set(info.len() + 1, f)?;
+            info.push(MenuItemInfo { target, label });
+            Ok(())
+        })?)?;
 
         let slots_t = slots.clone();
         api.set("slot", lua.create_function(move |_, (name, f): (String, Function)| {
@@ -595,7 +631,7 @@ fn build(
     };
     setup().map_err(load_err)?;
 
-    let vm = Vm { lua, slots, commands, actions, events, deadline, base, budget: limits.call_budget };
+    let vm = Vm { lua, slots, commands, actions, menu_items, menu_info, events, deadline, base, budget: limits.call_budget };
     let source = snapshot.entry_source().map_err(|e| PluginError::Load(e.to_string()))?;
     vm.budgeted(|| vm.lua.load(source).set_name("=init.lua").exec()).map_err(|e| match e {
         PluginError::Runtime(msg) => PluginError::Load(msg),
@@ -635,6 +671,7 @@ fn worker(
         commands: names(&vm.commands),
         actions: names(&vm.actions),
         events: names(&vm.events),
+        menu_items: vm.menu_info.lock().unwrap_or_else(|p| p.into_inner()).clone(),
     };
     let _ = init_tx.send(Ok(info));
 
@@ -649,6 +686,7 @@ fn worker(
             Request::Render { slot, state, reply } => finish(&reply, vm.render(&slot, &state), status, queue),
             Request::Command { name, args, reply } => finish(&reply, vm.command(&name, &args), status, queue),
             Request::Action { id, reply } => finish(&reply, vm.action(&id), status, queue),
+            Request::MenuItem { index, kind, id, reply } => finish(&reply, vm.menu_item(index, &kind, &id), status, queue),
             Request::Hook { event, payload, reply } => finish(&reply, vm.hook(&event, &payload), status, queue),
             Request::Event { event, payload } => match vm.event(&event, &payload, &manifest.name) {
                 Err(e) => {

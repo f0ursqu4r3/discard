@@ -125,6 +125,24 @@ fn run_app(
     // The engine and provider processes run on tokio. GPUI owns the main thread.
     let runtime = tokio::runtime::Runtime::new()?;
     let _enter = runtime.enter();
+    let mut provider_checks = Vec::new();
+    let mut providers = Vec::new();
+    for id in discard_core::bootstrap::PROVIDERS {
+        let provider = provider_for(id)?;
+        let setup = Arc::new(Mutex::new(None));
+        providers.push(discard_ui::ProviderInfo { id: (*id).into(), matrix: provider.capabilities().clone(), setup: setup.clone() });
+        provider_checks.push(((*id).to_string(), provider, setup));
+    }
+    let handle = runtime.handle().clone();
+    let recheck: discard_ui::Recheck = Arc::new(move |id| {
+        if let Some((_, provider, setup)) = provider_checks.iter().find(|(name, _, _)| name == id) {
+            *lock(setup) = None;
+            let provider = provider.clone();
+            let setup = setup.clone();
+            handle.spawn(async move { let status = provider.check_setup().await; *lock(&setup) = Some(status); });
+        }
+    });
+    for id in discard_core::bootstrap::PROVIDERS { recheck(id); }
 
     // Memory: markdown files are the source of truth. The FTS index can always be rebuilt from them.
     let memory_store = Arc::new(MemoryStore::open(&data_dir.join("memory"), &data_dir.join("memory-index.db"))?);
@@ -165,6 +183,7 @@ fn run_app(
     let (commands_tx, commands_rx) = mpsc::unbounded_channel();
     let (updates_tx, updates_rx) = mpsc::unbounded_channel();
 
+    let git_workspace = Arc::new(GitWorkspace::new(&data_dir.join("worktrees"), Arc::clone(&store)));
     let engine = Engine {
         store: Arc::clone(&store),
         agent_id: workspace.channel.agent_id.clone(),
@@ -172,7 +191,7 @@ fn run_app(
         memory: Some(memory),
         plugin_write: workspace.agent.plugin_write,
         workspace_mode: workspace.channel.workspace_mode,
-        workspace: Some(Arc::new(GitWorkspace::new(&data_dir.join("worktrees"), Arc::clone(&store)))),
+        workspace: Some(git_workspace.clone()),
         observer: Some(Arc::new(plugin_events::PluginEvents::new(Arc::clone(&manager)))),
         channel_name: workspace.channel.name.clone(),
         provider: provider_for(&workspace.agent.provider)?,
@@ -194,12 +213,17 @@ fn run_app(
         },
         plugins,
         load_report,
-        UiState::new(workspace.channel.id, history),
+        UiState::new(workspace.channel.id.clone(), history),
         commands_tx,
         updates_rx,
         settings,
         data_dir.to_path_buf(),
         relaunch,
+        git_workspace,
+        workspace.channel.id,
+        providers,
+        recheck,
+        store,
     );
     Ok(())
 }

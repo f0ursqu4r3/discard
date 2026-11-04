@@ -4,6 +4,10 @@
 /// A user command that menus, keys, and banners all dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Action {
+    ArchiveChannel,
+    CopyMessageText,
+    CopyCode,
+    CopyChannelName,
     OpenSettings,
     Quit,
     CancelTurn,
@@ -28,6 +32,10 @@ impl Action {
     /// Stable identifier, safe to use in a keymap or a deep link.
     pub fn id(self) -> &'static str {
         match self {
+            Action::ArchiveChannel => "archive_channel",
+            Action::CopyMessageText => "copy_message_text",
+            Action::CopyCode => "copy_code",
+            Action::CopyChannelName => "copy_channel_name",
             Action::OpenSettings => "open_settings",
             Action::Quit => "quit",
             Action::CancelTurn => "cancel_turn",
@@ -49,6 +57,10 @@ impl Action {
 
     pub fn all() -> &'static [Action] {
         &[
+            Action::ArchiveChannel,
+            Action::CopyMessageText,
+            Action::CopyCode,
+            Action::CopyChannelName,
             Action::OpenSettings,
             Action::Quit,
             Action::CancelTurn,
@@ -63,7 +75,27 @@ impl Action {
             Action::CloseWindow,
         ]
     }
+
+    pub fn needs_target(self) -> bool {
+        matches!(self, Self::CopyMessageText | Self::CopyCode | Self::CopyChannelName)
+    }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuTarget { App, Message, CodeBlock, Channel }
+
+impl MenuTarget {
+    pub fn id(self) -> &'static str {
+        match self { Self::App => "app", Self::Message => "message", Self::CodeBlock => "code_block", Self::Channel => "channel" }
+    }
+
+    pub fn parse(id: &str) -> Option<Self> {
+        [Self::App, Self::Message, Self::CodeBlock, Self::Channel].into_iter().find(|target| target.id() == id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginMenuItem { pub plugin: String, pub index: usize, pub target: MenuTarget, pub label: String }
 
 /// A menu item with no backend yet. It shows greyed, tagged "Soon", with no handler.
 #[derive(Debug, PartialEq, Eq)]
@@ -74,7 +106,6 @@ pub struct FutureItem {
 
 pub const FUTURE_ITEMS: &[FutureItem] = &[
     FutureItem { label: "New Channel…", tooltip: "Creating a channel from the menu is coming soon." },
-    FutureItem { label: "Archive Channel…", tooltip: "Archiving a channel is coming soon." },
     FutureItem { label: "Switch Channel…", tooltip: "Switching channels from the menu is coming soon." },
     FutureItem { label: "Discard Documentation", tooltip: "The documentation is coming soon." },
 ];
@@ -92,6 +123,7 @@ pub enum StandardItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuEntry {
+    Plugin { plugin: String, index: usize, label: String },
     Action { label: String, action: Action, checked: bool, enabled: bool },
     Standard(StandardItem),
     Future(&'static FutureItem),
@@ -111,6 +143,16 @@ pub struct MenuContext {
     pub safe_mode: bool,
     pub turn_running: bool,
     pub pending_reviews: usize,
+    pub archived: bool,
+    pub plugin_items: Vec<PluginMenuItem>,
+}
+
+pub(crate) fn append_plugin_items(entries: &mut Vec<MenuEntry>, ctx: &MenuContext, target: MenuTarget) {
+    let items: Vec<_> = ctx.plugin_items.iter().filter(|item| item.target == target).collect();
+    if !items.is_empty() {
+        entries.push(MenuEntry::Separator);
+        entries.extend(items.into_iter().map(|item| MenuEntry::Plugin { plugin: item.plugin.clone(), index: item.index, label: format!("{} ({})", item.label, item.plugin) }));
+    }
 }
 
 fn action(label: &str, action: Action) -> MenuEntry {
@@ -132,7 +174,7 @@ pub fn menu_bar(ctx: &MenuContext) -> Vec<MenuSpec> {
     } else {
         format!("Review Plugins ({})…", ctx.pending_reviews)
     };
-    vec![
+    let mut menus = vec![
         MenuSpec {
             title: "Discard",
             entries: vec![
@@ -151,7 +193,7 @@ pub fn menu_bar(ctx: &MenuContext) -> Vec<MenuSpec> {
             title: "File",
             entries: vec![
                 future("New Channel…"),
-                future("Archive Channel…"),
+                MenuEntry::Action { label: "Archive Channel…".into(), action: Action::ArchiveChannel, checked: false, enabled: !ctx.turn_running && !ctx.archived },
                 MenuEntry::Separator,
                 action("Close Window", Action::CloseWindow),
                 MenuEntry::Separator,
@@ -200,7 +242,10 @@ pub fn menu_bar(ctx: &MenuContext) -> Vec<MenuSpec> {
             entries: vec![action("Minimize", Action::Minimize), action("Zoom", Action::Zoom)],
         },
         MenuSpec { title: "Help", entries: vec![future("Discard Documentation")] },
-    ]
+    ];
+    let plugins = menus.iter_mut().find(|menu| menu.title == "Plugins").expect("Plugins menu exists");
+    append_plugin_items(&mut plugins.entries, ctx, MenuTarget::App);
+    menus
 }
 
 /// Default key bindings. GPUI adds no window or app keys of its own, so Cmd+W, Cmd+H, and Cmd+M are listed here.
@@ -255,6 +300,7 @@ mod tests {
     fn every_action_appears_in_the_menu_bar() {
         let entries = all_entries(&MenuContext::default());
         for action in Action::all() {
+            if action.needs_target() { continue; }
             assert!(
                 entries.iter().any(|e| matches!(e, MenuEntry::Action { action: a, .. } if a == action)),
                 "{action:?} missing from the menu bar"
@@ -268,6 +314,41 @@ mod tests {
             assert_eq!(Action::from_id(action.id()), Some(*action));
         }
         assert_eq!(Action::from_id("nope"), None);
+    }
+
+    #[test]
+    fn archive_channel_is_enabled_only_when_idle_and_not_archived() {
+        assert!(find_action(&MenuContext::default(), Action::ArchiveChannel).2);
+        assert!(!find_action(&MenuContext { turn_running: true, ..Default::default() }, Action::ArchiveChannel).2);
+        assert!(!find_action(&MenuContext { archived: true, ..Default::default() }, Action::ArchiveChannel).2);
+    }
+
+    #[test]
+    fn menu_target_ids_round_trip() {
+        for target in [MenuTarget::App, MenuTarget::Message, MenuTarget::CodeBlock, MenuTarget::Channel] {
+            assert_eq!(MenuTarget::parse(target.id()), Some(target));
+        }
+        assert_eq!(MenuTarget::parse("diff"), None);
+    }
+
+    #[test]
+    fn targeted_actions_are_the_copy_actions_and_stay_out_of_the_menu_bar() {
+        for action in Action::all() {
+            assert_eq!(action.needs_target(), matches!(action, Action::CopyMessageText | Action::CopyCode | Action::CopyChannelName));
+        }
+    }
+
+    #[test]
+    fn plugin_items_follow_the_rust_items_in_the_plugins_menu() {
+        let ctx = MenuContext { plugin_items: vec![
+            PluginMenuItem { plugin: "notes".into(), index: 0, target: MenuTarget::App, label: "Pin".into() },
+            PluginMenuItem { plugin: "notes".into(), index: 1, target: MenuTarget::App, label: "Other".into() },
+            PluginMenuItem { plugin: "notes".into(), index: 2, target: MenuTarget::Message, label: "Hidden".into() },
+        ], ..Default::default() };
+        let menu = menu_bar(&ctx).into_iter().find(|m| m.title == "Plugins").unwrap();
+        assert_eq!(menu.entries.len(), 7);
+        assert_eq!(menu.entries[4], MenuEntry::Separator);
+        assert_eq!(menu.entries[5], MenuEntry::Plugin { plugin: "notes".into(), index: 0, label: "Pin (notes)".into() });
     }
 
     #[test]
@@ -297,7 +378,7 @@ mod tests {
     #[test]
     fn future_items_are_in_the_menu_as_future_entries() {
         let entries = all_entries(&MenuContext::default());
-        assert_eq!(FUTURE_ITEMS.len(), 4);
+        assert_eq!(FUTURE_ITEMS.len(), 3);
         for item in FUTURE_ITEMS {
             assert!(
                 entries.iter().any(|e| matches!(e, MenuEntry::Future(f) if f.label == item.label)),

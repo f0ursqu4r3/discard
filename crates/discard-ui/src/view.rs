@@ -10,6 +10,9 @@ use crate::appearance::{self, AppearanceState};
 use crate::plugin_element::{ActionFactory, render_element};
 use crate::problems::{problem_count, problem_lines, problem_summary};
 use discard_core::action::{Action, MenuContext};
+use discard_core::action::{MenuTarget, PluginMenuItem};
+use discard_core::context_menu::{ContextTarget, context_menu, message_text};
+use gpui_kit::component::menu::ContextMenuExt as _;
 use crate::shared::{PROTECTED_DEFAULT, Shared, hsla};
 use discard_core::ui_state::{Command, SlotLabels, UiState, Update};
 use discard_core::settings::SettingsStore;
@@ -29,10 +32,12 @@ use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerStat
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use discard_core::window_state::{StateStore, PanelWidths, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH};
 use gpui_kit::component::text::markdown;
-use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+
+fn may_send(archived: bool, text: &str) -> bool { !archived && !text.trim().is_empty() }
 
 /// Static labels the window shows. The engine owns the real data.
 #[derive(Debug, Clone)]
@@ -66,6 +71,10 @@ pub struct DiscardView {
     _composer_events: Subscription,
     /// A Quit or relaunch that waits for the user to confirm it. The main window draws the notice.
     pending_confirm: Option<Confirm>,
+    archived: bool,
+    archive_busy: bool,
+    pending_archive: Option<Vec<String>>,
+    channel_id: String,
     /// The state the installed menu bar was built for. A change installs it again.
     menu_ctx: MenuContext,
 }
@@ -83,7 +92,7 @@ pub struct ViewInit {
 impl DiscardView {
     pub fn new(init: ViewInit, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let ViewInit { data, shared, state, commands, mut updates, window_state } = init;
-        let Shared { plugins, load_report, plugin_epoch, plugin_notice, settings, appearance, .. } = shared;
+        let Shared { plugins, load_report, plugin_epoch, plugin_notice, settings, appearance, channel_id, .. } = shared;
         let placeholder = format!("Message #{}", data.channel_name);
         let composer = cx.new(|cx| TextareaState::new(window, cx).placeholder(placeholder).auto_grow(1, 6).submit_on_enter(true));
         let scroller = cx.new(|cx| MessageScrollerState::new(row_count(state.history().len(), state.turn_running()), cx));
@@ -172,6 +181,8 @@ impl DiscardView {
             safe_mode: load_report.safe_mode,
             turn_running: state.turn_running(),
             pending_reviews: plugins.pending().len(),
+            plugin_items: menu_items(&plugins),
+            ..Default::default()
         };
         menus::install(&menu_ctx, cx);
 
@@ -192,12 +203,30 @@ impl DiscardView {
             window_state,
             _composer_events: events,
             pending_confirm: None,
+            archived: false,
+            archive_busy: false,
+            pending_archive: None,
+            channel_id: channel_id.0,
             menu_ctx,
         }
     }
 
     pub(crate) fn turn_running(&self) -> bool {
         self.state.turn_running()
+    }
+
+    pub(crate) fn archived(&self) -> bool { self.archived }
+    pub(crate) fn archive_busy(&self) -> bool { self.archive_busy }
+    pub(crate) fn set_archive_busy(&mut self, busy: bool, cx: &mut Context<Self>) { self.archive_busy = busy; cx.notify(); }
+    pub(crate) fn set_archived(&mut self, cx: &mut Context<Self>) {
+        self.archived = true;
+        self.pending_archive = None;
+        self.refresh_menus(self.menu_ctx.pending_reviews, cx);
+        cx.notify();
+    }
+    pub(crate) fn set_pending_archive(&mut self, pending: Option<Vec<String>>, cx: &mut Context<Self>) { self.pending_archive = pending; cx.notify(); }
+    pub(crate) fn resolve_copy(&self, target: &discard_core::context_menu::ContextTarget) -> Option<String> {
+        discard_core::context_menu::resolve_copy(self.state.history(), &self.data.channel_name, target)
     }
 
     /// Show `text` in the main window's notice line. The next send clears it.
@@ -221,6 +250,8 @@ impl DiscardView {
             safe_mode: self.load_report.safe_mode,
             turn_running: self.state.turn_running(),
             pending_reviews,
+            archived: self.archived,
+            plugin_items: menu_items(&self.plugins),
         };
         if ctx != self.menu_ctx {
             menus::install(&ctx, cx);
@@ -241,7 +272,7 @@ impl DiscardView {
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).value().to_string();
         let text = text.trim();
-        if text.is_empty() || self.state.turn_running() {
+        if !may_send(self.archived || self.archive_busy || self.pending_archive.is_some(), text) || self.state.turn_running() {
             return;
         }
         self.state.user_sent(text);
@@ -398,6 +429,16 @@ impl DiscardView {
         )
     }
 
+    fn archive_notice(&self) -> Option<AnyElement> {
+        if self.archived {
+            return Some(h_flex().mx_4().mb_2().child(Button::new("archive-relaunch").label("Relaunch").on_click(|_, _, cx| dispatch::relaunch_same_mode(cx))).into_any_element());
+        }
+        let items = self.pending_archive.as_ref()?;
+        Some(v_flex().mx_4().mb_2().gap_2().child("Archiving will delete these items:").children(items.iter().cloned().map(|item| div().child(item))).child(h_flex().gap_2()
+            .child(Button::new("archive-cancel").label("Cancel").on_click(|_, _, cx| dispatch::cancel_archive(cx)))
+            .child(Button::new("archive-confirm").danger().label("Archive and delete").on_click(|_, _, cx| dispatch::confirm_archive(cx)))).into_any_element())
+    }
+
     /// One Rust-drawn line when plugins have problems. Plugins cannot hide or replace it.
     /// The list itself is on the Plugins page in Settings.
     fn plugin_problem_line(&self) -> Option<AnyElement> {
@@ -442,6 +483,10 @@ fn status_color(status: AgentStatus, cx: &App) -> Hsla {
         AgentStatus::Idle => cx.theme().muted_foreground,
         AgentStatus::Offline => cx.theme().border,
     }
+}
+
+fn menu_items(plugins: &PluginService) -> Vec<PluginMenuItem> {
+    plugins.manager().lock().unwrap_or_else(|p| p.into_inner()).menu_items().into_iter().filter_map(|(plugin, index, item)| Some(PluginMenuItem { plugin, index, target: MenuTarget::parse(&item.target)?, label: item.label })).collect()
 }
 
 fn status_label(status: AgentStatus) -> &'static str {
@@ -494,12 +539,14 @@ impl DiscardView {
             .child(
                 div().p(self.space(2.0)).child(
                     h_flex()
+                        .id("channel-row")
                         .px(self.space(2.0))
                         .py(self.space(1.0))
                         .rounded_md()
                         .bg(cx.theme().sidebar_accent)
                         .text_color(cx.theme().sidebar_accent_foreground)
-                        .child(format!("# {}", self.data.channel_name)),
+                        .child(format!("# {}", self.data.channel_name))
+                        .context_menu({ let target = ContextTarget::Channel { id: self.channel_id.clone() }; menus::to_popup(context_menu(&target, &self.menu_ctx), target) }),
                 ),
             )
             .child(div().flex_1())
@@ -612,13 +659,14 @@ impl DiscardView {
         v_flex().children(lines).into_any_element()
     }
 
-    fn render_block(&self, block: &Block, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn render_block(&self, block: &Block, index: usize, target: Option<ContextTarget>, cx: &mut Context<Self>) -> AnyElement {
         match block {
             Block::Markdown { text } => div().child(markdown(text.clone())).into_any_element(),
             Block::Code { language, text } => {
                 let diff = language.as_deref().is_some_and(|lang| lang.eq_ignore_ascii_case("diff") || lang.eq_ignore_ascii_case("patch"));
                 let content = if diff { self.diff_lines(text, true, cx) } else { div().child(text.clone()).into_any_element() };
-                div().p(self.space(2.0)).rounded_md().bg(cx.theme().muted).font_family("Menlo").text_sm().child(content).into_any_element()
+                let element = div().id(("code-block", index)).p(self.space(2.0)).rounded_md().bg(cx.theme().muted).font_family("Menlo").text_sm().child(content);
+                if let Some(target) = target { element.context_menu(menus::to_popup(context_menu(&target, &self.menu_ctx), target)).into_any_element() } else { element.into_any_element() }
             }
             Block::Diff { text } => div().p(self.space(2.0)).rounded_md().bg(cx.theme().muted)
                 .font_family("Menlo").text_sm().child(self.diff_lines(text, true, cx)).into_any_element(),
@@ -720,9 +768,10 @@ impl DiscardView {
             .blocks
             .iter()
             .enumerate()
-            .map(|(i, b)| self.render_block(b, row * 1000 + i, cx))
+            .map(|(i, b)| self.render_block(b, row * 1000 + i, Some(ContextTarget::CodeBlock { message_id: message.id.0.clone(), block: i }), cx))
             .collect();
         h_flex()
+            .id(("message-row", row))
             .gap(self.space(3.0))
             .px(self.space(4.0))
             .py(self.space(2.0))
@@ -736,6 +785,7 @@ impl DiscardView {
                     .child(div().font_weight(FontWeight::BOLD).child(author))
                     .children(blocks),
             )
+            .context_menu({ let target = ContextTarget::Message { id: message.id.0.clone(), has_text: !message_text(&message.blocks).is_empty() }; menus::to_popup(context_menu(&target, &self.menu_ctx), target) })
             .into_any_element()
     }
 
@@ -749,7 +799,7 @@ impl DiscardView {
             .live_blocks()
             .iter()
             .enumerate()
-            .map(|(i, b)| self.render_block(b, base * 1000 + i, cx))
+            .map(|(i, b)| self.render_block(b, base * 1000 + i, None, cx))
             .collect();
         Some(
             h_flex()
@@ -816,6 +866,7 @@ impl Render for DiscardView {
             .child(header)
             .child(div().flex_1().min_h_0().child(scroller))
             .children(confirm_notice)
+            .children(self.archive_notice())
             .children(review_banner)
             .children(plugin_problem_line)
             .when_some(notice, |col, text| {
@@ -838,7 +889,7 @@ impl Render for DiscardView {
                     .items_center()
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .child(div().flex_1().child(Textarea::new(&self.composer)))
+                    .child(div().flex_1().child(Textarea::new(&self.composer).disabled(self.archived || self.archive_busy || self.pending_archive.is_some())))
                     .child(if running {
                         Button::new("cancel")
                             .danger()
@@ -852,6 +903,7 @@ impl Render for DiscardView {
                         Button::new("send")
                             .primary()
                             .label("Send")
+                            .disabled(self.archived || self.archive_busy || self.pending_archive.is_some())
                             .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
                             .into_any_element()
                     }),
@@ -889,6 +941,12 @@ fn should_clear_confirm(turn_running: bool, pending: bool) -> bool { !turn_runni
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn send_is_ignored_after_archive() {
+        assert!(!super::may_send(true, "hello"));
+        assert!(!super::may_send(false, "  "));
+        assert!(super::may_send(false, "hello"));
+    }
     use super::{row_count, should_clear_confirm};
 
     #[test]

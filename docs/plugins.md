@@ -110,3 +110,11 @@ secrets. The three tool events are sent only if the provider shows tool calls.
 - The Keychain may ask for your permission the first time, and again after a rebuild of an unsigned binary.
 - Linux and Windows secret stores are not wired. Use `DISCARD_PLUGIN_PASSPHRASE` there.
 - The review screen was built and logic-tested but not checked visually in this milestone.
+
+## Menu items
+
+A plugin with the `ui` capability can call `discard.menu_item(target, label, run)`. Targets are `app`, `message`,
+`code_block`, and `channel`. `app` adds an item to the Plugins menu. Other items appear at the end of the matching
+context menu. The label shows as `Label (plugin-name)`. A plugin can register at most eight items. Each label must
+contain 1 to 40 characters and no control characters. The callback receives only `{ kind, id }`. A code block ID is
+the message ID, a colon, and the block index. An app item receives `kind = "app"` and an empty ID.

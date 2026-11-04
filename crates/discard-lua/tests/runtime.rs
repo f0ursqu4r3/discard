@@ -35,6 +35,41 @@ fn ok(caps: &str, init: &str) -> (PluginHandle, discard_lua::LoadedInfo) {
 }
 
 #[test]
+fn menu_item_callback_receives_only_kind_and_id_and_items_keep_order() {
+    let (h, info) = ok(UI, r#"
+        local keys = ""
+        discard.menu_item("message", "Pin", function(target)
+            local k = {} for key in target do table.insert(k, key) end table.sort(k)
+            keys = table.concat(k, ",") .. ":" .. target.kind .. ":" .. target.id
+        end)
+        discard.menu_item("app", "Other", function() end)
+        discard.command("keys", function() return keys end)
+    "#);
+    assert_eq!(info.menu_items.iter().map(|item| item.label.as_str()).collect::<Vec<_>>(), ["Pin", "Other"]);
+    h.run_menu_item(0, "message", "m1").unwrap();
+    assert_eq!(h.run_command("keys", "").unwrap().as_deref(), Some("id,kind:message:m1"));
+}
+
+#[test]
+fn invalid_menu_items_fail_to_load() {
+    for (source, expected) in [
+        ("discard.menu_item('diff', 'ok', function() end)".to_string(), "unknown menu target `diff`"),
+        ("discard.menu_item('app', 'bad\\nlabel', function() end)".to_string(), "menu label must be 1 to 40 characters"),
+        (format!("discard.menu_item('app', '{}', function() end)", "x".repeat(41)), "menu label must be 1 to 40 characters"),
+        ("for i = 1, 9 do discard.menu_item('app', 'ok', function() end) end".to_string(), "too many menu items (max 8)"),
+    ] {
+        let Err(PluginError::Load(message)) = load(UI, &source) else { panic!("expected load error") };
+        assert!(message.contains(expected), "{message}");
+    }
+}
+
+#[test]
+fn menu_item_needs_the_ui_capability() {
+    let Err(PluginError::Load(message)) = load("", "discard.menu_item('app', 'ok', function() end)") else { panic!("expected load error") };
+    assert!(message.contains("ui"), "{message}");
+}
+
+#[test]
 fn loading_reports_what_the_plugin_registered() {
     let (_h, info) = ok(
         UI,

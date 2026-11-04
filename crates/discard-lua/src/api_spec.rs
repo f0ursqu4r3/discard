@@ -17,6 +17,7 @@ pub struct ApiFn {
 
 /// Functions on `discard`. The constant `api_version` is listed in `CONSTANTS`.
 pub const FUNCTIONS: &[ApiFn] = &[
+    ApiFn { name: "menu_item", signature: "(target: string, label: string, run: (target: { kind: string, id: string }) -> ()) -> ()", doc: "Add a menu item for `app`, `message`, `code_block`, or `channel`. At most eight items per plugin; labels have 1 to 40 characters and no control characters. The callback receives only `{ kind, id }`.", capability: Some("ui") },
     ApiFn {
         name: "slot",
         signature: "(name: string, render: (state: any) -> Element) -> ()",

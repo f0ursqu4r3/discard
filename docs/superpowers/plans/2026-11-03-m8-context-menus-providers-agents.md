@@ -102,11 +102,11 @@ Menu content. File menu: "Archive Channel…" is an `Action` entry, enabled when
 **Interfaces:**
 - Produces in `Store`:
   - `fn list_agents(&self) -> Result<Vec<(AgentId, AgentConfig)>>`: insert order.
-  - `fn find_agent(&self, provider: &str, plugin_write: bool) -> Result<Option<(AgentId, AgentConfig)>>`: the first match in insert order.
+  - `fn find_project_agent(&self, project: &ProjectId, provider: &str, plugin_write: bool) -> Result<Option<(AgentId, AgentConfig)>>`: the first agent used by a channel of that project (archived channels count) that matches. Agents are never shared between projects, because agent-private memory is keyed by agent.
   - `fn update_agent(&self, id: &AgentId, cfg: &AgentConfig) -> Result<()>`: `StoreError::NotFound` when no row matches.
-- `ensure_workspace`: when no existing channel matches, call `find_agent(provider, role == Builder)` and reuse its ID and config. Create an agent only when `find_agent` gives `None`.
+- `ensure_workspace`: when no existing channel matches, call `find_project_agent(&project.id, provider, role == Builder)` and reuse its ID and config. Create an agent only when it gives `None`.
 
-- [ ] **Step 1: Write failing tests** in `store.rs`: `list_agents_returns_agents_in_insert_order`, `find_agent_matches_provider_and_plugin_write`, `update_agent_replaces_the_config`, `update_agent_unknown_id_is_not_found`.
+- [ ] **Step 1: Write failing tests** in `store.rs`: `list_agents_returns_agents_in_insert_order`, `find_project_agent_matches_provider_and_plugin_write_within_the_project_only`, `update_agent_replaces_the_config`, `update_agent_unknown_id_is_not_found`.
 - [ ] **Step 2: Write failing tests** in `bootstrap.rs`: `after_archiving_the_only_channel_a_new_run_makes_a_new_channel_and_reuses_the_agent` (call `ensure_workspace`, `archive_channel`, call again: new channel ID, same agent ID, `list_agents().len() == 1`), `reused_agent_keeps_its_edits` (change the model with `update_agent` before the second call; the second `Workspace.agent.model` shows the edit).
 - [ ] **Step 3: Run** `cargo test -p discard-core store:: bootstrap::` — expect FAIL.
 - [ ] **Step 4: Implement** the three store methods (`ORDER BY rowid` on `agents`) and the reuse in `ensure_workspace`.

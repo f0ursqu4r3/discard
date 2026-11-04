@@ -3,7 +3,7 @@
 
 use crate::element::Element;
 use crate::host::Host;
-use crate::runtime::{HookResult, LoadedInfo, PluginError, PluginHandle, PluginLimits, Status};
+use crate::runtime::{HookResult, LoadedInfo, MenuItemInfo, PluginError, PluginHandle, PluginLimits, Status};
 use crate::snapshot::Snapshot;
 use crate::theme::ThemeOverrides;
 use std::collections::BTreeMap;
@@ -151,6 +151,17 @@ impl PluginManager {
         result
     }
 
+    pub fn menu_items(&self) -> Vec<(String, usize, MenuItemInfo)> {
+        self.plugins.iter().filter(|entry| entry.handle.status() == Status::Running).flat_map(|entry| entry.info.menu_items.iter().cloned().enumerate().map(|(index, info)| (entry.info.manifest.name.clone(), index, info))).collect()
+    }
+
+    pub fn run_menu_item(&mut self, plugin: &str, index: usize, kind: &str, id: &str) -> Result<(), PluginError> {
+        let entry = self.plugins.iter_mut().find(|entry| entry.info.manifest.name == plugin).ok_or_else(|| PluginError::NotRegistered { kind: "plugin", name: plugin.into() })?;
+        let result = entry.handle.run_menu_item(index, kind, id);
+        match &result { Ok(()) => entry.succeeded(), Err(error) => entry.failed(error) }
+        result
+    }
+
     /// Run a slash command. The first plugin that registered it handles it.
     pub fn run_command(&mut self, name: &str, args: &str) -> Option<Result<Option<String>, PluginError>> {
         let entry = self.plugins.iter_mut().find(|e| e.info.commands.iter().any(|c| c == name))?;
@@ -233,6 +244,26 @@ mod tests {
 
     fn manager() -> PluginManager {
         PluginManager::new(PluginLimits { call_budget: Duration::from_millis(150), ..PluginLimits::default() })
+    }
+
+    #[test]
+    fn menu_items_are_listed_in_load_order_and_errors_are_counted() {
+        let mut m = manager();
+        m.load(plugin("a", UI, "discard.menu_item('app', 'One', function() error('oops') end) discard.menu_item('channel', 'Two', function() end)")).unwrap();
+        m.load(plugin("b", UI, "discard.menu_item('app', 'Three', function() end)")).unwrap();
+        let items = m.menu_items();
+        assert_eq!(items.iter().map(|(name, index, info)| (name.as_str(), *index, info.label.as_str())).collect::<Vec<_>>(), [("a", 0, "One"), ("a", 1, "Two"), ("b", 0, "Three")]);
+        assert!(m.run_menu_item("a", 0, "app", "").is_err());
+        assert_eq!(m.failure_count("a"), 1);
+    }
+
+    #[test]
+    fn menu_items_leave_the_list_when_the_plugin_is_terminated() {
+        let mut m = manager();
+        m.load(plugin("loop", UI, "discard.menu_item('app', 'Run', function() while true do end end)")).unwrap();
+        assert_eq!(m.menu_items().len(), 1);
+        assert!(m.run_menu_item("loop", 0, "app", "").is_err());
+        assert!(m.menu_items().is_empty());
     }
 
     fn text_slot(slot: &str, text: &str) -> String {

@@ -10,7 +10,7 @@ mod shared;
 mod view;
 
 pub use settings::{SettingsView, open_settings};
-pub use shared::Shared;
+pub use shared::{ProviderInfo, Recheck, Shared};
 pub use view::{DiscardView, ViewData, ViewInit};
 
 use appearance::AppearanceState;
@@ -39,6 +39,11 @@ pub fn run(
     settings: std::sync::Arc<std::sync::Mutex<SettingsStore>>,
     discard_home: std::path::PathBuf,
     relaunch: Relaunch,
+    workspace: Arc<discard_core::workspace::GitWorkspace>,
+    channel_id: discard_core::model::ChannelId,
+    providers: Vec<ProviderInfo>,
+    recheck: Recheck,
+    store: Arc<Mutex<discard_core::store::Store>>,
 ) {
     // On macOS `cx.quit()` ends the process inside this call, so nothing after it may matter.
     application().run(move |cx| {
@@ -66,6 +71,11 @@ pub fn run(
         let window_bounds = saved.filter(|b| b.is_restorable(&displays)).map(|b| WindowBounds::Windowed(Bounds::new(point(px(b.x), px(b.y)), size(px(b.width), px(b.height)))));
         let options = WindowOptions { window_bounds, ..Default::default() };
         let shared = Shared {
+            workspace,
+            channel_id,
+            providers,
+            recheck,
+            store,
             discard_home,
             plugins,
             load_report: std::rc::Rc::new(load_report),

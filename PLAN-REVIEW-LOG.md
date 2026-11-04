@@ -133,3 +133,15 @@ I found no new material issue that blocks implementation. The provider capabilit
 VERDICT: APPROVED
 ### Resolution
 Converged. VERDICT: APPROVED at round 5 of MAX_ROUNDS=5. Awaiting user sign-off.
+
+## Act 3 — Build (M8)
+
+### Round 1 — Codex build
+Spec: `docs/superpowers/plans/2026-11-03-m8-context-menus-providers-agents.md`. Codex ran with `--sandbox workspace-write` (`--full-auto` no longer exists in Codex 0.166). It implemented Tasks 1 to 8 in one run and made no commits. It reported clippy clean and all tests passing, with the MCP loopback test run outside the sandbox. It marked the GUI checks of Tasks 4 to 7 as NOT RUN. It merged some planned test cases and added the manager tests after the code.
+
+### Claude's verdict
+Passed: `cargo clippy --workspace --all-targets -- -D warnings` is clean and `cargo test --workspace` shows 841 passed, 0 failed in a fresh run. I read the full diff. The agent confirm and block rules reuse `AgentChange::needs_user_approval` and `CapabilityMatrix::enforcement_for`. Archive uses `GitWorkspace::archive` and its existing data-loss confirmation. The plugin menu callback receives only `{ kind, id }`.
+Open: no GUI check ran. Some plan tests are merged or missing (a separate `ui` capability test for `menu_item`, a test that a plugin item cannot displace a Rust item). Reusing an agent across projects shares agent-private memory between projects.
+
+### Round 2 — Claude fix
+Problem found in review: `find_agent` reused an agent across projects, so two projects shared agent-private memory. Claude replaced it with `Store::find_project_agent(project, provider, plugin_write)`, which looks only at the project's own channels (archived ones included). Tests added first and seen failing: `a_new_project_never_reuses_another_projects_agent`, `archiving_in_one_project_does_not_hand_its_agent_to_another`. After the fix: clippy clean, 844 tests pass, 0 fail. The plan text for Task 2 is updated to match.

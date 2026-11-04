@@ -16,6 +16,15 @@ pub const LABEL_GHOSTTY_CONFIG: &str = "Ghostty config";
 pub const LABEL_IGNORE_PLUGIN_THEMES: &str = "Ignore plugin themes";
 pub const LABEL_PLUGIN_OVERRIDES: &str = "Plugin overrides";
 pub const LABEL_SWATCHES: &str = "Swatches";
+pub const LABEL_SETUP_STATUS: &str = "Setup status";
+pub const LABEL_CAPABILITIES: &str = "Capabilities";
+pub const LABEL_HOOK_ENFORCEMENT: &str = "Hook enforcement";
+pub const LABEL_RECHECK: &str = "Re-check";
+pub const LABEL_AGENT: &str = "Agent";
+pub const LABEL_MODEL: &str = "Model";
+pub const LABEL_SYSTEM_PROMPT: &str = "System prompt";
+pub const LABEL_APPROVAL_POLICY: &str = "Approval policy";
+pub const LABEL_PLUGIN_WRITE: &str = "plugin.write";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
@@ -64,7 +73,7 @@ impl SettingsPage {
 
     /// Only available pages have a body. The others show as "Soon".
     pub fn is_available(self) -> bool {
-        matches!(self, SettingsPage::General | SettingsPage::Appearance | SettingsPage::Plugins)
+        matches!(self, SettingsPage::General | SettingsPage::Appearance | SettingsPage::Plugins | SettingsPage::Providers | SettingsPage::Agents)
     }
 
     /// Field labels the search also matches. Pages with no body have none.
@@ -76,6 +85,8 @@ impl SettingsPage {
                 LABEL_REOPEN_LAST_CHANNEL,
             ],
             SettingsPage::Appearance => &[LABEL_THEME_SOURCE, LABEL_LIGHT_THEME, LABEL_DARK_THEME, LABEL_ONE_THEME, LABEL_EDIT_COPY, LABEL_ACTIVE_THEME_FILE, LABEL_GHOSTTY_CONFIG, LABEL_IGNORE_PLUGIN_THEMES, LABEL_PLUGIN_OVERRIDES, LABEL_SWATCHES],
+            SettingsPage::Providers => &[LABEL_SETUP_STATUS, LABEL_CAPABILITIES, LABEL_HOOK_ENFORCEMENT, LABEL_RECHECK],
+            SettingsPage::Agents => &[LABEL_AGENT, LABEL_MODEL, LABEL_SYSTEM_PROMPT, LABEL_APPROVAL_POLICY, LABEL_PLUGIN_WRITE],
             SettingsPage::Plugins => &[
                 "Safe mode",
                 "Review",
@@ -127,13 +138,27 @@ mod tests {
             .collect();
         assert_eq!(
             available,
-            vec![SettingsPage::General, SettingsPage::Appearance, SettingsPage::Plugins]
+            vec![SettingsPage::General, SettingsPage::Appearance, SettingsPage::Agents, SettingsPage::Providers, SettingsPage::Plugins]
         );
     }
 
     #[test]
     fn empty_query_returns_every_page() {
         assert_eq!(search(""), SettingsPage::all().to_vec());
+    }
+
+    #[test]
+    fn provider_labels_are_searchable() {
+        for label in ["Setup status", "Capabilities", "Hook enforcement", "Re-check"] {
+            assert!(search(label).contains(&SettingsPage::Providers));
+        }
+        assert!(SettingsPage::Providers.is_available());
+    }
+
+    #[test]
+    fn agent_labels_are_searchable() {
+        for label in ["Agent", "Model", "System prompt", "Approval policy", "plugin.write"] { assert!(search(label).contains(&SettingsPage::Agents)); }
+        assert!(SettingsPage::Agents.is_available());
     }
 
     #[test]

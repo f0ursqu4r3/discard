@@ -9,5 +9,6 @@ discard-core.workspace = true
 tracing.workspace = true
 discard-lua = { path = "../discard-lua" }
 serde_json.workspace = true
+serde.workspace = true
 tokio.workspace = true
 gpui-kit = "0.9"

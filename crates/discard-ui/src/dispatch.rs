@@ -5,8 +5,10 @@ use crate::settings::open_settings;
 use crate::shared::Shared;
 use crate::view::DiscardView;
 use discard_core::action::{Action, needs_confirm};
+use discard_core::context_menu::ContextTarget;
+use discard_core::workspace::ArchiveOutcome;
 use discard_core::settings_page::SettingsPage;
-use gpui_kit::{AnyWindowHandle, App, Entity, Global, WeakEntity, Window};
+use gpui_kit::{AnyWindowHandle, App, AppContext as _, Entity, Global, WeakEntity, Window};
 
 /// An action that ends this process, and so may need the user to confirm it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +60,29 @@ pub(crate) enum Close {
     Ask(Confirm),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TargetedPlan { Copy, Archive, ArchiveBlocked, Nothing }
+
+pub(crate) fn plan_targeted(action: Action, has_target: bool, turn_running: bool, archived: bool) -> TargetedPlan {
+    if action.needs_target() { return if has_target { TargetedPlan::Copy } else { TargetedPlan::Nothing }; }
+    if action == Action::ArchiveChannel {
+        return if archived { TargetedPlan::Nothing } else if turn_running { TargetedPlan::ArchiveBlocked } else { TargetedPlan::Archive };
+    }
+    TargetedPlan::Nothing
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ArchiveStep { Done(String), NeedsConfirm(Vec<String>), Failed(String) }
+
+pub(crate) fn archive_step(result: Result<ArchiveOutcome, String>) -> ArchiveStep {
+    match result {
+        Ok(ArchiveOutcome::Archived { kept_branch: Some(branch) }) => ArchiveStep::Done(format!("Channel archived. The branch `{branch}` is kept. Relaunch to start a new channel.")),
+        Ok(ArchiveOutcome::Archived { kept_branch: None }) => ArchiveStep::Done("Channel archived. Relaunch to start a new channel.".into()),
+        Ok(ArchiveOutcome::NeedsConfirmation(items)) => ArchiveStep::NeedsConfirm(items),
+        Err(error) => ArchiveStep::Failed(error),
+    }
+}
+
 /// Decide whether a window may close. Closing the main window ends the app, so it follows the Quit rule.
 /// Pure, so the rule is testable without a window.
 pub(crate) fn close_plan(is_main: bool, turn_running: bool, confirm_while_working: bool) -> Close {
@@ -76,6 +101,7 @@ pub(crate) fn plan(
     safe_mode: bool,
 ) -> Plan {
     let ending = match action {
+        Action::ArchiveChannel | Action::CopyMessageText | Action::CopyCode | Action::CopyChannelName => return Plan::Nothing,
         Action::OpenSettings => return Plan::OpenSettings(SettingsPage::General),
         Action::ReviewPlugins | Action::ShowPluginErrors => {
             return Plan::OpenSettings(SettingsPage::Plugins);
@@ -169,7 +195,25 @@ fn state(cx: &mut App) -> State {
 /// Do not call this while the main view is being updated (for example from a `cx.listener` on it):
 /// `run` reads the view. Plain `on_click` closures, menu items, and key bindings are safe.
 pub fn run(action: Action, cx: &mut App) {
+    run_on(action, None, cx);
+}
+
+pub fn run_on(action: Action, target: Option<ContextTarget>, cx: &mut App) {
     let state = state(cx);
+    if action.needs_target() || action == Action::ArchiveChannel {
+        let Some(view) = state.view else { return; };
+        match plan_targeted(action, target.is_some(), state.turn_running, view.read(cx).archived()) {
+            TargetedPlan::Copy => {
+                if let Some(text) = target.as_ref().and_then(|target| view.read(cx).resolve_copy(target)) {
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
+                }
+            }
+            TargetedPlan::Archive => start_archive(false, cx),
+            TargetedPlan::ArchiveBlocked => view.update(cx, |view, cx| view.show_notice("Cannot archive a channel while a turn runs.".into(), cx)),
+            TargetedPlan::Nothing => {}
+        }
+        return;
+    }
     match plan(
         action,
         state.turn_running,
@@ -209,6 +253,58 @@ pub fn run(action: Action, cx: &mut App) {
         }
         Plan::Nothing => {}
     }
+}
+
+fn start_archive(force: bool, cx: &mut App) {
+    let Some(view) = cx.try_global::<MainWindow>().and_then(|m| m.view.upgrade()) else { return; };
+    if view.read(cx).turn_running() || view.read(cx).archived() || view.read(cx).archive_busy() { return; }
+    let Some(shared) = cx.try_global::<Shared>() else { return; };
+    let workspace = shared.workspace.clone();
+    let channel = shared.channel_id.clone();
+    view.update(cx, |view, cx| view.set_archive_busy(true, cx));
+    let task = cx.background_spawn(async move { workspace.archive(&channel, force) });
+    cx.spawn(async move |cx| {
+        let result = archive_step(task.await);
+        view.update(cx, |view, cx| {
+            view.set_archive_busy(false, cx);
+            match result {
+                ArchiveStep::Done(message) => { view.set_archived(cx); view.show_notice(message, cx); }
+                ArchiveStep::NeedsConfirm(items) => view.set_pending_archive(Some(items), cx),
+                ArchiveStep::Failed(error) => view.show_notice(format!("Could not archive channel: {error}"), cx),
+            }
+        });
+    }).detach();
+}
+
+pub(crate) fn confirm_archive(cx: &mut App) {
+    if let Some(view) = cx.try_global::<MainWindow>().and_then(|m| m.view.upgrade()) {
+        view.update(cx, |view, cx| view.set_pending_archive(None, cx));
+        start_archive(true, cx);
+    }
+}
+
+pub(crate) fn cancel_archive(cx: &mut App) {
+    if let Some(view) = cx.try_global::<MainWindow>().and_then(|m| m.view.upgrade()) {
+        view.update(cx, |view, cx| view.set_pending_archive(None, cx));
+    }
+}
+
+pub(crate) fn relaunch_same_mode(cx: &mut App) {
+    let safe_mode = state(cx).safe_mode;
+    perform(Confirm::Relaunch { safe_mode }, cx);
+}
+
+fn plugin_item_notice(plugin: &str, error: &str) -> String { format!("{plugin}: {error}") }
+
+pub(crate) fn run_plugin_item(plugin: &str, index: usize, target: Option<&ContextTarget>, cx: &mut App) {
+    let Some(shared) = cx.try_global::<Shared>() else { return; };
+    let kind = target.map_or("app", |target| target.kind().id());
+    let id = target.map_or_else(String::new, ContextTarget::target_id);
+    let result = shared.plugins.manager().lock().unwrap_or_else(|p| p.into_inner()).run_menu_item(plugin, index, kind, &id);
+    if let Err(error) = result {
+        *shared.plugin_notice.lock().unwrap_or_else(|p| p.into_inner()) = Some(plugin_item_notice(plugin, &error.to_string()));
+    }
+    shared.plugin_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Run `f` on the focused window after the current update ends.
@@ -306,10 +402,33 @@ pub(crate) fn cancel_pending(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Close, Confirm, Plan, close_plan, plan, prepare_exit};
+    use super::{ArchiveStep, Close, Confirm, Plan, TargetedPlan, archive_step, close_plan, plan, plan_targeted, prepare_exit};
+    use discard_core::workspace::ArchiveOutcome;
     use discard_core::action::Action;
     use discard_core::settings_page::SettingsPage;
     use std::cell::Cell;
+
+    #[test]
+    fn copy_actions_need_a_target_and_archive_obeys_state() {
+        assert_eq!(plan_targeted(Action::CopyCode, false, false, false), TargetedPlan::Nothing);
+        assert_eq!(plan_targeted(Action::CopyCode, true, false, false), TargetedPlan::Copy);
+        assert_eq!(plan_targeted(Action::ArchiveChannel, false, true, false), TargetedPlan::ArchiveBlocked);
+        assert_eq!(plan_targeted(Action::ArchiveChannel, false, false, true), TargetedPlan::Nothing);
+        assert_eq!(plan_targeted(Action::ArchiveChannel, false, false, false), TargetedPlan::Archive);
+    }
+
+    #[test]
+    fn archive_step_maps_results() {
+        assert_eq!(archive_step(Ok(ArchiveOutcome::Archived { kept_branch: None })), ArchiveStep::Done("Channel archived. Relaunch to start a new channel.".into()));
+        assert_eq!(archive_step(Ok(ArchiveOutcome::Archived { kept_branch: Some("branch".into()) })), ArchiveStep::Done("Channel archived. The branch `branch` is kept. Relaunch to start a new channel.".into()));
+        assert_eq!(archive_step(Ok(ArchiveOutcome::NeedsConfirmation(vec!["file".into()]))), ArchiveStep::NeedsConfirm(vec!["file".into()]));
+        assert_eq!(archive_step(Err("error".into())), ArchiveStep::Failed("error".into()));
+    }
+
+    #[test]
+    fn a_failing_plugin_item_sets_the_plugin_notice() {
+        assert_eq!(super::plugin_item_notice("notes", "oops"), "notes: oops");
+    }
 
     #[test]
     fn settings_actions_open_their_page_in_any_state() {

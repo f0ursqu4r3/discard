@@ -10,7 +10,20 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
+pub struct ProviderInfo {
+    pub id: String,
+    pub matrix: discard_core::capability::CapabilityMatrix,
+    pub setup: Arc<Mutex<Option<discard_core::provider::SetupStatus>>>,
+}
+pub type Recheck = Arc<dyn Fn(&str) + Send + Sync>;
+
+#[derive(Clone)]
 pub struct Shared {
+    pub store: Arc<Mutex<discard_core::store::Store>>,
+    pub providers: Vec<ProviderInfo>,
+    pub recheck: Recheck,
+    pub workspace: Arc<discard_core::workspace::GitWorkspace>,
+    pub channel_id: discard_core::model::ChannelId,
     pub discard_home: std::path::PathBuf,
     pub plugins: Arc<PluginService>,
     pub load_report: Rc<LoadReport>,

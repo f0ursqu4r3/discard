@@ -1,7 +1,7 @@
 # Settings, menus, and key bindings
 
 Discard has a settings file, a native menu bar, seven default key bindings, and a Settings window. Rust owns all of
-them. Plugins cannot change the menu bar, the keys, or the Settings pages.
+them. Plugins can add items to the Plugins menu and context menus. They cannot change Rust items, keys, or Settings pages.
 
 ## The settings file
 
@@ -100,7 +100,7 @@ changes. The Safe Mode check mark reflects the mode the app started in.
 | Discard | Show All | Shows every hidden app. |
 | Discard | Quit Discard | Quits. May ask first. See "Safe mode, relaunch, and confirm". |
 | File | New Channel… | Greyed, "Soon". |
-| File | Archive Channel… | Greyed, "Soon". |
+| File | Archive Channel… | Archives the current channel when no turn runs. |
 | File | Close Window | Closes the focused window. Closing the main window quits, so it may ask first. Closing Settings never asks and does not quit. |
 | File | Cancel Turn | Cancels the running turn. Greyed when no turn runs. |
 | Edit | Undo, Redo, Cut, Copy, Paste, Select All | Standard items. The OS and the text input handle them. |
@@ -114,8 +114,8 @@ changes. The Safe Mode check mark reflects the mode the app started in.
 
 ### Why some items are greyed
 
-An item is greyed "Soon" when its feature does not exist yet. These items have no handler. Four items are in this
-state: New Channel…, Archive Channel…, Switch Channel…, and Discard Documentation. The list is one Rust constant
+An item is greyed "Soon" when its feature does not exist yet. These items have no handler. Three items are in this
+state: New Channel…, Switch Channel…, and Discard Documentation. The list is one Rust constant
 (`FUTURE_ITEMS` in `crates/discard-core/src/action.rs`). An item turns on when its feature is built.
 
 Native menus show no tooltip. Each greyed item carries " (Soon)" in its label instead. Cancel Turn is greyed when no
@@ -156,7 +156,7 @@ fixes these keys: Cmd+Q, Cmd+, , Cmd+W, Cmd+H, Cmd+M, Cmd+C, Cmd+V, Cmd+X, Cmd+A
 - **Search.** The box above the list filters pages. A page stays if its title or one of its field labels contains the
   text. Case and spaces do not matter, so "rollback" finds "Roll back". "No matching settings" shows when nothing
   matches.
-- **Pages that work now:** General, Appearance, and Plugins. The other seven show greyed with a "Soon" tag. You cannot select them.
+- **Pages that work now:** General, Appearance, Agents, Providers, and Plugins. The other five show greyed with a "Soon" tag. You cannot select them.
   They stay in the list when the search matches their title.
 
 ### General page
@@ -183,6 +183,18 @@ From top to bottom:
 - **Plugin overrides.** Each theme token a plugin sets, with the plugin that wins it. Later plugins win.
 - Theme problems and write errors show at the top of the page.
 
+### Providers page
+
+Each provider card shows setup status, the install or login command when needed, all capabilities, and hook enforcement.
+Missing capabilities show as "No". **Re-check** runs the setup check again. Discard does not read or store credentials.
+
+### Agents page
+
+Select an agent to edit its model, system prompt, approval policy, and `plugin.write`. The name and provider are
+read-only. The page lists changes before save. A looser policy or enabling `plugin.write` requires an explicit
+confirmation. Choices that the provider cannot enforce are disabled and show the reason. Changes apply at the next
+launch. Use **Relaunch** after saving to apply them.
+
 ### Plugins page
 
 Rust draws this page. A plugin cannot hide or replace it. From top to bottom:
@@ -198,6 +210,15 @@ Rust draws this page. A plugin cannot hide or replace it. From top to bottom:
 - **Installed plugins.** One row for each user plugin with its state (running, failed, disabled because files changed
   outside review, disabled in Safe Mode), a "trusts future edits" tag, and a **Roll back** button. The bundled
   interface is a plugin too, but it is not listed.
+
+## Context menus and archive
+
+Right-click a message to copy its text, a code block to copy its code, or a channel row to copy its name or archive it.
+The live streaming row has no context menu. Plugin items follow the Rust items and show the plugin name.
+
+Archive is blocked while a turn runs. If removing a worktree can lose work, Discard lists the items and asks for
+confirmation. Cancel keeps the channel and worktree. After archive, the composer is locked. **Relaunch** starts a new
+channel. The worktree branch is kept.
 
 ## Safe mode, relaunch, and confirm
 
@@ -270,7 +291,7 @@ and the engine runs for it. A Mac app usually stays open with no window. Discard
 - After the first write to a file that could not be parsed, the "file" problem disappears. Discard does not tell you
   that the old text is now in `settings.toml.invalid`.
 - You cannot change any key yet. The keymap is in code.
-- Plugin menu items, context menus, and the Providers and Agents pages arrive in M8. The Keybindings,
+- The Keybindings,
   Memory, Workspaces, Logs, and Advanced pages arrive in M9. See `PLAN.md`.
 - Plugin-declared settings are not built. `settings.toml` holds `version`, `general`, and `appearance`. Unknown keys stay in the
   file, but nothing reads them.

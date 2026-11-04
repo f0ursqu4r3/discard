@@ -5,7 +5,39 @@ use discard_core::action::{
     Action, MenuContext, MenuEntry, StandardItem, default_keymap, menu_bar,
 };
 use gpui_kit::component::input;
-use gpui_kit::{App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType};
+use gpui_kit::{App, Context, Global, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window};
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use discard_core::context_menu::ContextTarget;
+
+#[derive(Clone, PartialEq, serde::Deserialize, gpui_kit::Action)]
+#[action(namespace = discard, no_json)]
+struct RunPluginItem { slot: usize }
+struct PluginMenuTable(Vec<(String, usize)>);
+impl Global for PluginMenuTable {}
+
+fn plugin_table(ctx: &MenuContext) -> Vec<(String, usize)> {
+    ctx.plugin_items.iter().filter(|item| item.target == discard_core::action::MenuTarget::App).take(32).map(|item| (item.plugin.clone(), item.index)).collect()
+}
+
+pub(crate) fn to_popup(entries: Vec<MenuEntry>, target: ContextTarget) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+    move |mut menu, _, _| {
+        for entry in entries.clone() {
+            match entry {
+                MenuEntry::Action { label, action, enabled, .. } => {
+                    let target = target.clone();
+                    menu = menu.item(PopupMenuItem::new(label).disabled(!enabled).on_click(move |_, _, cx| crate::dispatch::run_on(action, Some(target.clone()), cx)));
+                }
+                MenuEntry::Plugin { plugin, index, label } => {
+                    let target = target.clone();
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| crate::dispatch::run_plugin_item(&plugin, index, Some(&target), cx)));
+                }
+                MenuEntry::Separator => menu = menu.separator(),
+                _ => {}
+            }
+        }
+        menu
+    }
+}
 
 /// Declares one GPUI action type per core `Action`, plus `Soon`, and the one mapping between them.
 /// The `match` in `boxed` is exhaustive, so a new core `Action` does not compile until it is listed here.
@@ -23,11 +55,19 @@ macro_rules! action_types {
         /// Send each GPUI action to `dispatch::run`. `Soon` gets no handler, so the OS greys its items.
         pub(crate) fn register_handlers(cx: &mut App) {
             $(cx.on_action(|_: &$name, cx: &mut App| crate::dispatch::run(Action::$name, cx));)*
+            cx.on_action(|action: &RunPluginItem, cx: &mut App| {
+                let item = cx.try_global::<PluginMenuTable>().and_then(|table| table.0.get(action.slot)).cloned();
+                if let Some((plugin, index)) = item { crate::dispatch::run_plugin_item(&plugin, index, None, cx); }
+            });
         }
     };
 }
 
 action_types!(
+    ArchiveChannel,
+    CopyMessageText,
+    CopyCode,
+    CopyChannelName,
     OpenSettings,
     Quit,
     CancelTurn,
@@ -74,7 +114,12 @@ fn standard(item: StandardItem) -> MenuItem {
 /// So a disabled entry carries the handler-less `Soon` action, and macOS greys it. The flag is still set
 /// for platforms that read it.
 pub fn to_gpui(entry: &MenuEntry) -> MenuItem {
+    to_gpui_with_slot(entry, None)
+}
+
+fn to_gpui_with_slot(entry: &MenuEntry, slot: Option<usize>) -> MenuItem {
     match entry {
+        MenuEntry::Plugin { label, .. } => match slot { Some(slot) => MenuItem::action(label.clone(), RunPluginItem { slot }), None => MenuItem::action(label.clone(), Soon).disabled(true) },
         MenuEntry::Action {
             label,
             action,
@@ -106,9 +151,18 @@ pub fn to_gpui(entry: &MenuEntry) -> MenuItem {
 
 /// Build the menu bar for `ctx` and give it to the OS. Calling it again replaces the menu bar.
 pub fn install(ctx: &MenuContext, cx: &mut App) {
+    let table = plugin_table(ctx);
+    cx.set_global(PluginMenuTable(table));
+    let mut slot = 0usize;
     let menus = menu_bar(ctx)
         .into_iter()
-        .map(|spec| Menu::new(spec.title).items(spec.entries.iter().map(to_gpui)));
+        .map(|spec| Menu::new(spec.title).items(spec.entries.iter().filter_map(|entry| {
+            if matches!(entry, MenuEntry::Plugin { .. }) {
+                let current = slot;
+                slot += 1;
+                (current < 32).then(|| to_gpui_with_slot(entry, Some(current)))
+            } else { Some(to_gpui(entry)) }
+        })));
     cx.set_menus(menus);
 }
 
@@ -117,6 +171,14 @@ mod tests {
     use super::{Soon, boxed, to_gpui};
     use discard_core::action::{Action, FUTURE_ITEMS, MenuEntry, StandardItem};
     use gpui_kit::{MenuItem, OsAction, SystemMenuType};
+
+    #[test]
+    fn plugin_table_lists_each_plugin_item_once_in_menu_order() {
+        use discard_core::action::{MenuContext, MenuTarget, PluginMenuItem};
+        let ctx = MenuContext { plugin_items: vec![PluginMenuItem { plugin: "notes".into(), index: 2, target: MenuTarget::App, label: "Pin".into() }], ..Default::default() };
+        let table = super::plugin_table(&ctx);
+        assert_eq!(table, vec![("notes".into(), 2)]);
+    }
 
     #[test]
     fn future_entry_becomes_a_disabled_item() {
