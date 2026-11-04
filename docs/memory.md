@@ -57,3 +57,7 @@ the approval audit table with the decider `Policy("builtin-memory-tools")`. All 
   conversation. Core blocks edited after the first turn do not change the prompt of that conversation. They
   appear in the next new session. The conversation history still holds what the agent saved earlier.
 - Background consolidation of memory ("sleep-time" agents) is not built.
+
+## Settings
+
+The Memory page lists scopes and lets you read files or reveal a scope folder. The Advanced page can rebuild the memory index from those files.

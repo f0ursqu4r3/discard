@@ -571,7 +571,7 @@ fn build(
         let info_t = Arc::clone(&menu_info);
         api.set("menu_item", lua.create_function(move |_, (target, label, f): (String, String, Function)| {
             need(ui, "ui", "discard.menu_item")?;
-            if !matches!(target.as_str(), "app" | "message" | "code_block" | "channel") { return Err(mlua::Error::runtime(format!("unknown menu target `{target}`"))); }
+            if !matches!(target.as_str(), "app" | "message" | "code_block" | "channel" | "diff_block" | "tool_call" | "agent" | "server") { return Err(mlua::Error::runtime(format!("unknown menu target `{target}`"))); }
             if label.is_empty() || label.chars().count() > 40 || label.chars().any(char::is_control) { return Err(mlua::Error::runtime("menu label must be 1 to 40 characters with no control characters")); }
             let mut info = info_t.lock().unwrap_or_else(|p| p.into_inner());
             if info.len() >= 8 { return Err(mlua::Error::runtime("too many menu items (max 8)")); }

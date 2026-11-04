@@ -114,7 +114,9 @@ secrets. The three tool events are sent only if the provider shows tool calls.
 ## Menu items
 
 A plugin with the `ui` capability can call `discard.menu_item(target, label, run)`. Targets are `app`, `message`,
-`code_block`, and `channel`. `app` adds an item to the Plugins menu. Other items appear at the end of the matching
+`code_block`, `channel`, `diff_block`, `tool_call`, `agent`, and `server`. `app` adds an item to the Plugins menu. Other items appear at the end of the matching
 context menu. The label shows as `Label (plugin-name)`. A plugin can register at most eight items. Each label must
 contain 1 to 40 characters and no control characters. The callback receives only `{ kind, id }`. A code block ID is
 the message ID, a colon, and the block index. An app item receives `kind = "app"` and an empty ID.
+
+For `diff_block` and `tool_call`, the callback ID is the message ID, a colon, and the block index. For `agent` and `server`, it is the agent ID or project ID.

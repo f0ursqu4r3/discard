@@ -20,6 +20,22 @@ pub const LABEL_SETUP_STATUS: &str = "Setup status";
 pub const LABEL_CAPABILITIES: &str = "Capabilities";
 pub const LABEL_HOOK_ENFORCEMENT: &str = "Hook enforcement";
 pub const LABEL_RECHECK: &str = "Re-check";
+pub const LABEL_KEYBINDINGS_RECORD: &str = "Record";
+pub const LABEL_KEYBINDINGS_RESET: &str = "Reset";
+pub const LABEL_KEYBINDINGS_UNBIND: &str = "Unbind";
+pub const LABEL_LOG_LEVEL: &str = "Level";
+pub const LABEL_LOG_COMPONENT: &str = "Component";
+pub const LABEL_LOG_ID: &str = "Session, turn, or plugin ID";
+pub const LABEL_LOG_FOLLOW: &str = "Follow";
+pub const LABEL_MEMORY_SCOPES: &str = "Memory scopes";
+pub const LABEL_MEMORY_FILES: &str = "Memory files";
+pub const LABEL_MEMORY_REVEAL: &str = "Reveal";
+pub const LABEL_WORKSPACE_PROJECTS: &str = "Projects";
+pub const LABEL_WORKSPACE_WORKTREE: &str = "Worktree";
+pub const LABEL_WORKSPACE_REVEAL: &str = "Reveal";
+pub const LABEL_RESET_SETTINGS: &str = "Reset settings";
+pub const LABEL_REBUILD_MEMORY_INDEX: &str = "Rebuild memory index";
+pub const LABEL_CLEAR_LOGS: &str = "Clear logs";
 pub const LABEL_AGENT: &str = "Agent";
 pub const LABEL_MODEL: &str = "Model";
 pub const LABEL_SYSTEM_PROMPT: &str = "System prompt";
@@ -73,7 +89,7 @@ impl SettingsPage {
 
     /// Only available pages have a body. The others show as "Soon".
     pub fn is_available(self) -> bool {
-        matches!(self, SettingsPage::General | SettingsPage::Appearance | SettingsPage::Plugins | SettingsPage::Providers | SettingsPage::Agents)
+        matches!(self, SettingsPage::General | SettingsPage::Appearance | SettingsPage::Plugins | SettingsPage::Providers | SettingsPage::Agents | SettingsPage::Keybindings | SettingsPage::Logs | SettingsPage::Memory | SettingsPage::Workspaces | SettingsPage::Advanced)
     }
 
     /// Field labels the search also matches. Pages with no body have none.
@@ -86,6 +102,11 @@ impl SettingsPage {
             ],
             SettingsPage::Appearance => &[LABEL_THEME_SOURCE, LABEL_LIGHT_THEME, LABEL_DARK_THEME, LABEL_ONE_THEME, LABEL_EDIT_COPY, LABEL_ACTIVE_THEME_FILE, LABEL_GHOSTTY_CONFIG, LABEL_IGNORE_PLUGIN_THEMES, LABEL_PLUGIN_OVERRIDES, LABEL_SWATCHES],
             SettingsPage::Providers => &[LABEL_SETUP_STATUS, LABEL_CAPABILITIES, LABEL_HOOK_ENFORCEMENT, LABEL_RECHECK],
+            SettingsPage::Advanced => &[LABEL_RESET_SETTINGS, LABEL_REBUILD_MEMORY_INDEX, LABEL_CLEAR_LOGS],
+            SettingsPage::Workspaces => &[LABEL_WORKSPACE_PROJECTS, LABEL_WORKSPACE_WORKTREE, LABEL_WORKSPACE_REVEAL],
+            SettingsPage::Memory => &[LABEL_MEMORY_SCOPES, LABEL_MEMORY_FILES, LABEL_MEMORY_REVEAL],
+            SettingsPage::Logs => &[LABEL_LOG_LEVEL, LABEL_LOG_COMPONENT, LABEL_LOG_ID, LABEL_LOG_FOLLOW],
+            SettingsPage::Keybindings => &[LABEL_KEYBINDINGS_RECORD, LABEL_KEYBINDINGS_RESET, LABEL_KEYBINDINGS_UNBIND, "Shortcut", "Key"],
             SettingsPage::Agents => &[LABEL_AGENT, LABEL_MODEL, LABEL_SYSTEM_PROMPT, LABEL_APPROVAL_POLICY, LABEL_PLUGIN_WRITE],
             SettingsPage::Plugins => &[
                 "Safe mode",
@@ -94,7 +115,6 @@ impl SettingsPage {
                 "Trust future edits",
                 "Plugin problems",
             ],
-            _ => &[],
         }
     }
 }
@@ -129,7 +149,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_has_ten_pages_and_three_are_available() {
+    fn all_ten_pages_are_available() {
         assert_eq!(SettingsPage::all().len(), 10);
         let available: Vec<_> = SettingsPage::all()
             .iter()
@@ -138,10 +158,18 @@ mod tests {
             .collect();
         assert_eq!(
             available,
-            vec![SettingsPage::General, SettingsPage::Appearance, SettingsPage::Agents, SettingsPage::Providers, SettingsPage::Plugins]
+            vec![SettingsPage::General, SettingsPage::Appearance, SettingsPage::Agents, SettingsPage::Providers, SettingsPage::Plugins, SettingsPage::Memory, SettingsPage::Workspaces, SettingsPage::Keybindings, SettingsPage::Logs, SettingsPage::Advanced]
         );
     }
 
+    #[test]
+    fn advanced_labels_are_searchable() { for label in ["Reset settings", "Rebuild memory index", "Clear logs"] { assert!(search(label).contains(&SettingsPage::Advanced)); } assert!(SettingsPage::Advanced.is_available()); }
+    #[test]
+    fn workspace_labels_are_searchable() { for label in ["Projects", "Worktree", "Reveal"] { assert!(search(label).contains(&SettingsPage::Workspaces)); } assert!(SettingsPage::Workspaces.is_available()); }
+    #[test]
+    fn memory_labels_are_searchable() { for label in ["Memory scopes", "Memory files", "Reveal"] { assert!(search(label).contains(&SettingsPage::Memory)); } assert!(SettingsPage::Memory.is_available()); }
+    #[test]
+    fn log_labels_are_searchable() { for label in ["Level", "Component", "Session, turn, or plugin ID", "Follow"] { assert!(search(label).contains(&SettingsPage::Logs)); } assert!(SettingsPage::Logs.is_available()); }
     #[test]
     fn empty_query_returns_every_page() {
         assert_eq!(search(""), SettingsPage::all().to_vec());
@@ -210,5 +238,11 @@ mod tests {
     #[test]
     fn no_match_returns_nothing() {
         assert_eq!(search("zzz"), vec![]);
+    }
+
+    #[test]
+    fn keybinding_labels_are_searchable() {
+            for label in ["Record", "Reset", "Unbind", "Shortcut", "Key"] { assert!(search(label).contains(&SettingsPage::Keybindings)); }
+        assert!(SettingsPage::Keybindings.is_available());
     }
 }

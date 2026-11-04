@@ -426,7 +426,7 @@ impl MemoryStore {
         Ok(out)
     }
 
-    fn scopes_on_disk(&self) -> Vec<Scope> {
+    pub fn scopes_on_disk(&self) -> Vec<Scope> {
         let mut out = vec![Scope::Global];
         for (sub, make) in [("agents", (|id: String| Scope::Agent(AgentId(id))) as fn(String) -> Scope), ("projects", |id| Scope::Project(ProjectId(id)))] {
             let Ok(entries) = fs::read_dir(self.root.join(sub)) else { continue };
@@ -443,6 +443,14 @@ impl MemoryStore {
     /// Bring the index in line with the files on disk. Safe to run at any time.
     pub fn reconcile(&self) -> Result<ReconcileStats> {
         let _guard = lock(&self.write_lock);
+        self.reconcile_locked()
+    }
+    pub fn rebuild_index(&self) -> Result<ReconcileStats> {
+        let _guard = lock(&self.write_lock);
+        lock(&self.index).execute_batch("DELETE FROM mem_files; DELETE FROM mem_fts;").map_err(index_err)?;
+        self.reconcile_locked()
+    }
+    fn reconcile_locked(&self) -> Result<ReconcileStats> {
         let mut stats = ReconcileStats::default();
         let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
         for scope in self.scopes_on_disk() {
@@ -712,6 +720,8 @@ mod tests {
         assert!(names.iter().all(|n| !n.starts_with(".tmp")), "{names:?}");
     }
 
+    #[test] fn rebuild_index_after_the_index_was_emptied_by_hand_restores_search() {let d=tempfile::tempdir().unwrap();let m=MemoryStore::open_in_memory_index(d.path()).unwrap();m.create(&Scope::Global,"x.md","needle").unwrap();lock(&m.index).execute_batch("DELETE FROM mem_files; DELETE FROM mem_fts;").unwrap();assert!(m.search(&[Scope::Global],"needle",10).unwrap().is_empty());m.rebuild_index().unwrap();assert_eq!(m.search(&[Scope::Global],"needle",10).unwrap().len(),1);}
+    #[test] fn rebuild_index_reindexes_every_file_and_search_still_finds_them() { let d=tempfile::tempdir().unwrap(); let m=MemoryStore::open_in_memory_index(d.path()).unwrap(); m.create(&Scope::Global,"test.md","needle").unwrap(); assert_eq!(m.rebuild_index().unwrap().indexed,1); assert_eq!(m.search(&[Scope::Global],"needle",10).unwrap().len(),1); }
     #[test]
     fn list_is_sorted_recursive_and_hides_temp_files() {
         let (s, d) = store();

@@ -20,6 +20,7 @@ pub type Recheck = Arc<dyn Fn(&str) + Send + Sync>;
 #[derive(Clone)]
 pub struct Shared {
     pub store: Arc<Mutex<discard_core::store::Store>>,
+    pub memory: Arc<discard_core::memory::MemoryStore>,
     pub providers: Vec<ProviderInfo>,
     pub recheck: Recheck,
     pub workspace: Arc<discard_core::workspace::GitWorkspace>,

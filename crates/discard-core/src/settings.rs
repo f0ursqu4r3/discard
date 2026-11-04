@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use toml_edit::{DocumentMut, Item, Table, Value, value};
 
 use crate::bootstrap::PROVIDERS;
+use crate::action::Action;
+use crate::keymap::{self, Keymap};
 use crate::ghostty::bundled::DEFAULT_THEME;
 use crate::ghostty::resolve::ThemeSource;
 use crate::ghostty::spec::ThemeSpec;
@@ -13,6 +15,7 @@ use crate::ghostty::spec::ThemeSpec;
 /// The settings Discard understands.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Settings {
+    pub keymap: Keymap,
     pub general: GeneralSettings,
     pub appearance: AppearanceSettings,
 }
@@ -61,6 +64,8 @@ pub struct SettingsIssue {
 /// One change the Settings window can make.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
+    Keybinding { action: Action, chord: Option<String> },
+    ResetKeybinding(Action),
     DefaultProvider(String),
     ConfirmWhileWorking(bool),
     ThemeSource(ThemeSource),
@@ -79,6 +84,9 @@ pub enum SettingsError {
 
 /// The settings file version this build writes.
 const CURRENT_VERSION: i64 = 1;
+
+/// What Reset settings leaves in the file.
+const MINIMAL_FILE: &[u8] = b"version = 1\n";
 
 /// The state of the file after one read.
 struct Loaded {
@@ -146,22 +154,19 @@ impl SettingsStore {
             )));
         }
 
+        if let Change::Keybinding { action, chord } = &change {
+            check_key(&self.settings.keymap, *action, chord.as_deref())?;
+        }
+        if let Change::ResetKeybinding(action) = &change {
+            let default = Keymap::defaults();
+            check_key(&self.settings.keymap, *action, default.chord(*action).map(|c| c.as_str()))?;
+        }
+
         let mut doc = self.doc.clone();
         if doc.get("version").is_none() {
             doc.insert("version", value(CURRENT_VERSION));
         }
-        let (table, key, new_value) = match change {
-            Change::DefaultProvider(name) => ("general", "default_provider", Value::from(name)),
-            Change::ConfirmWhileWorking(on) => {
-                ("general", "confirm_while_working", Value::from(on))
-            }
-            Change::ThemeSource(source) => {
-                ("appearance", "theme_source", Value::from(source.as_str()))
-            }
-            Change::Theme(value) => ("appearance", "theme", Value::from(value.trim())),
-            Change::IgnorePluginThemes(on) => ("appearance", "ignore_plugin_themes", Value::from(on)),
-        };
-        set_in_table(&mut doc, table, key, new_value);
+        edit_doc(&mut doc, change);
 
         if self.parse_failed {
             self.save_invalid_copy()?;
@@ -176,6 +181,32 @@ impl SettingsStore {
         self.settings = settings;
         self.issues = issues;
         Ok(())
+    }
+
+    /// Back the file up to `<name>.bak`, then replace it with a minimal file. Returns the backup path,
+    /// or `None` when there was no file. An older backup stays until the new copy is whole.
+    /// On error, the file and the in-memory state stay as they were.
+    pub fn reset(&mut self) -> Result<Option<PathBuf>, SettingsError> {
+        let io = |e: std::io::Error| SettingsError::Io(e.to_string());
+        let backup = match read_bytes(&self.path).map_err(SettingsError::Io)? {
+            Some(bytes) => {
+                let backup = with_suffix(&self.path, ".bak");
+                let temp = with_suffix(&backup, ".tmp");
+                std::fs::write(&temp, &bytes)
+                    .and_then(|()| std::fs::rename(&temp, &backup))
+                    .map_err(io)?;
+                Some(backup)
+            }
+            None => None,
+        };
+        self.write_atomic(MINIMAL_FILE)?;
+        let loaded = parse(Some(MINIMAL_FILE.to_vec()));
+        self.doc = loaded.doc;
+        self.parse_failed = false;
+        self.last_bytes = loaded.bytes;
+        self.settings = loaded.settings;
+        self.issues = loaded.issues;
+        Ok(backup)
     }
 
     /// Re-read the file when its bytes differ from the last read or write.
@@ -376,7 +407,61 @@ fn evaluate(doc: &DocumentMut) -> (Settings, Vec<SettingsIssue>) {
             }
         },
     }
+    if let Some(item) = doc.get("keybindings") {
+        match item.as_table_like() {
+            None => issues.push(SettingsIssue { key: "keybindings".into(), message: "must be a table".into() }),
+            Some(table) => {
+                let mut raw = Vec::new();
+                for (key, item) in table.iter() {
+                    match item.as_str() {
+                        Some(value) => raw.push((key.to_string(), value.to_string())),
+                        None => issues.push(SettingsIssue { key: format!("keybindings.{key}"), message: "must be a string".into() }),
+                    }
+                }
+                let (map, problems) = keymap::resolve(&raw); settings.keymap = map; issues.extend(problems);
+            }
+        }
+    }
     (settings, issues)
+}
+
+/// Check a keybinding change against the current keymap.
+fn check_key(map: &Keymap, action: Action, chord: Option<&str>) -> Result<(), SettingsError> {
+    keymap::check_change(map, action, chord)
+        .map(|_| ())
+        .map_err(|e| SettingsError::Invalid(e.to_string()))
+}
+
+/// Write one change into the TOML document.
+fn edit_doc(doc: &mut DocumentMut, change: Change) {
+    let (table, key, new_value) = match change {
+        Change::ResetKeybinding(action) => {
+            if let Some(table) = doc.get_mut("keybindings").and_then(Item::as_table_like_mut) {
+                table.remove(action.id());
+            }
+            return;
+        }
+        Change::Keybinding { action, chord } => {
+            ("keybindings", action.id(), Value::from(chord.unwrap_or_default()))
+        }
+        Change::DefaultProvider(name) => ("general", "default_provider", Value::from(name)),
+        Change::ConfirmWhileWorking(on) => {
+            ("general", "confirm_while_working", Value::from(on))
+        }
+        Change::ThemeSource(source) => {
+            ("appearance", "theme_source", Value::from(source.as_str()))
+        }
+        Change::Theme(value) => ("appearance", "theme", Value::from(value.trim())),
+        Change::IgnorePluginThemes(on) => ("appearance", "ignore_plugin_themes", Value::from(on)),
+    };
+    set_in_table(doc, table, key, new_value);
+}
+
+/// `settings.toml` -> `settings.toml.bak`.
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
 }
 
 /// Set `[<table>].<key>`, keeping the old value's comments and spacing.
@@ -406,6 +491,13 @@ mod tests {
         dir.path().join("settings.toml")
     }
 
+    #[test] fn reset_replaces_an_older_backup() {let d=tempfile::tempdir().unwrap();let p=path_in(&d);fs::write(&p,"version = 1\n").unwrap();fs::write(d.path().join("settings.toml.bak"),"older").unwrap();let mut s=SettingsStore::open(&p);let b=s.reset().unwrap().unwrap();assert_eq!(fs::read_to_string(b).unwrap(),"version = 1\n");}
+    #[test] fn reset_of_an_unparseable_file_backs_it_up_and_clears_the_issue() {let d=tempfile::tempdir().unwrap();let p=path_in(&d);fs::write(&p,"bad = [").unwrap();let mut s=SettingsStore::open(&p);assert!(!s.issues().is_empty());let b=s.reset().unwrap().unwrap();assert_eq!(fs::read_to_string(b).unwrap(),"bad = [");assert!(s.issues().is_empty());}
+    #[test] fn reset_drops_keybindings_and_unknown_keys_from_the_live_file_but_keeps_them_in_the_backup() {let d=tempfile::tempdir().unwrap();let p=path_in(&d);let original="version = 1\nextra = 7\n[keybindings]\nzoom = \"cmd-k\"\n";fs::write(&p,original).unwrap();let mut s=SettingsStore::open(&p);let b=s.reset().unwrap().unwrap();assert_eq!(fs::read_to_string(b).unwrap(),original);assert_eq!(fs::read_to_string(p).unwrap(),"version = 1\n");assert_eq!(s.settings(),&Settings::default());}
+    #[cfg(unix)]
+    #[test] fn reset_in_a_read_only_folder_fails_and_keeps_the_file_and_the_state() { use std::os::unix::fs::PermissionsExt; let d=tempfile::tempdir().unwrap();let p=path_in(&d);let old="version = 1\n[general]\nconfirm_while_working = false\n";fs::write(&p,old).unwrap();let mut s=SettingsStore::open(&p);fs::set_permissions(d.path(),fs::Permissions::from_mode(0o500)).unwrap();let result=s.reset();fs::set_permissions(d.path(),fs::Permissions::from_mode(0o700)).unwrap();assert!(result.is_err());assert_eq!(fs::read_to_string(p).unwrap(),old);assert!(!s.settings().general.confirm_while_working);}
+    #[test] fn reset_backs_up_then_writes_a_minimal_file() { let d=tempfile::tempdir().unwrap(); let p=path_in(&d); fs::write(&p,"bad = [").unwrap(); let mut s=SettingsStore::open(&p); let backup=s.reset().unwrap().unwrap(); assert_eq!(fs::read_to_string(backup).unwrap(),"bad = ["); assert_eq!(fs::read_to_string(p).unwrap(),"version = 1\n"); assert!(s.issues().is_empty()); }
+    #[test] fn reset_with_no_file_returns_none_and_writes_the_minimal_file() { let d=tempfile::tempdir().unwrap(); let p=path_in(&d); let mut s=SettingsStore::open(&p); assert_eq!(s.reset().unwrap(),None); assert_eq!(fs::read_to_string(p).unwrap(),"version = 1\n"); }
     #[test]
     fn missing_file_gives_defaults_and_creates_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -702,5 +794,42 @@ mod tests {
         }
         assert!(!path.exists());
         assert_eq!(store.settings().appearance.theme, DEFAULT_THEME);
+    }
+
+    fn chord(text: &str) -> crate::keymap::Chord {
+        crate::keymap::parse_chord(text).unwrap()
+    }
+
+    #[test]
+    fn keybinding_change_writes_the_table_and_keeps_comments() {
+        let d = tempfile::tempdir().unwrap(); let path = d.path().join("settings.toml");
+        std::fs::write(&path, "version = 1\n[keybindings]\nzoom = \"cmd-k\" # keep\n").unwrap();
+        let mut s = SettingsStore::open(&path); s.apply(Change::Keybinding { action: Action::Zoom, chord: Some("cmd-j".into()) }).unwrap();
+        assert!(std::fs::read_to_string(path).unwrap().contains("# keep")); assert_eq!(s.settings().keymap.chord(Action::Zoom), Some(&chord("cmd-j")));
+    }
+    #[test]
+    fn unbind_writes_an_empty_string() {
+        let d = tempfile::tempdir().unwrap(); let path = d.path().join("settings.toml"); let mut s = SettingsStore::open(&path);
+        s.apply(Change::Keybinding { action: Action::HideOthers, chord: None }).unwrap(); assert!(std::fs::read_to_string(path).unwrap().contains("hide_others = \"\""));
+    }
+    #[test]
+    fn reset_keybinding_removes_the_key_and_keeps_the_table_otherwise() {
+        let d = tempfile::tempdir().unwrap(); let path = d.path().join("settings.toml"); std::fs::write(&path, "[keybindings]\nzoom = \"cmd-k\"\nquit = \"cmd-shift-q\"\n").unwrap();
+        let mut s = SettingsStore::open(&path); s.apply(Change::ResetKeybinding(Action::Zoom)).unwrap(); let text = std::fs::read_to_string(path).unwrap(); assert!(!text.contains("zoom")); assert!(text.contains("quit"));
+    }
+    #[test]
+    fn refused_keybinding_change_leaves_the_file_as_it_was() {
+        let d = tempfile::tempdir().unwrap(); let path = d.path().join("settings.toml"); let bytes = b"version = 1\n"; std::fs::write(&path, bytes).unwrap();
+        let mut s = SettingsStore::open(&path); assert!(s.apply(Change::Keybinding { action: Action::Zoom, chord: Some("cmd-q".into()) }).is_err()); assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+    #[test]
+    fn bad_keybinding_entries_become_issues_and_defaults_hold() {
+        let d = tempfile::tempdir().unwrap(); let path = d.path().join("settings.toml"); std::fs::write(&path, "keybindings = 3\n").unwrap();
+        let s = SettingsStore::open(&path); assert_eq!(s.issues()[0].key, "keybindings"); assert_eq!(s.settings().keymap, Keymap::defaults());
+    }
+    #[test]
+    fn a_hand_edit_to_a_keybinding_is_read_on_reload() {
+        let d = tempfile::tempdir().unwrap(); let path = d.path().join("settings.toml"); let mut s = SettingsStore::open(&path); std::fs::write(&path, "[keybindings]\nzoom = \"cmd-k\"\n").unwrap();
+        assert!(s.reload_if_changed()); assert_eq!(s.settings().keymap.chord(Action::Zoom), Some(&chord("cmd-k")));
     }
 }

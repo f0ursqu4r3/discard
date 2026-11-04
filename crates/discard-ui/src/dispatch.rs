@@ -101,8 +101,10 @@ pub(crate) fn plan(
     safe_mode: bool,
 ) -> Plan {
     let ending = match action {
-        Action::ArchiveChannel | Action::CopyMessageText | Action::CopyCode | Action::CopyChannelName => return Plan::Nothing,
+        Action::ArchiveChannel | Action::CopyMessageText | Action::CopyCode | Action::CopyChannelName | Action::CopyDiff | Action::CopyToolInput | Action::CopyToolOutput | Action::CopyAgentName | Action::CopyProjectName | Action::CopyProjectPath => return Plan::Nothing,
         Action::OpenSettings => return Plan::OpenSettings(SettingsPage::General),
+        Action::OpenAgentSettings => return Plan::OpenSettings(SettingsPage::Agents),
+        Action::OpenWorkspaceSettings => return Plan::OpenSettings(SettingsPage::Workspaces),
         Action::ReviewPlugins | Action::ShowPluginErrors => {
             return Plan::OpenSettings(SettingsPage::Plugins);
         }
@@ -204,7 +206,7 @@ pub fn run_on(action: Action, target: Option<ContextTarget>, cx: &mut App) {
         let Some(view) = state.view else { return; };
         match plan_targeted(action, target.is_some(), state.turn_running, view.read(cx).archived()) {
             TargetedPlan::Copy => {
-                if let Some(text) = target.as_ref().and_then(|target| view.read(cx).resolve_copy(target)) {
+                if let Some(text) = target.as_ref().and_then(|target| view.read(cx).resolve_copy(target, action)) {
                     cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
                 }
             }
@@ -408,6 +410,9 @@ mod tests {
     use discard_core::settings_page::SettingsPage;
     use std::cell::Cell;
 
+    #[test] fn open_agent_and_workspace_settings_open_their_pages() { assert_eq!(plan(Action::OpenAgentSettings,false,true,false),Plan::OpenSettings(SettingsPage::Agents)); assert_eq!(plan(Action::OpenWorkspaceSettings,false,true,false),Plan::OpenSettings(SettingsPage::Workspaces)); }
+    #[test] fn plan_targeted_copies_for_every_copy_action() { for &action in Action::all() { if action.needs_target() { assert_eq!(plan_targeted(action,true,false,false),TargetedPlan::Copy); assert_eq!(plan_targeted(action,false,false,false),TargetedPlan::Nothing); } } }
+    #[test] fn the_new_copy_actions_need_a_target() { for a in [Action::CopyDiff,Action::CopyToolInput,Action::CopyToolOutput,Action::CopyAgentName,Action::CopyProjectName,Action::CopyProjectPath] { assert_eq!(plan_targeted(a,false,false,false),TargetedPlan::Nothing); assert_eq!(plan_targeted(a,true,false,false),TargetedPlan::Copy); } }
     #[test]
     fn copy_actions_need_a_target_and_archive_obeys_state() {
         assert_eq!(plan_targeted(Action::CopyCode, false, false, false), TargetedPlan::Nothing);

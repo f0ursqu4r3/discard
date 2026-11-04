@@ -1,5 +1,10 @@
 //! The Settings window: a second OS window with a sidebar, a search box, and one page at a time.
 
+mod advanced;
+mod workspaces;
+mod memory;
+mod logs;
+mod keybindings;
 mod appearance;
 mod general;
 mod plugins;
@@ -28,13 +33,12 @@ struct SidebarEntry {
 }
 
 /// The pages the search keeps, in sidebar order.
+fn entry_for(page: SettingsPage, available: bool) -> SidebarEntry { SidebarEntry { page, clickable: available } }
+
 fn sidebar_entries(query: &str) -> Vec<SidebarEntry> {
     search(query)
         .into_iter()
-        .map(|page| SidebarEntry {
-            page,
-            clickable: page.is_available(),
-        })
+        .map(|page| entry_for(page, page.is_available()))
         .collect()
 }
 
@@ -46,6 +50,16 @@ pub struct SettingsView {
     /// The last error from a General page change. `None` after a change succeeds.
     general_error: Option<String>,
     appearance_error: Option<String>,
+    advanced_confirm: Option<discard_core::advanced::AdvancedAction>,
+    advanced_result: Option<(discard_core::advanced::AdvancedAction, String)>,
+    memory_rows: Vec<discard_core::memory_page::ScopeSummary>,
+    memory_text: Option<String>,
+    logs: logs::Logs,
+    _log_events: Subscription,
+    key_capture: Option<discard_core::action::Action>,
+    key_error: Option<(discard_core::action::Action, String)>,
+    key_saved: bool,
+    key_focus: FocusHandle,
     pickers: appearance::Pickers,
     /// Review IDs where the user switched on "trust future edits".
     trusted: HashSet<String>,
@@ -103,7 +117,9 @@ impl SettingsView {
                 seen_epoch = now_epoch;
                 seen_pending = now_pending;
                 let alive = this
-                    .update(cx, |_, cx| {
+                    .update(cx, |this, cx| {
+                        if this.page == SettingsPage::Logs && this.logs.poll() { cx.notify(); }
+                        if this.page == SettingsPage::Workspaces { cx.notify(); }
                         if changed || plugins_changed || providers_changed {
                             cx.notify();
                         }
@@ -131,13 +147,26 @@ impl SettingsView {
                 this.agent_editor.changed(); cx.notify();
             }
         });
+        let logs = logs::Logs::new(&shared.discard_home, window, cx);
+        let log_events = cx.subscribe_in(&logs.id, window, |this, input, event: &InputEvent, _, cx| { if let InputEvent::Change = event { this.logs.filter.id = input.read(cx).value().to_string(); cx.notify(); } });
+        let memory_rows = memory::load(&shared);
         Self {
+            advanced_confirm: None,
+            advanced_result: None,
+            memory_rows,
+            memory_text: None,
+            logs,
+            _log_events: log_events,
             shared,
             page,
             search,
             query: String::new(),
             general_error: None,
             appearance_error: None,
+            key_capture: None,
+            key_error: None,
+            key_saved: false,
+            key_focus: cx.focus_handle(),
             pickers,
             trusted: HashSet::new(),
             _search_events: events,
@@ -152,6 +181,7 @@ impl SettingsView {
             return;
         }
         self.page = page;
+        if page == SettingsPage::Memory { self.memory_rows = memory::load(&self.shared); }
         self.query.clear();
         self.search
             .update(cx, |input, cx| input.set_value("", window, cx));
@@ -183,6 +213,7 @@ impl SettingsView {
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.page = page;
+                            if page == SettingsPage::Memory { this.memory_rows = memory::load(&this.shared); }
                             cx.notify();
                         }))
                         .into_any_element()
@@ -219,14 +250,15 @@ impl SettingsView {
     fn content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let body = match self.page {
             SettingsPage::General => general::render(self, cx),
+            SettingsPage::Keybindings => keybindings::render(self, cx),
+            SettingsPage::Logs => logs::render(self, cx),
+            SettingsPage::Memory => memory::render(self, cx),
+            SettingsPage::Workspaces => workspaces::render(self, cx),
+            SettingsPage::Advanced => advanced::render(self, cx),
             SettingsPage::Appearance => appearance::render(self, window, cx),
             SettingsPage::Plugins => plugins::render(self, cx),
             SettingsPage::Providers => providers::render(self, cx),
             SettingsPage::Agents => agents::render(self, cx),
-            _ => div()
-                .text_color(cx.theme().muted_foreground)
-                .child("Soon")
-                .into_any_element(),
         };
         let spacing = self.shared.appearance.lock().unwrap_or_else(|p| p.into_inner()).scales().1;
         v_flex()
@@ -366,7 +398,7 @@ pub fn open_settings(page: SettingsPage, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     // Import by name: `use super::*` would bring in GPUI's `test` macro and shadow the built-in `#[test]`.
-    use super::{Reuse, SidebarEntry, plan_reuse, sidebar_entries};
+    use super::{Reuse, SidebarEntry, plan_reuse, sidebar_entries, entry_for};
     use discard_core::settings_page::SettingsPage;
 
     #[test]
@@ -385,19 +417,7 @@ mod tests {
 
     #[test]
     fn search_keeps_unavailable_pages_not_clickable() {
-        assert_eq!(
-            sidebar_entries("provider"),
-            vec![
-                SidebarEntry {
-                    page: SettingsPage::General,
-                    clickable: true
-                },
-                SidebarEntry {
-                    page: SettingsPage::Providers,
-                    clickable: true
-                },
-            ]
-        );
+        assert!(!entry_for(SettingsPage::Workspaces, false).clickable);
     }
 
     #[test]

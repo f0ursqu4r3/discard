@@ -2,7 +2,7 @@
 //! Rust builds the menu bar from `discard_core::action::menu_bar`. Plugins cannot change it.
 
 use discard_core::action::{
-    Action, MenuContext, MenuEntry, StandardItem, default_keymap, menu_bar,
+    Action, MenuContext, MenuEntry, StandardItem, menu_bar,
 };
 use gpui_kit::component::input;
 use gpui_kit::{App, Context, Global, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window};
@@ -64,6 +64,7 @@ macro_rules! action_types {
 }
 
 action_types!(
+    CopyDiff, CopyToolInput, CopyToolOutput, CopyAgentName, CopyProjectName, CopyProjectPath, OpenAgentSettings, OpenWorkspaceSettings,
     ArchiveChannel,
     CopyMessageText,
     CopyCode,
@@ -83,12 +84,12 @@ action_types!(
 );
 
 /// Bind `default_keymap()`. System keys other than those in the keymap stay with the OS and the inputs.
-pub(crate) fn bind_keys(cx: &mut App) {
-    let bindings: Vec<KeyBinding> = default_keymap()
+pub(crate) fn bind_keys(cx: &mut App, map: &discard_core::keymap::Keymap) {
+    let bindings: Vec<KeyBinding> = map.bindings()
         .iter()
         .filter_map(|(action, keys)| {
-            KeyBinding::load(keys, boxed(*action), None, false, None, cx)
-                .map_err(|e| tracing::warn!(action = action.id(), keys, error = ?e, "invalid key binding"))
+            KeyBinding::load(keys.as_str(), boxed(*action), None, false, None, cx)
+                .map_err(|e| tracing::warn!(action = action.id(), keys = keys.as_str(), error = ?e, "invalid key binding"))
                 .ok()
         })
         .collect();
@@ -172,6 +173,12 @@ mod tests {
     use discard_core::action::{Action, FUTURE_ITEMS, MenuEntry, StandardItem};
     use gpui_kit::{MenuItem, OsAction, SystemMenuType};
 
+    #[test]
+    fn plugin_items_for_the_new_targets_are_kept_out_of_the_app_table() {
+        use discard_core::action::{MenuContext,MenuTarget,PluginMenuItem};
+        let items=[MenuTarget::Diff,MenuTarget::ToolCall,MenuTarget::Agent,MenuTarget::Server].into_iter().map(|target|PluginMenuItem {plugin:"p".into(),index:0,target,label:"Run".into()}).collect();
+        assert!(super::plugin_table(&MenuContext {plugin_items:items,..Default::default()}).is_empty());
+    }
     #[test]
     fn plugin_table_lists_each_plugin_item_once_in_menu_order() {
         use discard_core::action::{MenuContext, MenuTarget, PluginMenuItem};

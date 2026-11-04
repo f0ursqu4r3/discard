@@ -196,6 +196,12 @@ impl Store {
         Ok(())
     }
 
+    pub fn list_projects(&self) -> Result<Vec<Project>> {
+        let mut statement = self.conn.prepare("SELECT id, name, path FROM projects ORDER BY rowid")?;
+        let rows = statement.query_map([], |r| Ok(Project { id: ProjectId(r.get(0)?), name: r.get(1)?, path: r.get(2)? }))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     pub fn insert_agent(&self, id: &AgentId, cfg: &AgentConfig) -> Result<()> {
         self.conn.execute(
             "INSERT INTO agents (id, config_toml) VALUES (?1, ?2)",
@@ -269,6 +275,14 @@ impl Store {
                 .ok_or_else(|| StoreError::Corrupt(format!("workspace_mode {mode}")))?;
             out.push(Channel { id: ChannelId(id), project_id: ProjectId(project_id), name, agent_id: AgentId(agent_id), workspace_mode });
         }
+        Ok(out)
+    }
+
+    pub fn all_channels_for_project(&self, p: &ProjectId) -> Result<Vec<(Channel, bool)>> {
+        let mut stmt = self.conn.prepare("SELECT id, project_id, name, agent_id, workspace_mode, archived FROM channels WHERE project_id = ?1 ORDER BY ord")?;
+        let rows = stmt.query_map(params![p.0], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,bool>(5)?)))?;
+        let mut out=Vec::new();
+        for row in rows { let (id,project_id,name,agent_id,mode,archived)=row?; let workspace_mode=WorkspaceMode::parse(&mode).ok_or_else(||StoreError::Corrupt(format!("workspace_mode {mode}")))?; out.push((Channel { id:ChannelId(id),project_id:ProjectId(project_id),name,agent_id:AgentId(agent_id),workspace_mode },archived)); }
         Ok(out)
     }
 
@@ -585,6 +599,10 @@ mod tests {
         Fixture { store, project, agent, channel, session }
     }
 
+    #[test]
+    fn list_projects_returns_projects_in_insert_order() { let f=fixture(); let p=Project { id: ProjectId::new(), name:"second".into(),path:"/second".into() }; f.store.insert_project(&p).unwrap(); assert_eq!(f.store.list_projects().unwrap(), vec![f.project, p]); }
+    #[test]
+    fn all_channels_include_archived_ones_with_the_flag() { let f=fixture(); f.store.archive_channel(&f.channel.id).unwrap(); let channels=f.store.all_channels_for_project(&f.project.id).unwrap(); assert_eq!(channels, vec![(f.channel,true)]); }
     #[test]
     fn list_agents_returns_agents_in_insert_order() {
         let f = fixture();

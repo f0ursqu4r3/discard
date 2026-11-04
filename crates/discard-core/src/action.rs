@@ -26,6 +26,14 @@ pub enum Action {
     Zoom,
     /// Close the focused window (Cmd+W). Closing the main window ends the app, so it can need a confirm.
     CloseWindow,
+    CopyDiff,
+    CopyToolInput,
+    CopyToolOutput,
+    CopyAgentName,
+    CopyProjectName,
+    CopyProjectPath,
+    OpenAgentSettings,
+    OpenWorkspaceSettings,
 }
 
 impl Action {
@@ -48,6 +56,44 @@ impl Action {
             Action::Minimize => "minimize",
             Action::Zoom => "zoom",
             Action::CloseWindow => "close_window",
+            Action::CopyDiff => "copy_diff",
+            Action::CopyToolInput => "copy_tool_input",
+            Action::CopyToolOutput => "copy_tool_output",
+            Action::CopyAgentName => "copy_agent_name",
+            Action::CopyProjectName => "copy_project_name",
+            Action::CopyProjectPath => "copy_project_path",
+            Action::OpenAgentSettings => "open_agent_settings",
+            Action::OpenWorkspaceSettings => "open_workspace_settings",
+        }
+    }
+
+    /// The name shown in menus and on the Keybindings page, without a trailing `…`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ArchiveChannel => "Archive Channel",
+            Self::CopyMessageText => "Copy Message Text",
+            Self::CopyCode => "Copy Code",
+            Self::CopyChannelName => "Copy Channel Name",
+            Self::OpenSettings => "Settings",
+            Self::Quit => "Quit",
+            Self::CancelTurn => "Cancel Turn",
+            Self::ReviewPlugins => "Review Plugins",
+            Self::ShowPluginErrors => "Plugin Errors",
+            Self::ToggleSafeMode => "Safe Mode",
+            Self::HideApp => "Hide Discard",
+            Self::HideOthers => "Hide Others",
+            Self::ShowAll => "Show All",
+            Self::Minimize => "Minimize",
+            Self::Zoom => "Zoom",
+            Self::CloseWindow => "Close Window",
+            Self::CopyDiff => "Copy Diff",
+            Self::CopyToolInput => "Copy Tool Input",
+            Self::CopyToolOutput => "Copy Tool Output",
+            Self::CopyAgentName => "Copy Agent Name",
+            Self::CopyProjectName => "Copy Project Name",
+            Self::CopyProjectPath => "Copy Project Path",
+            Self::OpenAgentSettings => "Agent Settings",
+            Self::OpenWorkspaceSettings => "Workspace Settings",
         }
     }
 
@@ -73,24 +119,32 @@ impl Action {
             Action::Minimize,
             Action::Zoom,
             Action::CloseWindow,
+            Action::CopyDiff,
+            Action::CopyToolInput,
+            Action::CopyToolOutput,
+            Action::CopyAgentName,
+            Action::CopyProjectName,
+            Action::CopyProjectPath,
+            Action::OpenAgentSettings,
+            Action::OpenWorkspaceSettings,
         ]
     }
 
     pub fn needs_target(self) -> bool {
-        matches!(self, Self::CopyMessageText | Self::CopyCode | Self::CopyChannelName)
+        matches!(self, Self::CopyMessageText | Self::CopyCode | Self::CopyChannelName | Self::CopyDiff | Self::CopyToolInput | Self::CopyToolOutput | Self::CopyAgentName | Self::CopyProjectName | Self::CopyProjectPath)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MenuTarget { App, Message, CodeBlock, Channel }
+pub enum MenuTarget { App, Message, CodeBlock, Channel, Diff, ToolCall, Agent, Server }
 
 impl MenuTarget {
     pub fn id(self) -> &'static str {
-        match self { Self::App => "app", Self::Message => "message", Self::CodeBlock => "code_block", Self::Channel => "channel" }
+        match self { Self::App => "app", Self::Message => "message", Self::CodeBlock => "code_block", Self::Channel => "channel", Self::Diff => "diff_block", Self::ToolCall => "tool_call", Self::Agent => "agent", Self::Server => "server" }
     }
 
     pub fn parse(id: &str) -> Option<Self> {
-        [Self::App, Self::Message, Self::CodeBlock, Self::Channel].into_iter().find(|target| target.id() == id)
+        [Self::App, Self::Message, Self::CodeBlock, Self::Channel, Self::Diff, Self::ToolCall, Self::Agent, Self::Server].into_iter().find(|target| target.id() == id)
     }
 }
 
@@ -297,15 +351,11 @@ mod tests {
     }
 
     #[test]
-    fn every_action_appears_in_the_menu_bar() {
-        let entries = all_entries(&MenuContext::default());
-        for action in Action::all() {
-            if action.needs_target() { continue; }
-            assert!(
-                entries.iter().any(|e| matches!(e, MenuEntry::Action { action: a, .. } if a == action)),
-                "{action:?} missing from the menu bar"
-            );
-        }
+    fn every_action_appears_in_a_menu() {
+        use crate::context_menu::{ContextTarget,context_menu};
+        let ctx=MenuContext::default(); let mut entries=all_entries(&ctx);
+        for target in [ContextTarget::Message{id:"m".into(),has_text:true},ContextTarget::CodeBlock{message_id:"m".into(),block:0},ContextTarget::Channel{id:"c".into()},ContextTarget::DiffBlock{message_id:"m".into(),block:0},ContextTarget::ToolCall{message_id:"m".into(),block:0,has_output:true},ContextTarget::Agent{id:"a".into(),name:"n".into()},ContextTarget::Server{id:"s".into(),name:"n".into(),path:"/".into()}] { entries.extend(context_menu(&target,&ctx)); }
+        for action in Action::all() { assert!(entries.iter().any(|e|matches!(e,MenuEntry::Action{action:a,..} if a==action)),"{action:?} missing from menus"); }
     }
 
     #[test]
@@ -325,7 +375,7 @@ mod tests {
 
     #[test]
     fn menu_target_ids_round_trip() {
-        for target in [MenuTarget::App, MenuTarget::Message, MenuTarget::CodeBlock, MenuTarget::Channel] {
+        for target in [MenuTarget::App, MenuTarget::Message, MenuTarget::CodeBlock, MenuTarget::Channel, MenuTarget::Diff, MenuTarget::ToolCall, MenuTarget::Agent, MenuTarget::Server] {
             assert_eq!(MenuTarget::parse(target.id()), Some(target));
         }
         assert_eq!(MenuTarget::parse("diff"), None);
@@ -334,7 +384,7 @@ mod tests {
     #[test]
     fn targeted_actions_are_the_copy_actions_and_stay_out_of_the_menu_bar() {
         for action in Action::all() {
-            assert_eq!(action.needs_target(), matches!(action, Action::CopyMessageText | Action::CopyCode | Action::CopyChannelName));
+            assert_eq!(action.needs_target(), matches!(action, Action::CopyMessageText | Action::CopyCode | Action::CopyChannelName | Action::CopyDiff | Action::CopyToolInput | Action::CopyToolOutput | Action::CopyAgentName | Action::CopyProjectName | Action::CopyProjectPath));
         }
     }
 
@@ -463,5 +513,12 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn labels_are_unique_and_not_empty() {
+        let labels: HashSet<_> = Action::all().iter().map(|a| a.label()).collect();
+        assert_eq!(labels.len(), Action::all().len());
+        assert!(!labels.contains(""));
     }
 }

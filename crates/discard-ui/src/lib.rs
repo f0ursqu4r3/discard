@@ -44,6 +44,7 @@ pub fn run(
     providers: Vec<ProviderInfo>,
     recheck: Recheck,
     store: Arc<Mutex<discard_core::store::Store>>,
+    memory: Arc<discard_core::memory::MemoryStore>,
 ) {
     // On macOS `cx.quit()` ends the process inside this call, so nothing after it may matter.
     application().run(move |cx| {
@@ -51,7 +52,8 @@ pub fn run(
         cx.set_global(dispatch::Relauncher(relaunch));
         // Bind keys before the first menu install, so the menu shows each shortcut.
         menus::register_handlers(cx);
-        menus::bind_keys(cx);
+        let keymap = settings.lock().unwrap_or_else(|p| p.into_inner()).settings().keymap.clone();
+        menus::bind_keys(cx, &keymap);
         let appearance = {
             let settings = settings.lock().unwrap_or_else(|p| p.into_inner()).settings().appearance.clone();
             let (dirs, configs) = appearance::theme_env(&discard_home);
@@ -76,6 +78,7 @@ pub fn run(
             providers,
             recheck,
             store,
+            memory,
             discard_home,
             plugins,
             load_report: std::rc::Rc::new(load_report),

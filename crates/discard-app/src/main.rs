@@ -75,7 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(2);
         }
     };
-    logging::init();
+    logging::init(Some(&data_dir.join("logs")));
     for issue in settings.issues() {
         warn!(key = %issue.key, message = %issue.message, "settings issue");
     }
@@ -206,6 +206,9 @@ fn run_app(
 
     discard_ui::run(
         ViewData {
+            project_id: workspace.project.id.0.clone(),
+            project_path: workspace.project.path.clone(),
+            agent_id: workspace.channel.agent_id.0.clone(),
             project_name: workspace.project.name,
             channel_name: workspace.channel.name,
             agent_name: workspace.agent.name,
@@ -224,6 +227,7 @@ fn run_app(
         providers,
         recheck,
         store,
+        Arc::clone(&memory_store),
     );
     Ok(())
 }

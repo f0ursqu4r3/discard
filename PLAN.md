@@ -164,6 +164,8 @@ Discard writes structured logs with secret redaction for provider, plugin, appro
 - **Advanced page.** Three destructive actions: Reset settings (backs up to `settings.toml.bak`), Rebuild memory index, Clear logs. Each shows a confirmation that lists what it changes. There is no "delete all data" action.
 - **Logs page.** Discard first adds a rotating, redacted log file in `~/.discard/logs/`, next to the stderr output. The viewer is read-only and follows the file live. It filters by level, component (provider, plugin, approval, storage, MCP, workspace), and session, turn, or plugin ID.
 
+Plugin-declared settings are not built and are in no milestone.
+
 ### Settings storage
 
 - App settings live in `~/.discard/settings.toml`. Rust owns the schema and validates it. Changes apply live. A hand edit reloads, and errors show in the window.

@@ -27,7 +27,7 @@
 ## Decisions this plan makes (not in the spec)
 
 - **Rule for each action's key** (`KeyRule` in `keymap.rs`). `Locked`: Close Window, Hide Discard, Minimize. They keep Cmd+W, Cmd+H, and Cmd+M and cannot be edited. `Required`: Quit, Open Settings, Cancel Turn. They always have one chord. The user may replace it, never remove it. `Optional`: every other action that needs no target. The user may replace, remove, or reset it. Actions that need a target (the Copy actions) have no key.
-- **A reserved chord belongs to its owner for good.** The reserved chords are the eleven system keys. No action but the owner may take one of them, even after Quit or Open Settings moves to another chord. Cmd+C, Cmd+V, Cmd+X, Cmd+A, and Cmd+Z have no owner: nobody may take them. This reads "fixed" and "can be rebound" in the spec together.
+- **A reserved chord belongs to its owner for good.** The reserved chords are the ten system keys. No action but the owner may take one of them, even after Quit or Open Settings moves to another chord. Cmd+C, Cmd+V, Cmd+X, Cmd+A, and Cmd+Z have no owner: nobody may take them. This reads "fixed" and "can be rebound" in the spec together.
 - **Settings format.** A `[keybindings]` table in `settings.toml` maps an action ID to a chord string. An empty string means "unbound" and is valid only for `Optional` actions. An absent key means the default. A hand edit with a bad entry (unknown action, bad chord, wrong rule, reserved chord, or a conflict) drops only that entry and reports one problem. A default chord always wins over a custom chord in a conflict. Among custom chords that conflict, the action that comes first in `Action::all()` wins.
 - **Chord text** is GPUI's format, in canonical order: `ctrl-alt-shift-cmd-<key>`, lowercase. A chord needs at least one of `ctrl`, `alt`, or `cmd`. Function keys (`f1` to `f12`) may stand alone. The key is one printable character or a name from `NAMED_KEYS`.
 - **Key changes apply at the next launch.** Rebinding at run time would need `clear_key_bindings`, which also clears the input component's bindings. The page says "Applies at next launch" and offers **Relaunch** (`dispatch::relaunch_same_mode`), as the Agents page does.
@@ -64,7 +64,7 @@
   - `pub fn parse_chord(text: &str) -> Result<Chord, KeymapError>`. Returns the canonical chord.
   - `pub fn display_chord(chord: &Chord) -> String`. `cmd-shift-p` becomes `Cmd+Shift+P`.
   - `pub enum KeyRule { Locked, Required, Optional }` and `pub fn rule(action: Action) -> Option<KeyRule>`. `None` for actions that need a target.
-  - `pub const RESERVED: &[(&str, Option<Action>)]`: the eleven system chords and their owner.
+  - `pub const RESERVED: &[(&str, Option<Action>)]`: the ten system chords and their owner.
   - `pub struct Keymap` with `Keymap::defaults() -> Keymap`, `chord(&self, Action) -> Option<&Chord>`, `is_custom(&self, Action) -> bool`, `bindings(&self) -> Vec<(Action, Chord)>` (in `Action::all()` order).
   - `pub fn resolve(raw: &[(String, String)]) -> (Keymap, Vec<SettingsIssue>)`. `raw` holds the `[keybindings]` entries. Each issue has the key `keybindings.<id>`.
   - `pub fn check_change(map: &Keymap, action: Action, chord: Option<&str>) -> Result<Option<Chord>, KeymapError>`.

@@ -145,3 +145,24 @@ Open: no GUI check ran. Some plan tests are merged or missing (a separate `ui` c
 
 ### Round 2 — Claude fix
 Problem found in review: `find_agent` reused an agent across projects, so two projects shared agent-private memory. Claude replaced it with `Store::find_project_agent(project, provider, plugin_write)`, which looks only at the project's own channels (archived ones included). Tests added first and seen failing: `a_new_project_never_reuses_another_projects_agent`, `archiving_in_one_project_does_not_hand_its_agent_to_another`. After the fix: clippy clean, 844 tests pass, 0 fail. The plan text for Task 2 is updated to match.
+
+## Act 3 — Build (M9)
+
+### Round 1 — Codex build
+Spec: `docs/superpowers/plans/2026-11-03-m9-keybindings-pages-logs-menus.md`. Codex ran with `--sandbox workspace-write`. It stopped after Tasks 1 to 3 (keymap, Keybindings page, log file) and reported the rest as not done.
+
+### Round 2 — Codex build (resume, same session)
+Claude resumed the same session for Tasks 4 to 10. The sandbox-bypass flag was refused, so the resume used `-c sandbox_mode="workspace-write"`. Codex finished all tasks and made no commits. The 11 `discard-mcp` HTTP tests could not run in its sandbox. The GUI "Verify" steps are NOT RUN.
+
+### Claude's verdict
+Passed: `cargo build --workspace`, `cargo test --workspace` (932 passed, 0 failed, 10 ignored, MCP tests included), and `cargo clippy --workspace --all-targets -- -D warnings` are clean in a fresh run. I read the full diff.
+Fixed by Claude (Codex's code was correct but dense and untidy):
+- Ran `rustfmt` on the new files. One-line functions became normal Rust.
+- Moved Codex's `tests/m9_*.rs` integration tests inline, as the plan says, and removed those files.
+- Split `SettingsStore::apply` into `check_key` and `edit_doc`. `reset` uses `with_suffix` and `MINIMAL_FILE`.
+- Moved the eight new `Action` variants to the end of the enum, `id`, and `all`. Expanded `Action::label`. Merged a stray test module.
+- Rewrote the `logging::init` section with correct docs.
+- `render_block` takes `owner: Option<(&str, usize)>` and builds its own target. Before, `message_row` passed a fake `CodeBlock` target that `render_block` rewrote.
+- `LogTail::poll` reads the head and the new bytes only, not the whole file, on each poll.
+- Docs: the `[keybindings]` example no longer uses Cmd+Shift+Z (Redo in text inputs). The plan now says ten reserved chords, not eleven.
+Open: the GUI checks for Tasks 2 to 7, 9, and 10 are not run. The new pages use plain text with no headings and probably need styling. The Workspaces page reads the store on every render as well as on the poll.

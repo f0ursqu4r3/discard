@@ -18,6 +18,9 @@ confirm_while_working = true      # ask before Quit or Safe Mode while a turn ru
 theme_source = "default"          # default, ghostty, or custom
 theme = "light:Catppuccin Latte,dark:Catppuccin Mocha"   # used when theme_source is "custom"
 ignore_plugin_themes = false      # true: plugin theme tokens have no effect
+
+[keybindings]
+zoom = "cmd-shift-k"
 ```
 
 | Key | Type | Default |
@@ -28,6 +31,7 @@ ignore_plugin_themes = false      # true: plugin theme tokens have no effect
 | `appearance.theme_source` | `"default"`, `"ghostty"`, or `"custom"` | `"default"` |
 | `appearance.theme` | A Ghostty `theme` value: `Name` or `light:X,dark:Y` | `"light:Catppuccin Latte,dark:Catppuccin Mocha"` |
 | `appearance.ignore_plugin_themes` | `true` or `false` | `false` |
+| `keybindings.<action>` | Shortcut string, or an empty string to unbind an optional action | Action default |
 
 Discard never creates the file at startup. It creates the file on the first change you make in the Settings window.
 The folder already exists after startup.
@@ -40,6 +44,8 @@ Discard reads each key on its own. A bad key falls back to its default. The rest
 | --- | --- |
 | Missing file | All defaults. No problem is reported. |
 | Wrong type for a key (for example `confirm_while_working = "yes"`) | That key uses its default. One problem is reported. |
+| Invalid keybinding or conflict | That action uses its default. One problem is reported. |
+| `keybindings` is not a table | All shortcuts use their defaults. One problem is reported. |
 | Unknown provider name | `default_provider` uses `claude`. One problem is reported. |
 | Unknown `theme_source`, or a `theme` that names no theme (empty, or only `light:X`) | That key uses its default. One problem is reported. |
 | `general` is not a table | All `general` keys use their defaults. One problem is reported. |
@@ -140,9 +146,10 @@ before it builds the menu bar, so the menu items for them show their keys: Setti
 Discard, Close Window, and Minimize. Cancel Turn shows its key only while a turn runs. When no turn runs, its item
 carries a placeholder action with no key. Show All and Zoom have no key. An invalid binding is logged and skipped.
 
-The edit keys are not in this list. Cmd+C, Cmd+V, Cmd+X, Cmd+A, and Cmd+Z stay with the OS and the text inputs,
-through the Edit menu items. You cannot change any key yet. The Keybindings page is not built. When it arrives, `PLAN.md`
-fixes these keys: Cmd+Q, Cmd+, , Cmd+W, Cmd+H, Cmd+M, Cmd+C, Cmd+V, Cmd+X, Cmd+A, Cmd+Z.
+The edit keys Cmd+C, Cmd+V, Cmd+X, Cmd+A, and Cmd+Z stay with the OS and text inputs. They are reserved.
+Cmd+Q and Cmd+, remain reserved for Quit and Settings even if you move those actions. Cmd+W, Cmd+H, and Cmd+M are locked.
+Quit, Settings, and Cancel Turn need a shortcut. You can change other actions or unbind them. A conflict blocks the
+change and names the action. Key changes apply at the next launch. Plugins cannot register shortcuts.
 
 ## The Settings window
 
@@ -156,8 +163,7 @@ fixes these keys: Cmd+Q, Cmd+, , Cmd+W, Cmd+H, Cmd+M, Cmd+C, Cmd+V, Cmd+X, Cmd+A
 - **Search.** The box above the list filters pages. A page stays if its title or one of its field labels contains the
   text. Case and spaces do not matter, so "rollback" finds "Roll back". "No matching settings" shows when nothing
   matches.
-- **Pages that work now:** General, Appearance, Agents, Providers, and Plugins. The other five show greyed with a "Soon" tag. You cannot select them.
-  They stay in the list when the search matches their title.
+- **Pages:** All ten pages are available.
 
 ### General page
 
@@ -211,10 +217,30 @@ Rust draws this page. A plugin cannot hide or replace it. From top to bottom:
   outside review, disabled in Safe Mode), a "trusts future edits" tag, and a **Roll back** button. The bundled
   interface is a plugin too, but it is not listed.
 
+### Keybindings page
+
+Record, reset, or unbind shortcuts. Locked actions cannot be edited. Changes apply at the next launch. Use **Relaunch** to apply them.
+
+### Memory page
+
+Browse scopes and read memory files. Use **Reveal** to open a scope folder. Editing and deleting files are not available here.
+
+### Workspaces page
+
+Browse projects, channels, workspace modes, and worktree paths. Missing folders and archived channels are marked. Use **Reveal** to open a folder. This page is read-only.
+
+### Logs page
+
+Discard writes redacted JSON lines to stderr and `$DISCARD_HOME/logs/discard.log`. It rotates at 5 MiB and keeps four older files. Filter by level, component, or session, turn, or plugin ID. Follow scrolls to new lines. The log is read-only.
+
+### Advanced page
+
+Reset settings saves a backup at `settings.toml.bak`. Rebuild memory index reads the memory files again. Clear logs removes old log files and empties the active file. Each action asks for confirmation.
+
 ## Context menus and archive
 
 Right-click a message to copy its text, a code block to copy its code, or a channel row to copy its name or archive it.
-The live streaming row has no context menu. Plugin items follow the Rust items and show the plugin name.
+Right-click a diff to copy it, a tool call to copy its input or output, an agent to copy its name or open Agent Settings, or the server icon to copy the project name or path or open Workspace Settings. The live streaming row has no context menu. Plugin items follow the Rust items and show the plugin name.
 
 Archive is blocked while a turn runs. If removing a worktree can lose work, Discard lists the items and asks for
 confirmation. Cancel keeps the channel and worktree. After archive, the composer is locked. **Relaunch** starts a new
@@ -279,7 +305,7 @@ and the engine runs for it. A Mac app usually stays open with no window. Discard
 - Relaunch works on unix only. On other systems the code starts the new process at once, without waiting for the old
   one to exit. Windows is out of scope for v1.
 - The relaunched process has no input or standard output. `relaunch.rs` sets them to null. Its stderr is inherited,
-  so the relaunched Discard writes its logs where the first one did. A log file is planned for M9.
+  so the relaunched Discard writes its logs where the first one did.
 - The confirm notice comes from the Quit action (`Cmd+Q` and Quit Discard), closing the main window, and the Safe
   Mode relaunch. Discard has no hook that can stop a Quit from the Dock or the system, so those do not ask. They end
   the process. Discard sends Cancel to the engine when the app quits, but GPUI gives quit handlers only a short time.
@@ -290,12 +316,10 @@ and the engine runs for it. A Mac app usually stays open with no window. Discard
   Confirm. A second request replaces the first.
 - After the first write to a file that could not be parsed, the "file" problem disappears. Discard does not tell you
   that the old text is now in `settings.toml.invalid`.
-- You cannot change any key yet. The keymap is in code.
-- The Keybindings,
-  Memory, Workspaces, Logs, and Advanced pages arrive in M9. See `PLAN.md`.
-- Plugin-declared settings are not built. `settings.toml` holds `version`, `general`, and `appearance`. Unknown keys stay in the
+- Key changes need a relaunch. The Memory and Workspaces pages are read-only.
+- Plugin-declared settings are not built. `settings.toml` holds `version`, `general`, `appearance`, and `keybindings`. Unknown keys stay in the
   file, but nothing reads them.
-- The "Soon" sidebar rows and the greyed menu items have no tooltip.
+- Greyed menu items have no tooltip.
 - The menu bar, the keys, the confirm notice, the relaunch, the single Settings window, and the Plugins page were
   built and logic-tested. The manual GUI checks have not been run.
 

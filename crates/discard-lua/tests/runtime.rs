@@ -51,6 +51,12 @@ fn menu_item_callback_receives_only_kind_and_id_and_items_keep_order() {
 }
 
 #[test]
+fn menu_item_accepts_the_four_new_targets() {
+    let (_, info) = load(UI, "for _, target in {'diff_block', 'tool_call', 'agent', 'server'} do discard.menu_item(target, 'Run', function() end) end").unwrap();
+    assert_eq!(info.menu_items.len(), 4);
+}
+
+#[test]
 fn invalid_menu_items_fail_to_load() {
     for (source, expected) in [
         ("discard.menu_item('diff', 'ok', function() end)".to_string(), "unknown menu target `diff`"),

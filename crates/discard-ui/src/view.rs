@@ -43,6 +43,9 @@ fn may_send(archived: bool, text: &str) -> bool { !archived && !text.trim().is_e
 #[derive(Debug, Clone)]
 pub struct ViewData {
     pub project_name: String,
+    pub project_id: String,
+    pub project_path: String,
+    pub agent_id: String,
     pub channel_name: String,
     pub agent_name: String,
     pub provider_label: String,
@@ -225,8 +228,8 @@ impl DiscardView {
         cx.notify();
     }
     pub(crate) fn set_pending_archive(&mut self, pending: Option<Vec<String>>, cx: &mut Context<Self>) { self.pending_archive = pending; cx.notify(); }
-    pub(crate) fn resolve_copy(&self, target: &discard_core::context_menu::ContextTarget) -> Option<String> {
-        discard_core::context_menu::resolve_copy(self.state.history(), &self.data.channel_name, target)
+    pub(crate) fn resolve_copy(&self, target: &discard_core::context_menu::ContextTarget, action: Action) -> Option<String> {
+        discard_core::context_menu::resolve_copy(self.state.history(), &self.data.channel_name, target, action)
     }
 
     /// Show `text` in the main window's notice line. The next send clears it.
@@ -515,7 +518,7 @@ impl DiscardView {
             .bg(cx.theme().sidebar)
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
-            .child(Avatar::new().name(self.data.project_name.clone()))
+            .child(div().id("server-icon").child(Avatar::new().name(self.data.project_name.clone())).context_menu({ let target=ContextTarget::Server {id:self.data.project_id.clone(),name:self.data.project_name.clone(),path:self.data.project_path.clone()}; menus::to_popup(context_menu(&target,&self.menu_ctx),target) }))
     }
 
     fn channel_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -589,8 +592,10 @@ impl DiscardView {
             .child(div().text_xs().text_color(cx.theme().muted_foreground).child("AGENTS"))
             .child(
                 h_flex()
+                    .id("agent-row")
                     .gap(self.space(2.0))
                     .items_center()
+                    .context_menu({ let target=ContextTarget::Agent {id:self.data.agent_id.clone(),name:self.data.agent_name.clone()}; menus::to_popup(context_menu(&target,&self.menu_ctx),target) })
                     .child(Avatar::new().name(self.data.agent_name.clone()).small())
                     .child(
                         v_flex()
@@ -659,20 +664,39 @@ impl DiscardView {
         v_flex().children(lines).into_any_element()
     }
 
-    fn render_block(&self, block: &Block, index: usize, target: Option<ContextTarget>, cx: &mut Context<Self>) -> AnyElement {
+    /// `owner` is the message ID and the block's index in that message. The live row has no message ID,
+    /// so it passes `None` and its blocks get no context menu.
+    fn render_block(&self, block: &Block, index: usize, owner: Option<(&str, usize)>, cx: &mut Context<Self>) -> AnyElement {
+        let target = owner.and_then(|(message_id, block_index)| {
+            let message_id = message_id.to_string();
+            match block {
+                Block::Code { .. } => Some(ContextTarget::CodeBlock { message_id, block: block_index }),
+                Block::Diff { .. } => Some(ContextTarget::DiffBlock { message_id, block: block_index }),
+                Block::ToolCall { output, .. } => Some(ContextTarget::ToolCall { message_id, block: block_index, has_output: output.is_some() }),
+                Block::Markdown { .. } | Block::Approval { .. } => None,
+            }
+        });
+        let with_menu = |element: Stateful<Div>| -> AnyElement {
+            match target.clone() {
+                Some(target) => element.context_menu(menus::to_popup(context_menu(&target, &self.menu_ctx), target)).into_any_element(),
+                None => element.into_any_element(),
+            }
+        };
         match block {
             Block::Markdown { text } => div().child(markdown(text.clone())).into_any_element(),
             Block::Code { language, text } => {
                 let diff = language.as_deref().is_some_and(|lang| lang.eq_ignore_ascii_case("diff") || lang.eq_ignore_ascii_case("patch"));
                 let content = if diff { self.diff_lines(text, true, cx) } else { div().child(text.clone()).into_any_element() };
-                let element = div().id(("code-block", index)).p(self.space(2.0)).rounded_md().bg(cx.theme().muted).font_family("Menlo").text_sm().child(content);
-                if let Some(target) = target { element.context_menu(menus::to_popup(context_menu(&target, &self.menu_ctx), target)).into_any_element() } else { element.into_any_element() }
+                with_menu(div().id(("code-block", index)).p(self.space(2.0)).rounded_md().bg(cx.theme().muted).font_family("Menlo").text_sm().child(content))
             }
-            Block::Diff { text } => div().p(self.space(2.0)).rounded_md().bg(cx.theme().muted)
-                .font_family("Menlo").text_sm().child(self.diff_lines(text, true, cx)).into_any_element(),
+            Block::Diff { text } => with_menu(
+                div().id(("diff-block", index)).p(self.space(2.0)).rounded_md().bg(cx.theme().muted)
+                    .font_family("Menlo").text_sm().child(self.diff_lines(text, true, cx)),
+            ),
             Block::ToolCall { name, input, output, .. } => {
                 let summary = discard_core::timeline::summarize_input(name, input);
-                v_flex()
+                let element = v_flex()
+                    .id(("tool-call", index))
                     .gap(self.space(1.0))
                     .p(self.space(2.0))
                     .rounded_md()
@@ -688,8 +712,8 @@ impl DiscardView {
                         let shown: String = out.chars().take(400).collect();
                         let content = if looks_like_unified_diff(out) { self.diff_lines(&shown, false, cx) } else { div().child(shown).into_any_element() };
                         col.child(div().text_xs().text_color(cx.theme().muted_foreground).child(content))
-                    })
-                    .into_any_element()
+                    });
+                with_menu(element)
             }
             Block::Approval { approval_id, tool, summary } => {
                 let prompt = self.state.prompts().iter().find(|p| p.approval_id.0 == *approval_id).cloned();
@@ -768,7 +792,7 @@ impl DiscardView {
             .blocks
             .iter()
             .enumerate()
-            .map(|(i, b)| self.render_block(b, row * 1000 + i, Some(ContextTarget::CodeBlock { message_id: message.id.0.clone(), block: i }), cx))
+            .map(|(i, b)| self.render_block(b, row * 1000 + i, Some((message.id.0.as_str(), i)), cx))
             .collect();
         h_flex()
             .id(("message-row", row))
