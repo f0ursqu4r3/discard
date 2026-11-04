@@ -51,6 +51,15 @@ File: `view.rs` (`server_rail`).
 - Server icons are squircles (a rounded square with a large corner radius), not circles. This includes the project avatar. Use a radius token, or one shared constant if no token fits. On hover and when selected, the corner radius gets tighter.
 - A count badge on the icon for pending approvals (warning token). It outranks the unread pill.
 - Keep the existing server context menu.
+- **Pill heights (Discord reference).** Selected server: full-height pill. Hovered, not selected: half-height pill. Otherwise none. Put the height decision in a pure function with tests. With one server (always selected) the hover pill never shows, but build it for later servers.
+- **Tooltip.** Hovering a server icon shows a tooltip with the project name, to the right of the icon.
+
+### Chrome changes (after Surface 4)
+
+These came from review of the running app. Do them together.
+- **Settings cog in the rail.** Remove the Settings button from the bottom of the channel list. Put a cog icon button at the bottom of the server rail, with the tooltip "Settings". It dispatches `Action::OpenSettings`. Rust draws it, so a plugin cannot hide it. Show a warning-token count badge on the cog when plugin reviews are pending (`self.plugins.pending().len()`).
+- **No Plugins button.** Remove the Plugins button from the channel list. Do not touch the menu bar. Plugin review stays reachable through the Plugins menu, the review banner, and Settings > Plugins.
+- **Member list toggle.** Add an icon button at the right end of the channel header that shows or hides the member list. It has a tooltip ("Hide member list" or "Show member list"). The header is a Lua slot that plugins can replace, so draw the button in Rust, outside the slot, beside it. When the member list is hidden, the message pane fills the space. Add `Action::ToggleMemberList` to the one Rust `Action` enum, with a View menu item, and make the button dispatch it. Save the visible flag in `state.toml` under `[layout]` (`member_list_visible`, default true) with the same bad-value fallback as the other layout keys. Do not save panel widths while the member list is hidden. Existing menu tests must pass.
 
 ### Surface 4 — Channel list
 
