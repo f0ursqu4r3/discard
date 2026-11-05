@@ -21,6 +21,9 @@
 - These surfaces are drawn by fixed Vue components that no plugin element can cover, hide, or restyle: approval card, review banner, plugin problem line, confirm notice, archive notice, safe-mode screen, plugin error list.
 - Plugin element props not in the whitelist of `web/src/plugin/props.ts` are ignored. Numeric props are clamped. Colors come only from the 14 theme token names.
 - Every color, radius, and spacing value in Vue comes from a CSS variable set from theme tokens. No hard-coded colors outside `web/src/styles/tokens.css` defaults.
+- Use canonical Tailwind v4 utility classes instead of custom CSS wherever possible. Custom CSS lives only in `web/src/styles/tokens.css` (theme variables and the `@theme` mapping) and the import lines of `web/src/style.css`.
+- Use canonical shadcn-vue components (`web/src/components/ui/`, added with `pnpm dlx shadcn-vue@latest add <name>`) wherever possible. Never hand-write a replacement for a component shadcn-vue ships. Wrap or compose one only when the app needs behavior it lacks.
+- Carry-forward from the Phase 1 review: Task 8 must cache rendered plugin slots by state key and render them outside the `AppCore` state lock.
 - Animations last 200 ms or less and stop under `prefers-reduced-motion`.
 - Behavior stays as in the GPUI app. Where this plan says "parity", read the named GPUI file and port every behavior and every pure-function test.
 - `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `pnpm --dir web lint`, `pnpm --dir web typecheck`, `pnpm --dir web test`, and `pnpm --dir web build` all pass at the end of every task.
