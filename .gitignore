@@ -21,3 +21,8 @@ Desktop.ini
 
 # Ignore subagent-driven-development scratch
 .superpowers
+
+/web/node_modules
+/web/dist
+
+/crates/discard-app/gen

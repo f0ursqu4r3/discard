@@ -21,7 +21,8 @@ use discard_core::provider::Provider;
 use discard_providers::claude::ClaudeProvider;
 use discard_providers::codex::CodexProvider;
 use discard_core::settings::SettingsStore;
-use discard_ui::{Relaunch, ViewData};
+use discard_ui::Relaunch;
+use discard_app::desktop::{self, core::CoreInit};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -92,7 +93,7 @@ fn run_app(
     options: &args::Options,
     data_dir: &Path,
     settings: SettingsStore,
-    relaunch: Relaunch,
+    _relaunch: Relaunch,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let settings = Arc::new(Mutex::new(settings));
     let project_dir = std::env::current_dir()?;
@@ -204,31 +205,14 @@ fn run_app(
     };
     runtime.spawn(engine.run(commands_rx, updates_tx));
 
-    discard_ui::run(
-        ViewData {
-            project_id: workspace.project.id.0.clone(),
-            project_path: workspace.project.path.clone(),
-            agent_id: workspace.channel.agent_id.0.clone(),
-            project_name: workspace.project.name,
-            channel_name: workspace.channel.name,
-            agent_name: workspace.agent.name,
-            provider_label: workspace.agent.provider,
-        },
-        plugins,
-        load_report,
-        UiState::new(workspace.channel.id.clone(), history),
-        commands_tx,
-        updates_rx,
-        settings,
-        data_dir.to_path_buf(),
-        relaunch,
-        git_workspace,
-        workspace.channel.id,
-        providers,
-        recheck,
-        store,
-        Arc::clone(&memory_store),
-    );
+    desktop::run(CoreInit {
+        state: UiState::new(workspace.channel.id.clone(), history),
+        commands: commands_tx,
+        project: workspace.project.name,
+        channel: workspace.channel.name,
+        agent: workspace.agent.name,
+        provider: workspace.agent.provider,
+    }, updates_rx, runtime.handle().clone(), settings, plugins, data_dir.to_path_buf())?;
     Ok(())
 }
 

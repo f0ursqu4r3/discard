@@ -1,0 +1,46 @@
+{
+  "rev": 1,
+  "historyRev": 0,
+  "project": "Example",
+  "channel": "general",
+  "agent": "Agent",
+  "provider": "example",
+  "agentStatus": "working",
+  "turnRunning": true,
+  "notice": null,
+  "liveBlocks": [
+    {
+      "type": "markdown",
+      "text": "Hello"
+    }
+  ],
+  "prompts": [],
+  "pendingApprovals": 0,
+  "unread": false,
+  "archived": false,
+  "archiveBusy": false,
+  "memberListVisible": true,
+  "panels": {
+    "channelList": 240.0,
+    "memberList": 200.0
+  },
+  "branches": [],
+  "slots": {},
+  "banners": {
+    "reviewCount": 0,
+    "problemLines": [],
+    "confirm": null,
+    "archive": null,
+    "safeMode": false
+  },
+  "theme": {
+    "mode": "dark",
+    "tokens": {},
+    "radius": null,
+    "fontScale": 1.0,
+    "spacingScale": 1.0,
+    "protectedBg": "#000000",
+    "protectedFg": "#ffffff",
+    "protectedBorder": "#ffffff"
+  }
+}
