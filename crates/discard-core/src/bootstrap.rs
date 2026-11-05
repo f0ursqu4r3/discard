@@ -60,6 +60,11 @@ pub fn ensure_workspace(store: &Store, project_dir: &Path, provider: &str, role:
     let existing = store.channels_for_project(&project.id)?;
     let mut found = None;
     for channel in &existing {
+        match store.agent_archived(&channel.agent_id) {
+            Ok(false) => (),
+            Ok(true) | Err(crate::store::StoreError::NotFound(_)) => continue,
+            Err(error) => return Err(error),
+        }
         let agent = store.load_agent(&channel.agent_id)?;
         if agent.provider == provider && agent.plugin_write == (role == Role::Builder) {
             found = Some((channel.clone(), agent));
@@ -322,4 +327,16 @@ mod tests {
         let ws = ensure_workspace(&store, &PathBuf::from("/"), "claude", Role::Default, WorkspaceChoice::Auto).unwrap();
         assert!(!ws.project.name.is_empty());
     }
+    #[test]
+    fn an_archived_agent_is_not_selected_from_an_existing_project_channel() {
+        let store=Store::open_in_memory().unwrap(); let dir=PathBuf::from("/work/archived");
+        let first=ensure_workspace(&store,&dir,"claude",Role::Default,WorkspaceChoice::Main).unwrap();
+        store.set_agent_archived(&first.channel.agent_id,true).unwrap();
+        let next=ensure_workspace(&store,&dir,"claude",Role::Default,WorkspaceChoice::Main).unwrap();
+        assert_ne!(first.channel.agent_id,next.channel.agent_id);
+        assert_ne!(first.channel.id,next.channel.id);
+        assert!(store.agent_archived(&first.channel.agent_id).unwrap());
+        assert_eq!(store.conversations_for_agent(&first.channel.agent_id).unwrap().len(),2);
+    }
+
 }

@@ -79,7 +79,7 @@ mod tests {
     fn setup(policy: ApprovalPolicy) -> (Store, AgentId, AgentConfig, CapabilityMatrix) {
         let store = Store::open_in_memory().unwrap();
         let id = AgentId::new();
-        let cfg = AgentConfig { name: "A".into(), avatar: None, provider: "p".into(), model: None, system_prompt: "old".into(), policy, plugin_write: false };
+        let cfg = AgentConfig { name: "A".into(), avatar: None, provider: "p".into(), model: Some("old-model".into()), system_prompt: "old".into(), policy, plugin_write: false };
         store.insert_agent(&id, &cfg).unwrap();
         let matrix = CapabilityMatrix { provider: "p".into(), matrix_version: 1, cli_version: "1".into(), capabilities: Capabilities { interactive_approvals: true, tool_call_visibility: true, per_session_mcp: true, session_resume: true, cancellation: true, pre_execution_blocking: true } };
         (store, id, cfg, matrix)
@@ -160,6 +160,14 @@ mod tests {
         assert_eq!(store.default_conversation(&id).unwrap().id,direct.id);
         draft.provider="other".into();
         assert!(matches!(save(&store,&id,&draft,&matrix,false),Err(SaveError::Blocked(_))));
+    }
+
+    #[test]
+    fn user_cannot_clear_the_selected_model() {
+        let (store,id,cfg,matrix)=setup(ApprovalPolicy::Ask);
+        let mut draft=AgentDraft::from(&cfg); draft.model=None;
+        assert!(matches!(save(&store,&id,&draft,&matrix,false),Err(SaveError::Store(StoreError::Invalid(_)))));
+        assert_eq!(store.load_agent(&id).unwrap(),cfg);
     }
 
 }

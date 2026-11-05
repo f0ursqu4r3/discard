@@ -13,6 +13,17 @@ mod tests {
         assert_eq!(save_agent(&store, &id, &draft, &matrix, false).unwrap_err(), "Confirmation is required");
         assert_eq!(store.load_agent(&id).unwrap(), cfg);
     }
+    #[test]
+    fn omitted_avatar_is_preserved_and_explicit_null_clears_it() {
+        let current=AgentConfig { name:"A".into(),avatar:Some("avatar.png".into()),provider:"p".into(),model:Some("m".into()),system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false };
+        let mut value=serde_json::json!({"model":"m","systemPrompt":"","policy":"ask","pluginWrite":false});
+        let draft:Draft=serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(draft.into_core(&current).unwrap().avatar,current.avatar);
+        value["avatar"]=serde_json::Value::Null;
+        let draft:Draft=serde_json::from_value(value).unwrap();
+        assert_eq!(draft.into_core(&current).unwrap().avatar,None);
+    }
+
 }
 
 use discard_core::{agent_edit::{self, AgentDraft}, capability::{ApprovalPolicy, CapabilityMatrix}, model::AgentId, store::Store};
@@ -23,11 +34,15 @@ pub fn save_agent(store: &Store, id: &AgentId, draft: &AgentDraft, matrix: &Capa
 }
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Draft { name: Option<String>, avatar: Option<String>, provider: Option<String>, model: String, system_prompt: String, policy: String, plugin_write: bool }
+pub struct Draft { name: Option<String>, #[serde(default, deserialize_with = "deserialize_avatar")] avatar: Option<Option<String>>, provider: Option<String>, model: String, system_prompt: String, policy: String, plugin_write: bool }
+// Preserve an omitted avatar in existing forms. Explicit null clears it.
+fn deserialize_avatar<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Option<String>>, D::Error> {
+    <Option<String> as serde::Deserialize>::deserialize(deserializer).map(Some)
+}
 impl Draft {
     fn into_core(self, current: &discard_core::agent::AgentConfig) -> Result<AgentDraft, String> {
         let policy = match self.policy.as_str() { "ask" => ApprovalPolicy::Ask, "deny" => ApprovalPolicy::DenyAll, _ => return Err("Unknown policy".into()) };
-        Ok(AgentDraft { name:self.name.unwrap_or_else(||current.name.clone()), avatar:self.avatar, provider:self.provider.unwrap_or_else(||current.provider.clone()), model: if self.model.is_empty() { None } else { Some(self.model) }, system_prompt: self.system_prompt, policy, plugin_write: self.plugin_write })
+        Ok(AgentDraft { name:self.name.unwrap_or_else(||current.name.clone()), avatar:self.avatar.unwrap_or_else(||current.avatar.clone()), provider:self.provider.unwrap_or_else(||current.provider.clone()), model: if self.model.is_empty() { None } else { Some(self.model) }, system_prompt: self.system_prompt, policy, plugin_write: self.plugin_write })
     }
 }
 fn policy_name(policy: ApprovalPolicy) -> &'static str { match policy { ApprovalPolicy::Ask => "ask", ApprovalPolicy::DenyAll => "deny" } }

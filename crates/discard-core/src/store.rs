@@ -391,6 +391,7 @@ impl Store {
         rows.map(|r| { let (id,project,name,mode)=r?; Ok(Channel { id:ChannelId(id),project_id:project.map(ProjectId),name,agent_id:agent.clone(),workspace_mode:WorkspaceMode::parse(&mode).ok_or_else(||StoreError::Corrupt(mode))? }) }).collect()
     }
 
+    /// Internal bootstrap insertion permits an absent model. Public creation and edits require one.
     pub fn insert_agent(&self, id: &AgentId, cfg: &AgentConfig) -> Result<()> {
         cfg.validate().map_err(StoreError::Invalid)?;
         self.conn.execute(
@@ -439,6 +440,7 @@ impl Store {
 
     pub fn update_agent(&self, id: &AgentId, cfg: &AgentConfig) -> Result<()> {
         cfg.validate().map_err(StoreError::Invalid)?;
+        if cfg.model.is_none() { return Err(StoreError::Invalid("Select a model.".into())); }
         let updated = self.conn.execute("UPDATE agents SET config_toml = ?1 WHERE id = ?2 AND deleted=0", params![cfg.to_toml()?, id.0])?;
         if updated == 0 { return Err(StoreError::NotFound(format!("agent {}", id.0))); }
         Ok(())
@@ -1236,6 +1238,14 @@ mod agent_lifecycle_tests {
         assert_eq!(store.conversations_for_agent(&agent).unwrap(),vec![chat.clone()]);
         assert_eq!(store.ensure_default_conversation(&agent).unwrap().id,chat.id);
         assert_eq!(store.conversations_for_agent(&agent).unwrap().len(),1);
+    }
+
+    #[test]
+    fn clearing_an_explicit_model_is_rejected_without_mutating_config() {
+        let store=Store::open_in_memory().unwrap(); let cfg=config();
+        let id=store.create_agent(&cfg).unwrap(); let mut cleared=cfg.clone(); cleared.model=None;
+        assert!(matches!(store.update_agent(&id,&cleared),Err(StoreError::Invalid(_))));
+        assert_eq!(store.load_agent(&id).unwrap(),cfg);
     }
 
 }
