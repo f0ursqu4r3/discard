@@ -96,7 +96,7 @@ async fn send_streams_then_finishes() {
         .unwrap();
     let channel = Channel {
         id: ChannelId::new(),
-        project_id: project.id.clone(),
+        project_id: Some(project.id.clone()),
         name: "c".into(),
         agent_id: agent_id.clone(),
         workspace_mode: WorkspaceMode::MainCheckout,
@@ -216,7 +216,7 @@ fn switching_keeps_background_turns_history_and_commands_in_their_channel() {
     let (core, mut first_commands) = core();
     core.configure_read_marker(dir.path(), "first");
     core.configure_targets("project".into(), dir.path(), "agent-a".into());
-    let second = Channel { id: ChannelId("second".into()), project_id: ProjectId("project".into()), name: "tests".into(), agent_id: AgentId("agent-b".into()), workspace_mode: WorkspaceMode::Worktree };
+    let second = Channel { id: ChannelId("second".into()), project_id: Some(ProjectId("project".into())), name: "tests".into(), agent_id: AgentId("agent-b".into()), workspace_mode: WorkspaceMode::Worktree };
     let (commands, mut second_commands) = mpsc::unbounded_channel();
     core.add_channel(CoreInit { state: UiState::new(second.id.clone(), vec![]), commands, project: "Project".into(), channel: second.name.clone(), agent: "Tester".into(), provider: "codex".into() }, &second);
     core.send_to(Some("first"), "first task".into()).unwrap();
@@ -250,7 +250,7 @@ fn switching_keeps_background_turns_history_and_commands_in_their_channel() {
 fn archive_confirmation_locks_selection_to_its_channel() {
     let (core, _commands) = core();
     let (commands, _receiver) = mpsc::unbounded_channel();
-    let channel = Channel { id: ChannelId("other".into()), project_id: ProjectId("p".into()), name: "other".into(), agent_id: AgentId("a".into()), workspace_mode: WorkspaceMode::MainCheckout };
+    let channel = Channel { id: ChannelId("other".into()), project_id: Some(ProjectId("p".into())), name: "other".into(), agent_id: AgentId("a".into()), workspace_mode: WorkspaceMode::MainCheckout };
     core.add_channel(CoreInit { state: UiState::new(channel.id.clone(), vec![]), commands, project: "p".into(), channel: "other".into(), agent: "a".into(), provider: "fake".into() }, &channel);
     assert!(core.archive_started());
     assert!(core.switch_channel("other").is_err());
@@ -264,7 +264,7 @@ fn archive_confirmation_locks_selection_to_its_channel() {
 fn background_completion_releases_the_exit_confirmation() {
     let (core, _receiver) = core();
     let (commands, _receiver2) = mpsc::unbounded_channel();
-    let other = Channel { id: ChannelId("other".into()), project_id: ProjectId("p".into()), name: "other".into(), agent_id: AgentId("a".into()), workspace_mode: WorkspaceMode::MainCheckout };
+    let other = Channel { id: ChannelId("other".into()), project_id: Some(ProjectId("p".into())), name: "other".into(), agent_id: AgentId("a".into()), workspace_mode: WorkspaceMode::MainCheckout };
     core.add_channel(CoreInit { state: UiState::new(other.id.clone(), vec![]), commands, project: "p".into(), channel: "other".into(), agent: "a".into(), provider: "fake".into() }, &other);
     core.send("work".into());
     let first = core.active_channel_id();

@@ -48,7 +48,7 @@ impl Harness {
             .unwrap();
         let channel = Channel {
             id: ChannelId::new(),
-            project_id: project.id,
+            project_id: Some(project.id),
             name: "c".into(),
             agent_id: agent,
             workspace_mode: WorkspaceMode::MainCheckout,

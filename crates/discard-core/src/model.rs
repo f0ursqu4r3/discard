@@ -60,7 +60,7 @@ impl WorkspaceMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Channel {
     pub id: ChannelId,
-    pub project_id: ProjectId,
+    pub project_id: Option<ProjectId>,
     pub name: String,
     pub agent_id: AgentId,
     pub workspace_mode: WorkspaceMode,

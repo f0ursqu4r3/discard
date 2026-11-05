@@ -123,7 +123,7 @@ impl AppCore {
     pub fn clear_project(&self) {
         let (commands, _) = tokio::sync::mpsc::unbounded_channel();
         let project = discard_core::model::Project { id: discard_core::model::ProjectId(String::new()), name: String::new(), path: String::new() };
-        let channel = discard_core::model::Channel { id: discard_core::model::ChannelId(String::new()), project_id: project.id.clone(), name: String::new(), agent_id: AgentId(String::new()), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout };
+        let channel = discard_core::model::Channel { id: discard_core::model::ChannelId(String::new()), project_id: None, name: String::new(), agent_id: AgentId(String::new()), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout };
         self.replace_project(CoreInit { state: UiState::new(channel.id.clone(), vec![]), commands, project: String::new(), channel: String::new(), agent: String::new(), provider: String::new() }, &project, &channel);
         *self.branch_source.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.clear_slots();

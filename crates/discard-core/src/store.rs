@@ -26,6 +26,8 @@ pub enum StoreError {
     InvalidTransition { from: TurnState, to: TurnState },
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("{0}")]
+    Invalid(String),
     #[error("corrupt row: {0}")]
     Corrupt(String),
 }
@@ -40,15 +42,19 @@ pub struct ReconcileReport {
 
 const SCHEMA_V1: &str = "
 CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL);
-CREATE TABLE agents (id TEXT PRIMARY KEY, config_toml TEXT NOT NULL);
+CREATE TABLE agents (id TEXT PRIMARY KEY, config_toml TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE channels (
     ord INTEGER PRIMARY KEY AUTOINCREMENT,
     id TEXT NOT NULL UNIQUE,
-    project_id TEXT NOT NULL REFERENCES projects(id),
+    project_id TEXT REFERENCES projects(id),
     name TEXT NOT NULL,
     agent_id TEXT NOT NULL REFERENCES agents(id),
-    workspace_mode TEXT NOT NULL
+    workspace_mode TEXT NOT NULL,
+    is_default INTEGER NOT NULL DEFAULT 0 CHECK(is_default=0 OR project_id IS NULL)
 );
+CREATE UNIQUE INDEX one_default_conversation ON channels(agent_id) WHERE is_default = 1;
+CREATE TRIGGER fixed_conversation_context BEFORE UPDATE OF project_id ON channels
+WHEN NEW.project_id IS NOT OLD.project_id BEGIN SELECT RAISE(ABORT, 'Conversation context is fixed.'); END;
 CREATE TABLE sessions (
     ord INTEGER PRIMARY KEY AUTOINCREMENT,
     id TEXT NOT NULL UNIQUE,
@@ -113,6 +119,16 @@ pub struct WorktreeRecord {
     pub repo: String,
     pub owned: bool,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeleteAgentOptions {
+    pub delete_conversations: bool,
+    pub delete_private_memory: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrivateMemoryScope { Agent(AgentId), AgentProject { agent: AgentId, project: ProjectId } }
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DeleteAgentResult { pub private_scopes: Vec<PrivateMemoryScope> }
 
 pub struct Store {
     conn: Connection,
@@ -242,18 +258,11 @@ impl Store {
         let current = projects.iter().find(|p| p.id == *id).ok_or_else(|| StoreError::NotFound(id.0.clone()))?;
         if Path::new(&current.path).canonicalize().ok().as_ref() == Some(&canonical) { return Ok(()); }
         let destination = projects.iter().find(|p| p.id != *id && Path::new(&p.path).canonicalize().ok().as_ref() == Some(&canonical));
-        let target = destination.map_or(id, |project| &project.id);
+        if destination.is_some() { return Err(StoreError::Invalid("This folder belongs to another project.".into())); }
         let tx = self.conn.unchecked_transaction()?;
-        if destination.is_none() { self.conn.execute("UPDATE projects SET path=?2 WHERE id=?1", params![id.0, canonical.to_string_lossy()])?; }
-        // Keep channel IDs, messages, agent identities, and archived history. An empty source
-        // project record remains so its project-scoped memory is still available in Settings.
+        self.conn.execute("UPDATE projects SET path=?2 WHERE id=?1", params![id.0, canonical.to_string_lossy()])?;
+        // A folder change retains the project and conversation identities.
         for (channel, archived) in self.all_channels_for_project(id)? {
-            if target != id {
-                let existing = self.all_channels_for_project(target)?;
-                let mut name = channel.name.clone(); let mut suffix = 2;
-                while existing.iter().any(|(other, _)| other.name.eq_ignore_ascii_case(&name)) { name = format!("{}-{suffix}", channel.name); suffix += 1; }
-                self.conn.execute("UPDATE channels SET project_id=?2,name=?3 WHERE id=?1", params![channel.id.0,target.0,name])?;
-            }
             if !archived {
                 self.delete_worktree(&channel.id)?;
                 self.conn.execute("DELETE FROM channel_branches WHERE channel_id=?1", params![channel.id.0])?;
@@ -261,8 +270,7 @@ impl Store {
                 if !crate::worktree::WorktreeManager::is_repo(&canonical) { self.set_workspace_mode(&channel.id, WorkspaceMode::MainCheckout)?; }
             }
         }
-        self.select_project(target)?;
-        if target != id { self.hide_project(id)?; }
+        self.select_project(id)?;
         tx.commit()?;
         Ok(())
     }
@@ -285,7 +293,106 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    pub fn create_agent(&self, cfg: &AgentConfig) -> Result<AgentId> {
+        cfg.validate().map_err(StoreError::Invalid)?;
+        if cfg.model.is_none() { return Err(StoreError::Invalid("Select a model.".into())); }
+        let tx = self.conn.unchecked_transaction()?;
+        let id = AgentId::new();
+        self.insert_agent(&id, cfg)?;
+        self.ensure_default_conversation(&id)?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Create the default chat for internal bootstrap agents, or return its stable ID.
+    pub fn ensure_default_conversation(&self, agent: &AgentId) -> Result<Channel> {
+        match self.default_conversation(agent) {
+            Ok(channel) => return Ok(channel),
+            Err(StoreError::NotFound(_)) => (),
+            Err(error) => return Err(error),
+        }
+        self.conn.execute_batch("SAVEPOINT default_conversation")?;
+        let result=(|| {
+            let chat=self.create_conversation(agent,None,"General")?;
+            self.conn.execute("UPDATE channels SET is_default=1 WHERE id=?1",params![chat.id.0])?;
+            Ok(chat)
+        })();
+        match result {
+            Ok(chat) => { self.conn.execute_batch("RELEASE default_conversation")?; Ok(chat) }
+            Err(error) => { self.conn.execute_batch("ROLLBACK TO default_conversation; RELEASE default_conversation")?; Err(error) }
+        }
+    }
+
+    pub fn default_conversation(&self, agent: &AgentId) -> Result<Channel> {
+        let id: Option<String> = self.conn.query_row("SELECT id FROM channels WHERE agent_id=?1 AND is_default=1", params![agent.0], |r| r.get(0)).optional()?;
+        self.conversations_for_agent(agent)?.into_iter().find(|c| Some(&c.id.0)==id.as_ref()).ok_or_else(||StoreError::NotFound("default conversation".into()))
+    }
+
+    pub fn set_agent_archived(&self, id: &AgentId, archived: bool) -> Result<()> {
+        if self.conn.execute("UPDATE agents SET archived=?2 WHERE id=?1 AND deleted=0", params![id.0,archived])? == 0 { return Err(StoreError::NotFound(id.0.clone())); }
+        Ok(())
+    }
+
+    pub fn agent_archived(&self, id: &AgentId) -> Result<bool> {
+        self.conn.query_row("SELECT archived FROM agents WHERE id=?1 AND deleted=0",params![id.0],|r|r.get(0)).optional()?.ok_or_else(||StoreError::NotFound(id.0.clone()))
+    }
+
+    /// Include archived agents for Settings. Exclude deleted tombstones.
+    pub fn all_agents(&self) -> Result<Vec<(AgentId, AgentConfig, bool)>> {
+        let mut stmt=self.conn.prepare("SELECT id,config_toml,archived FROM agents WHERE deleted=0 ORDER BY rowid")?;
+        let rows=stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,bool>(2)?)))?;
+        rows.map(|r| { let (id,text,archived)=r?; Ok((AgentId(id),AgentConfig::from_toml(&text)?,archived)) }).collect()
+    }
+
+    pub fn delete_agent(&self, id: &AgentId, options: DeleteAgentOptions) -> Result<DeleteAgentResult> {
+        self.agent_archived(id)?;
+        let tx=self.conn.unchecked_transaction()?;
+        let channels=self.conversations_for_agent(id)?;
+        let mut result=DeleteAgentResult::default();
+        if options.delete_private_memory {
+            result.private_scopes.push(PrivateMemoryScope::Agent(id.clone()));
+            let projects: HashSet<ProjectId> = channels.iter().filter_map(|c|c.project_id.clone()).collect();
+            result.private_scopes.extend(projects.into_iter().map(|project|PrivateMemoryScope::AgentProject { agent:id.clone(),project }));
+        }
+        if options.delete_conversations {
+            for channel in channels {
+                for sql in [
+                    "DELETE FROM approval_audit WHERE approval_id IN (SELECT a.id FROM approvals a JOIN turns t ON a.turn_id=t.id JOIN sessions s ON t.session_id=s.id WHERE s.channel_id=?1)",
+                    "DELETE FROM approvals WHERE turn_id IN (SELECT t.id FROM turns t JOIN sessions s ON t.session_id=s.id WHERE s.channel_id=?1)",
+                    "DELETE FROM turns WHERE session_id IN (SELECT id FROM sessions WHERE channel_id=?1)",
+                    "DELETE FROM events WHERE session_id IN (SELECT id FROM sessions WHERE channel_id=?1)",
+                    "DELETE FROM sessions WHERE channel_id=?1", "DELETE FROM messages WHERE channel_id=?1", "DELETE FROM worktrees WHERE channel_id=?1", "DELETE FROM channel_branches WHERE channel_id=?1", "DELETE FROM channels WHERE id=?1"
+                ] { self.conn.execute(sql,params![channel.id.0])?; }
+            }
+        }
+        // Keep a minimal tombstone so retained history still has a readable author.
+        let tombstone=AgentConfig { name:"Deleted agent".into(),avatar:None,provider:String::new(),model:None,system_prompt:String::new(),policy:crate::capability::ApprovalPolicy::DenyAll,plugin_write:false };
+        self.conn.execute("UPDATE agents SET config_toml=?2,archived=1,deleted=1 WHERE id=?1",params![id.0,tombstone.to_toml()?])?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    pub fn create_conversation(&self, agent: &AgentId, project: Option<&ProjectId>, name: &str) -> Result<Channel> {
+        if name.trim().is_empty() { return Err(StoreError::Invalid("Enter a conversation name.".into())); }
+        if self.agent_archived(agent)? { return Err(StoreError::Invalid("Restore the agent first.".into())); }
+        let channel=Channel { id:ChannelId::new(),project_id:project.cloned(),name:name.trim().into(),agent_id:agent.clone(),workspace_mode:WorkspaceMode::MainCheckout };
+        // This may be called inside create_agent's transaction.
+        // Use a savepoint so create_agent can own the outer transaction.
+        self.conn.execute_batch("SAVEPOINT create_conversation")?;
+        let result=(|| { self.insert_channel(&channel)?; self.create_session(&SessionId::new(),&channel.id)?; Ok(()) })();
+        if let Err(error)=result { self.conn.execute_batch("ROLLBACK TO create_conversation; RELEASE create_conversation")?; return Err(error); }
+        self.conn.execute_batch("RELEASE create_conversation")?;
+        Ok(channel)
+    }
+
+    pub fn conversations_for_agent(&self, agent: &AgentId) -> Result<Vec<Channel>> {
+        let mut stmt=self.conn.prepare("SELECT id,project_id,name,workspace_mode FROM channels WHERE agent_id=?1 ORDER BY ord")?;
+        let rows=stmt.query_map(params![agent.0],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?;
+        rows.map(|r| { let (id,project,name,mode)=r?; Ok(Channel { id:ChannelId(id),project_id:project.map(ProjectId),name,agent_id:agent.clone(),workspace_mode:WorkspaceMode::parse(&mode).ok_or_else(||StoreError::Corrupt(mode))? }) }).collect()
+    }
+
     pub fn insert_agent(&self, id: &AgentId, cfg: &AgentConfig) -> Result<()> {
+        cfg.validate().map_err(StoreError::Invalid)?;
         self.conn.execute(
             "INSERT INTO agents (id, config_toml) VALUES (?1, ?2)",
             params![id.0, cfg.to_toml()?],
@@ -303,7 +410,7 @@ impl Store {
     }
 
     pub fn list_agents(&self) -> Result<Vec<(AgentId, AgentConfig)>> {
-        let mut statement = self.conn.prepare("SELECT id, config_toml FROM agents ORDER BY rowid")?;
+        let mut statement = self.conn.prepare("SELECT id, config_toml FROM agents WHERE archived=0 AND deleted=0 ORDER BY rowid")?;
         let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
         let mut agents = Vec::new();
         for row in rows {
@@ -314,10 +421,10 @@ impl Store {
     }
 
     /// The first agent that a channel of `project` uses (archived channels count) with this provider and
-    /// `plugin_write` value. Agents are never shared between projects: agent-private memory is keyed by agent.
+    /// `plugin_write` value. Bootstrap uses this lookup; user-created conversations select an agent ID.
     pub fn find_project_agent(&self, project: &ProjectId, provider: &str, plugin_write: bool) -> Result<Option<(AgentId, AgentConfig)>> {
         let mut statement = self.conn.prepare(
-            "SELECT a.id, a.config_toml FROM channels c JOIN agents a ON a.id = c.agent_id WHERE c.project_id = ?1 ORDER BY c.ord",
+            "SELECT a.id, a.config_toml FROM channels c JOIN agents a ON a.id = c.agent_id WHERE c.project_id = ?1 AND a.archived=0 AND a.deleted=0 ORDER BY c.ord",
         )?;
         let rows = statement.query_map(params![project.0], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
         for row in rows {
@@ -331,7 +438,8 @@ impl Store {
     }
 
     pub fn update_agent(&self, id: &AgentId, cfg: &AgentConfig) -> Result<()> {
-        let updated = self.conn.execute("UPDATE agents SET config_toml = ?1 WHERE id = ?2", params![cfg.to_toml()?, id.0])?;
+        cfg.validate().map_err(StoreError::Invalid)?;
+        let updated = self.conn.execute("UPDATE agents SET config_toml = ?1 WHERE id = ?2 AND deleted=0", params![cfg.to_toml()?, id.0])?;
         if updated == 0 { return Err(StoreError::NotFound(format!("agent {}", id.0))); }
         Ok(())
     }
@@ -339,7 +447,7 @@ impl Store {
     pub fn insert_channel(&self, c: &Channel) -> Result<()> {
         self.conn.execute(
             "INSERT INTO channels (id, project_id, name, agent_id, workspace_mode) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![c.id.0, c.project_id.0, c.name, c.agent_id.0, c.workspace_mode.as_str()],
+            params![c.id.0, c.project_id.as_ref().map(|id| &id.0), c.name, c.agent_id.0, c.workspace_mode.as_str()],
         )?;
         Ok(())
     }
@@ -360,23 +468,23 @@ impl Store {
             "SELECT id, project_id, name, agent_id, workspace_mode FROM channels WHERE project_id = ?1 AND archived = 0 ORDER BY ord",
         )?;
         let rows = stmt.query_map(params![p.0], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?))
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?))
         })?;
         let mut out = Vec::new();
         for row in rows {
             let (id, project_id, name, agent_id, mode) = row?;
             let workspace_mode = WorkspaceMode::parse(&mode)
                 .ok_or_else(|| StoreError::Corrupt(format!("workspace_mode {mode}")))?;
-            out.push(Channel { id: ChannelId(id), project_id: ProjectId(project_id), name, agent_id: AgentId(agent_id), workspace_mode });
+            out.push(Channel { id: ChannelId(id), project_id: project_id.map(ProjectId), name, agent_id: AgentId(agent_id), workspace_mode });
         }
         Ok(out)
     }
 
     pub fn all_channels_for_project(&self, p: &ProjectId) -> Result<Vec<(Channel, bool)>> {
         let mut stmt = self.conn.prepare("SELECT id, project_id, name, agent_id, workspace_mode, archived FROM channels WHERE project_id = ?1 ORDER BY ord")?;
-        let rows = stmt.query_map(params![p.0], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,bool>(5)?)))?;
+        let rows = stmt.query_map(params![p.0], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,bool>(5)?)))?;
         let mut out=Vec::new();
-        for row in rows { let (id,project_id,name,agent_id,mode,archived)=row?; let workspace_mode=WorkspaceMode::parse(&mode).ok_or_else(||StoreError::Corrupt(format!("workspace_mode {mode}")))?; out.push((Channel { id:ChannelId(id),project_id:ProjectId(project_id),name,agent_id:AgentId(agent_id),workspace_mode },archived)); }
+        for row in rows { let (id,project_id,name,agent_id,mode,archived)=row?; let workspace_mode=WorkspaceMode::parse(&mode).ok_or_else(||StoreError::Corrupt(format!("workspace_mode {mode}")))?; out.push((Channel { id:ChannelId(id),project_id:project_id.map(ProjectId),name,agent_id:AgentId(agent_id),workspace_mode },archived)); }
         Ok(out)
     }
 
@@ -682,7 +790,7 @@ mod tests {
             .unwrap();
         let channel = Channel {
             id: ChannelId::new(),
-            project_id: project.id.clone(),
+            project_id: Some(project.id.clone()),
             name: "general".into(),
             agent_id: agent.clone(),
             workspace_mode: WorkspaceMode::MainCheckout,
@@ -716,7 +824,7 @@ mod tests {
         let builder_id = AgentId::new();
         f.store.insert_agent(&builder_id, &builder).unwrap();
         f.store
-            .insert_channel(&Channel { id: ChannelId::new(), project_id: f.project.id.clone(), name: "b".into(), agent_id: builder_id.clone(), workspace_mode: WorkspaceMode::MainCheckout })
+            .insert_channel(&Channel { id: ChannelId::new(), project_id: Some(f.project.id.clone()), name: "b".into(), agent_id: builder_id.clone(), workspace_mode: WorkspaceMode::MainCheckout })
             .unwrap();
         let found = |provider, plugin_write| f.store.find_project_agent(&f.project.id, provider, plugin_write).unwrap().map(|(id, _)| id);
         assert_eq!(found("claude", false), Some(f.agent.clone()));
@@ -987,7 +1095,7 @@ mod tests {
                 .unwrap();
             let ch = Channel {
                 id: ChannelId::new(),
-                project_id: project.id,
+                project_id: Some(project.id),
                 name: "c".into(),
                 agent_id: agent,
                 workspace_mode: WorkspaceMode::Worktree,
@@ -1029,13 +1137,105 @@ mod project_folder_tests {
         assert_ne!(other.id, project.id);
         let target_workspace = crate::bootstrap::ensure_workspace(&store, Path::new(&other.path), "claude", crate::bootstrap::Role::Default, crate::bootstrap::WorkspaceChoice::Main).unwrap();
         let target_session = store.latest_session(&target_workspace.channel.id).unwrap();
-        store.change_project_folder(&project.id, &first).unwrap();
+        assert!(matches!(store.change_project_folder(&project.id, &first),Err(StoreError::Invalid(_))));
         assert_eq!(store.selected_project().unwrap().unwrap().id, other.id);
         let channels = store.channels_for_project(&other.id).unwrap();
-        assert_eq!(channels.len(), 2);
-        assert!(channels.iter().any(|c| c.id == ws.channel.id && c.name == "general-2"));
+        assert_eq!(channels.len(), 1);
+        assert!(channels.iter().all(|c| c.id != ws.channel.id));
         assert_eq!(store.messages_for_channel(&ws.channel.id).unwrap().len(), 1);
         assert_eq!(store.latest_session(&target_workspace.channel.id).unwrap(), target_session);
         assert!(store.import_project_folder(&db).is_err());
     }
+}
+
+#[cfg(test)]
+mod agent_lifecycle_tests {
+    use super::*;
+    use crate::capability::ApprovalPolicy;
+    fn config() -> AgentConfig { AgentConfig { name: crate::agent::generated_name(), avatar: None, provider: "claude".into(), model: Some("same-model".into()), system_prompt: "Be clear".into(), policy: ApprovalPolicy::Ask, plugin_write: false } }
+    #[test]
+    fn independent_agents_have_editable_names_and_default_direct_chats() {
+        let store = Store::open_in_memory().unwrap(); let mut cfg = config();
+        assert!(!cfg.name.trim().is_empty());
+        let a = store.create_agent(&cfg).unwrap(); let b = store.create_agent(&cfg).unwrap(); assert_ne!(a,b);
+        cfg.name = "Edited".into(); store.update_agent(&a,&cfg).unwrap(); assert_eq!(store.load_agent(&a).unwrap().name,"Edited");
+        let direct = store.default_conversation(&a).unwrap(); assert_eq!(direct.project_id,None);
+        assert_eq!(store.default_conversation(&a).unwrap().id,direct.id);
+        assert!(store.latest_session(&direct.id).unwrap().is_some());
+        store.create_conversation(&a,None,"Other").unwrap();
+        let project = Project { id: ProjectId::new(), name:"P".into(), path:"/p".into() }; store.insert_project(&project).unwrap();
+        let one = store.create_conversation(&a,Some(&project.id),"One").unwrap();
+        store.create_conversation(&a,Some(&project.id),"Two").unwrap();
+        assert_eq!(store.conversations_for_agent(&a).unwrap().len(),4);
+        assert_eq!(store.conversations_for_agent(&a).unwrap()[2].project_id,one.project_id);
+    }
+    #[test]
+    fn archive_restore_and_delete_keep_history_and_return_only_private_scopes() {
+        let store = Store::open_in_memory().unwrap(); let a=store.create_agent(&config()).unwrap();
+        let direct=store.default_conversation(&a).unwrap();
+        store.insert_message(&Message { id:MessageId::new(), channel_id:direct.id.clone(), role:Role::User, blocks:vec![] }).unwrap();
+        store.set_agent_archived(&a,true).unwrap(); assert!(store.agent_archived(&a).unwrap()); assert!(store.list_agents().unwrap().is_empty());
+        store.set_agent_archived(&a,false).unwrap(); assert!(!store.agent_archived(&a).unwrap());
+        let result=store.delete_agent(&a,DeleteAgentOptions { delete_conversations:false, delete_private_memory:true }).unwrap();
+        assert_eq!(result.private_scopes,vec![PrivateMemoryScope::Agent(a.clone())]);
+        assert_eq!(store.messages_for_channel(&direct.id).unwrap().len(),1);
+        assert_eq!(store.load_agent(&a).unwrap().name,"Deleted agent");
+        assert!(store.set_agent_archived(&a,false).is_err());
+        let b=store.create_agent(&config()).unwrap(); let chat=store.default_conversation(&b).unwrap();
+        store.delete_agent(&b,DeleteAgentOptions { delete_conversations:true,delete_private_memory:false }).unwrap();
+        assert!(store.conversations_for_agent(&b).unwrap().is_empty()); assert!(store.latest_session(&chat.id).unwrap().is_none());
+    }
+    #[test]
+    fn agent_validation_rejects_blank_fields() {
+        let store=Store::open_in_memory().unwrap(); let mut cfg=config(); cfg.name=" ".into(); assert!(store.create_agent(&cfg).is_err());
+        cfg=config(); cfg.model=None; assert!(store.create_agent(&cfg).is_err()); cfg=config(); cfg.provider=" ".into(); assert!(store.create_agent(&cfg).is_err()); cfg=config(); cfg.model=Some(" ".into()); assert!(store.create_agent(&cfg).is_err());
+    }
+    #[test]
+    fn deletion_choices_are_independent_and_do_not_remove_shared_projects_or_other_agents() {
+        for delete_conversations in [false,true] {
+            for delete_private_memory in [false,true] {
+                let store=Store::open_in_memory().unwrap();
+                let agent=store.create_agent(&config()).unwrap();
+                let other=store.create_agent(&config()).unwrap();
+                let project=Project { id:ProjectId::new(),name:"Shared".into(),path:"/shared".into() };
+                store.insert_project(&project).unwrap();
+                let direct=store.default_conversation(&agent).unwrap();
+                let chat=store.create_conversation(&agent,Some(&project.id),"Project").unwrap();
+                let other_chat=store.create_conversation(&other,Some(&project.id),"Other agent").unwrap();
+                for channel in [&direct,&chat,&other_chat] {
+                    store.insert_message(&Message { id:MessageId::new(),channel_id:channel.id.clone(),role:Role::User,blocks:vec![Block::Markdown { text:"History".into() }] }).unwrap();
+                    let session=store.latest_session(&channel.id).unwrap().unwrap();
+                    let turn=Turn::new(session.clone()); store.insert_turn(&turn).unwrap();
+                    let approval=Approval::new(turn.id.clone(),"Read",serde_json::json!({})); store.save_approval(&approval).unwrap();
+                    store.append_event(&Event { id:EventId::new(), session_id:session,seq:1,kind:EventKind::TextDelta { text:"History".into() },raw:None }).unwrap();
+                }
+                let result=store.delete_agent(&agent,DeleteAgentOptions { delete_conversations,delete_private_memory }).unwrap();
+                if delete_private_memory {
+                    assert_eq!(result.private_scopes.len(),2);
+                    assert!(result.private_scopes.contains(&PrivateMemoryScope::Agent(agent.clone())));
+                    assert!(result.private_scopes.contains(&PrivateMemoryScope::AgentProject { agent:agent.clone(),project:project.id.clone() }));
+                } else { assert!(result.private_scopes.is_empty()); }
+                for channel in [&direct,&chat] {
+                    assert_eq!(store.messages_for_channel(&channel.id).unwrap().len(),usize::from(!delete_conversations));
+                }
+                assert_eq!(store.messages_for_channel(&other_chat.id).unwrap().len(),1);
+                assert_eq!(store.list_projects().unwrap(),vec![project]);
+                assert_eq!(store.list_agents().unwrap().len(),1);
+                if !delete_conversations { assert_eq!(store.load_agent(&chat.agent_id).unwrap().name,"Deleted agent"); }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_context_and_failed_creation_leave_no_partial_conversations() {
+        let store=Store::open_in_memory().unwrap(); let agent=store.create_agent(&config()).unwrap();
+        let chat=store.default_conversation(&agent).unwrap();
+        let project=Project { id:ProjectId::new(),name:"P".into(),path:"/p".into() }; store.insert_project(&project).unwrap();
+        assert!(store.conn.execute("UPDATE channels SET project_id=?2 WHERE id=?1",params![chat.id.0,project.id.0]).is_err());
+        assert!(store.create_conversation(&agent,Some(&ProjectId::new()),"Missing project").is_err());
+        assert_eq!(store.conversations_for_agent(&agent).unwrap(),vec![chat.clone()]);
+        assert_eq!(store.ensure_default_conversation(&agent).unwrap().id,chat.id);
+        assert_eq!(store.conversations_for_agent(&agent).unwrap().len(),1);
+    }
+
 }

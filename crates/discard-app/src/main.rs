@@ -188,7 +188,8 @@ fn run_app(
         let store = store.clone(); let git_workspace = git_workspace.clone(); let memory = memory.clone();
         let manager = manager.clone(); let handle = runtime.handle().clone();
         Arc::new(move |channel| {
-            let project = lock(&store).list_projects().map_err(|e| e.to_string())?.into_iter().find(|p| p.id == channel.project_id).ok_or("Project unavailable")?;
+            let project_id = channel.project_id.as_ref().ok_or("Direct conversations are not available in this launcher yet.")?;
+            let project = lock(&store).list_projects().map_err(|e| e.to_string())?.into_iter().find(|p| &p.id == project_id).ok_or("Project unavailable")?;
             let project_dir = PathBuf::from(&project.path);
             let (agent, session_id, history) = {
                 let store = lock(&store);
@@ -200,10 +201,10 @@ fn run_app(
             let (commands_tx, commands_rx) = mpsc::unbounded_channel();
             let (updates_tx, updates_rx) = mpsc::unbounded_channel();
             let engine = Engine {
-                store: store.clone(), agent_id: channel.agent_id.clone(), project_id: channel.project_id.clone(),
+                store: store.clone(), agent_id: channel.agent_id.clone(), project_id: project_id.clone(),
                 memory: Some(memory.clone()), plugin_write: agent.plugin_write,
                 workspace_mode: channel.workspace_mode, workspace: Some(git_workspace.clone()),
-                observer: Some(Arc::new(plugin_events::PluginEvents::with_context(manager.clone(), Some((channel.agent_id.clone(), channel.project_id.clone()))))),
+                observer: Some(Arc::new(plugin_events::PluginEvents::with_context(manager.clone(), Some((channel.agent_id.clone(), project_id.clone()))))),
                 channel_name: channel.name.clone(), provider, channel_id: channel.id.clone(), session_id,
                 cwd: project_dir.clone(), model: agent.model.clone(),
                 system_prompt: Some(agent.system_prompt.clone()).filter(|p| !p.is_empty()), policy: agent.policy,

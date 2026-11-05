@@ -55,7 +55,7 @@ fn start_full(
         .unwrap();
     let channel = Channel {
         id: ChannelId::new(),
-        project_id: project.id,
+        project_id: Some(project.id),
         name: "c".into(),
         agent_id: agent,
         workspace_mode: WorkspaceMode::MainCheckout,
@@ -457,7 +457,7 @@ fn start_workspace(
     store.insert_project(&project).unwrap();
     let agent_id = AgentId::new();
     store.insert_agent(&agent_id, &AgentConfig { name: "A".into(), avatar: None, provider: "fake".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
-    let channel = Channel { id: ChannelId::new(), project_id: project.id.clone(), name: "general".into(), agent_id: agent_id.clone(), workspace_mode: mode };
+    let channel = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "general".into(), agent_id: agent_id.clone(), workspace_mode: mode };
     store.insert_channel(&channel).unwrap();
     let session = SessionId::new();
     store.create_session(&session, &channel.id).unwrap();

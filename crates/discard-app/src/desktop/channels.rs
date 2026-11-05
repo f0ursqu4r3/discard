@@ -100,7 +100,7 @@ impl Channels {
         self.create_inner(name, mode, None, None)
     }
     fn create_inner(&self, name: String, mode: WorkspaceMode, branch: Option<String>, worktree: Option<PathBuf>) -> Result<String, String> {
-        let channel = Channel { id: ChannelId::new(), project_id: self.core.current_project().id, name, agent_id: discard_core::model::AgentId(self.core.active_agent_id()), workspace_mode: mode };
+        let channel = Channel { id: ChannelId::new(), project_id: Some(self.core.current_project().id), name, agent_id: discard_core::model::AgentId(self.core.active_agent_id()), workspace_mode: mode };
         let record = worktree.map(|path| -> Result<WorktreeRecord, String> {
             let manager = WorktreeManager::new(&self.project_dir());
             let prepared = manager.recorded(&self.project_dir(), &path, branch.as_deref().ok_or("Missing branch")?).map_err(|e| e.to_string())?;
@@ -171,7 +171,7 @@ mod tests {
     fn core(channel: &Channel, dir: &std::path::Path) -> Arc<AppCore> {
         let (init, _) = launcher()(channel).unwrap();
         let core = Arc::new(AppCore::new(init));
-        core.configure_targets(channel.project_id.0.clone(), dir, channel.agent_id.0.clone());
+        core.configure_targets(channel.project_id.as_ref().expect("test channel has a project").0.clone(), dir, channel.agent_id.0.clone());
         core.configure_read_marker(dir, &channel.id.0);
         core
     }
@@ -219,7 +219,7 @@ mod tests {
         store.insert_project(&project).unwrap();
         let agent = AgentId::new();
         store.insert_agent(&agent, &AgentConfig { name: "Builder".into(), provider: "codex".into(), model: Some("agent-model".into()), avatar: None, system_prompt: "Review changes".into(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
-        let first = Channel { id: ChannelId::new(), project_id: project.id.clone(), name: "general".into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::MainCheckout };
+        let first = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "general".into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::MainCheckout };
         store.create_named_channel(&first, None, None).unwrap();
         let store = Arc::new(Mutex::new(store));
         let core = core(&first, dir.path());
@@ -261,7 +261,7 @@ mod tests {
         let agent = AgentId::new();
         store.insert_project(&project).unwrap();
         store.insert_agent(&agent, &AgentConfig { name: "Builder".into(), provider: "codex".into(), model: None, avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
-        let first = Channel { id: ChannelId::new(), project_id: project.id.clone(), name: "old".into(), agent_id: agent, workspace_mode: WorkspaceMode::Worktree };
+        let first = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "old".into(), agent_id: agent, workspace_mode: WorkspaceMode::Worktree };
         let manager = WorktreeManager::new(dir.path());
         let prepared = manager.recorded(dir.path(), dir.path(), "old").unwrap();
         store.create_named_channel(&first, Some("old"), Some(&WorktreeRecord { channel_id: first.id.clone(), path: dir.path().to_string_lossy().into_owned(), branch: "old".into(), base_commit: prepared.worktree.base_commit, repo: project.path.clone(), owned: false })).unwrap();

@@ -73,7 +73,7 @@ pub fn ensure_workspace(store: &Store, project_dir: &Path, provider: &str, role:
                 existing
             } else {
             let agent = AgentConfig {
-                name: if role == Role::Builder { "Builder".to_string() } else { display_name(provider) },
+                name: if role == Role::Builder { "Builder".to_string() } else { crate::agent::generated_name() },
                 avatar: None,
                 provider: provider.to_string(),
                 model: None,
@@ -83,11 +83,12 @@ pub fn ensure_workspace(store: &Store, project_dir: &Path, provider: &str, role:
             };
             let agent_id = AgentId::new();
             store.insert_agent(&agent_id, &agent)?;
+            store.ensure_default_conversation(&agent_id)?;
             (agent_id, agent)
             };
             let channel = Channel {
                 id: ChannelId::new(),
-                project_id: project.id.clone(),
+                project_id: Some(project.id.clone()),
                 // The first channel of a project is `general`. Later ones are named after their provider.
                 name: match role {
                     Role::Builder if provider == "claude" => "builder".into(),
@@ -129,11 +130,6 @@ pub fn ensure_workspace(store: &Store, project_dir: &Path, provider: &str, role:
         }
     };
     Ok(Workspace { project, channel, agent, session_id })
-}
-
-fn display_name(provider: &str) -> String {
-    let mut chars = provider.chars();
-    chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -221,7 +217,8 @@ mod tests {
         assert_ne!(claude.channel.agent_id, codex.channel.agent_id);
         assert_eq!((claude.agent.provider.as_str(), codex.agent.provider.as_str()), ("claude", "codex"));
         assert_eq!((claude.channel.name.as_str(), codex.channel.name.as_str()), ("general", "codex"));
-        assert_eq!((claude.agent.name.as_str(), codex.agent.name.as_str()), ("Claude", "Codex"));
+        assert!(!claude.agent.name.is_empty());
+        assert!(!codex.agent.name.is_empty());
     }
 
     #[test]
