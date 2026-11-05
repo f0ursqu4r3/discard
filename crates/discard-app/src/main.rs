@@ -21,7 +21,7 @@ use discard_core::provider::Provider;
 use discard_providers::claude::ClaudeProvider;
 use discard_providers::codex::CodexProvider;
 use discard_core::settings::SettingsStore;
-use discard_ui::Relaunch;
+use discard_app::desktop::actions::{ProviderInfo, Recheck, Relaunch};
 use discard_app::desktop::{self, core::CoreInit};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -123,7 +123,7 @@ fn run_app(
     let history = lock(&store).messages_for_channel(&workspace.channel.id)?;
     info!(project = %workspace.project.name, channel = %workspace.channel.name, "workspace ready");
 
-    // The engine and provider processes run on tokio. GPUI owns the main thread.
+    // The engine and provider processes run on tokio. Tauri owns the main thread.
     let runtime = tokio::runtime::Runtime::new()?;
     let _enter = runtime.enter();
     let mut provider_checks = Vec::new();
@@ -131,11 +131,11 @@ fn run_app(
     for id in discard_core::bootstrap::PROVIDERS {
         let provider = provider_for(id)?;
         let setup = Arc::new(Mutex::new(None));
-        providers.push(discard_ui::ProviderInfo { id: (*id).into(), matrix: provider.capabilities().clone(), setup: setup.clone() });
+        providers.push(ProviderInfo { id: (*id).into(), matrix: provider.capabilities().clone(), setup: setup.clone() });
         provider_checks.push(((*id).to_string(), provider, setup));
     }
     let handle = runtime.handle().clone();
-    let recheck: discard_ui::Recheck = Arc::new(move |id| {
+    let recheck: Recheck = Arc::new(move |id| {
         if let Some((_, provider, setup)) = provider_checks.iter().find(|(name, _, _)| name == id) {
             *lock(setup) = None;
             let provider = provider.clone();

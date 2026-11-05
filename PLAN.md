@@ -4,7 +4,7 @@ Discard is an agent harness for managing projects and multiple agents. Its UI fo
 
 ## Stack
 
-- Rust, `gpui-kit` (GPUI + GPUI Component + default assets).
+- Rust, Tauri 2, and a Vue 3 + TypeScript front end with shadcn-vue and Tailwind CSS 4.
 - Luau through `mlua`.
 - SQLite (history, FTS5 memory index).
 - Platform order: macOS, then Linux, then Windows.
@@ -13,11 +13,11 @@ Discard is an agent harness for managing projects and multiple agents. Its UI fo
 
 | Crate | Role |
 | --- | --- |
-| `discard-core` | Sessions, agents, memory, storage, plugin-host traits. No GPUI dependency. |
+| `discard-core` | Sessions, agents, memory, storage, plugin-host traits. No GUI dependency. |
 | `discard-providers` | Claude and Codex providers. |
 | `discard-lua` | Luau host and plugin API. |
-| `discard-ui` | GPUI views. |
-| `discard-app` | The binary. |
+| `discard-app` | The Tauri app and the engine-to-webview bridge. |
+| `web/` | The Vue 3 front end. |
 
 Testing is TDD-first. `core`, `providers`, and `lua` have unit tests. Providers are tested with a fake provider and recorded CLI transcripts. Lua API tests run headless. UI tests stay thin.
 
@@ -49,7 +49,7 @@ Discard writes structured logs with secret redaction for provider, plugin, appro
 
 ## Process, storage, workspaces
 
-- v1 is a single process. `discard-core` has no GPUI dependency, so a daemon can be split out later.
+- v1 is a single process. `discard-core` has no GUI dependency, so a daemon can be split out later.
 - Discard's SQLite store is the source of truth for messages, tool calls, and events. The CLI session id is a resume handle only.
 - Each channel in a git project gets its own git worktree by default. The user can turn it off per channel or per project.
 - Discard selects and creates the workspace **before** it starts the provider session, on the channel's first turn. It never moves a running session to a new directory. Worktree creation is serialized per repository with a lock. The worktree branches from the project's current `HEAD`. Uncommitted files in the main checkout are not copied, and the UI says so. If creation fails, the turn does not start and the error shows in the channel. Discard always keeps the worktree's branch. When a channel is archived, Discard removes the worktree only if all of these are true: no uncommitted changes, no untracked files, no ignored files with content, and no commits that are not on another branch. Otherwise it lists what would be lost and asks the user. Discard never deletes user data without that confirmation.
@@ -82,7 +82,7 @@ Discard writes structured logs with secret redaction for provider, plugin, appro
 ### Runtime
 
 - Luau via `mlua`, sandboxed. Capabilities are granted per plugin.
-- Each plugin gets its **own Luau state**. Each state runs on its **own dedicated OS thread**, never on the GPUI main thread and never on a shared pool. Execution and I/O workers are both owned by the plugin (see Cancellation below). The number of active plugins is capped (default 64) so thread count stays bounded. They talk to the main thread through bounded channels. One plugin cannot block another or the host.
+- Each plugin gets its **own Luau state**. Each state runs on its **own dedicated OS thread**, never on the app's main thread and never on a shared pool. Execution and I/O workers are both owned by the plugin (see Cancellation below). The number of active plugins is capped (default 64) so thread count stays bounded. They talk to the main thread through bounded channels. One plugin cannot block another or the host.
 - **Cancellation by operation type.**
   - Async network calls and timers: cancelled by dropping the task.
   - `exec`: Discard runs each process in its own process group and kills the group on timeout or termination.
@@ -96,7 +96,7 @@ Discard writes structured logs with secret redaction for provider, plugin, appro
 
 - Each slot is a pure `render(state)` function that returns an element tree.
 - Discard re-runs `render` when subscribed state changes (channel data, agent status, plugin signals).
-- Rust diffs the tree and updates GPUI views. Plugins never mutate the UI imperatively.
+- Rust validates the tree and sends it to the webview, which renders it through fixed Vue components. Plugins never mutate the UI imperatively.
 - Plugins control theme tokens (colors, radii, spacing) and register into named slots: sidebar, channel header, message renderer, status bar, command palette.
 - Messages are typed blocks: markdown, code, diff, tool call, approval, plugin-defined. Rust ships default renderers. Plugins override by block type, except protected types: `approval`, capability and diff review, and plugin error blocks. Those, and the containers that hold them, are not overridable and cannot be hidden. Plugin theme values are clamped. Protected surfaces keep a minimum contrast ratio, a minimum size, and a visible border.
 - The default UI is a bundled Lua plugin where practical.
@@ -175,12 +175,12 @@ Plugin-declared settings are not built and are in no milestone.
 
 ### Structure and tests
 
-- `SettingsStore` and the `Action` list live in `discard-core` with no GPUI dependency. The Settings window is a second thin view in `discard-ui`. It shares the app's existing services.
+- `SettingsStore` and the `Action` list live in `discard-core` with no GUI dependency. The Settings window is a second Tauri window with Vue pages in `web/src/settings/`. It shares the app's existing services.
 - TDD-first. Core logic has unit tests. Settings validation has failure tests: invalid values, unknown keys, version mismatch, a bad file at startup, a conflicting keybinding, and a policy the provider cannot enforce. UI tests stay thin.
 
 ## Milestones
 
-1. **M1** — GPUI shell, Claude provider, streaming chat, SQLite history, approvals.
+1. **M1** — Desktop shell, Claude provider, streaming chat, SQLite history, approvals.
 2. **M2** — Luau host, theme tokens, slots, default UI as a plugin.
 3. **M3** — Memory MCP server and memory files.
 4. **M4** — Codex provider.

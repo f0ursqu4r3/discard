@@ -141,7 +141,7 @@ Discard binds seven keys. The list is `default_keymap()` in `crates/discard-core
 | `Alt+Cmd+H` | Hide Others |
 | `Cmd+M` | Minimize |
 
-GPUI adds no window or app keys of its own, so Discard binds Cmd+W, Cmd+H, and Cmd+M itself. Discard binds these keys
+The webview adds no window or app keys of its own, so Discard binds Cmd+W, Cmd+H, and Cmd+M itself. Discard binds these keys
 before it builds the menu bar, so the menu items for them show their keys: Settings…, Hide Discard, Hide Others, Quit
 Discard, Close Window, and Minimize. Cancel Turn shows its key only while a turn runs. When no turn runs, its item
 carries a placeholder action with no key. Show All and Zoom have no key. An invalid binding is logged and skipped.
@@ -308,7 +308,7 @@ and the engine runs for it. A Mac app usually stays open with no window. Discard
   so the relaunched Discard writes its logs where the first one did.
 - The confirm notice comes from the Quit action (`Cmd+Q` and Quit Discard), closing the main window, and the Safe
   Mode relaunch. Discard has no hook that can stop a Quit from the Dock or the system, so those do not ask. They end
-  the process. Discard sends Cancel to the engine when the app quits, but GPUI gives quit handlers only a short time.
+  the process. Discard sends Cancel to the engine when the app quits, but the process gets only a short time to run quit handlers.
 - Provider processes can outlive Discard. On macOS a quit ends the process with `exit()`, so no cleanup code runs.
   Discard sends Cancel to the engine before it quits, on a best-effort basis only. A quit or relaunch during a running
   tool call can leave provider child processes running, and a relaunched Discard can start while they still run.
@@ -331,7 +331,7 @@ Discard colors the windows with a Ghostty theme. A plugin theme goes on top.
   config (`$XDG_CONFIG_HOME/ghostty/config`, `~/Library/Application Support/com.mitchellh.ghostty/config`, and the
   `config.ghostty` names). `custom` uses `appearance.theme`. Discard does not follow `config-file =` includes.
 - **Light and dark.** A `light:X,dark:Y` value picks the theme for the system appearance and switches when it
-  changes. The window uses gpui-component's light or dark base from the brightness of the theme's background.
+  changes. The window sets the `dark` class on the page from the brightness of the theme's background.
 - **Theme files.** Discard reads the Ghostty format (`palette = N=#hex`, `background`, `foreground`,
   `cursor-color`, `selection-background`, `split-divider-color`). Colors can be `#rrggbb`, `rrggbb`, `#rgb`, or an
   X11 name. Inline keys in the Ghostty config replace the same keys in the theme file.

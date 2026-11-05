@@ -22,7 +22,7 @@ pub const WAIT_SCRIPT: &str =
 
 /// The program and arguments for a waiter that starts `exe` again after `parent_pid` exits.
 ///
-/// GPUI on macOS ends the process with `exit()` inside `[NSApp terminate:]`, so code after the event loop never runs.
+/// Tauri on macOS ends the process with `exit()` inside `[NSApp terminate:]`, so code after the event loop never runs.
 /// The waiter starts before the quit. It waits for this process to exit, so the new process does not share the
 /// store or the memory runtime's TCP port with this one. It does not wait for provider child processes: a quit
 /// during a running tool call can leave them running. Discard sends `Cancel` to the engine first, on a best-effort

@@ -1,4 +1,4 @@
-//! UI protocol and the state the views render. Pure logic: no GPUI, no I/O.
+//! UI protocol and the state the views render. Pure logic: no GUI, no I/O.
 
 use crate::approval::{ApprovalState, Decision};
 use crate::driver::TurnOutcome;

@@ -1,5 +1,5 @@
 //! Headless core of Discard: events, turn and approval state machines,
-//! policy, storage, and the provider trait. No GPUI dependency.
+//! policy, storage, and the provider trait. No GUI dependency.
 
 pub mod action;
 pub mod context_menu;

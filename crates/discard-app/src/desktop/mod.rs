@@ -58,8 +58,8 @@ pub struct DesktopConfig {
     pub store: Arc<Mutex<discard_core::store::Store>>,
     pub workspace_mode: discard_core::model::WorkspaceMode,
     pub relaunch: actions::Relaunch,
-    pub providers: Vec<discard_ui::ProviderInfo>,
-    pub recheck: discard_ui::Recheck,
+    pub providers: Vec<actions::ProviderInfo>,
+    pub recheck: actions::Recheck,
     pub memory: Arc<discard_core::memory::MemoryStore>,
 }
 pub fn run(

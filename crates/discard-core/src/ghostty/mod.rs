@@ -1,5 +1,5 @@
 //! Ghostty theme support: parse a Ghostty config or theme file, find a theme
-//! by name, and map its colors to Discard's UI colors. No GPUI dependency.
+//! by name, and map its colors to Discard's UI colors. No GUI dependency.
 
 pub mod bundled;
 pub mod color;

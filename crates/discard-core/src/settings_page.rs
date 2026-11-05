@@ -1,5 +1,5 @@
 //! The pages of the Settings window and the sidebar search over them.
-//! Pure logic. The GPUI layer renders the sidebar from `SettingsPage::all`.
+//! Pure logic. The Settings window renders the sidebar from `SettingsPage::all`.
 
 /// Field labels of the General page. The search index and the page share them.
 pub const LABEL_DEFAULT_PROVIDER: &str = "Default provider";

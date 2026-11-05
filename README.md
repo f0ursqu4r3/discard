@@ -1,7 +1,7 @@
 # Discard
 
 An agent harness for managing projects and several agents, with an interface modeled on the Discord desktop
-client. The interface and behavior are Lua plugins. Rust and `gpui-kit`. macOS first.
+client. The interface and behavior are Lua plugins. Rust, Tauri 2, and a Vue 3 front end with shadcn-vue. macOS first.
 
 ## Run
 
@@ -15,11 +15,25 @@ cargo run -p discard-app -- --safe-mode       # no user plugins
 Sign in with the official CLIs first: `claude auth login`, `codex login`. Discard uses your subscription through
 those CLIs and never handles credentials. Data lives in `~/.discard` (set `DISCARD_HOME` to change it).
 
+For front end work, run the Vite dev server with hot reload:
+
+```
+(cd crates/discard-app && cargo tauri dev)      # needs `cargo install tauri-cli --version '^2'`
+pnpm --dir web dev                               # web only, in a browser
+cargo run -p discard-app --no-default-features   # app window against a running Vite dev server
+```
+
+A plain `cargo run` embeds the built front end from `web/dist`. It builds `web/` first when `web/dist` is missing.
+
 ## Test
 
 ```
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+pnpm --dir web lint
+pnpm --dir web typecheck
+pnpm --dir web test
+pnpm --dir web build
 ```
 
 Live tests use the real CLIs and your subscription. They are ignored by default:
@@ -36,12 +50,12 @@ cargo test -p discard-providers --test worktree_live  -- --ignored
 
 | Crate | Role |
 | --- | --- |
-| `discard-core` | Events, turn and approval state machines, storage, memory, worktrees, engine. No GPUI. |
+| `discard-core` | Events, turn and approval state machines, storage, memory, worktrees, engine. No GUI. |
 | `discard-providers` | Claude and Codex providers, and a scripted fake for tests. |
 | `discard-lua` | Luau plugin host, theme tokens, drafts, review, approval ledger. |
 | `discard-mcp` | Local MCP server: memory tools and plugin-authoring tools. |
-| `discard-ui` | GPUI views. |
-| `discard-app` | The binary. |
+| `discard-app` | The Tauri app. The `desktop` module bridges the engine to the webview: snapshots out, commands in. |
+| `web/` | The Vue 3 front end: main window, Settings window, shadcn-vue components, plugin element renderer. |
 
 ## Docs
 

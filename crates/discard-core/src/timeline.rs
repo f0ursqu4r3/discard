@@ -1,5 +1,5 @@
 //! Folds the normalized event stream into what the message pane shows.
-//! All UI state logic lives here so the GPUI layer stays thin.
+//! All UI state logic lives here so the UI layer stays thin.
 
 use crate::approval::{ApprovalState, Decision};
 use crate::event::{AgentStatus, ApprovalId, EventKind};

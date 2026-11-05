@@ -1,5 +1,7 @@
 # UI Juice — Spec
 
+> **Superseded.** The front end moved from GPUI to Tauri, Vue, and shadcn-vue. The main window now lives in `web/src/components/` and `crates/discard-app/src/desktop/`. This spec stays as the record of the visual behavior the Vue components keep. File names and GPUI details below describe the old build.
+
 Goal: make the main window look and feel closer to the Discord desktop client. This is polish and layout work in `discard-ui`. It adds no new backend.
 
 ## Ground rules

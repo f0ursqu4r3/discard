@@ -5,7 +5,6 @@ members = [
     "crates/discard-providers",
     "crates/discard-lua",
     "crates/discard-mcp",
-    "crates/discard-ui",
     "crates/discard-app",
 ]
 

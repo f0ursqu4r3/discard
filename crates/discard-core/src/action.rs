@@ -1,5 +1,5 @@
 //! Menu actions, the menu model, the default keymap, and confirm rules.
-//! Pure logic. The GPUI layer renders `menu_bar` and binds `default_keymap`.
+//! Pure logic. The desktop layer renders `menu_bar` and binds `default_keymap`.
 
 /// A user command that menus, keys, and banners all dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -306,7 +306,7 @@ pub fn menu_bar(ctx: &MenuContext) -> Vec<MenuSpec> {
     menus
 }
 
-/// Default key bindings. GPUI adds no window or app keys of its own, so Cmd+W, Cmd+H, and Cmd+M are listed here.
+/// Default key bindings. The webview adds no window or app keys of its own, so Cmd+W, Cmd+H, and Cmd+M are listed here.
 /// The edit keys (Cmd+C and so on) stay with the OS and the text inputs and are not listed.
 pub fn default_keymap() -> &'static [(Action, &'static str)] {
     &[

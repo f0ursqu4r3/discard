@@ -9,7 +9,7 @@ default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
 [build-dependencies]
-tauri-build = "2"
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -17,7 +17,6 @@ discard-core.workspace = true
 discard-lua = { path = "../discard-lua" }
 discard-mcp = { path = "../discard-mcp" }
 discard-providers.workspace = true
-discard-ui = { path = "../discard-ui" }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }

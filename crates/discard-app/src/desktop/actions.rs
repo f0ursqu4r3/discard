@@ -5,6 +5,18 @@ use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use tauri::{AppHandle, Manager};
 
 pub type Relaunch = Arc<dyn Fn(bool) -> Result<(), String> + Send + Sync>;
+
+/// One provider and the last result of its setup check.
+#[derive(Clone)]
+pub struct ProviderInfo {
+    pub id: String,
+    pub matrix: discard_core::capability::CapabilityMatrix,
+    pub setup: Arc<Mutex<Option<discard_core::provider::SetupStatus>>>,
+}
+
+/// Runs the setup check for one provider again.
+pub type Recheck = Arc<dyn Fn(&str) + Send + Sync>;
+
 pub struct DesktopActions {
     pub settings: Arc<Mutex<SettingsStore>>,
     pub workspace: Arc<GitWorkspace>,
