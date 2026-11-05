@@ -9,6 +9,15 @@ pub type BlockDto = Block;
 
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
+pub struct ChannelDto {
+    pub id: String, pub name: String, pub agent: String, pub provider: String,
+    pub workspace_mode: String, pub running: bool, pub unread: bool, pub pending_approvals: usize,
+}
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryDto { pub channel_id: String, pub rev: u64, pub messages: Vec<MessageDto> }
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct MessageDto {
     pub id: String,
     pub role: String,
@@ -32,6 +41,8 @@ pub struct BranchRowDto {
     pub depth: u8,
     pub current: bool,
     pub collapsed: bool,
+    pub has_children: bool,
+    pub detached: bool,
 }
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -106,6 +117,7 @@ pub struct SnapshotDto {
     pub member_list_visible: bool,
     pub panels: PanelsDto,
     pub branches: Vec<BranchRowDto>,
+    pub channels: Vec<ChannelDto>,
     pub slots: BTreeMap<String, SlotDto>,
     pub banners: BannersDto,
     pub theme: ThemeDto,
@@ -159,6 +171,7 @@ fn sample_snapshot() -> SnapshotDto {
             member_list: 200.0,
         },
         branches: vec![],
+        channels: vec![],
         slots: BTreeMap::new(),
         banners: BannersDto {
             review_count: 0,

@@ -1,1 +1,8 @@
-export type WorkspacePage = 'conversation' | 'overview' | 'agents' | 'memory' | 'artifacts' | 'direct-messages'
+export type WorkspacePage =
+  | 'conversation'
+  | 'overview'
+  | 'agents'
+  | 'memory'
+  | 'artifacts'
+  | 'direct-messages'
+  | 'project-settings'

@@ -207,8 +207,8 @@ fn slug(text: &str, max: usize) -> String {
 }
 
 fn short_id(channel_id: &str) -> String {
-    let id: String = channel_id.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).take(8).collect();
-    if id.is_empty() { "0".to_string() } else { id }
+    let id: String = channel_id.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    if id.is_empty() { "0".to_string() } else { id[id.len().saturating_sub(12)..].to_owned() }
 }
 
 /// Commits on `branch` that no other local or remote branch has. Refs go through stdin so a long list is safe.
@@ -253,18 +253,44 @@ impl WorktreeManager {
 
     /// Create the worktree for a channel, or return the existing one. `channel_id` makes the names unique.
     pub fn prepare(&self, project_dir: &Path, channel_id: &str, channel_name: &str) -> Result<Prepared> {
+        self.prepare_with_branch(project_dir, channel_id, channel_name, None)
+    }
+    pub fn prepare_branch(&self, project_dir: &Path, channel_id: &str, branch: &str) -> Result<Prepared> {
+        git(project_dir, &["check-ref-format", "--branch", branch])?;
+        git(project_dir, &["rev-parse", "--verify", &format!("refs/heads/{branch}")])?;
+        self.prepare_with_branch(project_dir, channel_id, branch, Some(branch))
+    }
+    /// Validate a recorded directory instead of silently resuming a session in a different checkout.
+    pub fn recorded(&self, project_dir: &Path, root: &Path, branch: &str) -> Result<Prepared> {
+        let entries = list_branches(project_dir)?;
+        let canonical = root.canonicalize().map_err(io_err)?;
+        let entry = entries.iter().find(|entry| entry.worktree.as_ref().and_then(|p| p.canonicalize().ok()).as_ref() == Some(&canonical))
+            .ok_or_else(|| WorktreeError::Git("The channel's worktree is no longer registered.".into()))?;
+        if entry.branch != branch { return Err(WorktreeError::Git("The channel's worktree is now on a different branch. Open that branch in a new channel.".into())); }
+        let prefix = git(project_dir, &["rev-parse", "--show-prefix"])?;
+        let cwd = if prefix.is_empty() { root.to_path_buf() } else { root.join(prefix.trim_end_matches('/')) };
+        if !cwd.is_dir() { return Err(WorktreeError::Git("The project directory is missing in this worktree.".into())); }
+        Ok(Prepared { cwd, worktree: Worktree { root: root.to_path_buf(), branch: branch.into(), base_commit: git(root, &["rev-parse", "HEAD"])? , repo: project_dir.into() }, created: false, notes: vec![] })
+    }
+    fn prepare_with_branch(&self, project_dir: &Path, channel_id: &str, channel_name: &str, existing_branch: Option<&str>) -> Result<Prepared> {
         if !Self::is_repo(project_dir) {
             return Err(WorktreeError::NotARepo(project_dir.display().to_string()));
         }
         let repo = PathBuf::from(git(project_dir, &["rev-parse", "--show-toplevel"])?);
         let repo = fs::canonicalize(&repo).unwrap_or(repo);
         let prefix = git(project_dir, &["rev-parse", "--show-prefix"])?;
-        let lock = self.lock_for(&repo);
+        let common = PathBuf::from(git(&repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?);
+        let lock = self.lock_for(&common);
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
 
+        if let Some(branch) = existing_branch {
+            if let Some(root) = list_branches(&repo)?.into_iter().find(|entry| entry.branch == branch).and_then(|entry| entry.worktree) {
+                return self.recorded(project_dir, &root, branch);
+            }
+        }
         let head = git(&repo, &["rev-parse", "--verify", "HEAD"]).map_err(|_| WorktreeError::NoCommits)?;
         let name = format!("{}-{}", Some(slug(channel_name, 24)).filter(|s| !s.is_empty()).unwrap_or_else(|| "channel".into()), short_id(channel_id));
-        let branch = format!("discard/{name}");
+        let branch = existing_branch.map(str::to_owned).unwrap_or_else(|| format!("discard/{name}"));
         let repo_key = format!("{}-{}", Some(slug(&repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), 24)).filter(|s| !s.is_empty()).unwrap_or_else(|| "repo".into()),
             Sha256::digest(repo.to_string_lossy().as_bytes()).iter().take(4).map(|b| format!("{b:02x}")).collect::<String>());
         let parent = self.base.join(repo_key);

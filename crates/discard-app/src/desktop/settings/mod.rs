@@ -103,7 +103,7 @@ pub struct SettingsContext {
     pub recheck: super::actions::Recheck,
     pub store: std::sync::Arc<std::sync::Mutex<discard_core::store::Store>>,
     pub memory: std::sync::Arc<discard_core::memory::MemoryStore>,
-    pub channel_id: discard_core::model::ChannelId,
+    pub core: std::sync::Arc<super::core::AppCore>,
     pub load_report: discard_lua::LoadReport,
     pub trusted_reviews: std::sync::Mutex<std::collections::HashSet<String>>,
     pub logs: std::sync::Mutex<logs::LogState>,

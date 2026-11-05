@@ -12,14 +12,20 @@ pub struct PluginEvents {
 }
 
 impl PluginEvents {
+    #[cfg(test)]
     pub fn new(manager: Arc<Mutex<PluginManager>>) -> Self {
+        Self::with_context(manager, None)
+    }
+    pub fn with_context(manager: Arc<Mutex<PluginManager>>, context: Option<(discard_core::model::AgentId, discard_core::model::ProjectId)>) -> Self {
         let (tx, rx) = channel::<(String, Value)>();
         std::thread::Builder::new()
             .name("plugin-events".into())
             .spawn(move || {
                 // Ends when the last sender is dropped.
                 for (event, payload) in rx {
-                    manager.lock().unwrap_or_else(|p| p.into_inner()).emit(&event, &payload);
+                    let manager = manager.lock().unwrap_or_else(|p| p.into_inner());
+                    if let Some((agent, project)) = context.as_ref() { crate::plugin_memory::PluginMemory::for_context(agent.clone(), project.clone(), || manager.emit(&event, &payload)); }
+                    else { manager.emit(&event, &payload); }
                 }
             })
             .expect("could not start the plugin event thread");

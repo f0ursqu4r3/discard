@@ -1,5 +1,7 @@
 /** Whether a streaming reply has a visible row. */
-export function hasLiveRow(running: boolean, blocks: number): boolean { return running && blocks > 0 }
+export function hasLiveRow(running: boolean, blocks: number): boolean {
+  return running && blocks > 0
+}
 /** Show the agents that are thinking. */
 export function thinkingLine(running: boolean, agents: string[]): string | null {
   if (!running || !agents.length) return null
@@ -8,7 +10,9 @@ export function thinkingLine(running: boolean, agents: string[]): string | null 
   return `${agents[0]}, ${agents[1]} and ${agents.length - 2} more are thinking...`
 }
 /** Count history rows and the optional streaming row. */
-export function rowCount(history: number, live: boolean): number { return history + Number(live) }
+export function rowCount(history: number, live: boolean): number {
+  return history + Number(live)
+}
 /** Classify a line of unified diff output. */
 export function classifyLine(line: string): 'added' | 'removed' | 'hunk' | 'context' {
   if (line.startsWith('+++') || line.startsWith('---')) return 'context'
@@ -21,7 +25,11 @@ export function classifyLine(line: string): 'added' | 'removed' | 'hunk' | 'cont
 export function looksLikeUnifiedDiff(text: string): boolean {
   let oldHeader = false
   for (const line of text.split('\n')) {
-    if ((line.startsWith('@@ ') && line.slice(3).includes(' @@')) || (oldHeader && line.startsWith('+++ '))) return true
+    if (
+      (line.startsWith('@@ ') && line.slice(3).includes(' @@')) ||
+      (oldHeader && line.startsWith('+++ '))
+    )
+      return true
     oldHeader = line.startsWith('--- ')
   }
   return false
@@ -32,7 +40,10 @@ export function summarizeInput(input: unknown): string {
   if (input !== null && typeof input === 'object' && !Array.isArray(input)) {
     const fields = input as Record<string, unknown>
     for (const key of ['command', 'file_path', 'path', 'url', 'pattern']) {
-      if (typeof fields[key] === 'string') { text = fields[key]; break }
+      if (typeof fields[key] === 'string') {
+        text = fields[key]
+        break
+      }
     }
   }
   text ??= JSON.stringify(input) ?? 'null'

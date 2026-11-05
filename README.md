@@ -15,7 +15,10 @@ cargo run -p discard-app -- --safe-mode       # no user plugins
 Sign in with the official CLIs first: `claude auth login`, `codex login`. Discard uses your subscription through
 those CLIs and never handles credentials. Data lives in `~/.discard` (set `DISCARD_HOME` to change it).
 
-For front end work, run the Vite dev server with hot reload:
+The web app uses Vite+ for development, builds, tests, linting, and formatting.
+Install dependencies with `pnpm --dir web install --frozen-lockfile`. No global Vite+ install is required.
+
+For front end work, run the Vite+ dev server with hot reload:
 
 ```
 (cd crates/discard-app && cargo tauri dev)      # needs `cargo install tauri-cli --version '^2'`
@@ -30,11 +33,14 @@ A plain `cargo run` embeds the built front end from `web/dist`. It builds `web/`
 ```
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-pnpm --dir web lint
-pnpm --dir web typecheck
+pnpm --dir web check                         # format, lint, and Vue type checks
 pnpm --dir web test
 pnpm --dir web build
 ```
+
+Use `pnpm --dir web fmt` to format the web app. Formatting and Oxlint settings live in
+`web/vite.config.ts`. ESLint remains enabled for Vue rules that Oxlint does not support.
+`vue-tsc` checks Vue templates; the build runs it before bundling.
 
 Live tests use the real CLIs and your subscription. They are ignored by default:
 

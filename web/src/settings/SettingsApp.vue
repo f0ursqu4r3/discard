@@ -36,31 +36,48 @@ function select(title: string) {
 watch(query, search)
 onMounted(async () => {
   await search()
-  stops.push(await listen<SnapshotDto>('discard://snapshot', event => applyTheme(event.payload.theme, document.documentElement)))
+  stops.push(
+    await listen<SnapshotDto>('discard://snapshot', (event) =>
+      applyTheme(event.payload.theme, document.documentElement),
+    ),
+  )
   const snapshot = await getSnapshot()
   if (snapshot?.theme) applyTheme(snapshot.theme, document.documentElement)
   function openRoute(route: string) {
     page.value = route.split('/')[2] || 'general'
     location.hash = route
   }
-  stops.push(await listen<string>('discard://settings-page', event => openRoute(event.payload)))
+  stops.push(await listen<string>('discard://settings-page', (event) => openRoute(event.payload)))
   const route = await invoke<string | null>('settings_current_page')
   if (typeof route === 'string') openRoute(route)
 })
-onUnmounted(() => stops.forEach(stop => stop()))
+onUnmounted(() => stops.forEach((stop) => stop()))
 </script>
 <template>
   <main class="flex h-screen overflow-hidden bg-background text-foreground">
-    <aside class="w-60 shrink-0 space-y-2 overflow-auto border-r border-border bg-sidebar p-4 text-sidebar-foreground">
+    <aside
+      class="w-60 shrink-0 space-y-2 overflow-auto border-r border-border bg-sidebar p-4 text-sidebar-foreground"
+    >
       <Input v-model="query" aria-label="Search settings" placeholder="Search settings" />
       <nav class="flex flex-col gap-1">
-        <Button v-for="entry in entries" :key="entry.title" :data-page="entry.title" :disabled="!entry.available" :variant="page === entry.title.toLowerCase() ? 'secondary' : 'ghost'" class="justify-start" @click="select(entry.title)">
-          {{ entry.title }} <span v-if="!entry.available" class="ml-auto text-muted-foreground">Soon</span>
+        <Button
+          v-for="entry in entries"
+          :key="entry.title"
+          :data-page="entry.title"
+          :disabled="!entry.available"
+          :variant="page === entry.title.toLowerCase() ? 'secondary' : 'ghost'"
+          class="justify-start"
+          @click="select(entry.title)"
+        >
+          {{ entry.title }}
+          <span v-if="!entry.available" class="ml-auto text-muted-foreground">Soon</span>
         </Button>
       </nav>
     </aside>
     <section class="min-w-0 flex-1 overflow-auto p-6">
-      <h1 class="mb-6 text-xl font-semibold">{{ entries.find(e => e.title.toLowerCase() === page)?.title || page }}</h1>
+      <h1 class="mb-6 text-xl font-semibold">
+        {{ entries.find((e) => e.title.toLowerCase() === page)?.title || page }}
+      </h1>
       <General v-if="page === 'general'" />
       <Appearance v-else-if="page === 'appearance'" />
       <Providers v-else-if="page === 'providers'" />

@@ -5,30 +5,79 @@ import { Send, Square, AtSign } from '@lucide/vue'
 import { InputGroup, InputGroupAddon, InputGroupTextarea } from './ui/input-group'
 import { Button } from './ui/button'
 import { maySend, mayStop } from './composer'
-const props = defineProps<{ archived: boolean; busy: boolean; running: boolean; channel: string; agent?: string; draft?: string }>()
+const props = defineProps<{
+  archived: boolean
+  busy: boolean
+  running: boolean
+  channel: string
+  agent?: string
+  draft?: string
+}>()
 const emit = defineEmits<{ send: [text: string]; stop: []; 'update:draft': [text: string] }>()
 const localDraft = ref('')
-const text = computed({ get: () => props.draft ?? localDraft.value, set: value => { localDraft.value = value; emit('update:draft', value) } })
+const text = computed({
+  get: () => props.draft ?? localDraft.value,
+  set: (value) => {
+    localDraft.value = value
+    emit('update:draft', value)
+  },
+})
 function send() {
   if (props.running || !maySend(props.archived || props.busy, text.value)) return
   emit('send', text.value.trim())
-  text.value = ''
+  if (props.draft === undefined) text.value = ''
 }
 function keydown(event: KeyboardEvent) {
-  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); send() }
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    event.preventDefault()
+    send()
+  }
 }
 </script>
 <template>
-  <section data-ui-id="message-composer" aria-label="Message composer" class="shrink-0 px-3 pb-3 pt-2 sm:px-5">
-    <p v-if="agent" class="mb-1.5 truncate text-xs text-muted-foreground">Message {{ agent }} in #{{ channel }}</p>
+  <section
+    data-ui-id="message-composer"
+    aria-label="Message composer"
+    class="shrink-0 px-3 pb-3 pt-2 sm:px-5"
+  >
+    <p v-if="agent" class="mb-1.5 truncate text-xs text-muted-foreground">
+      Message {{ agent }} in #{{ channel }}
+    </p>
     <InputGroup class="rounded-lg">
-      <InputGroupTextarea v-model="text" data-ui-id="composer-input" class="max-h-40 min-h-12 py-3" :rows="1" :disabled="archived || busy" :aria-label="`Message #${channel}`" :placeholder="`Message #${channel}`" @keydown="keydown" />
+      <InputGroupTextarea
+        v-model="text"
+        data-ui-id="composer-input"
+        class="max-h-40 min-h-12 py-3"
+        :rows="1"
+        :disabled="archived || busy"
+        :aria-label="`Message #${channel}`"
+        :placeholder="`Message #${channel}`"
+        @keydown="keydown"
+      />
       <InputGroupAddon align="inline-end" class="self-end pb-2">
         <AtSign aria-hidden="true" class="size-4 text-muted-foreground" />
-        <Button v-if="mayStop(running)" data-ui-id="composer-stop" size="sm" variant="destructive" @click="emit('stop')"><Square data-icon="inline-start" />Stop</Button>
-        <Button v-else data-ui-id="composer-send" size="icon-sm" :disabled="!maySend(archived || busy, text)" aria-label="Send message" @click="send"><Send /><span class="sr-only">Send</span></Button>
+        <Button
+          v-if="mayStop(running)"
+          data-ui-id="composer-stop"
+          size="sm"
+          variant="destructive"
+          @click="emit('stop')"
+          ><Square data-icon="inline-start" />Stop</Button
+        >
+        <Button
+          v-else
+          data-ui-id="composer-send"
+          size="icon-sm"
+          :disabled="!maySend(archived || busy, text)"
+          aria-label="Send message"
+          @click="send"
+          ><Send /><span class="sr-only">Send</span></Button
+        >
       </InputGroupAddon>
     </InputGroup>
-    <div class="mt-2 flex min-w-0 items-center justify-between gap-3 text-xs text-muted-foreground"><span class="truncate">{{ archived ? 'Channel archived' : `#${channel}` }}</span><span class="hidden shrink-0 sm:inline">Enter to send · Shift + Enter for new line</span></div>
+    <div class="mt-2 flex min-w-0 items-center justify-between gap-3 text-xs text-muted-foreground">
+      <span class="truncate">{{ archived ? 'Channel archived' : `#${channel}` }}</span
+      ><span class="hidden shrink-0 sm:inline">Enter to send · Shift + Enter for new line</span>
+    </div>
   </section>
 </template>

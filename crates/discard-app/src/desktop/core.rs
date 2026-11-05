@@ -1,11 +1,13 @@
 //! State shared between engine updates and desktop commands.
 use super::dto::*;
+use crate::plugin_memory::PluginMemory;
+use discard_core::model::AgentId;
 use discard_core::approval::Decision;
 use discard_core::event::{AgentStatus, ApprovalId};
 use discard_core::timeline::ApprovalView;
 use discard_core::ui_state::{Command, SlotLabels, UiState, Update, new_divider_anchor, startup_marker};
 use discard_lua::{PluginService, LoadReport};
-use discard_core::branch_tree::{TreeRow, RowKind, current_row, visible_rows};
+use discard_core::branch_tree::{TreeRow, RowKind, current_row};
 use discard_core::window_state::{Bounds, PanelWidths, StateStore};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -22,8 +24,34 @@ pub struct CoreInit {
     pub agent: String,
     pub provider: String,
 }
-struct State {
+struct ChannelState {
     ui: UiState,
+    commands: UnboundedSender<Command>,
+    channel: String,
+    agent: String,
+    provider: String,
+    channel_id: String,
+    agent_id: String,
+    mode: discard_core::model::WorkspaceMode,
+    new_anchor: Option<String>,
+    archive: Option<String>,
+    archived: bool,
+    archive_busy: bool,
+}
+impl ChannelState {
+    fn new(init: CoreInit) -> Self {
+        Self { ui: init.state, commands: init.commands, channel: init.channel, agent: init.agent,
+            provider: init.provider, channel_id: String::new(), agent_id: String::new(),
+            mode: discard_core::model::WorkspaceMode::MainCheckout, new_anchor: None,
+            archive: None, archived: false, archive_busy: false }
+    }
+}
+struct State {
+    project: String,
+    project_busy: bool,
+    runtime_generation: u64,
+    active: ChannelState,
+    parked: BTreeMap<String, ChannelState>,
     rev: u64,
     history_rev: u64,
     theme: ThemeDto,
@@ -31,31 +59,18 @@ struct State {
     branches: Vec<TreeRow>,
     current_branch: Option<usize>,
     collapsed: HashSet<String>,
-    channel_id: String,
     project_id: String,
     project_path: String,
-    agent_id: String,
-    new_anchor: Option<String>,
     confirm: Option<super::plan::Confirm>,
-    archive: Option<String>,
-    archived: bool,
-    archive_busy: bool,
     plugin_notice: Option<String>,
 }
 #[derive(Clone)]
 struct BranchSource {
     store: Arc<Mutex<discard_core::store::Store>>,
-    channel: discard_core::model::ChannelId,
-    mode: discard_core::model::WorkspaceMode,
     project: PathBuf,
 }
 pub struct AppCore {
     state: Mutex<State>,
-    commands: UnboundedSender<Command>,
-    project: String,
-    channel: String,
-    agent: String,
-    provider: String,
     plugins: Mutex<Option<Arc<PluginService>>>,
     load_report: Mutex<LoadReport>,
     slot_cache: Mutex<super::slots::SlotCache>,
@@ -66,22 +81,21 @@ pub struct AppCore {
 }
 impl AppCore {
     pub fn new(init: CoreInit) -> Self {
+        let project = init.project.clone();
         Self {
             state: Mutex::new(State {
-                ui: init.state,
+                project,
+                project_busy: false,
+                runtime_generation: 0,
+                active: ChannelState::new(init),
+                parked: BTreeMap::new(),
                 window: StateStore::open(Path::new("")),
                 branches: vec![],
                 current_branch: None,
                 collapsed: HashSet::new(),
-                channel_id: String::new(),
                 project_id: String::new(),
                 project_path: String::new(),
-                agent_id: String::new(),
-                new_anchor: None,
                 confirm: None,
-                archive: None,
-                archived: false,
-                archive_busy: false,
                 plugin_notice: None,
                 rev: 0,
                 history_rev: 0,
@@ -97,11 +111,6 @@ impl AppCore {
                     diff_colors: DiffColorsDto { added: "#77cc88".into(), removed: "#ff7777".into(), inline_added: "#77cc88".into(), inline_removed: "#ff7777".into() },
                 },
             }),
-            commands: init.commands,
-            project: init.project,
-            channel: init.channel,
-            agent: init.agent,
-            provider: init.provider,
             plugins: Mutex::new(None),
             load_report: Mutex::new(LoadReport::default()),
             slot_cache: Mutex::new(super::slots::SlotCache::default()),
@@ -111,38 +120,126 @@ impl AppCore {
             changed: Notify::new(),
         }
     }
+    pub fn clear_project(&self) {
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let project = discard_core::model::Project { id: discard_core::model::ProjectId(String::new()), name: String::new(), path: String::new() };
+        let channel = discard_core::model::Channel { id: discard_core::model::ChannelId(String::new()), project_id: project.id.clone(), name: String::new(), agent_id: AgentId(String::new()), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout };
+        self.replace_project(CoreInit { state: UiState::new(channel.id.clone(), vec![]), commands, project: String::new(), channel: String::new(), agent: String::new(), provider: String::new() }, &project, &channel);
+        *self.branch_source.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.clear_slots();
+    }
+    pub fn current_project(&self) -> discard_core::model::Project {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        discard_core::model::Project { id: discard_core::model::ProjectId(s.project_id.clone()), name: s.project.clone(), path: s.project_path.clone() }
+    }
+    pub fn replace_project(&self, init: CoreInit, project: &discard_core::model::Project, channel: &discard_core::model::Channel) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.runtime_generation += 1;
+        s.active = ChannelState::new(init);
+        s.active.channel_id = channel.id.0.clone(); s.active.agent_id = channel.agent_id.0.clone(); s.active.mode = channel.workspace_mode;
+        s.project = project.name.clone(); s.project_id = project.id.0.clone(); s.project_path = project.path.clone();
+        s.parked.clear(); s.branches.clear(); s.collapsed.clear(); s.current_branch = None;
+        if let Some(marker) = startup_marker(s.active.ui.history(), s.window.last_read(&channel.id.0)) { let _ = s.window.set_last_read(&channel.id.0, &marker); }
+        s.active.new_anchor = new_divider_anchor(s.active.ui.history(), s.window.last_read(&channel.id.0), None, false);
+        s.rev += 1; s.history_rev += 1;
+        self.branch_generation.fetch_add(1, Ordering::SeqCst);
+        self.changed.notify_one();
+    }
+    pub fn begin_project_change(&self) -> Result<(), String> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.project_busy || s.active.archive_busy || s.active.archive.is_some() || s.confirm.is_some() || s.active.ui.turn_running() || s.parked.values().any(|c| c.ui.turn_running()) { return Err("Stop all agents and finish pending confirmations before changing projects.".into()); }
+        s.project_busy = true; s.rev += 1; self.changed.notify_one(); Ok(())
+    }
+    pub fn end_project_change(&self) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.project_busy = false; s.rev += 1; self.changed.notify_one();
+    }
+    pub fn active_channel_id(&self) -> String { self.state.lock().unwrap_or_else(|e| e.into_inner()).active.channel_id.clone() }
+    pub fn active_agent_id(&self) -> String { self.state.lock().unwrap_or_else(|e| e.into_inner()).active.agent_id.clone() }
+    pub fn any_running(&self) -> bool {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.active.ui.turn_running() || s.parked.values().any(|c| c.ui.turn_running())
+    }
+    pub fn cancel_all(&self) {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        for channel in std::iter::once(&s.active).chain(s.parked.values()) { let _ = channel.commands.send(Command::Cancel); }
+    }
+    pub fn add_channel(&self, init: CoreInit, channel: &discard_core::model::Channel) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.active.channel_id == channel.id.0 || s.parked.contains_key(&channel.id.0) { return; }
+        let mut runtime = ChannelState::new(init);
+        runtime.channel_id = channel.id.0.clone(); runtime.agent_id = channel.agent_id.0.clone(); runtime.mode = channel.workspace_mode;
+        if let Some(marker) = startup_marker(runtime.ui.history(), s.window.last_read(&channel.id.0)) { let _ = s.window.set_last_read(&channel.id.0, &marker); }
+        runtime.new_anchor = new_divider_anchor(runtime.ui.history(), s.window.last_read(&channel.id.0), None, false);
+        s.parked.insert(channel.id.0.clone(), runtime);
+        s.rev += 1;
+        self.changed.notify_one();
+    }
+    pub fn can_switch(&self) -> Result<(), String> {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.project_busy || s.active.archive_busy || s.active.archive.is_some() || s.confirm.is_some() { Err("Finish the open confirmation before switching channels.".into()) } else { Ok(()) }
+    }
+    pub fn switch_channel(&self, id: &str) -> Result<(), String> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.active.channel_id == id { return Ok(()); }
+        if s.project_busy || s.active.archive_busy || s.active.archive.is_some() || s.confirm.is_some() { return Err("Finish the open confirmation before switching channels.".into()); }
+        if !s.parked.get(id).is_some_and(|c| !c.archived) { return Err("This channel is unavailable.".into()); }
+        let next = s.parked.remove(id).expect("channel checked under lock");
+        let previous = std::mem::replace(&mut s.active, next);
+        s.parked.insert(previous.channel_id.clone(), previous);
+        s.current_branch = None;
+        s.rev += 1; s.history_rev += 1;
+        self.branch_generation.fetch_add(1, Ordering::SeqCst);
+        self.changed.notify_one();
+        Ok(())
+    }
+    pub fn history_snapshot(&self) -> HistoryDto {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        HistoryDto { channel_id: s.active.channel_id.clone(), rev: s.history_rev, messages: history_dto(s.active.ui.history()) }
+    }
     pub fn snapshot(&self) -> SnapshotDto {
         let (mut snapshot, slot_state) = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let ui = &state.ui;
+            let ui = &state.active.ui;
             let rev = state.rev;
             let history_rev = state.history_rev;
             let theme = state.theme.clone();
             let labels = SlotLabels {
-                project: self.project.clone(),
-                channel: self.channel.clone(),
-                agent_name: self.agent.clone(),
-                provider: self.provider.clone(),
+                project: state.project.clone(),
+                channel: state.active.channel.clone(),
+                agent_name: state.active.agent.clone(),
+                provider: state.active.provider.clone(),
             };
             let slot_state = ui.slot_state(&labels);
             let window = state.window.state();
-            let branches = visible_rows(&state.branches, &state.collapsed).into_iter().map(|row| BranchRowDto {
+            let branches = state.branches.iter().map(|row| BranchRowDto {
                 key: row.name.clone(), label: row.name.clone(),
                 kind: match row.kind { RowKind::Main => "main", RowKind::Worktree => "worktree", RowKind::Branch => "branch" }.into(),
                 depth: row.depth(), current: state.current_branch.is_some_and(|i| std::ptr::eq(&state.branches[i], row)),
                 collapsed: state.collapsed.contains(&row.name),
+                detached: row.detached,
+                has_children: state.branches.iter().any(|child| child.parent.as_ref() == Some(&row.name)),
             }).collect();
+            let mut channels: Vec<_> = std::iter::once(&state.active).chain(state.parked.values())
+                    .filter(|channel| !channel.archived).map(|channel| ChannelDto {
+                        id: channel.channel_id.clone(), name: channel.channel.clone(), agent: channel.agent.clone(),
+                        provider: channel.provider.clone(), workspace_mode: channel.mode.as_str().into(),
+                        running: channel.ui.turn_running(), pending_approvals: channel.ui.pending_approvals(),
+                        unread: super::windows::channel_indicators(channel.ui.history(), state.window.last_read(&channel.channel_id), channel.ui.pending_approvals()).0,
+                    }).collect();
+            channels.sort_by(|a, b| a.id.cmp(&b.id));
+
             let snapshot = SnapshotDto {
                 rev,
                 history_rev,
-                project: self.project.clone(),
+                project: state.project.clone(),
                 project_id: state.project_id.clone(),
                 project_path: state.project_path.clone(),
-                channel_id: state.channel_id.clone(),
-                agent_id: state.agent_id.clone(),
-                channel: self.channel.clone(),
-                agent: self.agent.clone(),
-                provider: self.provider.clone(),
+                channel_id: state.active.channel_id.clone(),
+                agent_id: state.active.agent_id.clone(),
+                channel: state.active.channel.clone(),
+                agent: state.active.agent.clone(),
+                provider: state.active.provider.clone(),
                 agent_status: match ui.agent_status() {
                     AgentStatus::Idle => "idle",
                     AgentStatus::Working => "working",
@@ -170,15 +267,16 @@ impl AppCore {
                     })
                     .collect(),
                 pending_approvals: ui.pending_approvals(),
-                unread: super::windows::channel_indicators(ui.history(), state.window.last_read(&state.channel_id), ui.pending_approvals()).0,
-                new_anchor_id: state.new_anchor.clone(),
-                archived: state.archived,
-                archive_busy: state.archive_busy,
+                unread: super::windows::channel_indicators(ui.history(), state.window.last_read(&state.active.channel_id), ui.pending_approvals()).0,
+                new_anchor_id: state.active.new_anchor.clone(),
+                archived: state.active.archived,
+                archive_busy: state.project_busy || state.active.archive_busy,
                 member_list_visible: window.member_list_visible,
                 panels: PanelsDto {
                     channel_list: window.panels.channel_list,
                     member_list: window.panels.member_list,
                 },
+                channels,
                 branches,
                 slots: BTreeMap::new(),
                 banners: BannersDto {
@@ -186,7 +284,7 @@ impl AppCore {
                     review_names: vec![],
                     problem_lines: state.plugin_notice.iter().cloned().collect(),
                     confirm: state.confirm.map(|item| item.message().to_string()),
-                    archive: state.archive.clone().map(|message| ArchiveNoticeDto { message }),
+                    archive: state.active.archive.clone().map(|message| ArchiveNoticeDto { message }),
                     safe_mode: false,
                 },
                 theme,
@@ -199,7 +297,7 @@ impl AppCore {
             plugins.set_ui_state(slot_state.clone());
             let mut manager = plugins.manager().lock().unwrap_or_else(|e| e.into_inner());
             slots = self.slot_cache.lock().unwrap_or_else(|e| e.into_inner())
-                .get_or_render(&slot_state, || super::slots::render_slots(&mut manager, &slot_state));
+                .get_or_render(&slot_state, || PluginMemory::for_context(AgentId(snapshot.agent_id.clone()), discard_core::model::ProjectId(snapshot.project_id.clone()), || super::slots::render_slots(&mut manager, &slot_state)));
             let errors = manager.errors();
             drop(manager);
             let report = self.load_report.lock().unwrap_or_else(|e| e.into_inner());
@@ -231,42 +329,54 @@ impl AppCore {
         self.changed.notify_one();
     }
     pub fn configure_branch_source(&self, store: Arc<Mutex<discard_core::store::Store>>, channel: discard_core::model::ChannelId, mode: discard_core::model::WorkspaceMode, project: PathBuf) {
-        *self.branch_source.lock().unwrap_or_else(|e| e.into_inner()) = Some(BranchSource { store, channel, mode, project });
+        *self.branch_source.lock().unwrap_or_else(|e| e.into_inner()) = Some(BranchSource { store, project });
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.active.channel_id = channel.0;
+        state.active.mode = mode;
     }
     pub fn request_branch_refresh(&self) -> u64 { self.branch_generation.fetch_add(1, Ordering::SeqCst) + 1 }
     /// Reload the tree and determine the current worktree away from the UI thread.
     pub fn refresh_branches(&self, generation: u64) {
         let source = self.branch_source.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let Some(source) = source else { return };
-        let worktree = source.store.lock().unwrap_or_else(|e| e.into_inner()).worktree_for(&source.channel).ok().flatten().map(|record| PathBuf::from(record.path));
-        let current = super::windows::branch_current_directory(Some(source.mode), &source.project, worktree.as_deref());
+        let (channel, mode) = { let state = self.state.lock().unwrap_or_else(|e| e.into_inner()); (discard_core::model::ChannelId(state.active.channel_id.clone()), state.active.mode) };
+        let worktree = source.store.lock().unwrap_or_else(|e| e.into_inner()).worktree_for(&channel).ok().flatten().map(|record| PathBuf::from(record.path));
+        let current = super::windows::branch_current_directory(Some(mode), &source.project, worktree.as_deref());
         let rows = discard_core::worktree::list_branch_tree(&source.project).unwrap_or_default();
-        if self.branch_generation.load(Ordering::SeqCst) == generation { self.set_branches(rows, current.as_deref()); }
+        let selected = current.and_then(|path| current_row(&rows, &path.canonicalize().unwrap_or(path)));
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if self.branch_generation.load(Ordering::SeqCst) == generation {
+            state.branches = rows;
+            state.current_branch = selected;
+            state.rev += 1;
+            self.changed.notify_one();
+        }
     }
     pub fn configure_targets(&self, project_id: String, project_dir: &Path, agent_id: String) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.project_id = project_id;
         state.project_path = project_dir.to_string_lossy().into_owned();
-        state.agent_id = agent_id;
+        state.active.agent_id = agent_id;
     }
     /// Initialize read markers for this channel, treating old history as read on first use.
     pub fn configure_read_marker(&self, data_dir: &Path, channel_id: &str) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.window = StateStore::open(&data_dir.join("state.toml"));
-        s.channel_id = channel_id.to_owned();
-        let marker = startup_marker(s.ui.history(), s.window.last_read(channel_id));
+        s.active.channel_id = channel_id.to_owned();
+        let marker = startup_marker(s.active.ui.history(), s.window.last_read(channel_id));
         if let Some(marker) = marker { let _ = s.window.set_last_read(channel_id, &marker); }
-        s.new_anchor = new_divider_anchor(s.ui.history(), s.window.last_read(channel_id), None, false);
+        s.active.new_anchor = new_divider_anchor(s.active.ui.history(), s.window.last_read(channel_id), None, false);
     }
-    pub fn mark_read(&self, message_id: &str) -> Result<(), String> {
+    pub fn mark_read(&self, message_id: &str) -> Result<(), String> { self.mark_read_in(None, message_id) }
+    pub fn mark_read_in(&self, channel: Option<&str>, message_id: &str) -> Result<(), String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if s.channel_id.is_empty() { return Ok(()); }
-        let Some(index) = s.ui.history().iter().position(|m| m.id.0 == message_id) else { return Ok(()) };
-        let channel = s.channel_id.clone();
-        if s.window.last_read(&channel).and_then(|id| s.ui.history().iter().position(|m| m.id.0 == id)).is_some_and(|previous| previous > index) { return Ok(()); }
+        if s.active.channel_id.is_empty() || channel.is_some_and(|id| id != s.active.channel_id) { return Ok(()); }
+        let Some(index) = s.active.ui.history().iter().position(|m| m.id.0 == message_id) else { return Ok(()) };
+        let channel = s.active.channel_id.clone();
+        if s.window.last_read(&channel).and_then(|id| s.active.ui.history().iter().position(|m| m.id.0 == id)).is_some_and(|previous| previous > index) { return Ok(()); }
         let changed = s.window.last_read(&channel) != Some(message_id);
         if changed { s.window.set_last_read(&channel, message_id)?; }
-        let cleared = s.new_anchor.take().is_some();
+        let cleared = s.active.new_anchor.take().is_some();
         if changed || cleared { s.rev += 1; self.changed.notify_one(); }
         Ok(())
     }
@@ -336,9 +446,10 @@ impl AppCore {
     }
     /// Run a plugin action, then discard any cached trees it could have changed.
     pub fn plugin_action(&self, plugin: &str, action: &str) -> Result<(), String> {
+        let (agent, project) = { let state = self.state.lock().unwrap_or_else(|e| e.into_inner()); (AgentId(state.active.agent_id.clone()), discard_core::model::ProjectId(state.project_id.clone())) };
         let plugins = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
         let Some(plugins) = plugins.as_ref() else { return Err("plugins are unavailable".into()) };
-        let result = plugins.manager().lock().unwrap_or_else(|e| e.into_inner()).run_action(plugin, action).map_err(|e| e.to_string());
+        let result = PluginMemory::for_context(agent, project, || plugins.manager().lock().unwrap_or_else(|e| e.into_inner()).run_action(plugin, action).map_err(|e| e.to_string()));
         self.clear_slots();
         result
     }
@@ -355,7 +466,7 @@ impl AppCore {
     /// Show a notice in the main window.
     pub fn notice(&self, message: String) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.ui.apply(Update::Notice(message));
+        state.active.ui.apply(Update::Notice(message));
         state.rev += 1;
         self.changed.notify_one();
     }
@@ -371,38 +482,39 @@ impl AppCore {
         if ending.is_some() { state.rev += 1; self.changed.notify_one(); }
         ending
     }
-    pub fn archive_started(&self) -> bool {
+    pub fn archive_started(&self) -> bool { self.archive_started_for(None) }
+    pub fn archive_started_for(&self, expected_channel: Option<&str>) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.ui.turn_running() || state.archived || state.archive_busy { return false; }
-        state.archive = None;
-        state.archive_busy = true;
+        if state.project_busy || expected_channel.is_some_and(|id| id != state.active.channel_id) || state.active.ui.turn_running() || state.active.archived || state.active.archive_busy { return false; }
+        state.active.archive = None;
+        state.active.archive_busy = true;
         state.rev += 1;
         self.changed.notify_one();
         true
     }
     pub fn archive_finished(&self, result: super::plan::ArchiveStep) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.archive_busy = false;
+        state.active.archive_busy = false;
         match result {
-            super::plan::ArchiveStep::Done(message) => { state.archived = true; state.ui.apply(Update::Notice(message)); }
-            super::plan::ArchiveStep::NeedsConfirm(items) => state.archive = Some(format!("Archiving will delete these items:\n{}", items.join("\n"))),
-            super::plan::ArchiveStep::Failed(message) => state.ui.apply(Update::Notice(format!("Could not archive channel: {message}"))),
+            super::plan::ArchiveStep::Done(message) => { state.active.archived = true; state.active.ui.apply(Update::Notice(message)); }
+            super::plan::ArchiveStep::NeedsConfirm(items) => state.active.archive = Some(format!("Archiving will delete these items:\n{}", items.join("\n"))),
+            super::plan::ArchiveStep::Failed(message) => state.active.ui.apply(Update::Notice(format!("Could not archive channel: {message}"))),
         }
         state.rev += 1;
         self.changed.notify_one();
     }
     pub fn cancel_archive(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.archive.take().is_some() { state.rev += 1; self.changed.notify_one(); }
+        if state.active.archive.take().is_some() { state.rev += 1; self.changed.notify_one(); }
     }
-    pub fn has_pending_archive(&self) -> bool { self.state.lock().unwrap_or_else(|e| e.into_inner()).archive.is_some() }
+    pub fn has_pending_archive(&self) -> bool { self.state.lock().unwrap_or_else(|e| e.into_inner()).active.archive.is_some() }
     pub fn resolve_copy(&self, target: &discard_core::context_menu::ContextTarget, action: discard_core::action::Action) -> Option<String> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        discard_core::context_menu::resolve_copy(state.ui.history(), &self.channel, target, action)
+        discard_core::context_menu::resolve_copy(state.active.ui.history(), &state.active.channel, target, action)
     }
     pub fn menu_context(&self) -> discard_core::action::MenuContext {
         use discard_core::action::{MenuContext, MenuTarget, PluginMenuItem};
-        let (turn_running, archived) = { let state = self.state.lock().unwrap_or_else(|e| e.into_inner()); (state.ui.turn_running(), state.archived) };
+        let (turn_running, archived) = { let state = self.state.lock().unwrap_or_else(|e| e.into_inner()); (state.active.ui.turn_running(), state.active.archived) };
         let safe_mode = self.load_report.lock().unwrap_or_else(|e| e.into_inner()).safe_mode;
         let plugins = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
         let Some(plugins) = plugins.as_ref() else { return MenuContext { turn_running, archived, safe_mode, ..Default::default() } };
@@ -410,10 +522,11 @@ impl AppCore {
         MenuContext { turn_running, archived, safe_mode, pending_reviews: plugins.pending().len(), plugin_items }
     }
     pub fn run_plugin_menu(&self, plugin: &str, index: usize, target: Option<&discard_core::context_menu::ContextTarget>) -> Result<(), String> {
+        let (agent, project) = { let state = self.state.lock().unwrap_or_else(|e| e.into_inner()); (AgentId(state.active.agent_id.clone()), discard_core::model::ProjectId(state.project_id.clone())) };
         let plugins = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
         let Some(plugins) = plugins.as_ref() else { return Err("plugins are unavailable".into()) };
         let (kind, id) = target.map_or(("app".to_owned(), String::new()), |target| (target.kind().id().to_owned(), target.target_id()));
-        let result = plugins.manager().lock().unwrap_or_else(|e| e.into_inner()).run_menu_item(plugin, index, &kind, &id).map_err(|e| e.to_string());
+        let result = PluginMemory::for_context(agent, project, || plugins.manager().lock().unwrap_or_else(|e| e.into_inner()).run_menu_item(plugin, index, &kind, &id).map_err(|e| e.to_string()));
         self.clear_slots();
         result
     }
@@ -434,53 +547,80 @@ impl AppCore {
             self.state
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .ui
+                .active.ui
                 .history(),
         )
     }
-    pub fn send(&self, text: String) {
+    pub fn send(&self, text: String) { let _ = self.send_to(None, text); }
+    pub fn send_to(&self, channel: Option<&str>, text: String) -> Result<(), String> {
         if text.trim().is_empty() {
-            return;
+            return Ok(());
         }
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if s.ui.turn_running() || s.archived || s.archive_busy || s.archive.is_some() {
-            return;
+        if channel.is_some_and(|id| id != s.active.channel_id) { return Err("The channel changed. Send the message again.".into()); }
+        if s.project_busy || s.active.ui.turn_running() || s.active.archived || s.active.archive_busy || s.active.archive.is_some() {
+            return Err("This channel cannot send a message right now.".into());
         }
-        if self.commands.send(Command::Send(text.clone())).is_ok() {
-            s.new_anchor = None;
-            s.ui.user_sent(&text);
+        if s.active.commands.send(Command::Send(text.clone())).is_ok() {
+            s.active.new_anchor = None;
+            s.active.ui.user_sent(&text);
             s.rev += 1;
             s.history_rev += 1;
             self.changed.notify_one();
-        }
+        } else { return Err("The agent session is unavailable.".into()); }
+        Ok(())
     }
-    pub fn decide(&self, approval_id: String, decision: String) {
+    pub fn decide(&self, approval_id: String, decision: String) { self.decide_in(None, approval_id, decision); }
+    pub fn decide_in(&self, channel: Option<&str>, approval_id: String, decision: String) {
         let decision = match decision.as_str() {
             "approve" => Decision::Approve,
             "deny" => Decision::Deny,
             "always_allow" => Decision::AlwaysAllow,
             _ => return,
         };
-        let _ = self.commands.send(Command::Decide {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if channel.is_some_and(|id| id != s.active.channel_id) { return; }
+        if !s.active.ui.prompts().iter().any(|p| p.approval_id.to_string() == approval_id && p.view == ApprovalView::Pending) { return; }
+        let _ = s.active.commands.send(Command::Decide {
             approval_id: ApprovalId(approval_id),
             decision,
         });
     }
-    pub fn cancel(&self) {
-        let _ = self.commands.send(Command::Cancel);
+    pub fn cancel(&self) { self.cancel_in(None); }
+    pub fn cancel_in(&self, channel: Option<&str>) {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if channel.is_some_and(|id| id != s.active.channel_id) { return; }
+        let _ = s.active.commands.send(Command::Cancel);
     }
-    pub fn apply(&self, update: Update) -> bool {
+    pub fn apply(&self, update: Update) -> bool { self.apply_channel(&self.active_channel_id(), update) }
+    pub fn runtime_generation(&self) -> u64 { self.state.lock().unwrap_or_else(|e| e.into_inner()).runtime_generation }
+    pub fn apply_channel(&self, channel: &str, update: Update) -> bool { self.apply_runtime(channel, None, update) }
+    pub fn apply_runtime(&self, channel: &str, generation: Option<u64>, update: Update) -> bool {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let old_len = s.ui.history().len();
-        let was_running = s.ui.turn_running();
-        s.ui.apply(update);
-        if super::windows::should_clear_confirm(s.ui.turn_running(), s.confirm.is_some()) { s.confirm = None; }
+        if generation.is_some_and(|generation| generation != s.runtime_generation) { return false; }
+        if s.active.channel_id != channel {
+            let marker = s.window.last_read(channel).map(str::to_owned);
+            let Some(parked) = s.parked.get_mut(channel) else { return false };
+            let was_running = parked.ui.turn_running();
+            parked.ui.apply(update);
+            parked.new_anchor = new_divider_anchor(parked.ui.history(), marker.as_deref(), parked.new_anchor.as_deref(), false);
+            let finished = was_running && !parked.ui.turn_running();
+            if !s.active.ui.turn_running() && !s.parked.values().any(|c| c.ui.turn_running()) { s.confirm = None; }
+            s.rev += 1;
+            self.changed.notify_one();
+            return finished;
+        }
+        let old_len = s.active.ui.history().len();
+        let was_running = s.active.ui.turn_running();
+        s.active.ui.apply(update);
+        if super::windows::should_clear_confirm(s.active.ui.turn_running() || s.parked.values().any(|c| c.ui.turn_running()), s.confirm.is_some()) { s.confirm = None; }
         s.rev += 1;
-        if old_len != s.ui.history().len() {
-            s.new_anchor = new_divider_anchor(s.ui.history(), s.window.last_read(&s.channel_id), s.new_anchor.as_deref(), false);
+        if old_len != s.active.ui.history().len() {
+            s.active.new_anchor = new_divider_anchor(s.active.ui.history(), s.window.last_read(&s.active.channel_id), s.active.new_anchor.as_deref(), false);
             s.history_rev += 1;
         }
-        was_running && !s.ui.turn_running()
+        self.changed.notify_one();
+        was_running && !s.active.ui.turn_running()
     }
 }
 

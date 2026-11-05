@@ -111,6 +111,7 @@ pub struct WorktreeRecord {
     pub branch: String,
     pub base_commit: String,
     pub repo: String,
+    pub owned: bool,
 }
 
 pub struct Store {
@@ -181,6 +182,88 @@ impl Store {
             tx.pragma_update(None, "user_version", 2)?;
             tx.commit()?;
         }
+        if self.schema_version()? < 3 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch("ALTER TABLE worktrees ADD COLUMN owned INTEGER NOT NULL DEFAULT 1;
+                CREATE TABLE channel_branches (channel_id TEXT PRIMARY KEY REFERENCES channels(id), branch TEXT NOT NULL);")?;
+            tx.pragma_update(None, "user_version", 3)?;
+            tx.commit()?;
+        }
+        Ok(())
+    }
+
+    pub fn bind_branch(&self, channel: &ChannelId, branch: &str) -> Result<()> {
+        self.conn.execute("INSERT INTO channel_branches (channel_id, branch) VALUES (?1, ?2)", params![channel.0, branch])?;
+        Ok(())
+    }
+    pub fn channel_branch(&self, channel: &ChannelId) -> Result<Option<String>> {
+        Ok(self.conn.query_row("SELECT branch FROM channel_branches WHERE channel_id = ?1", params![channel.0], |r| r.get(0)).optional()?)
+    }
+
+    pub fn visible_projects(&self) -> Result<Vec<Project>> {
+        self.conn.execute_batch("CREATE TABLE IF NOT EXISTS hidden_projects (project_id TEXT PRIMARY KEY REFERENCES projects(id));")?;
+        let hidden: Vec<String> = self.conn.prepare("SELECT project_id FROM hidden_projects")?.query_map([], |r| r.get(0))?.collect::<std::result::Result<_,_>>()?;
+        Ok(self.list_projects()?.into_iter().filter(|p| !hidden.contains(&p.id.0)).collect())
+    }
+    pub fn hide_project(&self, id: &ProjectId) -> Result<()> {
+        self.visible_projects()?; self.selected_project()?;
+        self.conn.execute("INSERT OR IGNORE INTO hidden_projects VALUES (?1)", params![id.0])?;
+        self.conn.execute("DELETE FROM project_selection WHERE project_id=?1", params![id.0])?;
+        Ok(())
+    }
+    pub fn selected_project(&self) -> Result<Option<Project>> {
+        self.conn.execute_batch("CREATE TABLE IF NOT EXISTS project_selection (singleton INTEGER PRIMARY KEY CHECK(singleton=1), project_id TEXT NOT NULL REFERENCES projects(id));")?;
+        Ok(self.conn.query_row("SELECT p.id,p.name,p.path FROM projects p JOIN project_selection s ON s.project_id=p.id WHERE s.singleton=1", [], |r| Ok(Project { id: ProjectId(r.get(0)?), name: r.get(1)?, path: r.get(2)? })).optional()?)
+    }
+    pub fn select_project(&self, project: &ProjectId) -> Result<()> {
+        self.visible_projects()?;
+        self.conn.execute("DELETE FROM hidden_projects WHERE project_id=?1", params![project.0])?;
+        self.selected_project()?;
+        self.conn.execute("INSERT INTO project_selection VALUES (1,?1) ON CONFLICT(singleton) DO UPDATE SET project_id=excluded.project_id", params![project.0])?;
+        Ok(())
+    }
+    pub fn import_project_folder(&self, path: &Path) -> Result<Project> {
+        let canonical = path.canonicalize().map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        if !canonical.is_dir() { return Err(StoreError::Corrupt("Select a folder.".into())); }
+        for project in self.list_projects()? {
+            if Path::new(&project.path).canonicalize().ok().as_ref() == Some(&canonical) { self.select_project(&project.id)?; return Ok(project); }
+        }
+        let project = Project { id: ProjectId::new(), name: canonical.file_name().unwrap_or_default().to_string_lossy().into_owned(), path: canonical.to_string_lossy().into_owned() };
+        let tx = self.conn.unchecked_transaction()?;
+        self.insert_project(&project)?;
+        self.select_project(&project.id)?;
+        tx.commit()?;
+        Ok(project)
+    }
+    pub fn change_project_folder(&self, id: &ProjectId, path: &Path) -> Result<()> {
+        let canonical = path.canonicalize().map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        if !canonical.is_dir() { return Err(StoreError::Corrupt("Select a folder.".into())); }
+        let projects = self.list_projects()?;
+        let current = projects.iter().find(|p| p.id == *id).ok_or_else(|| StoreError::NotFound(id.0.clone()))?;
+        if Path::new(&current.path).canonicalize().ok().as_ref() == Some(&canonical) { return Ok(()); }
+        let destination = projects.iter().find(|p| p.id != *id && Path::new(&p.path).canonicalize().ok().as_ref() == Some(&canonical));
+        let target = destination.map_or(id, |project| &project.id);
+        let tx = self.conn.unchecked_transaction()?;
+        if destination.is_none() { self.conn.execute("UPDATE projects SET path=?2 WHERE id=?1", params![id.0, canonical.to_string_lossy()])?; }
+        // Keep channel IDs, messages, agent identities, and archived history. An empty source
+        // project record remains so its project-scoped memory is still available in Settings.
+        for (channel, archived) in self.all_channels_for_project(id)? {
+            if target != id {
+                let existing = self.all_channels_for_project(target)?;
+                let mut name = channel.name.clone(); let mut suffix = 2;
+                while existing.iter().any(|(other, _)| other.name.eq_ignore_ascii_case(&name)) { name = format!("{}-{suffix}", channel.name); suffix += 1; }
+                self.conn.execute("UPDATE channels SET project_id=?2,name=?3 WHERE id=?1", params![channel.id.0,target.0,name])?;
+            }
+            if !archived {
+                self.delete_worktree(&channel.id)?;
+                self.conn.execute("DELETE FROM channel_branches WHERE channel_id=?1", params![channel.id.0])?;
+                self.create_session(&SessionId::new(), &channel.id)?;
+                if !crate::worktree::WorktreeManager::is_repo(&canonical) { self.set_workspace_mode(&channel.id, WorkspaceMode::MainCheckout)?; }
+            }
+        }
+        self.select_project(target)?;
+        if target != id { self.hide_project(id)?; }
+        tx.commit()?;
         Ok(())
     }
 
@@ -261,6 +344,17 @@ impl Store {
         Ok(())
     }
 
+    /// Persist a complete channel before starting its runtime. Roll back on any storage failure.
+    pub fn create_named_channel(&self, channel: &Channel, branch: Option<&str>, worktree: Option<&WorktreeRecord>) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        self.insert_channel(channel)?;
+        self.create_session(&SessionId::new(), &channel.id)?;
+        if let Some(branch) = branch { self.bind_branch(&channel.id, branch)?; }
+        if let Some(worktree) = worktree { self.save_worktree(worktree)?; }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn channels_for_project(&self, p: &ProjectId) -> Result<Vec<Channel>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, project_id, name, agent_id, workspace_mode FROM channels WHERE project_id = ?1 AND archived = 0 ORDER BY ord",
@@ -288,10 +382,10 @@ impl Store {
 
     pub fn save_worktree(&self, w: &WorktreeRecord) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO worktrees (channel_id, path, branch, base_commit, repo) VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO worktrees (channel_id, path, branch, base_commit, repo, owned) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(channel_id) DO UPDATE SET path = excluded.path, branch = excluded.branch,
-               base_commit = excluded.base_commit, repo = excluded.repo",
-            params![w.channel_id.0, w.path, w.branch, w.base_commit, w.repo],
+               base_commit = excluded.base_commit, repo = excluded.repo, owned = excluded.owned",
+            params![w.channel_id.0, w.path, w.branch, w.base_commit, w.repo, w.owned],
         )?;
         Ok(())
     }
@@ -300,9 +394,9 @@ impl Store {
         let row = self
             .conn
             .query_row(
-                "SELECT path, branch, base_commit, repo FROM worktrees WHERE channel_id = ?1",
+                "SELECT path, branch, base_commit, repo, owned FROM worktrees WHERE channel_id = ?1",
                 params![channel.0],
-                |r| Ok(WorktreeRecord { channel_id: channel.clone(), path: r.get(0)?, branch: r.get(1)?, base_commit: r.get(2)?, repo: r.get(3)? }),
+                |r| Ok(WorktreeRecord { channel_id: channel.clone(), path: r.get(0)?, branch: r.get(1)?, base_commit: r.get(2)?, repo: r.get(3)?, owned: r.get(4)? }),
             )
             .optional()?;
         Ok(row)
@@ -686,7 +780,7 @@ mod tests {
             conn.execute("INSERT INTO channels (id, project_id, name, agent_id, workspace_mode) VALUES ('c', 'p', 'general', 'a', 'main_checkout')", []).unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 2);
+        assert_eq!(store.schema_version().unwrap(), 3);
         let channels = store.channels_for_project(&ProjectId("p".into())).unwrap();
         assert_eq!(channels.len(), 1);
         assert_eq!(channels[0].workspace_mode, WorkspaceMode::MainCheckout, "old channels stay in the main checkout");
@@ -696,7 +790,7 @@ mod tests {
     #[test]
     fn worktree_records_round_trip_update_and_delete() {
         let f = fixture();
-        let rec = WorktreeRecord { channel_id: f.channel.id.clone(), path: "/w/x".into(), branch: "discard/x".into(), base_commit: "abc".into(), repo: "/r".into() };
+        let rec = WorktreeRecord { channel_id: f.channel.id.clone(), path: "/w/x".into(), branch: "discard/x".into(), base_commit: "abc".into(), repo: "/r".into(), owned: true };
         assert_eq!(f.store.worktree_for(&f.channel.id).unwrap(), None);
         f.store.save_worktree(&rec).unwrap();
         assert_eq!(f.store.worktree_for(&f.channel.id).unwrap(), Some(rec.clone()));
@@ -905,5 +999,43 @@ mod tests {
         }
         let store = Store::open(&path).unwrap();
         assert_eq!(store.last_seq(&session).unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod project_folder_tests {
+    use super::*;
+    #[test]
+    fn folder_import_reuses_identity_and_folder_changes_reset_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first"); let next = root.path().join("next");
+        std::fs::create_dir_all(&first).unwrap(); std::fs::create_dir_all(&next).unwrap();
+        let db = root.path().join("store.db");
+        let store = Store::open(&db).unwrap();
+        let project = store.import_project_folder(&first).unwrap();
+        assert_eq!(store.import_project_folder(&first.join(".")).unwrap().id, project.id);
+        let ws = crate::bootstrap::ensure_workspace(&store, Path::new(&project.path), "claude", crate::bootstrap::Role::Default, crate::bootstrap::WorkspaceChoice::Main).unwrap();
+        let old_session = store.latest_session(&ws.channel.id).unwrap();
+        let message = Message { id: MessageId::new(), channel_id: ws.channel.id.clone(), role: Role::User, blocks: vec![] };
+        store.insert_message(&message).unwrap();
+        store.change_project_folder(&project.id, &next).unwrap();
+        assert_ne!(store.latest_session(&ws.channel.id).unwrap(), old_session);
+        assert_eq!(store.messages_for_channel(&ws.channel.id).unwrap(), vec![message]);
+        assert_eq!(store.selected_project().unwrap().unwrap().id, project.id);
+        drop(store);
+        let store = Store::open(&db).unwrap();
+        assert_eq!(store.selected_project().unwrap().unwrap().path, next.canonicalize().unwrap().to_string_lossy());
+        let other = store.import_project_folder(&first).unwrap();
+        assert_ne!(other.id, project.id);
+        let target_workspace = crate::bootstrap::ensure_workspace(&store, Path::new(&other.path), "claude", crate::bootstrap::Role::Default, crate::bootstrap::WorkspaceChoice::Main).unwrap();
+        let target_session = store.latest_session(&target_workspace.channel.id).unwrap();
+        store.change_project_folder(&project.id, &first).unwrap();
+        assert_eq!(store.selected_project().unwrap().unwrap().id, other.id);
+        let channels = store.channels_for_project(&other.id).unwrap();
+        assert_eq!(channels.len(), 2);
+        assert!(channels.iter().any(|c| c.id == ws.channel.id && c.name == "general-2"));
+        assert_eq!(store.messages_for_channel(&ws.channel.id).unwrap().len(), 1);
+        assert_eq!(store.latest_session(&target_workspace.channel.id).unwrap(), target_session);
+        assert!(store.import_project_folder(&db).is_err());
     }
 }

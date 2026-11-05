@@ -122,8 +122,7 @@ mod tests {
             path: path.clone(),
             branch: "branch".into(),
             base_commit: "base".into(),
-            repo: "repo".into(),
-        })
+            repo: "repo".into(), owned: true })
         .unwrap();
         let r = rows(&s, &id).unwrap();
         let w = r[0].channels[0].worktree.as_ref().unwrap();

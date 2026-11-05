@@ -16,7 +16,7 @@ local STATUS_COLOR = {
 
 discard.slot("channel_header", function(state)
   local children = {
-    "row", gap = 12, align = "center", padding_x = 16, padding_y = 12, border_bottom = true,
+    "row", gap = 12, align = "center", padding_x = 16, padding_y = 12,
     { "text", "# " .. state.channel, weight = "bold" },
     { "spacer" },
   }

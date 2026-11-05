@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod channels;
 pub mod core;
 pub mod dto;
 pub mod pump;
@@ -8,7 +9,7 @@ use discard_core::ghostty::{live::LiveTheme, spec::Appearance};
 use discard_core::settings::SettingsStore;
 use discard_core::ui_state::Update;
 use discard_lua::PluginService;
-use dto::{MessageDto, SnapshotDto};
+use dto::{HistoryDto, SnapshotDto};
 use pump::Emit;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -42,12 +43,15 @@ impl Emit for WebEmit {
         }
         let _ = self.app.emit("discard://snapshot", value);
     }
-    fn history(&self, value: &[MessageDto]) {
+    fn history(&self, value: &HistoryDto) {
         let _ = self.app.emit("discard://history", value);
     }
 }
 /// Startup data for the main desktop window.
 pub struct DesktopConfig {
+    pub empty_workspace: bool,
+    pub launcher: channels::Launcher,
+    pub on_ready: channels::OnReady,
     pub project_dir: PathBuf,
     pub project_id: String,
     pub agent_id: String,
@@ -75,10 +79,23 @@ pub fn run(
     core.set_plugins(plugins.clone());
     core.set_load_report(config.load_report.clone());
     core.configure_window(&data_dir, &config.project_dir, config.channel_dir.as_deref());
-    core.configure_targets(config.project_id, &config.project_dir, config.agent_id);
+    core.configure_targets(config.project_id.clone(), &config.project_dir, config.agent_id);
     core.configure_branch_source(config.store.clone(), config.channel_id.clone(), config.workspace_mode, config.project_dir.clone());
     core.configure_read_marker(&data_dir, &config.channel_id.0);
-    let actions = Arc::new(actions::DesktopActions { settings: settings.clone(), workspace: config.workspace, channel_id: config.channel_id.clone(), relaunch: config.relaunch, exiting: AtomicBool::new(false) });
+    (config.on_ready)(&core);
+    let channels = Arc::new(channels::Channels::new(core.clone(), config.store.clone(), discard_core::model::ProjectId(config.project_id.clone()), config.project_dir.clone(), runtime.clone(), config.launcher));
+    if let Err(error) = channels.restore() { core.notice(format!("Could not restore channels: {error}")); }
+    if config.empty_workspace { core.clear_project(); }
+    let actions = Arc::new(actions::DesktopActions { settings: settings.clone(), workspace: config.workspace, relaunch: config.relaunch, exiting: AtomicBool::new(false) });
+    let refresh_core = core.clone();
+    runtime.spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let core = refresh_core.clone();
+            let generation = core.request_branch_refresh();
+            let _ = tokio::task::spawn_blocking(move || core.refresh_branches(generation)).await;
+        }
+    });
     let event_actions = actions.clone();
     let menu_actions = actions.clone();
     let menu_core = core.clone();
@@ -90,10 +107,12 @@ pub fn run(
     let event_runtime = runtime.clone();
     let geometry_generation = Arc::new(AtomicU64::new(0));
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(core.clone())
+        .manage(channels)
         .manage(actions.clone())
         .manage(windows::SettingsRoute::default())
-        .manage(settings::SettingsContext { home: data_dir.clone(), plugins: plugins.clone(), providers: config.providers, recheck: config.recheck, store: config.store, memory: config.memory, channel_id: config.channel_id, load_report: config.load_report, trusted_reviews: Mutex::new(std::collections::HashSet::new()), logs: Mutex::new(settings::logs::LogState::open(&data_dir)) })
+        .manage(settings::SettingsContext { home: data_dir.clone(), plugins: plugins.clone(), providers: config.providers, recheck: config.recheck, store: config.store, memory: config.memory, core: core.clone(), load_report: config.load_report, trusted_reviews: Mutex::new(std::collections::HashSet::new()), logs: Mutex::new(settings::logs::LogState::open(&data_dir)) })
         .on_menu_event(move |app, event| {
             let id = event.id().as_ref();
             if let Some(action) = discard_core::action::Action::from_id(id) {
@@ -109,10 +128,9 @@ pub fn run(
                 event_dark.store(*value == tauri::Theme::Dark, Ordering::Relaxed);
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let ctx = event_core.menu_context();
                 if windows::request_main_close(&event_core, window.label() == "main", event_actions.confirms()) {
                     api.prevent_close();
-                } else if window.label() == "main" && ctx.turn_running { event_core.cancel(); }
+                } else if window.label() == "main" && event_core.any_running() { event_core.cancel_all(); }
             }
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)) {
                 let generation = geometry_generation.fetch_add(1, Ordering::Relaxed) + 1;
@@ -197,7 +215,7 @@ pub fn run(
                 let mut timer = tokio::time::interval(Duration::from_secs(1));
                 loop { timer.tick().await; maintenance_core.maintain_plugins(); }
             });
-            runtime.spawn(pump::pump(
+            runtime.spawn(pump::pump_live(
                 core.clone(),
                 updates,
                 Arc::new(WebEmit { app: app.handle().clone(), core: core.clone(), settings: emitter_settings, menu_state: Mutex::new(None) }),
@@ -206,7 +224,8 @@ pub fn run(
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::get_snapshot,
+            commands::get_snapshot, commands::choose_project_folder, commands::get_projects, commands::select_project, commands::remove_project,
+            commands::create_channel, commands::switch_channel, commands::open_branch_channel,
             commands::get_history,
             commands::send_message,
             commands::decide_approval,
@@ -255,11 +274,10 @@ pub fn run(
         .build(tauri::generate_context!())?;
     app.run(move |_handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event && !exit_actions.exiting.load(Ordering::SeqCst) {
-            let ctx = exit_core.menu_context();
-            if let plan::Close::Ask(ending) = plan::close_plan(true, ctx.turn_running, exit_actions.confirms()) {
+            if let plan::Close::Ask(ending) = plan::close_plan(true, exit_core.any_running(), exit_actions.confirms()) {
                 api.prevent_exit();
                 exit_core.ask(ending);
-            } else if ctx.turn_running { exit_core.cancel(); }
+            } else if exit_core.any_running() { exit_core.cancel_all(); }
         }
     });
     Ok(())

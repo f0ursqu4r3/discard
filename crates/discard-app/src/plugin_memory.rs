@@ -1,26 +1,59 @@
 //! Gives plugins access to agent memory. A plugin names a scope (`agent`, `project`, `global`). This maps it to
-//! the ids of the agent and project this app runs, so a plugin never passes an id or a path for a scope.
+//! the active agent and project. Each engine event and UI callback pins its agent for the whole callback.
 
 use discard_core::memory::{MemoryStore, Scope};
 use discard_core::model::{AgentId, ProjectId};
 use discard_lua::{MemoryFile, MemoryHit, MemoryHost, MemoryText};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+thread_local! { static EVENT_AGENT: RefCell<Option<AgentId>> = const { RefCell::new(None) }; }
+thread_local! { static EVENT_PROJECT: RefCell<Option<ProjectId>> = const { RefCell::new(None) }; }
+type ActiveProject = Arc<dyn Fn() -> ProjectId + Send + Sync>;
+type ActiveAgent = Arc<dyn Fn() -> AgentId + Send + Sync>;
 
 pub struct PluginMemory {
     store: Arc<MemoryStore>,
     agent: AgentId,
     project: ProjectId,
+    active: Mutex<Option<ActiveAgent>>,
+    active_project: Mutex<Option<ActiveProject>>,
 }
 
 impl PluginMemory {
     pub fn new(store: Arc<MemoryStore>, agent: AgentId, project: ProjectId) -> Self {
-        Self { store, agent, project }
+        Self { store, agent, project, active: Mutex::new(None), active_project: Mutex::new(None) }
     }
 
+    pub fn set_active_source(&self, source: ActiveAgent) { *self.active.lock().unwrap_or_else(|e| e.into_inner()) = Some(source); }
+    pub fn for_agent<T>(agent: AgentId, callback: impl FnOnce() -> T) -> T {
+        struct Restore(Option<AgentId>);
+        impl Drop for Restore { fn drop(&mut self) { EVENT_AGENT.with(|scope| { scope.replace(self.0.take()); }); } }
+        let previous = EVENT_AGENT.with(|scope| scope.replace(Some(agent)));
+        let _restore = Restore(previous);
+        callback()
+    }
+    pub fn set_project_source(&self, source: ActiveProject) { *self.active_project.lock().unwrap_or_else(|e| e.into_inner()) = Some(source); }
+    pub fn for_context<T>(agent: AgentId, project: ProjectId, callback: impl FnOnce() -> T) -> T {
+        struct Restore(Option<ProjectId>);
+        impl Drop for Restore { fn drop(&mut self) { EVENT_PROJECT.with(|scope| { scope.replace(self.0.take()); }); } }
+        let previous = EVENT_PROJECT.with(|scope| scope.replace(Some(project)));
+        let _restore = Restore(previous);
+        Self::for_agent(agent, callback)
+    }
+    fn project(&self) -> ProjectId {
+        EVENT_PROJECT.with(|scope| scope.borrow().clone()).unwrap_or_else(|| {
+            self.active_project.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or_else(|| self.project.clone(), |source| source())
+        })
+    }
+    fn agent(&self) -> AgentId {
+        EVENT_AGENT.with(|scope| scope.borrow().clone()).unwrap_or_else(|| {
+            self.active.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or_else(|| self.agent.clone(), |source| source())
+        })
+    }
     fn scope(&self, name: &str) -> Result<Scope, String> {
         match name {
-            "agent" => Ok(Scope::Agent(self.agent.clone())),
-            "project" => Ok(Scope::Project(self.project.clone())),
+            "agent" => Ok(Scope::Agent(self.agent())),
+            "project" => Ok(Scope::Project(self.project())),
             "global" => Ok(Scope::Global),
             other => Err(format!("unknown memory scope `{other}`")),
         }
@@ -73,6 +106,17 @@ mod tests {
     }
 
     #[test]
+    fn project_scope_follows_selection_but_callback_keeps_its_origin() {
+        let r = rig();
+        let h = host(&r, "agent");
+        h.set_project_source(Arc::new(|| ProjectId("selected".into())));
+        PluginMemory::for_context(AgentId("agent".into()), ProjectId("origin".into()), || h.append("project", "notes.md", "origin").unwrap());
+        assert!(h.list("project").unwrap().is_empty());
+        h.append("project", "notes.md", "selected").unwrap();
+        assert_eq!(r.store.read(&Scope::Project(ProjectId("origin".into())), "notes.md").unwrap().text, "origin");
+        assert_eq!(h.read("project", "notes.md").unwrap().text, "selected");
+    }
+    #[test]
     fn scope_names_map_to_this_apps_agent_and_project() {
         let r = rig();
         let h = host(&r, "a1");
@@ -112,5 +156,34 @@ mod tests {
         let hits = h.search(&["global".into()], "gamma", 5).unwrap();
         assert_eq!((hits[0].scope.as_str(), hits[0].path.as_str()), ("global", "n.md"));
         assert!(h.search(&["project".into()], "gamma", 5).unwrap().is_empty(), "search stays inside the named scopes");
+    }
+
+    #[test]
+    fn background_plugin_event_uses_its_agent_then_restores_the_active_agent() {
+        let r = rig();
+        let h = host(&r, "initial");
+        h.set_active_source(Arc::new(|| AgentId("active".into())));
+        PluginMemory::for_agent(AgentId("background".into()), || h.append("agent", "notes.md", "background").unwrap());
+        h.append("agent", "notes.md", "active").unwrap();
+        assert_eq!(r.store.read(&Scope::Agent(AgentId("background".into())), "notes.md").unwrap().text, "background");
+        assert_eq!(r.store.read(&Scope::Agent(AgentId("active".into())), "notes.md").unwrap().text, "active");
+        assert!(r.store.list(&Scope::Agent(AgentId("initial".into()))).unwrap().is_empty());
+    }
+
+    #[test]
+    fn one_callback_keeps_its_agent_when_active_channel_changes() {
+        let r = rig();
+        let h = host(&r, "initial");
+        let active = Arc::new(Mutex::new(AgentId("first".into())));
+        let source = active.clone();
+        h.set_active_source(Arc::new(move || source.lock().unwrap().clone()));
+        PluginMemory::for_agent(AgentId("first".into()), || {
+            h.append("agent", "notes.md", "before").unwrap();
+            *active.lock().unwrap() = AgentId("second".into());
+            h.append("agent", "notes.md", "after").unwrap();
+            assert!(h.read("agent", "notes.md").unwrap().text.contains("before"));
+        });
+        assert!(r.store.read(&Scope::Agent(AgentId("first".into())), "notes.md").unwrap().text.contains("after"));
+        assert!(h.list("agent").unwrap().is_empty(), "next callback sees the newly selected agent");
     }
 }

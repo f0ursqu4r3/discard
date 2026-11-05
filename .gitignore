@@ -46,3 +46,6 @@ npm-debug.log*
 /web/dist
 
 /crates/discard-app/gen
+
+# Vite+ task cache
+/web/.vite-plus/

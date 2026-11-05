@@ -1,5 +1,7 @@
 # Visual implementation plan
 
+This plan records the completed first visual pass. The later [channel navigation implementation](channel-navigation.md) adds backend contracts with the user's approval and supersedes this plan's single-channel boundary.
+
 **Goal:** Apply the Design Lab layout to the existing Vue desktop app before adding new backend contracts.
 
 **Architecture:** Keep the existing snapshot, history, commands, safe rendering, and protected decisions. Compose the workspace from small Vue components. Keep all existing Ghostty tokens and derive new surfaces from those tokens.

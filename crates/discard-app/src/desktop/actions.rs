@@ -20,7 +20,6 @@ pub type Recheck = Arc<dyn Fn(&str) + Send + Sync>;
 pub struct DesktopActions {
     pub settings: Arc<Mutex<SettingsStore>>,
     pub workspace: Arc<GitWorkspace>,
-    pub channel_id: ChannelId,
     pub relaunch: Relaunch,
     pub exiting: AtomicBool,
 }
@@ -31,7 +30,7 @@ impl DesktopActions {
 pub fn perform(app: &AppHandle, core: &AppCore, actions: &DesktopActions, ending: Confirm) {
     match plan::prepare_exit(ending, Some(actions.relaunch.as_ref())) {
         Ok(()) => {
-            if core.menu_context().turn_running { core.cancel(); }
+            if core.any_running() { core.cancel_all(); }
             actions.exiting.store(true, Ordering::SeqCst);
             app.exit(0);
         }
@@ -40,23 +39,30 @@ pub fn perform(app: &AppHandle, core: &AppCore, actions: &DesktopActions, ending
 }
 /// Start the archive operation away from the UI thread.
 pub fn archive(core: Arc<AppCore>, actions: &DesktopActions, force: bool) {
-    if !core.archive_started() { return; }
+    archive_for(core, actions, force, None);
+}
+fn archive_for(core: Arc<AppCore>, actions: &DesktopActions, force: bool, channel: Option<&str>) {
+    if !core.archive_started_for(channel) { return; }
     let workspace = actions.workspace.clone();
-    let channel_id = actions.channel_id.clone();
+    let channel_id = ChannelId(core.active_channel_id());
     tauri::async_runtime::spawn_blocking(move || {
         core.archive_finished(plan::archive_step(workspace.archive(&channel_id, force)));
     });
 }
 /// Run a core action. Copy results return to the webview for the Web Clipboard API.
 pub fn run(app: &AppHandle, core: &Arc<AppCore>, actions: &DesktopActions, action: Action, target: Option<ContextTarget>) -> Option<String> {
+    if let Some(ContextTarget::Channel { id }) = &target { if id != &core.active_channel_id() { return None; } }
     let ctx = core.menu_context();
     match plan::plan_targeted(action, target.is_some(), ctx.turn_running, ctx.archived) {
         plan::TargetedPlan::Copy => return target.as_ref().and_then(|target| core.resolve_copy(target, action)),
-        plan::TargetedPlan::Archive => { archive(core.clone(), actions, false); return None; }
+        plan::TargetedPlan::Archive => {
+            if let Some(ContextTarget::Channel { id }) = &target { archive_for(core.clone(), actions, false, Some(id)); }
+            return None;
+        }
         plan::TargetedPlan::ArchiveBlocked => { core.notice("Stop the turn before archiving the channel".into()); return None; }
         plan::TargetedPlan::Nothing => {}
     }
-    match plan::plan(action, ctx.turn_running, actions.confirms(), ctx.safe_mode) {
+    match plan::plan(action, if matches!(action, Action::Quit | Action::ToggleSafeMode | Action::CloseWindow) { core.any_running() } else { ctx.turn_running }, actions.confirms(), ctx.safe_mode) {
         Plan::OpenSettings(page) => if let Err(error) = super::windows::open_settings(app, page) { core.notice(format!("Cannot open Settings: {error}")); },
         Plan::CancelTurn => core.cancel(),
         Plan::ToggleMemberList => { let _ = core.set_member_list_visible(!core.snapshot().member_list_visible); }

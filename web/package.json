@@ -1,15 +1,18 @@
 {
   "name": "discard-web",
-  "private": true,
   "version": "0.0.0",
+  "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vue-tsc -b && vite build",
-    "preview": "vite preview",
-    "lint": "eslint .",
+    "dev": "vp dev",
+    "build": "vue-tsc -b && vp build",
+    "preview": "vp preview",
+    "lint": "vp lint . && eslint .",
     "typecheck": "vue-tsc -b",
-    "test": "vitest run"
+    "test": "vp test run",
+    "check": "vp check && eslint . && vue-tsc -b",
+    "fmt": "vp fmt",
+    "fmt:check": "vp fmt --check"
   },
   "dependencies": {
     "@lucide/vue": "^1.67.0",
@@ -40,8 +43,9 @@
     "tailwindcss": "^4.3.4",
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.72.1",
-    "vite": "^8.3.5",
-    "vitest": "^5.1.0",
+    "vite": "catalog:",
+    "vite-plus": "catalog:",
     "vue-tsc": "^3.3.13"
-  }
+  },
+  "packageManager": "pnpm@12.16.1"
 }

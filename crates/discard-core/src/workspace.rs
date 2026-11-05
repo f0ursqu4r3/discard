@@ -36,6 +36,22 @@ impl GitWorkspace {
             self.store().archive_channel(channel).map_err(|e| e.to_string())?;
             return Ok(ArchiveOutcome::Archived { kept_branch: None });
         };
+        // A channel that borrows a checkout never owns its directory, even with force.
+        let shared = {
+            let store = self.store();
+            let mut shared = false;
+            for project in store.list_projects().map_err(|e| e.to_string())? {
+                for other in store.channels_for_project(&project.id).map_err(|e| e.to_string())? {
+                    if other.id != *channel && store.worktree_for(&other.id).map_err(|e| e.to_string())?.is_some_and(|w| w.path == record.path) { shared = true; }
+                }
+            }
+            shared
+        };
+        if !record.owned || shared {
+            self.store().archive_channel(channel).map_err(|e| e.to_string())?;
+            return Ok(ArchiveOutcome::Archived { kept_branch: Some(record.branch) });
+        }
+        if Path::new(&record.path).exists() { self.manager.recorded(Path::new(&record.repo), Path::new(&record.path), &record.branch).map_err(|e| e.to_string())?; }
         let worktree = Worktree { root: PathBuf::from(&record.path), branch: record.branch.clone(), base_commit: record.base_commit.clone(), repo: PathBuf::from(&record.repo) };
         match self.manager.remove(&worktree, force) {
             Ok(()) => {}
@@ -51,15 +67,23 @@ impl GitWorkspace {
 
 impl WorkspaceService for GitWorkspace {
     fn prepare(&self, project_dir: &Path, channel: &ChannelId, channel_name: &str) -> Result<PreparedWorkspace, String> {
-        let prepared = self.manager.prepare(project_dir, &channel.0, channel_name).map_err(|e| e.to_string())?;
+        let (record, branch) = { let store = self.store();
+            (store.worktree_for(channel).map_err(|e| e.to_string())?, store.channel_branch(channel).map_err(|e| e.to_string())?) };
+        if let Some(record) = record {
+            let prepared = self.manager.recorded(project_dir, Path::new(&record.path), &record.branch).map_err(|e| e.to_string())?;
+            return Ok(PreparedWorkspace { cwd: prepared.cwd, notes: prepared.notes });
+        }
+        let prepared = match branch {
+            Some(branch) => self.manager.prepare_branch(project_dir, &channel.0, &branch),
+            None => self.manager.prepare(project_dir, &channel.0, channel_name),
+        }.map_err(|e| e.to_string())?;
         let wt = &prepared.worktree;
         let record = WorktreeRecord {
             channel_id: channel.clone(),
             path: wt.root.to_string_lossy().into_owned(),
             branch: wt.branch.clone(),
             base_commit: wt.base_commit.clone(),
-            repo: wt.repo.to_string_lossy().into_owned(),
-        };
+            repo: wt.repo.to_string_lossy().into_owned(), owned: prepared.created };
         self.store().save_worktree(&record).map_err(|e| e.to_string())?;
         Ok(PreparedWorkspace { cwd: prepared.cwd, notes: prepared.notes })
     }
@@ -219,5 +243,40 @@ mod tests {
         assert_ne!(old, new, "the old provider session belonged to the old directory");
         assert_eq!(store.latest_session(&r.channel.id).unwrap(), Some(new));
         assert_eq!(store.channels_for_project(&r.channel.project_id).unwrap()[0].workspace_mode, WorkspaceMode::MainCheckout);
+    }
+
+    #[test]
+    fn existing_branch_is_used_without_creating_a_discard_branch() {
+        let r = rig();
+        git(&r.repo, &["branch", "feature"]);
+        r.store.lock().unwrap().bind_branch(&r.channel.id, "feature").unwrap();
+        let prepared = r.ws.prepare(&r.repo, &r.channel.id, "feature").unwrap();
+        assert_eq!(git(&prepared.cwd, &["branch", "--show-current"]), "feature");
+        assert!(r.store.lock().unwrap().worktree_for(&r.channel.id).unwrap().unwrap().owned);
+        assert!(!git(&r.repo, &["branch", "--list", "discard/*"]).contains("discard/"));
+        assert_eq!(r.ws.prepare(&r.repo, &r.channel.id, "feature").unwrap().cwd, prepared.cwd);
+    }
+
+    #[test]
+    fn checked_out_branch_is_borrowed_and_archive_never_deletes_it() {
+        let r = rig();
+        let external = r.repo.parent().unwrap().join("external");
+        git(&r.repo, &["worktree", "add", "-b", "existing", external.to_str().unwrap()]);
+        r.store.lock().unwrap().bind_branch(&r.channel.id, "existing").unwrap();
+        let prepared = r.ws.prepare(&r.repo, &r.channel.id, "existing").unwrap();
+        assert_eq!(prepared.cwd.canonicalize().unwrap(), external.canonicalize().unwrap());
+        assert!(!r.store.lock().unwrap().worktree_for(&r.channel.id).unwrap().unwrap().owned);
+        std::fs::write(external.join("keep.txt"), "keep me").unwrap();
+        assert!(matches!(r.ws.archive(&r.channel.id, true).unwrap(), ArchiveOutcome::Archived { .. }));
+        assert_eq!(std::fs::read_to_string(external.join("keep.txt")).unwrap(), "keep me");
+    }
+
+    #[test]
+    fn recorded_channel_refuses_an_external_branch_change() {
+        let r = rig();
+        let prepared = r.ws.prepare(&r.repo, &r.channel.id, "work").unwrap();
+        git(&prepared.cwd, &["checkout", "-b", "changed-outside-discard"]);
+        let error = r.ws.prepare(&r.repo, &r.channel.id, "work").unwrap_err();
+        assert!(error.contains("different branch"), "{error}");
     }
 }

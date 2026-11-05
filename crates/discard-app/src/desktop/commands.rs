@@ -1,6 +1,6 @@
 use super::{
     core::AppCore,
-    dto::{MessageDto, SnapshotDto},
+    dto::{HistoryDto, SnapshotDto},
 };
 use std::sync::Arc;
 use tauri::State;
@@ -9,20 +9,20 @@ pub fn get_snapshot(core: State<'_, Arc<AppCore>>) -> SnapshotDto {
     core.snapshot()
 }
 #[tauri::command]
-pub fn get_history(core: State<'_, Arc<AppCore>>) -> Vec<MessageDto> {
-    core.history()
+pub fn get_history(core: State<'_, Arc<AppCore>>) -> HistoryDto {
+    core.history_snapshot()
 }
 #[tauri::command]
-pub fn send_message(core: State<'_, Arc<AppCore>>, text: String) {
-    core.send(text);
+pub fn send_message(core: State<'_, Arc<AppCore>>, channel_id: String, text: String) -> Result<(), String> {
+    core.send_to(Some(&channel_id), text)
 }
 #[tauri::command]
-pub fn decide_approval(core: State<'_, Arc<AppCore>>, approval_id: String, decision: String) {
-    core.decide(approval_id, decision);
+pub fn decide_approval(core: State<'_, Arc<AppCore>>, channel_id: String, approval_id: String, decision: String) {
+    core.decide_in(Some(&channel_id), approval_id, decision);
 }
 #[tauri::command]
-pub fn cancel_turn(core: State<'_, Arc<AppCore>>) {
-    core.cancel();
+pub fn cancel_turn(core: State<'_, Arc<AppCore>>, channel_id: String) {
+    core.cancel_in(Some(&channel_id));
 }
 
 #[tauri::command]
@@ -39,8 +39,8 @@ pub fn toggle_branch(core: State<'_, Arc<AppCore>>, key: String) {
 }
 
 #[tauri::command]
-pub fn mark_read(core: State<'_, Arc<AppCore>>, message_id: String) -> Result<(), String> {
-    core.mark_read(&message_id)
+pub fn mark_read(core: State<'_, Arc<AppCore>>, channel_id: String, message_id: String) -> Result<(), String> {
+    core.mark_read_in(Some(&channel_id), &message_id)
 }
 
 #[tauri::command]
@@ -58,10 +58,14 @@ pub fn context_menu(core: State<'_, Arc<AppCore>>, target: super::dto::ContextTa
 }
 #[tauri::command]
 pub fn run_action(app: tauri::AppHandle, core: State<'_, Arc<AppCore>>, actions: State<'_, Arc<super::actions::DesktopActions>>, action_id: String, target: Option<super::dto::ContextTargetDto>) -> Option<String> {
+    if action_id == "open_provider_settings" {
+        if let Err(error) = super::windows::open_settings(&app, discard_core::settings_page::SettingsPage::Providers) { core.notice(format!("Cannot open CLI connections: {error}")); }
+        return None;
+    }
     if action_id == "relaunch" {
         let ctx = core.menu_context();
         let ending = super::plan::Confirm::Relaunch { safe_mode: ctx.safe_mode };
-        if ctx.turn_running && actions.confirms() { core.ask(ending); }
+        if core.any_running() && actions.confirms() { core.ask(ending); }
         else { super::actions::perform(&app, &core, &actions, ending); }
         return None;
     }
@@ -88,4 +92,73 @@ pub fn plugin_action(core: State<'_, Arc<AppCore>>, plugin: String, action: Stri
 pub fn web_shortcuts(actions: State<'_, Arc<super::actions::DesktopActions>>) -> Vec<(String, String)> {
     let settings = actions.settings.lock().unwrap_or_else(|e| e.into_inner());
     super::menu::web_shortcuts(&settings.settings().keymap)
+}
+
+#[tauri::command]
+pub async fn create_channel(channels: State<'_, Arc<super::channels::Channels>>, name: String, workspace_mode: String, source_channel: String) -> Result<String, String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.create(&name, &workspace_mode, &source_channel)).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn switch_channel(channels: State<'_, Arc<super::channels::Channels>>, channel_id: String) -> Result<(), String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.select(&channel_id)).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn open_branch_channel(channels: State<'_, Arc<super::channels::Channels>>, key: String) -> Result<String, String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.open_branch(&key)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn get_projects(context: State<'_, super::settings::SettingsContext>) -> Result<Vec<serde_json::Value>, String> {
+    Ok(context.store.lock().unwrap_or_else(|e| e.into_inner()).visible_projects().map_err(|e| e.to_string())?.into_iter().map(|p| serde_json::json!({"id":p.id.0,"name":p.name,"path":p.path})).collect())
+}
+#[tauri::command]
+pub async fn select_project(channels: State<'_, Arc<super::channels::Channels>>, project_id: String) -> Result<(), String> {
+    let channels = channels.inner().clone();
+    channels.core.begin_project_change()?;
+    let core = channels.core.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || channels.activate_project(&discard_core::model::ProjectId(project_id))).await.map_err(|e| e.to_string()).and_then(|r| r);
+    core.end_project_change(); result
+}
+#[tauri::command]
+pub async fn remove_project(channels: State<'_, Arc<super::channels::Channels>>, project_id: String) -> Result<(), String> {
+    let channels = channels.inner().clone(); channels.core.begin_project_change()?;
+    let core = channels.core.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let id = discard_core::model::ProjectId(project_id);
+        let next = channels.store.lock().unwrap_or_else(|e| e.into_inner()).visible_projects().map_err(|e| e.to_string())?.into_iter().find(|p| p.id != id);
+        if channels.core.current_project().id == id {
+            if let Some(next) = next { channels.activate_project(&next.id)?; } else { channels.core.clear_project(); }
+        }
+        channels.store.lock().unwrap_or_else(|e| e.into_inner()).hide_project(&id).map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string()).and_then(|r| r);
+    core.end_project_change(); result
+}
+#[tauri::command]
+pub async fn choose_project_folder(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, change_current: bool) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let channels = channels.inner().clone(); channels.core.begin_project_change()?;
+    let snapshot = channels.core.snapshot(); let core = channels.core.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
+        let title = if change_current { "Change project folder" } else { "Import project folder" };
+        let selected = app.dialog().file().set_title(title).set_directory(&snapshot.project_path).blocking_pick_folder();
+        let Some(selected) = selected else { return Ok(false) };
+        let path = selected.into_path().map_err(|e| e.to_string())?;
+        let project = {
+            let store = channels.store.lock().unwrap_or_else(|e| e.into_inner());
+            if change_current {
+                store.change_project_folder(&discard_core::model::ProjectId(snapshot.project_id), &path).map_err(|e| e.to_string())?;
+                store.selected_project().map_err(|e| e.to_string())?.ok_or("Project unavailable")?
+            } else { store.import_project_folder(&path).map_err(|e| e.to_string())? }
+        };
+        if let Err(error) = channels.activate_project(&project.id) {
+            // The folder is already saved. Do not leave an engine using the old folder.
+            if change_current { channels.core.clear_project(); }
+            return Err(error);
+        }
+        Ok(true)
+    }).await.map_err(|e| e.to_string()).and_then(|r| r);
+    core.end_project_change(); result
 }

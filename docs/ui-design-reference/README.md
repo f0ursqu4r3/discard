@@ -434,7 +434,7 @@ The prototype’s Create new agent action opens agent setup and then navigates t
 
 ### Execution routing boundary
 
-The prototype records memberships and mentions but does not dispatch work. The current desktop bridge exposes `send_message(text)` for one active channel/agent. It does not establish multi-agent fan-out, scheduling, or concurrent execution in a shared worktree.
+The prototype records memberships and mentions but does not dispatch work. The desktop app now supports [real channel creation and switching](channel-navigation.md), with one assigned agent and an independent runtime per channel. `send_message(channelId, text)` targets that channel's agent. Multi-agent fan-out, scheduling, and coordination within a shared worktree remain separate work.
 
 Required user-visible behavior is stable: agents are people-like members, mentions address those agents, and their own provider/model configuration applies. Before enabling live multi-recipient dispatch, define the runner/session contract. Keep unmentioned sends on the existing channel-owner behavior unless a separate routing policy is approved. Do not silently broadcast every message to all members.
 
@@ -588,11 +588,11 @@ Keep domain state in Rust and consume it through the existing typed bridge. Vue 
 | Capability | Existing foundation | Required extension |
 | --- | --- | --- |
 | Project switching | Current project ID/path in SnapshotDto | Project collection, selected project, lifecycle-safe switch command |
-| Channel switching | Current channel and branch rows | Channel collection and supported runtime switching; respect branch-tree phases |
+| Channel switching | Channel collection, creation, switching, and branch/worktree bindings are implemented | See [channel navigation](channel-navigation.md) for contracts and limits |
 | Agent directory | Agent store/config and active agent fields | Directory DTO with ID, handle, role, avatar, provider/model, presence |
 | Agent editing | Core config/edit logic | Typed read/save/create commands with validation and policy decisions |
 | Project membership | ProjectId and AgentId | Durable project-agent relation, listing and idempotent invite command |
-| Mention routing | `send_message(text)` | Resolved recipient IDs and backend validation; routing/session contract |
+| Mention routing | `send_message(channelId, text)` | Resolved recipient IDs and backend validation; routing/session contract |
 | DMs and questions | Channel history infrastructure | Agent DM thread identities, history, optional context, send lifecycle |
 | Memory editing | File scopes, versions, memory tools | UI read/write/delete/undo contract with version checks and applicability |
 | Run/task/artifact/review views | Typed messages and provider events | Structured records and commands for supported features |

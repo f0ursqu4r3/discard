@@ -1,4 +1,4 @@
-import { expect, test } from 'vitest'
+import { expect, test } from 'vite-plus/test'
 import snapshot from './fixtures/snapshot.json'
 import type { SnapshotDto } from './types'
 

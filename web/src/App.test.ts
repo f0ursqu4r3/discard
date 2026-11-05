@@ -1,5 +1,5 @@
 import { mount } from '@vue/test-utils'
-import { expect, test, vi } from 'vitest'
+import { expect, test, vi } from 'vite-plus/test'
 vi.mock('./bridge/store', () => ({ useStore: () => ({ snapshot: null, history: [] }) }))
 import App from './App.vue'
 

@@ -19,8 +19,7 @@ pub fn branch_current_directory(mode: Option<discard_core::model::WorkspaceMode>
 
 /// Decide whether to prevent a close request and show a confirmation.
 pub fn request_main_close(core: &super::core::AppCore, is_main: bool, confirm_while_working: bool) -> bool {
-    let ctx = core.menu_context();
-    if let super::plan::Close::Ask(ending) = super::plan::close_plan(is_main, ctx.turn_running, confirm_while_working) {
+    if let super::plan::Close::Ask(ending) = super::plan::close_plan(is_main, core.any_running(), confirm_while_working) {
         core.ask(ending);
         true
     } else { false }

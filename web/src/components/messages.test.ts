@@ -1,5 +1,5 @@
 import { mount, flushPromises } from '@vue/test-utils'
-import { expect, test } from 'vitest'
+import { expect, test } from 'vite-plus/test'
 import MessageRow from './MessageRow.vue'
 import DiffBlock from './DiffBlock.vue'
 import ToolCallBlock from './ToolCallBlock.vue'
@@ -7,7 +7,12 @@ import MessageList from './MessageList.vue'
 import { hasLiveRow, thinkingLine } from './messages'
 
 test('continued messages hide their identity', () => {
-  const row = mount(MessageRow, { props: { message: { id: 'a', role: 'agent', blocks: [], continuesGroup: true } } })
+  const row = mount(MessageRow, {
+    props: {
+      channelId: 'channel',
+      message: { id: 'a', role: 'agent', blocks: [], continuesGroup: true },
+    },
+  })
   expect(row.find('[data-testid="message-identity"]').exists()).toBe(false)
 })
 test('diff lines have their matching types', () => {
@@ -25,7 +30,15 @@ test('long tool output can be expanded', async () => {
   expect(block.text()).toContain('line 20')
 })
 test('new divider is before its message', () => {
-  const list = mount(MessageList, { props: { messages: [{ id: 'a', role: 'user', blocks: [], continuesGroup: false }], live: [], running: false, newAnchorId: 'a' } })
+  const list = mount(MessageList, {
+    props: {
+      conversationId: 'channel',
+      messages: [{ id: 'a', role: 'user', blocks: [], continuesGroup: false }],
+      live: [],
+      running: false,
+      newAnchorId: 'a',
+    },
+  })
   expect(list.text()).toContain('New')
   expect(list.find('[data-testid="new-divider"]').exists()).toBe(true)
 })
@@ -41,7 +54,15 @@ test('live row and thinking line follow running state', () => {
   expect(thinkingLine(true, ['A', 'B', 'C', 'D'])).toBe('A, B and 2 more are thinking...')
 })
 test('stream cursor appears only when running', async () => {
-  const list = mount(MessageList, { props: { messages: [], live: [{ type: 'markdown', text: 'Hi' }], running: true, newAnchorId: null } })
+  const list = mount(MessageList, {
+    props: {
+      conversationId: 'channel',
+      messages: [],
+      live: [{ type: 'markdown', text: 'Hi' }],
+      running: true,
+      newAnchorId: null,
+    },
+  })
   expect(list.find('[data-testid="stream-cursor"]').exists()).toBe(true)
   await list.setProps({ running: false })
   expect(list.find('[data-testid="stream-cursor"]').exists()).toBe(false)
@@ -70,7 +91,9 @@ test('tool output identifies unified diffs without treating lists as diffs', asy
 test('a fenced Markdown block uses the code component and offers copy', async () => {
   const { default: SafeMarkdown } = await import('./SafeMarkdown.vue')
   const { default: CodeBlock } = await import('./CodeBlock.vue')
-  const markdown = mount(SafeMarkdown, { props: { text: 'Before\n\n```rust\nlet x = 1;\n```\n\nAfter' } })
+  const markdown = mount(SafeMarkdown, {
+    props: { text: 'Before\n\n```rust\nlet x = 1;\n```\n\nAfter' },
+  })
   await flushPromises()
   expect(markdown.text()).toContain('Before')
   expect(markdown.text()).toContain('After')
@@ -83,7 +106,9 @@ test('a fenced Markdown block uses the code component and offers copy', async ()
 test('a fenced block nested in a list uses the code component', async () => {
   const { default: SafeMarkdown } = await import('./SafeMarkdown.vue')
   const { default: CodeBlock } = await import('./CodeBlock.vue')
-  const markdown = mount(SafeMarkdown, { props: { text: '- Item\n\n  ```rust\n  let x = 1;\n  ```' } })
+  const markdown = mount(SafeMarkdown, {
+    props: { text: '- Item\n\n  ```rust\n  let x = 1;\n  ```' },
+  })
   await flushPromises()
   expect(markdown.findComponent(CodeBlock).exists()).toBe(true)
   expect(markdown.find('li [data-markdown-code]').exists()).toBe(true)
@@ -96,7 +121,9 @@ test('long tool output uses the collapsible component', () => {
 })
 
 test('tool call summary uses the preferred field and truncates long input', () => {
-  const block = mount(ToolCallBlock, { props: { name: 'shell', input: { command: 'x'.repeat(121), extra: 'hidden' }, output: null } })
+  const block = mount(ToolCallBlock, {
+    props: { name: 'shell', input: { command: 'x'.repeat(121), extra: 'hidden' }, output: null },
+  })
   expect(block.text()).toContain(`${'x'.repeat(120)}…`)
   expect(block.text()).not.toContain('hidden')
 })

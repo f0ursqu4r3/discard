@@ -3,7 +3,7 @@
 mod args;
 mod keys;
 mod plugin_events;
-mod plugin_memory;
+use discard_app::plugin_memory;
 mod relaunch;
 
 use discard_core::bootstrap::{Role, WorkspaceChoice};
@@ -96,8 +96,9 @@ fn run_app(
     relaunch: Relaunch,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let settings = Arc::new(Mutex::new(settings));
-    let project_dir = std::env::current_dir()?;
     let store = Arc::new(Mutex::new(Store::open(&data_dir.join("discard.db"))?));
+    let empty_workspace = { let store = lock(&store); !store.list_projects()?.is_empty() && store.visible_projects()?.is_empty() };
+    let project_dir = { let store = lock(&store); store.selected_project()?.or_else(|| if empty_workspace { store.list_projects().ok()?.into_iter().next() } else { None }) }.map(|project| PathBuf::from(project.path)).unwrap_or(std::env::current_dir()?);
 
     // No provider process survives a restart. Fail orphaned turns and expire their approvals.
     let report = lock(&store).reconcile(&HashSet::new())?;
@@ -120,7 +121,6 @@ fn run_app(
         if options.builder { Role::Builder } else { Role::Default },
         options.workspace,
     )?;
-    let history = lock(&store).messages_for_channel(&workspace.channel.id)?;
     info!(project = %workspace.project.name, channel = %workspace.channel.name, "workspace ready");
 
     // The engine and provider processes run on tokio. Tauri owns the main thread.
@@ -161,7 +161,7 @@ fn run_app(
         workspace.channel.agent_id.clone(),
         workspace.project.id.clone(),
     ));
-    let manager = Arc::new(Mutex::new(PluginManager::with_host(PluginLimits::default(), Host::live(Some(plugin_memory)))));
+    let manager = Arc::new(Mutex::new(PluginManager::with_host(PluginLimits::default(), Host::live(Some(plugin_memory.clone())))));
     manager.lock().unwrap_or_else(|p| p.into_inner()).load(discard_lua::bundled::default_ui())?;
     let plugins = Arc::new(PluginService::new(data_dir, ledger, Arc::clone(&manager), options.safe_mode)?);
     let load_report = plugins.load_all();
@@ -181,40 +181,47 @@ fn run_app(
         Some(Arc::clone(&plugins)),
     ))?;
 
-    let (commands_tx, commands_rx) = mpsc::unbounded_channel();
-    let (updates_tx, updates_rx) = mpsc::unbounded_channel();
-
     let git_workspace = Arc::new(GitWorkspace::new(&data_dir.join("worktrees"), Arc::clone(&store)));
     let branch_worktree = lock(&store).worktree_for(&workspace.channel.id)?.map(|record| std::path::PathBuf::from(record.path));
     let branch_dir = desktop::windows::branch_current_directory(Some(workspace.channel.workspace_mode), &project_dir, branch_worktree.as_deref());
-    let engine = Engine {
-        store: Arc::clone(&store),
-        agent_id: workspace.channel.agent_id.clone(),
-        project_id: workspace.project.id.clone(),
-        memory: Some(memory),
-        plugin_write: workspace.agent.plugin_write,
-        workspace_mode: workspace.channel.workspace_mode,
-        workspace: Some(git_workspace.clone()),
-        observer: Some(Arc::new(plugin_events::PluginEvents::new(Arc::clone(&manager)))),
-        channel_name: workspace.channel.name.clone(),
-        provider: provider_for(&workspace.agent.provider)?,
-        channel_id: workspace.channel.id.clone(),
-        session_id: workspace.session_id.clone(),
-        cwd: project_dir.clone(),
-        model: workspace.agent.model.clone(),
-        system_prompt: Some(workspace.agent.system_prompt.clone()).filter(|p| !p.is_empty()),
-        policy: workspace.agent.policy,
+    let launcher: desktop::channels::Launcher = {
+        let store = store.clone(); let git_workspace = git_workspace.clone(); let memory = memory.clone();
+        let manager = manager.clone(); let handle = runtime.handle().clone();
+        Arc::new(move |channel| {
+            let project = lock(&store).list_projects().map_err(|e| e.to_string())?.into_iter().find(|p| p.id == channel.project_id).ok_or("Project unavailable")?;
+            let project_dir = PathBuf::from(&project.path);
+            let (agent, session_id, history) = {
+                let store = lock(&store);
+                (store.load_agent(&channel.agent_id).map_err(|e| e.to_string())?,
+                 store.latest_session(&channel.id).map_err(|e| e.to_string())?.ok_or("This channel has no session")?,
+                 store.messages_for_channel(&channel.id).map_err(|e| e.to_string())?)
+            };
+            let provider = provider_for(&agent.provider)?;
+            let (commands_tx, commands_rx) = mpsc::unbounded_channel();
+            let (updates_tx, updates_rx) = mpsc::unbounded_channel();
+            let engine = Engine {
+                store: store.clone(), agent_id: channel.agent_id.clone(), project_id: channel.project_id.clone(),
+                memory: Some(memory.clone()), plugin_write: agent.plugin_write,
+                workspace_mode: channel.workspace_mode, workspace: Some(git_workspace.clone()),
+                observer: Some(Arc::new(plugin_events::PluginEvents::with_context(manager.clone(), Some((channel.agent_id.clone(), channel.project_id.clone()))))),
+                channel_name: channel.name.clone(), provider, channel_id: channel.id.clone(), session_id,
+                cwd: project_dir.clone(), model: agent.model.clone(),
+                system_prompt: Some(agent.system_prompt.clone()).filter(|p| !p.is_empty()), policy: agent.policy,
+            };
+            handle.spawn(engine.run(commands_rx, updates_tx));
+            Ok((CoreInit { state: UiState::new(channel.id.clone(), history), commands: commands_tx,
+                project: project.name.clone(), channel: channel.name.clone(), agent: agent.name, provider: agent.provider }, updates_rx))
+        })
     };
-    runtime.spawn(engine.run(commands_rx, updates_tx));
+    let on_ready: desktop::channels::OnReady = Arc::new(move |core| {
+        let project_core = Arc::downgrade(core);
+        plugin_memory.set_project_source(Arc::new(move || project_core.upgrade().map(|core| core.current_project().id).unwrap_or_else(|| discard_core::model::ProjectId(String::new()))));
+        let core = Arc::downgrade(core);
+        plugin_memory.set_active_source(Arc::new(move || discard_core::model::AgentId(core.upgrade().map(|core| core.active_agent_id()).unwrap_or_default())));
+    });
+    let (init, updates_rx) = launcher(&workspace.channel)?;
 
-    desktop::run(CoreInit {
-        state: UiState::new(workspace.channel.id.clone(), history),
-        commands: commands_tx,
-        project: workspace.project.name,
-        channel: workspace.channel.name,
-        agent: workspace.agent.name,
-        provider: workspace.agent.provider,
-    }, updates_rx, runtime.handle().clone(), settings, plugins, data_dir.to_path_buf(), desktop::DesktopConfig { project_dir, project_id: workspace.project.id.0.clone(), agent_id: workspace.channel.agent_id.0.clone(), channel_dir: branch_dir, channel_id: workspace.channel.id.clone(), load_report, workspace: git_workspace, store, workspace_mode: workspace.channel.workspace_mode, relaunch, providers, recheck, memory: memory_store })?;
+    desktop::run(init, updates_rx, runtime.handle().clone(), settings, plugins, data_dir.to_path_buf(), desktop::DesktopConfig { empty_workspace, project_dir, project_id: workspace.project.id.0.clone(), agent_id: workspace.channel.agent_id.0.clone(), channel_dir: branch_dir, channel_id: workspace.channel.id.clone(), load_report, workspace: git_workspace, store, workspace_mode: workspace.channel.workspace_mode, relaunch, providers, recheck, memory: memory_store, launcher, on_ready })?;
     Ok(())
 }
 

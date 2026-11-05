@@ -1,10 +1,18 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vite-plus/test'
 import { mount, flushPromises } from '@vue/test-utils'
 import General from './pages/General.vue'
-vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async (name: string) => {
-  if (name === 'settings_get') return { defaultProvider: 'claude', confirmWhileWorking: true, providers: ['claude', 'codex'], issues: [] }
-  throw 'invalid setting'
-}) }))
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: vi.fn(async (name: string) => {
+    if (name === 'settings_get')
+      return {
+        defaultProvider: 'claude',
+        confirmWhileWorking: true,
+        providers: ['claude', 'codex'],
+        issues: [],
+      }
+    throw 'invalid setting'
+  }),
+}))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
 describe('general settings', () => {
   it('shows a rejected patch and keeps the old provider', async () => {
