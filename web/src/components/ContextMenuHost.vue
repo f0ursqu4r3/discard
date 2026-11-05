@@ -28,20 +28,21 @@ async function select(entry: MenuEntryDto) {
 </script>
 <template>
   <ContextMenu v-if="target">
-    <ContextMenuTrigger as-child
-      ><div @contextmenu.stop="load"><slot /></div
-    ></ContextMenuTrigger>
-    <ContextMenuContent
-      ><template v-for="(entry, index) in entries" :key="index">
+    <ContextMenuTrigger as-child>
+      <div @contextmenu.stop="load"><slot /></div>
+    </ContextMenuTrigger>
+    <ContextMenuContent>
+      <template v-for="(entry, index) in entries" :key="index">
         <ContextMenuSeparator v-if="entry.kind === 'separator'" />
         <ContextMenuItem
           v-else
           :disabled="entry.kind === 'action' && !entry.enabled"
           @select="select(entry)"
-          >{{ entry.label }}</ContextMenuItem
         >
-      </template></ContextMenuContent
-    >
+          {{ entry.label }}
+        </ContextMenuItem>
+      </template>
+    </ContextMenuContent>
   </ContextMenu>
   <slot v-else />
 </template>

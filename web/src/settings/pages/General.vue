@@ -67,15 +67,16 @@ onUnmounted(() => stop?.())
           :key="provider"
           :variant="value.defaultProvider === provider ? 'default' : 'outline'"
           @click="patch({ defaultProvider: provider })"
-          >{{ provider }}</Button
         >
+          {{ provider }}
+        </Button>
       </div>
       <p class="text-sm text-muted-foreground">Applies at next launch</p>
     </section>
     <section class="space-y-2">
       <div class="flex items-center gap-3">
-        <span class="font-semibold">Confirm while working</span
-        ><Switch
+        <span class="font-semibold">Confirm while working</span>
+        <Switch
           aria-label="Confirm while working"
           :model-value="value.confirmWhileWorking"
           @update:model-value="patch({ confirmWhileWorking: $event })"

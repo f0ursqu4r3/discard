@@ -70,8 +70,8 @@ onUnmounted(() => clearInterval(timer))
       data-protected="true"
       class="flex items-center gap-2 border border-[var(--protected-border)] bg-[var(--protected-bg)] p-2 text-[var(--protected-fg)]"
     >
-      <span>Safe mode: user plugins disabled</span
-      ><Button @click="runAction('toggle_safe_mode')">Relaunch normally</Button>
+      <span>Safe mode: user plugins disabled</span>
+      <Button @click="runAction('toggle_safe_mode')">Relaunch normally</Button>
     </div>
     <div
       v-if="data.problems.length || error"
@@ -87,8 +87,8 @@ onUnmounted(() => clearInterval(timer))
       data-protected="true"
       class="flex items-center gap-2 border border-[var(--protected-border)] bg-[var(--protected-bg)] p-2 text-[var(--protected-fg)]"
     >
-      <span class="flex-1">{{ data.notice }}</span
-      ><Button variant="outline" @click="run('settings_plugin_dismiss_notice', {})">Dismiss</Button>
+      <span class="flex-1">{{ data.notice }}</span>
+      <Button variant="outline" @click="run('settings_plugin_dismiss_notice', {})">Dismiss</Button>
     </div>
     <h2 class="font-semibold">Waiting for your review</h2>
     <p v-if="!data.reviews.length">Nothing to review.</p>
@@ -114,19 +114,23 @@ onUnmounted(() => clearInterval(timer))
         class="max-h-72 overflow-auto whitespace-pre-wrap border border-[var(--protected-border)] p-2"
         >{{ review.diff }}</pre>
       <div class="flex items-center gap-2">
-        <template v-if="review.trustOffered"
-          ><span>Trust future edits</span
-          ><Switch
+        <template v-if="review.trustOffered">
+          <span>Trust future edits</span>
+          <Switch
             :model-value="!!trusted[review.id]"
             aria-label="Trust future edits"
-            @update:model-value="setTrust(review.id, $event)" /></template
-        ><Button
+            @update:model-value="setTrust(review.id, $event)"
+          />
+        </template>
+        <Button
           variant="destructive"
           @click="run('settings_plugin_reject', { reviewId: review.id })"
-          >Reject</Button
-        ><Button @click="run('settings_plugin_approve', { reviewId: review.id })"
-          >Approve and run</Button
         >
+          Reject
+        </Button>
+        <Button @click="run('settings_plugin_approve', { reviewId: review.id })">
+          Approve and run
+        </Button>
       </div>
     </article>
     <h2 class="font-semibold">Installed plugins</h2>
@@ -136,14 +140,15 @@ onUnmounted(() => clearInterval(timer))
     </p>
     <div v-for="status in data.statuses" :key="status.name" class="space-y-2">
       <div class="flex items-center gap-2">
-        <strong>{{ status.name }}</strong
-        ><span>{{ status.state }}</span
-        ><span v-if="status.trusted">trusts future edits</span
-        ><Button v-if="status.modified" variant="outline" @click="showDiff(status.name)"
-          >Show diff</Button
-        ><Button variant="outline" @click="run('settings_plugin_rollback', { name: status.name })"
-          >Roll back</Button
-        >
+        <strong>{{ status.name }}</strong>
+        <span>{{ status.state }}</span>
+        <span v-if="status.trusted">trusts future edits</span>
+        <Button v-if="status.modified" variant="outline" @click="showDiff(status.name)">
+          Show diff
+        </Button>
+        <Button variant="outline" @click="run('settings_plugin_rollback', { name: status.name })">
+          Roll back
+        </Button>
       </div>
       <div
         v-if="diffs[status.name] !== undefined"

@@ -56,11 +56,11 @@ onUnmounted(() => window.removeEventListener('keydown', keydown, true))
   <div class="space-y-3">
     <div v-for="row in rows" :key="row.id">
       <div class="flex items-center gap-2">
-        <span class="flex-1">{{ row.label }}</span
-        ><span>{{ capture === row.id ? 'Press a key (Escape to cancel)' : row.chord }}</span
-        ><span v-if="row.rule === 'locked'">Locked</span
-        ><template v-else
-          ><Button
+        <span class="flex-1">{{ row.label }}</span>
+        <span>{{ capture === row.id ? 'Press a key (Escape to cancel)' : row.chord }}</span>
+        <span v-if="row.rule === 'locked'">Locked</span>
+        <template v-else>
+          <Button
             variant="outline"
             @click="
               () => {
@@ -68,16 +68,20 @@ onUnmounted(() => window.removeEventListener('keydown', keydown, true))
                 error = ''
               }
             "
-            >Record</Button
-          ><Button v-if="row.custom" variant="outline" @click="setKey(row.id, null, true)"
-            >Reset</Button
-          ><Button
+          >
+            Record
+          </Button>
+          <Button v-if="row.custom" variant="outline" @click="setKey(row.id, null, true)">
+            Reset
+          </Button>
+          <Button
             v-if="row.rule === 'optional' && row.bound"
             variant="outline"
             @click="setKey(row.id, null)"
-            >Unbind</Button
-          ></template
-        >
+          >
+            Unbind
+          </Button>
+        </template>
       </div>
       <p
         v-if="error && errorId === row.id"

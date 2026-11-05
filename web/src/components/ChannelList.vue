@@ -107,38 +107,41 @@ const approvals = computed(
           aria-label="Project menu"
           class="flex h-16 w-full shrink-0 items-center gap-3 border-b border-border/60 px-4 text-left outline-none transition-colors hover:bg-sidebar-accent/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         >
-          <BrandMark v-if="page !== 'direct-messages'" class="size-8 shrink-0" /><Users
-            v-else
-            class="size-7 shrink-0 text-muted-foreground"
-          />
-          <span class="min-w-0 flex-1"
-            ><span class="block truncate text-sm font-semibold">{{
-              page === 'direct-messages' ? 'Direct messages' : project
-            }}</span
-            ><span class="block truncate text-xs text-muted-foreground" :title="projectPath">{{
-              page === 'direct-messages' ? 'Your agents' : projectPath
-            }}</span></span
-          >
+          <BrandMark v-if="page !== 'direct-messages'" class="size-8 shrink-0" />
+          <Users v-else class="size-7 shrink-0 text-muted-foreground" />
+          <span class="min-w-0 flex-1">
+            <span class="block truncate text-sm font-semibold">
+              {{ page === 'direct-messages' ? 'Direct messages' : project }}
+            </span>
+            <span class="block truncate text-xs text-muted-foreground" :title="projectPath">
+              {{ page === 'direct-messages' ? 'Your agents' : projectPath }}
+            </span>
+          </span>
           <ChevronDown class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent data-ui-id="project-menu" align="start" class="w-60">
-        <DropdownMenuItem @select="emit('navigate', 'overview')"
-          ><Monitor />Project overview</DropdownMenuItem
-        >
-        <DropdownMenuItem :disabled="busy" @select="emit('createChannel')"
-          ><Plus />New channel</DropdownMenuItem
-        >
-        <DropdownMenuItem @select="emit('action', 'open_agent_settings')"
-          ><Users />Manage agents</DropdownMenuItem
-        >
+        <DropdownMenuItem @select="emit('navigate', 'overview')">
+          <Monitor />
+          Project overview
+        </DropdownMenuItem>
+        <DropdownMenuItem :disabled="busy" @select="emit('createChannel')">
+          <Plus />
+          New channel
+        </DropdownMenuItem>
+        <DropdownMenuItem @select="emit('action', 'open_agent_settings')">
+          <Users />
+          Manage agents
+        </DropdownMenuItem>
         <DropdownMenuSeparator />
-        <DropdownMenuItem @select="emit('navigate', 'project-settings')"
-          ><Settings />Project settings</DropdownMenuItem
-        >
-        <DropdownMenuItem @select="emit('action', 'open_provider_settings')"
-          ><Cable />CLI connections</DropdownMenuItem
-        >
+        <DropdownMenuItem @select="emit('navigate', 'project-settings')">
+          <Settings />
+          Project settings
+        </DropdownMenuItem>
+        <DropdownMenuItem @select="emit('action', 'open_provider_settings')">
+          <Cable />
+          CLI connections
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
     <div
@@ -151,8 +154,10 @@ const approvals = computed(
           size="sm"
           class="justify-start"
           @click="emit('action', 'open_agent_settings')"
-          ><Plus data-icon="inline-start" />Manage agents</Button
         >
+          <Plus data-icon="inline-start" />
+          Manage agents
+        </Button>
         <div class="mt-5 flex flex-col gap-1">
           <h2 class="px-2 pb-2 text-xs font-semibold text-muted-foreground">Agents</h2>
           <Button
@@ -160,8 +165,10 @@ const approvals = computed(
             size="sm"
             class="justify-start"
             @click="emit('navigate', 'direct-messages')"
-            ><Bot data-icon="inline-start" /><span class="truncate">{{ agent }}</span></Button
           >
+            <Bot data-icon="inline-start" />
+            <span class="truncate">{{ agent }}</span>
+          </Button>
         </div>
       </template>
       <template v-else>
@@ -175,8 +182,10 @@ const approvals = computed(
             :variant="page === item.id ? 'secondary' : 'ghost'"
             class="h-8 justify-start gap-2 px-2 font-normal"
             @click="emit('navigate', item.id)"
-            ><component :is="item.icon" data-icon="inline-start" />{{ item.label }}</Button
           >
+            <component :is="item.icon" data-icon="inline-start" />
+            {{ item.label }}
+          </Button>
           <Button
             data-ui-id="nav-settings"
             :variant="page === 'project-settings' ? 'secondary' : 'ghost'"
@@ -184,8 +193,10 @@ const approvals = computed(
             size="sm"
             class="h-8 justify-start gap-2 px-2 font-normal"
             @click="emit('navigate', 'project-settings')"
-            ><Settings data-icon="inline-start" />Settings</Button
           >
+            <Settings data-icon="inline-start" />
+            Settings
+          </Button>
         </div>
         <Collapsible
           v-for="group in [
@@ -197,16 +208,16 @@ const approvals = computed(
           :data-ui-id="`${group.id}-list`"
           class="mt-5"
         >
-          <CollapsibleTrigger as-child
-            ><button
+          <CollapsibleTrigger as-child>
+            <button
               :data-ui-id="`${group.id}-toggle`"
               class="flex h-7 w-full items-center gap-1 px-1 text-xs font-semibold text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
-              <component :is="sections[group.id] ? ChevronDown : ChevronRight" class="size-3" />{{
-                group.label
-              }}<span class="ml-1 font-normal tabular-nums">{{ group.rows.length }}</span>
-            </button></CollapsibleTrigger
-          >
+              <component :is="sections[group.id] ? ChevronDown : ChevronRight" class="size-3" />
+              {{ group.label }}
+              <span class="ml-1 font-normal tabular-nums">{{ group.rows.length }}</span>
+            </button>
+          </CollapsibleTrigger>
           <CollapsibleContent class="flex flex-col gap-0.5">
             <button
               v-for="row in group.rows"
@@ -226,10 +237,9 @@ const approvals = computed(
               "
               @click="emit('openBranch', row.key)"
             >
-              <component :is="group.icon" class="size-4 shrink-0" /><span
-                class="min-w-0 flex-1 truncate"
-                >{{ row.label }}</span
-              ><span
+              <component :is="group.icon" class="size-4 shrink-0" />
+              <span class="min-w-0 flex-1 truncate">{{ row.label }}</span>
+              <span
                 v-if="group.id === 'worktrees'"
                 class="size-1.5 shrink-0 rounded-full bg-success"
                 aria-label="Worktree available"
@@ -245,17 +255,15 @@ const approvals = computed(
           data-ui-id="integrations-navigation"
           class="mt-5"
         >
-          <CollapsibleTrigger as-child
-            ><button
+          <CollapsibleTrigger as-child>
+            <button
               data-ui-id="integrations-toggle"
               class="flex h-7 w-full items-center gap-1 px-1 text-xs font-semibold text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
-              <component
-                :is="sections.integrations ? ChevronDown : ChevronRight"
-                class="size-3"
-              />Integrations
-            </button></CollapsibleTrigger
-          >
+              <component :is="sections.integrations ? ChevronDown : ChevronRight" class="size-3" />
+              Integrations
+            </button>
+          </CollapsibleTrigger>
           <CollapsibleContent class="flex flex-col gap-0.5">
             <Button
               data-ui-id="nav-connections"
@@ -263,28 +271,36 @@ const approvals = computed(
               size="sm"
               class="h-8 justify-start gap-2 px-2 font-normal"
               @click="emit('action', 'open_provider_settings')"
-              ><Cable data-icon="inline-start" />CLI connections</Button
             >
+              <Cable data-icon="inline-start" />
+              CLI connections
+            </Button>
             <Button
               data-ui-id="nav-plugins"
               variant="ghost"
               size="sm"
               class="h-8 justify-start gap-2 px-2 font-normal"
               @click="emit('action', 'review_plugins')"
-              ><Boxes data-icon="inline-start" />Lua plugins</Button
             >
+              <Boxes data-icon="inline-start" />
+              Lua plugins
+            </Button>
             <Button
               data-ui-id="nav-approvals"
               variant="ghost"
               size="sm"
               class="h-8 justify-start gap-2 px-2 font-normal"
               @click="emit('approvals')"
-              ><ShieldCheck data-icon="inline-start" />Approvals<Badge
+            >
+              <ShieldCheck data-icon="inline-start" />
+              Approvals
+              <Badge
                 v-if="approvals"
                 class="ml-auto h-4 min-w-4 rounded-full px-1 text-xs tabular-nums"
-                >{{ approvals }}</Badge
-              ></Button
-            >
+              >
+                {{ approvals }}
+              </Badge>
+            </Button>
           </CollapsibleContent>
         </Collapsible>
       </template>

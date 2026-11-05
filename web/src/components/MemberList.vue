@@ -35,19 +35,20 @@ const statusColor = computed(
 </script>
 <template>
   <Card data-ui-id="project-members" size="sm">
-    <CardHeader
-      ><CardTitle class="flex items-center gap-2 text-sm"
-        ><Users class="size-4 text-muted-foreground" />Members</CardTitle
-      ></CardHeader
-    >
-    <CardContent
-      ><ContextMenuHost :target="target ?? null"
-        ><div class="flex items-center gap-3">
-          <Avatar class="size-8"
-            ><AvatarFallback class="bg-primary/20 text-xs text-primary">{{
-              serverInitials(agent)
-            }}</AvatarFallback></Avatar
-          >
+    <CardHeader>
+      <CardTitle class="flex items-center gap-2 text-sm">
+        <Users class="size-4 text-muted-foreground" />
+        Members
+      </CardTitle>
+    </CardHeader>
+    <CardContent>
+      <ContextMenuHost :target="target ?? null">
+        <div class="flex items-center gap-3">
+          <Avatar class="size-8">
+            <AvatarFallback class="bg-primary/20 text-xs text-primary">
+              {{ serverInitials(agent) }}
+            </AvatarFallback>
+          </Avatar>
           <div class="min-w-0 flex-1">
             <p class="truncate text-xs font-semibold">{{ agent }}</p>
             <p class="text-xs text-muted-foreground">{{ statusLabel }} · {{ provider }}</p>
@@ -57,13 +58,16 @@ const statusColor = computed(
             class="size-1.5 shrink-0 rounded-full"
             :class="statusColor"
             :aria-label="statusLabel"
-          /></div></ContextMenuHost
-    ></CardContent>
-    <CardFooter
-      ><Button variant="outline" size="sm" class="w-full" @click="emit('settings')"
-        ><Settings data-icon="inline-start" />Agent settings</Button
-      ></CardFooter
-    >
+          />
+        </div>
+      </ContextMenuHost>
+    </CardContent>
+    <CardFooter>
+      <Button variant="outline" size="sm" class="w-full" @click="emit('settings')">
+        <Settings data-icon="inline-start" />
+        Agent settings
+      </Button>
+    </CardFooter>
     <slot />
   </Card>
 </template>

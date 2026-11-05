@@ -20,10 +20,11 @@ defineProps<{ channelId: string; prompt: PromptDto }>()
         size="sm"
         class="border-[var(--protected-border)] bg-[var(--protected-bg)] text-[var(--protected-fg)] hover:bg-[var(--protected-bg)] hover:text-[var(--protected-fg)] focus-visible:border-[var(--protected-border)] focus-visible:ring-[var(--protected-border)] aria-invalid:border-[var(--protected-border)] aria-invalid:ring-[var(--protected-border)] dark:aria-invalid:border-[var(--protected-border)] dark:aria-invalid:ring-[var(--protected-border)]"
         @click="decideApproval(channelId, prompt.approvalId, decision)"
-        >{{
-          decision === 'always_allow' ? 'Always allow' : decision === 'approve' ? 'Approve' : 'Deny'
-        }}</Button
       >
+        {{
+          decision === 'always_allow' ? 'Always allow' : decision === 'approve' ? 'Approve' : 'Deny'
+        }}
+      </Button>
     </div>
     <p v-else class="text-sm">
       {{

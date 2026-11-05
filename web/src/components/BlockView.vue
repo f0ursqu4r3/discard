@@ -46,25 +46,28 @@ const approval = computed(() => {
 })
 </script>
 <template>
-  <ContextMenuHost :target="target"
-    ><SafeMarkdown v-if="block.type === 'markdown'" :text="block.text" />
+  <ContextMenuHost :target="target">
+    <SafeMarkdown v-if="block.type === 'markdown'" :text="block.text" />
     <DiffBlock
       v-else-if="
         block.type === 'diff' ||
         (block.type === 'code' && ['diff', 'patch'].includes((block.language || '').toLowerCase()))
       "
       :text="block.text"
-      :target="target" />
+      :target="target"
+    />
     <CodeBlock
       v-else-if="block.type === 'code'"
       :text="block.text"
       :language="block.language"
-      :target="target" />
+      :target="target"
+    />
     <ToolCallBlock
       v-else-if="block.type === 'tool_call'"
       :name="block.name"
       :input="block.input"
-      :output="block.output" />
-    <ApprovalCard :channel-id="channelId" v-else-if="approval" :prompt="approval"
-  /></ContextMenuHost>
+      :output="block.output"
+    />
+    <ApprovalCard :channel-id="channelId" v-else-if="approval" :prompt="approval" />
+  </ContextMenuHost>
 </template>

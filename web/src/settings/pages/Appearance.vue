@@ -87,8 +87,9 @@ onUnmounted(() => stop?.())
           :variant="value.themeSource === source ? 'default' : 'outline'"
           class="capitalize"
           @click="patch({ themeSource: source })"
-          >{{ source }}</Button
         >
+          {{ source }}
+        </Button>
       </div>
       <p class="text-sm text-muted-foreground">
         {{
@@ -102,8 +103,8 @@ onUnmounted(() => stop?.())
     </section>
     <section v-if="value.themeSource === 'custom'" class="space-y-2">
       <div class="flex items-center gap-3">
-        <span class="font-semibold">Use one theme for both</span
-        ><Switch
+        <span class="font-semibold">Use one theme for both</span>
+        <Switch
           aria-label="Use one theme for both"
           :model-value="value.single"
           @update:model-value="choose($event ? 'single' : 'pair')"
@@ -120,27 +121,30 @@ onUnmounted(() => stop?.())
             @update:open="themeSearch = ''"
             :model-value="kind === 'light' ? value.light : value.dark"
             @update:model-value="choose(kind, String($event))"
-            ><SelectTrigger class="w-60"><SelectValue /></SelectTrigger
-            ><SelectContent
-              ><Input
+          >
+            <SelectTrigger class="w-60"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <Input
                 v-model="themeSearch"
                 aria-label="Search themes"
                 placeholder="Search themes"
                 @keydown.stop
-              /><SelectGroup v-for="origin in ['Yours', 'Ghostty', 'Bundled']" :key="origin"
-                ><SelectLabel>{{ origin }}</SelectLabel
-                ><SelectItem
+              />
+              <SelectGroup v-for="origin in ['Yours', 'Ghostty', 'Bundled']" :key="origin">
+                <SelectLabel>{{ origin }}</SelectLabel>
+                <SelectItem
                   v-for="item in value.themes?.filter(
                     (t) =>
                       t[1] === origin && t[0].toLowerCase().includes(themeSearch.toLowerCase()),
                   )"
                   :key="item[0]"
                   :value="item[0]"
-                  >{{ item[0] }}</SelectItem
-                ></SelectGroup
-              ></SelectContent
-            ></Select
-          >
+                >
+                  {{ item[0] }}
+                </SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
         </div>
       </div>
       <p class="text-sm text-muted-foreground">
@@ -153,11 +157,11 @@ onUnmounted(() => stop?.())
     </section>
     <section class="space-y-2">
       <div class="flex items-center gap-3">
-        <strong>{{ value.activeName }}</strong
-        ><span class="text-sm text-muted-foreground">{{ value.origin }}</span
-        ><Button variant="outline" @click="run('settings_copy_theme', { name: value.activeName })"
-          >Edit a copy</Button
-        >
+        <strong>{{ value.activeName }}</strong>
+        <span class="text-sm text-muted-foreground">{{ value.origin }}</span>
+        <Button variant="outline" @click="run('settings_copy_theme', { name: value.activeName })">
+          Edit a copy
+        </Button>
       </div>
       <p class="text-sm text-muted-foreground">Active theme file: {{ value.file }}</p>
       <p class="text-sm text-muted-foreground">Ghostty config: {{ value.config }}</p>
@@ -172,14 +176,15 @@ onUnmounted(() => stop?.())
             class="size-6 rounded-sm border border-border bg-[var(--swatch-color)]"
             :style="{ '--swatch-color': swatch[1] }"
             :title="swatch[0]"
-          /><span v-if="index >= 16" class="text-sm text-muted-foreground">{{ swatch[0] }}</span>
+          />
+          <span v-if="index >= 16" class="text-sm text-muted-foreground">{{ swatch[0] }}</span>
         </div>
       </div>
     </section>
     <section class="space-y-1">
       <div class="flex items-center gap-3">
-        <span class="font-semibold">Ignore plugin themes</span
-        ><Switch
+        <span class="font-semibold">Ignore plugin themes</span>
+        <Switch
           aria-label="Ignore plugin themes"
           :model-value="value.ignorePluginThemes"
           @update:model-value="patch({ ignorePluginThemes: $event })"

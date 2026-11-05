@@ -62,8 +62,10 @@ function keydown(event: KeyboardEvent) {
           size="sm"
           variant="destructive"
           @click="emit('stop')"
-          ><Square data-icon="inline-start" />Stop</Button
         >
+          <Square data-icon="inline-start" />
+          Stop
+        </Button>
         <Button
           v-else
           data-ui-id="composer-send"
@@ -71,13 +73,15 @@ function keydown(event: KeyboardEvent) {
           :disabled="!maySend(archived || busy, text)"
           aria-label="Send message"
           @click="send"
-          ><Send /><span class="sr-only">Send</span></Button
         >
+          <Send />
+          <span class="sr-only">Send</span>
+        </Button>
       </InputGroupAddon>
     </InputGroup>
     <div class="mt-2 flex min-w-0 items-center justify-between gap-3 text-xs text-muted-foreground">
-      <span class="truncate">{{ archived ? 'Channel archived' : `#${channel}` }}</span
-      ><span class="hidden shrink-0 sm:inline">Enter to send · Shift + Enter for new line</span>
+      <span class="truncate">{{ archived ? 'Channel archived' : `#${channel}` }}</span>
+      <span class="hidden shrink-0 sm:inline">Enter to send · Shift + Enter for new line</span>
     </div>
   </section>
 </template>

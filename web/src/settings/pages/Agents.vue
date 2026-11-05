@@ -76,15 +76,16 @@ onMounted(() => {
 <template>
   <div class="space-y-3">
     <div class="flex flex-wrap gap-2">
-      <Button v-for="agent in agents" :key="agent.id" variant="outline" @click="select(agent)"
-        >{{ agent.name }} · {{ agent.provider }}</Button
-      >
+      <Button v-for="agent in agents" :key="agent.id" variant="outline" @click="select(agent)">
+        {{ agent.name }} · {{ agent.provider }}
+      </Button>
     </div>
     <template v-if="selected">
       <p>Agent: {{ selected.name }} · {{ selected.provider }}</p>
-      <label for="agent-model">Model</label><Input id="agent-model" v-model="selected.model" />
-      <label for="agent-prompt">System prompt</label
-      ><Textarea id="agent-prompt" v-model="selected.systemPrompt" />
+      <label for="agent-model">Model</label>
+      <Input id="agent-model" v-model="selected.model" />
+      <label for="agent-prompt">System prompt</label>
+      <Textarea id="agent-prompt" v-model="selected.systemPrompt" />
       <p>Approval policy</p>
       <div class="flex gap-2">
         <div v-for="choice in review?.choices" :key="choice.policy">
@@ -92,13 +93,15 @@ onMounted(() => {
             :disabled="!choice.enabled"
             :variant="selected.policy === choice.policy ? 'default' : 'outline'"
             @click="selected.policy = choice.policy"
-            >{{ choice.policy === 'ask' ? 'Ask before tool calls' : 'Deny all' }}</Button
           >
+            {{ choice.policy === 'ask' ? 'Ask before tool calls' : 'Deny all' }}
+          </Button>
           <p v-if="choice.reason">{{ choice.reason }}</p>
         </div>
       </div>
       <div class="flex items-center gap-2">
-        <span>plugin.write</span><Switch aria-label="plugin.write" v-model="selected.pluginWrite" />
+        <span>plugin.write</span>
+        <Switch aria-label="plugin.write" v-model="selected.pluginWrite" />
       </div>
       <p v-for="change in review?.changes" :key="change.field" class="whitespace-pre-wrap">
         {{ change.field }}: {{ change.before }} → {{ change.after }}

@@ -130,9 +130,9 @@ onUnmounted(() => window.removeEventListener('focus', read))
               data-testid="new-divider"
               class="my-3 flex items-center gap-2 px-6 text-xs font-medium text-primary"
             >
-              <span class="flex-1 border-t border-primary" />New<span
-                class="w-4 border-t border-primary"
-              />
+              <span class="flex-1 border-t border-primary" />
+              New
+              <span class="w-4 border-t border-primary" />
             </div>
             <MessageRow
               :channel-id="conversationId"
@@ -145,22 +145,22 @@ onUnmounted(() => window.removeEventListener('focus', read))
             class="[content-visibility:visible]"
             v-if="hasLiveRow(running, live.length)"
             message-id="streaming-reply"
-            ><MessageRow
+          >
+            <MessageRow
               :channel-id="conversationId"
               :message="liveMessage"
               :agent="agent"
               :prompts="prompts"
               show-cursor
-          /></MessageScrollerItem>
-          <Empty v-if="!messages.length && !hasLiveRow(running, live.length)" class="m-auto"
-            ><EmptyHeader
-              ><EmptyMedia variant="icon"><MessageSquare /></EmptyMedia
-              ><EmptyTitle>No messages yet</EmptyTitle
-              ><EmptyDescription
-                >Send a message to {{ agent || 'your agent' }}.</EmptyDescription
-              ></EmptyHeader
-            ></Empty
-          >
+            />
+          </MessageScrollerItem>
+          <Empty v-if="!messages.length && !hasLiveRow(running, live.length)" class="m-auto">
+            <EmptyHeader>
+              <EmptyMedia variant="icon"><MessageSquare /></EmptyMedia>
+              <EmptyTitle>No messages yet</EmptyTitle>
+              <EmptyDescription>Send a message to {{ agent || 'your agent' }}.</EmptyDescription>
+            </EmptyHeader>
+          </Empty>
         </MessageScrollerContent>
       </MessageScrollerViewport>
       <MessageScrollerButton aria-label="Jump to latest" title="Jump to latest" />

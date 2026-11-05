@@ -1,40 +1,49 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { serverPillHeight } from './layout'
-import { MessagesSquare, Plus } from '@lucide/vue'
-import { Badge } from './ui/badge'
-import { Button } from './ui/button'
-import { Separator } from './ui/separator'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
-import ContextMenuHost from './ContextMenuHost.vue'
-import BrandMark from './workspace/BrandMark.vue'
-import { cn } from '@/lib/utils'
-import type { ContextTargetDto } from '../bridge/types'
+import { computed, ref } from 'vue';
+import { serverPillHeight } from './layout';
+import { MessagesSquare, Plus } from '@lucide/vue';
+import { Badge } from './ui/badge';
+import { Button } from './ui/button';
+import { Separator } from './ui/separator';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from './ui/tooltip';
+import ContextMenuHost from './ContextMenuHost.vue';
+import BrandMark from './workspace/BrandMark.vue';
+import { cn } from '@/lib/utils';
+import type { ContextTargetDto } from '../bridge/types';
 const props = withDefaults(
   defineProps<{
-    projects?: import('@/bridge/api').ProjectEntry[]
-    projectId?: string
-    project: string
-    unread: boolean
-    pendingApprovals: number
-    reviewCount?: number
-    target?: ContextTargetDto
-    directMessages?: boolean
-    compact?: boolean
+    projects?: import('@/bridge/api').ProjectEntry[];
+    projectId?: string;
+    project: string;
+    unread: boolean;
+    pendingApprovals: number;
+    reviewCount?: number;
+    target?: ContextTargetDto;
+    directMessages?: boolean;
+    compact?: boolean;
   }>(),
-  { directMessages: false, compact: false },
-)
+  { directMessages: false, compact: false }
+);
 const entries = computed(
-  () => props.projects ?? [{ id: props.projectId ?? '', name: props.project, path: '' }],
-)
-const selected = (id: string) => id === (props.projectId ?? '') && !props.directMessages
-const hovered = ref<string | null>(null)
-const focused = ref<string | null>(null)
+  () =>
+    props.projects ?? [
+      { id: props.projectId ?? '', name: props.project, path: '' },
+    ]
+);
+const selected = (id: string) =>
+  id === (props.projectId ?? '') && !props.directMessages;
+const hovered = ref<string | null>(null);
+const focused = ref<string | null>(null);
 const emit = defineEmits<{
-  project: [id?: string]
-  directMessages: []
-  addProject: []
-}>()
+  project: [id?: string];
+  directMessages: [];
+  addProject: [];
+}>();
 </script>
 <template>
   <TooltipProvider>
@@ -43,14 +52,17 @@ const emit = defineEmits<{
       aria-label="Projects"
       :class="
         cn(
-          'flex h-full shrink-0 flex-col items-center gap-3 border-r border-border/60 bg-canvas',
-          compact ? 'w-13' : 'w-18',
+          'flex h-full shrink-0 flex-col items-center border-r border-border/60 bg-canvas',
+          compact ? 'w-13' : 'w-18'
         )
       "
     >
-      <div data-ui-id="rail-home" class="flex h-16 shrink-0 items-center justify-center">
-        <Tooltip
-          ><TooltipTrigger as-child>
+      <div
+        data-ui-id="rail-home"
+        class="flex h-16 shrink-0 items-center justify-center"
+      >
+        <Tooltip>
+          <TooltipTrigger as-child>
             <Button
               data-ui-id="direct-messages-button"
               :variant="directMessages ? 'default' : 'secondary'"
@@ -58,17 +70,21 @@ const emit = defineEmits<{
               aria-label="Direct messages"
               :aria-current="directMessages ? 'page' : undefined"
               @click="emit('directMessages')"
-              ><MessagesSquare
-            /></Button> </TooltipTrigger
-          ><TooltipContent side="right">Direct messages</TooltipContent></Tooltip
-        >
+            >
+              <MessagesSquare />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="right">Direct messages</TooltipContent>
+        </Tooltip>
       </div>
       <Separator class="max-w-8" />
       <div
-        class="flex min-h-0 flex-1 flex-col items-center gap-3 overflow-x-hidden overflow-y-auto overscroll-contain py-3"
+        class="flex min-h-0 w-full flex-1 flex-col items-center gap-3 overflow-x-hidden overflow-y-auto overscroll-contain py-3"
       >
         <div v-for="entry in entries" :key="entry.id" class="w-full">
-          <ContextMenuHost :target="entry.id === projectId ? (target ?? null) : null">
+          <ContextMenuHost
+            :target="entry.id === projectId ? (target ?? null) : null"
+          >
             <div
               @mouseenter="hovered = entry.id"
               @mouseleave="hovered = null"
@@ -77,7 +93,7 @@ const emit = defineEmits<{
               :class="
                 cn(
                   'group relative flex items-center justify-center',
-                  compact ? 'h-10 w-full' : 'h-12 w-full',
+                  compact ? 'h-10 w-full' : 'h-12 w-full'
                 )
               "
             >
@@ -92,13 +108,15 @@ const emit = defineEmits<{
                   height: `calc(var(--spacing) * ${serverPillHeight(selected(entry.id), hovered === entry.id || focused === entry.id, entry.id === projectId && unread, compact ? 10 : 12)})`,
                 }"
               />
-              <Tooltip
-                ><TooltipTrigger as-child>
+              <Tooltip>
+                <TooltipTrigger as-child>
                   <Button
                     :aria-label="entry.name"
                     :aria-current="selected(entry.id) ? 'page' : undefined"
                     :variant="selected(entry.id) ? 'default' : 'secondary'"
-                    :class="cn('relative rounded-xl', compact ? 'size-9' : 'size-12')"
+                    :class="
+                      cn('relative rounded-xl', compact ? 'size-9' : 'size-12')
+                    "
                     @click="emit('project', entry.id)"
                   >
                     <BrandMark
@@ -108,33 +126,41 @@ const emit = defineEmits<{
                     <span
                       v-if="entry.id !== projectId && entries.length > 1"
                       class="text-sm font-semibold"
-                      >{{ entry.name.slice(0, 2).toUpperCase() }}</span
                     >
+                      {{ entry.name.slice(0, 2).toUpperCase() }}
+                    </span>
                     <Badge
-                      v-if="entry.id === (projectId ?? '') && pendingApprovals > 0"
+                      v-if="
+                        entry.id === (projectId ?? '') && pendingApprovals > 0
+                      "
                       data-testid="approval-badge"
                       class="absolute -right-1 -bottom-1 bg-warning text-background"
-                      >{{ pendingApprovals }}</Badge
                     >
-                  </Button> </TooltipTrigger
-                ><TooltipContent side="right"
+                      {{ pendingApprovals }}
+                    </Badge>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="right"
                   >{{ entry.name }} · {{ entry.path }}</TooltipContent
-                ></Tooltip
-              >
+                >
+              </Tooltip>
             </div>
           </ContextMenuHost>
         </div>
         <Separator class="max-w-8" />
-        <Tooltip
-          ><TooltipTrigger as-child
-            ><Button
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <Button
               variant="secondary"
               :class="cn('rounded-xl', compact ? 'size-9' : 'size-12')"
               aria-label="Import project"
               @click="emit('addProject')"
-              ><Plus /></Button></TooltipTrigger
-          ><TooltipContent side="right">Import project</TooltipContent></Tooltip
-        >
+            >
+              <Plus />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="right">Import project</TooltipContent>
+        </Tooltip>
       </div>
     </aside>
   </TooltipProvider>

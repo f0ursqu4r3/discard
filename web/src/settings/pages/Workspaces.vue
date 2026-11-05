@@ -45,8 +45,8 @@ onMounted(async () => {
     </p>
     <section v-for="project in rows" :key="project.path" class="space-y-1">
       <div class="flex items-center gap-2">
-        <span>{{ project.name }} · {{ project.path }}{{ project.exists ? '' : ' · missing' }}</span
-        ><Button variant="outline" @click="reveal(project.path)">Reveal</Button>
+        <span>{{ project.name }} · {{ project.path }}{{ project.exists ? '' : ' · missing' }}</span>
+        <Button variant="outline" @click="reveal(project.path)">Reveal</Button>
       </div>
       <div v-for="channel in project.channels" :key="channel.name">
         <p>
@@ -54,10 +54,11 @@ onMounted(async () => {
           }}{{ channel.current ? ' · Current' : '' }}
         </p>
         <div v-if="channel.worktree" class="flex items-center gap-2">
-          <span
-            >{{ channel.worktree.branch }} · {{ channel.worktree.path
-            }}{{ channel.worktree.exists ? '' : ' · missing' }}</span
-          ><Button variant="outline" @click="reveal(channel.worktree.path)">Reveal</Button>
+          <span>
+            {{ channel.worktree.branch }} · {{ channel.worktree.path
+            }}{{ channel.worktree.exists ? '' : ' · missing' }}
+          </span>
+          <Button variant="outline" @click="reveal(channel.worktree.path)">Reveal</Button>
         </div>
       </div>
     </section>

@@ -68,11 +68,11 @@ onUnmounted(() => {
       role="status"
       class="fixed inset-x-3 bottom-3 z-50 mx-auto flex w-fit max-w-full items-center gap-3 rounded-lg border border-border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-lg"
     >
-      <span class="truncate font-mono">{{ name }}</span
-      ><Button variant="ghost" size="icon-xs" aria-label="Copy UI ID" @click="copy"><Copy /></Button
-      ><Button variant="ghost" size="icon-xs" aria-label="Close UI inspector" @click="emit('close')"
-        ><X
-      /></Button>
+      <span class="truncate font-mono">{{ name }}</span>
+      <Button variant="ghost" size="icon-xs" aria-label="Copy UI ID" @click="copy"><Copy /></Button>
+      <Button variant="ghost" size="icon-xs" aria-label="Close UI inspector" @click="emit('close')">
+        <X />
+      </Button>
     </div>
   </Teleport>
 </template>

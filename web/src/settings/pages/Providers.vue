@@ -42,12 +42,13 @@ onUnmounted(() => clearInterval(timer))
     >
       {{ error }}
     </p>
-    <Card v-for="row in rows" :key="row.id"
-      ><CardHeader class="flex flex-row items-center justify-between"
-        ><CardTitle>{{ row.id }}</CardTitle
-        ><Button @click="recheck(row.id)">Re-check</Button></CardHeader
-      ><CardContent class="space-y-2"
-        ><p>Setup status: {{ row.setup }}</p>
+    <Card v-for="row in rows" :key="row.id">
+      <CardHeader class="flex flex-row items-center justify-between">
+        <CardTitle>{{ row.id }}</CardTitle>
+        <Button @click="recheck(row.id)">Re-check</Button>
+      </CardHeader>
+      <CardContent class="space-y-2">
+        <p>Setup status: {{ row.setup }}</p>
         <p v-if="row.command" class="font-mono">{{ row.command }}</p>
         <h2 class="font-semibold">Capabilities</h2>
         <p v-for="item in row.capabilities" :key="item.label">
@@ -55,8 +56,8 @@ onUnmounted(() => clearInterval(timer))
         </p>
         <h2 class="font-semibold">Hook enforcement</h2>
         <p v-for="item in row.hooks" :key="item.label">{{ item.label }}: {{ item.mode }}</p>
-        <p v-if="row.blocked">{{ row.blocked }}</p></CardContent
-      ></Card
-    >
+        <p v-if="row.blocked">{{ row.blocked }}</p>
+      </CardContent>
+    </Card>
   </div>
 </template>

@@ -51,8 +51,9 @@ onUnmounted(() => clearInterval(timer))
         :key="item"
         :variant="item === level ? 'default' : 'outline'"
         @click="level = item"
-        >{{ item }}</Button
       >
+        {{ item }}
+      </Button>
     </div>
     <p>Component</p>
     <div class="flex flex-wrap gap-1">
@@ -70,12 +71,14 @@ onUnmounted(() => clearInterval(timer))
         :key="item"
         :variant="item === component ? 'default' : 'outline'"
         @click="component = item"
-        >{{ item }}</Button
       >
+        {{ item }}
+      </Button>
     </div>
     <Input v-model="id" placeholder="Session, turn, or plugin ID" />
     <div class="flex items-center gap-2">
-      <span>Follow</span><Switch v-model="follow" aria-label="Follow" />
+      <span>Follow</span>
+      <Switch v-model="follow" aria-label="Follow" />
     </div>
     <p
       v-if="error"

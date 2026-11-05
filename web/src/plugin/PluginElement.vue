@@ -77,10 +77,10 @@ function action() {
     :class="[element.tag === 'column' ? 'flex-col' : 'flex-row', classes]"
     :style="style"
   >
-    <template v-for="(child, i) in element.children" :key="i"
-      ><span v-if="'Text' in child">{{ child.Text }}</span
-      ><PluginElement v-else :element="child.Element" :plugin="plugin"
-    /></template>
+    <template v-for="(child, i) in element.children" :key="i">
+      <span v-if="'Text' in child">{{ child.Text }}</span>
+      <PluginElement v-else :element="child.Element" :plugin="plugin" />
+    </template>
   </div>
   <div v-else-if="element.tag === 'text'" data-plugin-tag="text" :class="classes" :style="style">
     {{ text }}
@@ -100,22 +100,24 @@ function action() {
             : 'secondary'
     "
     @click="action"
-    >{{ text }}</Button
   >
+    {{ text }}
+  </Button>
   <div v-else-if="element.tag === 'avatar'" data-plugin-tag="avatar" class="relative inline-flex">
-    <Avatar :class="clean.size === 'small' ? 'size-6' : clean.size === 'large' ? 'size-10' : ''"
-      ><AvatarFallback>{{
-        serverInitials(typeof clean.name === 'string' ? clean.name : '?')
-      }}</AvatarFallback></Avatar
-    ><span
+    <Avatar :class="clean.size === 'small' ? 'size-6' : clean.size === 'large' ? 'size-10' : ''">
+      <AvatarFallback>
+        {{ serverInitials(typeof clean.name === 'string' ? clean.name : '?') }}
+      </AvatarFallback>
+    </Avatar>
+    <span
       v-if="colorToken(clean.status)"
       class="absolute -bottom-1 -right-1 size-2 rounded-full border-2 border-sidebar"
       :style="{ backgroundColor: colorToken(clean.status) }"
     />
   </div>
-  <Badge v-else-if="element.tag === 'badge'" data-plugin-tag="badge">{{
-    typeof clean.count === 'number' ? Math.floor(clampNumber('count', clean.count)) : 0
-  }}</Badge>
+  <Badge v-else-if="element.tag === 'badge'" data-plugin-tag="badge">
+    {{ typeof clean.count === 'number' ? Math.floor(clampNumber('count', clean.count)) : 0 }}
+  </Badge>
   <Separator v-else-if="element.tag === 'divider'" data-plugin-tag="divider" />
   <div v-else-if="element.tag === 'spacer'" data-plugin-tag="spacer" class="flex-1" />
   <div

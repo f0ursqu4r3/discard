@@ -23,7 +23,8 @@ async function copy() {
       v-if="!inline"
       class="mb-2 flex items-center justify-between font-medium text-muted-foreground"
     >
-      <span>Diff</span><Button v-if="target" variant="ghost" size="sm" @click="copy">Copy</Button>
+      <span>Diff</span>
+      <Button v-if="target" variant="ghost" size="sm" @click="copy">Copy</Button>
     </div>
     <pre
       class="overflow-x-auto"

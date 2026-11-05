@@ -77,8 +77,8 @@ async function copy() {
 <template>
   <div class="overflow-hidden rounded-xl border border-border/60 bg-card p-3 text-xs">
     <div class="mb-2 flex items-center justify-between font-medium text-muted-foreground">
-      <span>{{ language || 'Code' }}</span
-      ><Button v-if="target || copyText" variant="ghost" size="sm" @click="copy">Copy</Button>
+      <span>{{ language || 'Code' }}</span>
+      <Button v-if="target || copyText" variant="ghost" size="sm" @click="copy">Copy</Button>
     </div>
     <pre
       class="overflow-x-auto whitespace-pre-wrap"

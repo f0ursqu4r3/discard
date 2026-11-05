@@ -255,17 +255,21 @@ watch(
     class="flex h-dvh flex-col overflow-hidden bg-canvas text-sm text-foreground"
   >
     <header data-ui-id="app-toolbar" class="flex h-9 shrink-0 items-center gap-2 px-3">
-      <BrandMark class="size-4" /><span class="text-xs font-semibold">Discard</span>
+      <BrandMark class="size-4" />
+      <span class="text-xs font-semibold">Discard</span>
       <span
         class="pointer-events-none mx-auto hidden truncate text-xs text-muted-foreground sm:block"
-        >{{ store.snapshot?.project
-        }}<template v-if="store.snapshot"> — agent workspace</template></span
       >
+        {{ store.snapshot?.project }}
+        <template v-if="store.snapshot">— agent workspace</template>
+      </span>
       <span
         v-if="store.snapshot?.turnRunning"
         class="ml-auto flex items-center gap-1.5 text-xs text-muted-foreground"
-        ><LoaderCircle class="size-3 motion-safe:animate-spin" />Working</span
       >
+        <LoaderCircle class="size-3 motion-safe:animate-spin" />
+        Working
+      </span>
       <Button
         data-ui-id="ui-inspector-toggle"
         :variant="inspector ? 'secondary' : 'ghost'"
@@ -274,8 +278,9 @@ watch(
         aria-label="Toggle UI names"
         :aria-pressed="inspector"
         @click="inspector = !inspector"
-        ><ScanEye
-      /></Button>
+      >
+        <ScanEye />
+      </Button>
     </header>
     <div v-if="store.snapshot?.projectId" class="flex min-h-0 flex-1 gap-1.5 px-1.5 pb-1.5">
       <NavigationPanel
@@ -357,15 +362,15 @@ watch(
                 data-ui-id="conversation-tabs"
                 class="flex h-11 shrink-0 flex-row items-center justify-start overflow-x-auto border-b border-border/60 px-3 sm:px-5"
               >
-                <TabsList variant="line"
-                  ><TabsTrigger value="conversation">Conversation</TabsTrigger
-                  ><TabsTrigger value="changes"
-                    >Changes<Badge v-if="changes.length" variant="secondary">{{
-                      changes.length
-                    }}</Badge></TabsTrigger
-                  ><TabsTrigger value="run">Run</TabsTrigger
-                  ><TabsTrigger value="review">Merge review</TabsTrigger></TabsList
-                >
+                <TabsList variant="line">
+                  <TabsTrigger value="conversation">Conversation</TabsTrigger>
+                  <TabsTrigger value="changes">
+                    Changes
+                    <Badge v-if="changes.length" variant="secondary">{{ changes.length }}</Badge>
+                  </TabsTrigger>
+                  <TabsTrigger value="run">Run</TabsTrigger>
+                  <TabsTrigger value="review">Merge review</TabsTrigger>
+                </TabsList>
               </Tabs>
               <MessageList
                 :conversation-id="store.snapshot.channelId"
@@ -392,15 +397,15 @@ watch(
                     :text="'text' in block ? block.text : ''"
                   />
                 </div>
-                <Empty v-else
-                  ><EmptyHeader
-                    ><EmptyMedia variant="icon"><GitPullRequest /></EmptyMedia
-                    ><EmptyTitle>No changes to display</EmptyTitle
-                    ><EmptyDescription
-                      >Diffs shared in this conversation appear here.</EmptyDescription
-                    ></EmptyHeader
-                  ></Empty
-                >
+                <Empty v-else>
+                  <EmptyHeader>
+                    <EmptyMedia variant="icon"><GitPullRequest /></EmptyMedia>
+                    <EmptyTitle>No changes to display</EmptyTitle>
+                    <EmptyDescription>
+                      Diffs shared in this conversation appear here.
+                    </EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
               </div>
               <div
                 v-else-if="conversationTab === 'run'"
@@ -417,30 +422,30 @@ watch(
                     :output="tool.output"
                   />
                 </div>
-                <Empty v-else
-                  ><EmptyHeader
-                    ><EmptyMedia variant="icon"><ListChecks /></EmptyMedia
-                    ><EmptyTitle>No tool activity</EmptyTitle
-                    ><EmptyDescription
-                      >Tool calls from this conversation appear here.</EmptyDescription
-                    ></EmptyHeader
-                  ></Empty
-                >
+                <Empty v-else>
+                  <EmptyHeader>
+                    <EmptyMedia variant="icon"><ListChecks /></EmptyMedia>
+                    <EmptyTitle>No tool activity</EmptyTitle>
+                    <EmptyDescription>
+                      Tool calls from this conversation appear here.
+                    </EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
               </div>
               <div
                 v-else
                 data-ui-id="merge-review-view"
                 class="min-h-0 flex-1 overflow-auto overscroll-contain"
               >
-                <Empty
-                  ><EmptyHeader
-                    ><EmptyMedia variant="icon"><GitPullRequest /></EmptyMedia
-                    ><EmptyTitle>No merge review</EmptyTitle
-                    ><EmptyDescription
-                      >Merge reviews are not available in this workspace yet.</EmptyDescription
-                    ></EmptyHeader
-                  ></Empty
-                >
+                <Empty>
+                  <EmptyHeader>
+                    <EmptyMedia variant="icon"><GitPullRequest /></EmptyMedia>
+                    <EmptyTitle>No merge review</EmptyTitle>
+                    <EmptyDescription>
+                      Merge reviews are not available in this workspace yet.
+                    </EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
               </div>
             </template>
             <WorkspacePageView
@@ -455,13 +460,14 @@ watch(
               data-ui-id="protected-notices"
               class="max-h-64 shrink-0 overflow-auto overscroll-contain"
             >
-              <template v-if="page !== 'conversation' || conversationTab !== 'conversation'"
-                ><ApprovalCard
+              <template v-if="page !== 'conversation' || conversationTab !== 'conversation'">
+                <ApprovalCard
                   :channel-id="store.snapshot.channelId"
                   v-for="prompt in store.snapshot.prompts.filter((p) => p.view === 'pending')"
                   :key="prompt.approvalId"
                   :prompt="prompt"
-              /></template>
+                />
+              </template>
               <Notices
                 :banners="store.snapshot.banners"
                 :notice="store.snapshot.notice"
@@ -473,9 +479,8 @@ watch(
                 v-if="thinkingLine(store.snapshot.turnRunning, [store.snapshot.agent])"
                 class="flex items-center gap-2 px-5 py-1 text-xs text-muted-foreground"
               >
-                <LoaderCircle class="size-3 motion-safe:animate-spin" />{{
-                  thinkingLine(store.snapshot.turnRunning, [store.snapshot.agent])
-                }}
+                <LoaderCircle class="size-3 motion-safe:animate-spin" />
+                {{ thinkingLine(store.snapshot.turnRunning, [store.snapshot.agent]) }}
               </p>
               <Composer
                 :key="store.snapshot.channelId"
@@ -510,14 +515,16 @@ watch(
             size-unit="px"
             :min-size="240"
             :max-size="400"
-            ><div class="h-full overflow-hidden rounded-xl border border-border/60">
+          >
+            <div class="h-full overflow-hidden rounded-xl border border-border/60">
               <ContextPanel
                 :direct-message="page === 'direct-messages'"
                 :snapshot="store.snapshot"
                 @action="action"
                 @approvals="navigate('conversation')"
-              /></div
-          ></ResizablePanel>
+              />
+            </div>
+          </ResizablePanel>
         </template>
       </ResizablePanelGroup>
       <CreateChannelDialog
@@ -529,13 +536,14 @@ watch(
         :has-git="store.snapshot.branches.length > 0"
         @created="channelCreated"
       />
-      <Sheet v-model:open="navigationOpen"
-        ><SheetContent side="left" class="gap-0" :show-close-button="false"
-          ><SheetTitle class="sr-only">Workspace navigation</SheetTitle
-          ><SheetDescription class="sr-only">Projects, channels, and agents</SheetDescription
-          ><Button variant="ghost" class="shrink-0" @click="navigationOpen = false"
-            >Close navigation</Button
-          ><ChannelList
+      <Sheet v-model:open="navigationOpen">
+        <SheetContent side="left" class="gap-0" :show-close-button="false">
+          <SheetTitle class="sr-only">Workspace navigation</SheetTitle>
+          <SheetDescription class="sr-only">Projects, channels, and agents</SheetDescription>
+          <Button variant="ghost" class="shrink-0" @click="navigationOpen = false">
+            Close navigation
+          </Button>
+          <ChannelList
             :channels="store.snapshot.channels"
             :channel-id="store.snapshot.channelId"
             class="min-h-0 flex-1"
@@ -555,15 +563,18 @@ watch(
             @select-channel="selectChannel"
             @open-branch="openBranch"
             @create-channel="newChannelOpen = true"
-            @approvals="showApprovals" /></SheetContent
-      ></Sheet>
-      <Sheet v-model:open="contextOpen"
-        ><SheetContent side="right" class="gap-0" :show-close-button="false"
-          ><SheetTitle class="sr-only">Workspace context</SheetTitle
-          ><SheetDescription class="sr-only">Channel context, members, and reviews</SheetDescription
-          ><Button variant="ghost" class="shrink-0" @click="contextOpen = false"
-            >Close context</Button
-          ><ContextPanel
+            @approvals="showApprovals"
+          />
+        </SheetContent>
+      </Sheet>
+      <Sheet v-model:open="contextOpen">
+        <SheetContent side="right" class="gap-0" :show-close-button="false">
+          <SheetTitle class="sr-only">Workspace context</SheetTitle>
+          <SheetDescription class="sr-only">Channel context, members, and reviews</SheetDescription>
+          <Button variant="ghost" class="shrink-0" @click="contextOpen = false">
+            Close context
+          </Button>
+          <ContextPanel
             class="min-h-0 flex-1"
             :direct-message="page === 'direct-messages'"
             :snapshot="store.snapshot"
@@ -573,8 +584,10 @@ watch(
                 navigate('conversation')
                 contextOpen = false
               }
-            " /></SheetContent
-      ></Sheet>
+            "
+          />
+        </SheetContent>
+      </Sheet>
     </div>
     <div
       v-else-if="store.snapshot"
@@ -585,7 +598,8 @@ watch(
       <Button @click="action('import_project')">Import project folder</Button>
     </div>
     <div v-else class="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
-      <LoaderCircle class="size-4 motion-safe:animate-spin" />Opening workspace…
+      <LoaderCircle class="size-4 motion-safe:animate-spin" />
+      Opening workspace…
     </div>
     <UiInspector v-if="inspector" @close="inspector = false" />
     <Toaster

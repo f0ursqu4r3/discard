@@ -4,7 +4,15 @@ import vue from '@vitejs/plugin-vue'
 import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
-  fmt: { tabWidth: 2, useTabs: false, semi: false, singleQuote: true, printWidth: 100 },
+  fmt: {
+    tabWidth: 2,
+    useTabs: false,
+    semi: false,
+    singleQuote: true,
+    printWidth: 100,
+    htmlWhitespaceSensitivity: 'ignore',
+    bracketSameLine: false,
+  },
   lint: {
     plugins: ['oxc', 'typescript', 'unicorn', 'vue'],
     categories: {

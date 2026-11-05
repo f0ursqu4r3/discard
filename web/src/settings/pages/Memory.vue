@@ -41,8 +41,8 @@ onMounted(() => {
     </p>
     <section v-for="row in rows" :key="row.scope" class="space-y-1">
       <div class="flex items-center gap-2">
-        <span>{{ row.title }} ({{ row.files.length }})</span
-        ><Button variant="outline" @click="reveal(row.scope)">Reveal</Button>
+        <span>{{ row.title }} ({{ row.files.length }})</span>
+        <Button variant="outline" @click="reveal(row.scope)">Reveal</Button>
       </div>
       <div v-for="file in row.files" :key="file">
         <Button variant="ghost" @click="read(row.scope, file)">{{ file }}</Button>

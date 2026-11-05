@@ -31,17 +31,17 @@ async function copy() {
 }
 </script>
 <template>
-  <ContextMenuHost :target="target"
-    ><article
+  <ContextMenuHost :target="target">
+    <article
       :data-ui-id="`message-${message.id}`"
       class="group relative flex gap-3 px-3 py-3 text-xs leading-6 hover:bg-muted/30 sm:px-6"
     >
       <div class="w-9 shrink-0">
-        <Avatar v-if="!message.continuesGroup" class="size-9"
-          ><AvatarFallback class="bg-primary/20 text-primary">{{
-            serverInitials(message.role === 'user' ? 'You' : agent || message.role)
-          }}</AvatarFallback></Avatar
-        >
+        <Avatar v-if="!message.continuesGroup" class="size-9">
+          <AvatarFallback class="bg-primary/20 text-primary">
+            {{ serverInitials(message.role === 'user' ? 'You' : agent || message.role) }}
+          </AvatarFallback>
+        </Avatar>
       </div>
       <div class="flex min-w-0 flex-1 flex-col gap-1">
         <div
@@ -50,14 +50,11 @@ async function copy() {
           class="flex items-center gap-2 font-semibold"
         >
           {{
-            message.role === 'user'
-              ? 'You'
-              : message.role === 'agent'
-                ? agent || 'Agent'
-                : 'System'
-          }}<Badge v-if="message.role === 'agent'" variant="secondary" class="text-xs font-normal"
-            >Agent</Badge
-          >
+            message.role === 'user' ? 'You' : message.role === 'agent' ? agent || 'Agent' : 'System'
+          }}
+          <Badge v-if="message.role === 'agent'" variant="secondary" class="text-xs font-normal">
+            Agent
+          </Badge>
         </div>
         <BlockView
           :channel-id="channelId"
@@ -77,8 +74,9 @@ async function copy() {
         size="sm"
         class="absolute right-2 top-0 invisible group-hover:visible focus-visible:visible"
         @click="copy"
-        >Copy</Button
       >
-    </article></ContextMenuHost
-  >
+        Copy
+      </Button>
+    </article>
+  </ContextMenuHost>
 </template>

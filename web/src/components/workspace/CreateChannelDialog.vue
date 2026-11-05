@@ -82,10 +82,10 @@ async function submit() {
         }
       "
     >
-      <DialogHeader
-        ><DialogTitle>Create channel</DialogTitle
-        ><DialogDescription>{{ project }}</DialogDescription></DialogHeader
-      >
+      <DialogHeader>
+        <DialogTitle>Create channel</DialogTitle>
+        <DialogDescription>{{ project }}</DialogDescription>
+      </DialogHeader>
       <form
         id="create-channel-form"
         data-ui-id="create-channel-form"
@@ -93,12 +93,13 @@ async function submit() {
         @submit.prevent="submit"
       >
         <FieldGroup>
-          <Field :data-invalid="!!error"
-            ><FieldLabel for="channel-name">Channel name</FieldLabel>
+          <Field :data-invalid="!!error">
+            <FieldLabel for="channel-name">Channel name</FieldLabel>
             <div class="relative">
               <Hash
                 class="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
-              /><Input
+              />
+              <Input
                 id="channel-name"
                 v-model="name"
                 data-ui-id="channel-name-input"
@@ -109,62 +110,72 @@ async function submit() {
                 :disabled="busy"
                 :aria-invalid="!!error"
                 :aria-describedby="error ? 'channel-error' : undefined"
-              /></div
-          ></Field>
-          <Field
-            ><FieldLabel for="channel-workspace">Workspace</FieldLabel
-            ><Select v-model="mode" :disabled="busy"
-              ><SelectTrigger
+              />
+            </div>
+          </Field>
+          <Field>
+            <FieldLabel for="channel-workspace">Workspace</FieldLabel>
+            <Select v-model="mode" :disabled="busy">
+              <SelectTrigger
                 id="channel-workspace"
                 data-ui-id="channel-workspace-select"
                 class="w-full"
-                ><SelectValue /></SelectTrigger
-              ><SelectContent
-                ><SelectItem value="worktree" :disabled="!hasGit"
-                  ><GitBranch class="size-4" />New isolated worktree</SelectItem
-                ><SelectItem value="main_checkout"
-                  ><Folder class="size-4" />Project folder</SelectItem
-                ></SelectContent
-              ></Select
-            ><FieldDescription>{{
-              mode === 'worktree'
-                ? 'A new branch and worktree will be created when the agent starts work.'
-                : 'The agent will work directly in your project folder.'
-            }}</FieldDescription></Field
-          >
-          <Field
-            ><FieldLabel>Agent</FieldLabel>
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="worktree" :disabled="!hasGit">
+                  <GitBranch class="size-4" />
+                  New isolated worktree
+                </SelectItem>
+                <SelectItem value="main_checkout">
+                  <Folder class="size-4" />
+                  Project folder
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <FieldDescription>
+              {{
+                mode === 'worktree'
+                  ? 'A new branch and worktree will be created when the agent starts work.'
+                  : 'The agent will work directly in your project folder.'
+              }}
+            </FieldDescription>
+          </Field>
+          <Field>
+            <FieldLabel>Agent</FieldLabel>
             <div
               data-ui-id="channel-agent"
               class="flex items-center gap-3 rounded-lg border bg-muted/40 p-3"
             >
               <span
                 class="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary"
-                ><Bot class="size-4"
-              /></span>
+              >
+                <Bot class="size-4" />
+              </span>
               <div class="min-w-0">
                 <p class="truncate text-sm font-medium">{{ agent }}</p>
                 <p class="text-xs text-muted-foreground">
                   {{ provider }} · Uses this agent’s settings
                 </p>
               </div>
-            </div></Field
-          >
+            </div>
+          </Field>
         </FieldGroup>
         <FieldError v-if="error" id="channel-error" role="alert">{{ error }}</FieldError>
       </form>
-      <DialogFooter
-        ><Button variant="ghost" :disabled="busy" @click="open = false">Cancel</Button
-        ><Button
+      <DialogFooter>
+        <Button variant="ghost" :disabled="busy" @click="open = false">Cancel</Button>
+        <Button
           type="submit"
           form="create-channel-form"
           data-ui-id="create-channel-submit"
           :disabled="busy || !name.trim()"
-          ><LoaderCircle v-if="busy" class="motion-safe:animate-spin" />{{
-            busy ? 'Creating…' : 'Create channel'
-          }}</Button
-        ></DialogFooter
-      >
+        >
+          <LoaderCircle v-if="busy" class="motion-safe:animate-spin" />
+          {{ busy ? 'Creating…' : 'Create channel' }}
+        </Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>
