@@ -35,6 +35,14 @@ pub struct BranchRowDto {
 }
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
+pub struct DiffColorsDto {
+    pub added: String,
+    pub removed: String,
+    pub inline_added: String,
+    pub inline_removed: String,
+}
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct ThemeDto {
     pub mode: String,
     pub tokens: BTreeMap<String, String>,
@@ -44,6 +52,7 @@ pub struct ThemeDto {
     pub protected_bg: String,
     pub protected_fg: String,
     pub protected_border: String,
+    pub diff_colors: DiffColorsDto,
 }
 #[derive(Serialize, Clone, PartialEq, Debug)]
 pub struct SlotDto {
@@ -65,6 +74,7 @@ pub struct ArchiveNoticeDto {
 #[serde(rename_all = "camelCase")]
 pub struct BannersDto {
     pub review_count: usize,
+    pub review_names: Vec<String>,
     pub problem_lines: Vec<String>,
     pub confirm: Option<String>,
     pub archive: Option<ArchiveNoticeDto>,
@@ -76,6 +86,10 @@ pub struct SnapshotDto {
     pub rev: u64,
     pub history_rev: u64,
     pub project: String,
+    pub project_id: String,
+    pub project_path: String,
+    pub channel_id: String,
+    pub agent_id: String,
     pub channel: String,
     pub agent: String,
     pub provider: String,
@@ -86,6 +100,7 @@ pub struct SnapshotDto {
     pub prompts: Vec<PromptDto>,
     pub pending_approvals: usize,
     pub unread: bool,
+    pub new_anchor_id: Option<String>,
     pub archived: bool,
     pub archive_busy: bool,
     pub member_list_visible: bool,
@@ -119,6 +134,10 @@ fn sample_snapshot() -> SnapshotDto {
         rev: 1,
         history_rev: 0,
         project: "Example".into(),
+        project_id: "project".into(),
+        project_path: "/project".into(),
+        channel_id: "channel".into(),
+        agent_id: "agent".into(),
         channel: "general".into(),
         agent: "Agent".into(),
         provider: "example".into(),
@@ -131,6 +150,7 @@ fn sample_snapshot() -> SnapshotDto {
         prompts: vec![],
         pending_approvals: 0,
         unread: false,
+        new_anchor_id: None,
         archived: false,
         archive_busy: false,
         member_list_visible: true,
@@ -142,6 +162,7 @@ fn sample_snapshot() -> SnapshotDto {
         slots: BTreeMap::new(),
         banners: BannersDto {
             review_count: 0,
+            review_names: vec![],
             problem_lines: vec![],
             confirm: None,
             archive: None,
@@ -156,6 +177,7 @@ fn sample_snapshot() -> SnapshotDto {
             protected_bg: "#000000".into(),
             protected_fg: "#ffffff".into(),
             protected_border: "#ffffff".into(),
+            diff_colors: DiffColorsDto { added: "#ffffff".into(), removed: "#ffffff".into(), inline_added: "#ffffff".into(), inline_removed: "#ffffff".into() },
         },
     }
 }
@@ -203,5 +225,51 @@ mod tests {
             std::fs::write(&path, &actual).unwrap();
         }
         assert_eq!(actual, std::fs::read_to_string(path).unwrap());
+    }
+}
+
+/// A context menu target sent by the webview.
+#[derive(serde::Deserialize, Clone, Debug)]
+#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum ContextTargetDto {
+    Message { id: String, has_text: bool },
+    CodeBlock { message_id: String, block: usize },
+    DiffBlock { message_id: String, block: usize },
+    ToolCall { message_id: String, block: usize, has_output: bool },
+    Channel { id: String },
+    Agent { id: String, name: String },
+    Server { id: String, name: String, path: String },
+}
+impl From<ContextTargetDto> for discard_core::context_menu::ContextTarget {
+    fn from(target: ContextTargetDto) -> Self {
+        use discard_core::context_menu::ContextTarget as T;
+        match target {
+            ContextTargetDto::Message { id, has_text } => T::Message { id, has_text },
+            ContextTargetDto::CodeBlock { message_id, block } => T::CodeBlock { message_id, block },
+            ContextTargetDto::DiffBlock { message_id, block } => T::DiffBlock { message_id, block },
+            ContextTargetDto::ToolCall { message_id, block, has_output } => T::ToolCall { message_id, block, has_output },
+            ContextTargetDto::Channel { id } => T::Channel { id },
+            ContextTargetDto::Agent { id, name } => T::Agent { id, name },
+            ContextTargetDto::Server { id, name, path } => T::Server { id, name, path },
+        }
+    }
+}
+/// A context menu entry for the webview.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MenuEntryDto {
+    Action { id: String, label: String, enabled: bool },
+    Plugin { plugin: String, index: usize, label: String },
+    Separator,
+}
+impl MenuEntryDto {
+    pub fn from_entry(entry: discard_core::action::MenuEntry) -> Option<Self> {
+        use discard_core::action::MenuEntry;
+        match entry {
+            MenuEntry::Action { action, label, enabled, .. } => Some(Self::Action { id: action.id().into(), label, enabled }),
+            MenuEntry::Plugin { plugin, index, label } => Some(Self::Plugin { plugin, index, label }),
+            MenuEntry::Separator => Some(Self::Separator),
+            _ => None,
+        }
     }
 }

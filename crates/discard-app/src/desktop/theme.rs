@@ -1,5 +1,5 @@
 //! Theme resolution without GUI dependencies.
-use super::dto::ThemeDto;
+use super::dto::{DiffColorsDto, ThemeDto};
 use discard_core::ghostty::color::Rgb as CoreRgb;
 use discard_core::ghostty::live::LiveTheme;
 use discard_core::ghostty::lookup::ThemeDirs;
@@ -8,7 +8,7 @@ use discard_core::ghostty::resolve::{ThemeProblem, ghostty_config_paths};
 use discard_core::ghostty::spec::Appearance;
 use discard_core::settings::AppearanceSettings;
 use discard_lua::theme::{
-    ProtectedPalette, Rgb, ThemeOverrides, contrast_ratio, protected_palette,
+    ProtectedPalette, Rgb, ThemeOverrides, contrast_ratio, protected_palette, protected_accent, MIN_CONTRAST,
 };
 use std::path::{Path, PathBuf};
 const TOKENS: [&str; 14] = [
@@ -222,6 +222,11 @@ fn compute(
 pub fn contrast_ok(fg: Rgb, bg: Rgb) -> bool {
     contrast_ratio(fg, bg) >= 4.5
 }
+/// Diff colors use the Ghostty palette and remain readable on their background.
+pub fn diff_palette(ui: &UiColors, on_block: bool) -> (String, String) {
+    let palette = ProtectedPalette { background: to_lua(if on_block { ui.muted } else { ui.background }), foreground: to_lua(ui.foreground), border: to_lua(ui.border) };
+    (protected_accent(&palette, to_lua(ui.diff_added), MIN_CONTRAST).to_hex(), protected_accent(&palette, to_lua(ui.diff_removed), MIN_CONTRAST).to_hex())
+}
 pub fn theme_dto(state: &AppearanceState, _mode: Appearance) -> ThemeDto {
     let ui = state.effective();
     let overrides = as_overrides(ui);
@@ -239,6 +244,8 @@ pub fn theme_dto(state: &AppearanceState, _mode: Appearance) -> ThemeDto {
         PROTECTED_DEFAULT
     };
     let (font_scale, spacing_scale) = state.scales();
+    let (added, removed) = diff_palette(ui, true);
+    let (inline_added, inline_removed) = diff_palette(ui, false);
     ThemeDto {
         mode: if ui.background.is_dark() {
             "dark"
@@ -253,6 +260,7 @@ pub fn theme_dto(state: &AppearanceState, _mode: Appearance) -> ThemeDto {
         protected_bg: palette.background.to_hex(),
         protected_fg: palette.foreground.to_hex(),
         protected_border: palette.border.to_hex(),
+        diff_colors: DiffColorsDto { added, removed, inline_added, inline_removed },
     }
 }
 #[cfg(test)]
@@ -268,6 +276,16 @@ mod tests {
     }
 
     const DARK: &str = "background = #101010\nforeground = #f0f0f0\npalette = 1=#ff0000\npalette = 2=#00ff00\npalette = 3=#ffff00\npalette = 4=#0000ff\n";
+
+    #[test]
+    fn diff_colors_use_ghostty_palette_and_fall_back_when_unreadable() {
+        let mut colors = ui(DARK);
+        colors.muted = colors.background;
+        colors.diff_added = colors.background;
+        let (added, removed) = diff_palette(&colors, true);
+        assert_eq!(added, to_lua(colors.foreground).to_hex());
+        assert_eq!(removed, to_lua(colors.diff_removed).to_hex());
+    }
 
     #[test]
     fn plugin_tokens_replace_the_ghostty_tokens() {

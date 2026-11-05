@@ -24,7 +24,14 @@ pub async fn pump(
     loop {
         tokio::select! {
             update = updates.recv() => match update {
-                Some(update) => { core.apply(update); dirty = true; }
+                Some(update) => {
+                    if core.apply(update) {
+                        let generation = core.request_branch_refresh();
+                        let branch_core = core.clone();
+                        tokio::task::spawn_blocking(move || branch_core.refresh_branches(generation));
+                    }
+                    dirty = true;
+                }
                 None => {
                     if dirty { emit_current(&core, &*emit, &mut history_rev); }
                     break;

@@ -93,7 +93,7 @@ fn run_app(
     options: &args::Options,
     data_dir: &Path,
     settings: SettingsStore,
-    _relaunch: Relaunch,
+    relaunch: Relaunch,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let settings = Arc::new(Mutex::new(settings));
     let project_dir = std::env::current_dir()?;
@@ -185,6 +185,8 @@ fn run_app(
     let (updates_tx, updates_rx) = mpsc::unbounded_channel();
 
     let git_workspace = Arc::new(GitWorkspace::new(&data_dir.join("worktrees"), Arc::clone(&store)));
+    let branch_worktree = lock(&store).worktree_for(&workspace.channel.id)?.map(|record| std::path::PathBuf::from(record.path));
+    let branch_dir = desktop::windows::branch_current_directory(Some(workspace.channel.workspace_mode), &project_dir, branch_worktree.as_deref());
     let engine = Engine {
         store: Arc::clone(&store),
         agent_id: workspace.channel.agent_id.clone(),
@@ -198,7 +200,7 @@ fn run_app(
         provider: provider_for(&workspace.agent.provider)?,
         channel_id: workspace.channel.id.clone(),
         session_id: workspace.session_id.clone(),
-        cwd: project_dir,
+        cwd: project_dir.clone(),
         model: workspace.agent.model.clone(),
         system_prompt: Some(workspace.agent.system_prompt.clone()).filter(|p| !p.is_empty()),
         policy: workspace.agent.policy,
@@ -212,7 +214,7 @@ fn run_app(
         channel: workspace.channel.name,
         agent: workspace.agent.name,
         provider: workspace.agent.provider,
-    }, updates_rx, runtime.handle().clone(), settings, plugins, data_dir.to_path_buf())?;
+    }, updates_rx, runtime.handle().clone(), settings, plugins, data_dir.to_path_buf(), desktop::DesktopConfig { project_dir, project_id: workspace.project.id.0.clone(), agent_id: workspace.channel.agent_id.0.clone(), channel_dir: branch_dir, channel_id: workspace.channel.id.clone(), load_report, workspace: git_workspace, store, workspace_mode: workspace.channel.workspace_mode, relaunch })?;
     Ok(())
 }
 

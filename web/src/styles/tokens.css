@@ -21,9 +21,14 @@
   --protected-bg: #1e1e1e;
   --protected-fg: #f0f0f0;
   --protected-border: #ffaa00;
+  --diff-added: var(--success);
+  --diff-removed: var(--danger);
+  --diff-added-inline: var(--success);
+  --diff-removed-inline: var(--danger);
 }
 
 @theme inline {
+  --spacing: calc(0.25rem * var(--space-scale));
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-sidebar: var(--sidebar);
@@ -55,4 +60,13 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }

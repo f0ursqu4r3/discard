@@ -1,0 +1,118 @@
+//! Persistence helpers for the main window.
+use discard_core::window_state::{Bounds, StateStore};
+
+/// Save bounds only when enough of the window is visible on a screen.
+pub fn save_restorable_bounds(store: &mut StateStore, bounds: Bounds, screens: &[Bounds]) -> Result<(), String> {
+    if bounds.is_restorable(screens) { store.set_bounds(bounds)?; }
+    Ok(())
+}
+
+/// Choose the directory represented by the current channel.
+pub fn branch_current_directory(mode: Option<discard_core::model::WorkspaceMode>, project: &std::path::Path, worktree: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    use discard_core::model::WorkspaceMode;
+    match mode {
+        Some(WorkspaceMode::MainCheckout) => Some(project.to_path_buf()),
+        Some(WorkspaceMode::Worktree) => worktree.map(std::path::Path::to_path_buf),
+        None => None,
+    }
+}
+
+/// Decide whether to prevent a close request and show a confirmation.
+pub fn request_main_close(core: &super::core::AppCore, is_main: bool, confirm_while_working: bool) -> bool {
+    let ctx = core.menu_context();
+    if let super::plan::Close::Ask(ending) = super::plan::close_plan(is_main, ctx.turn_running, confirm_while_working) {
+        core.ask(ending);
+        true
+    } else { false }
+}
+
+/// The channel unread indicator and pending approval count.
+pub fn channel_indicators(messages: &[discard_core::model::Message], marker: Option<&str>, pending: usize) -> (bool, usize) {
+    (discard_core::ui_state::first_unread_index(messages, marker).is_some(), pending)
+}
+/// A confirmation no longer applies after the turn ends.
+pub fn should_clear_confirm(running: bool, pending: bool) -> bool { !running && pending }
+
+/// Read the window and monitor bounds in logical points.
+pub fn window_geometry<R: tauri::Runtime>(window: &tauri::Window<R>) -> Option<(Bounds, Vec<Bounds>)> {
+    let scale = window.scale_factor().ok()? as f32;
+    let pos = window.outer_position().ok()?;
+    let size = window.outer_size().ok()?;
+    let bounds = Bounds { x: pos.x as f32 / scale, y: pos.y as f32 / scale, width: size.width as f32 / scale, height: size.height as f32 / scale };
+    let screens = window.available_monitors().ok()?.iter().map(|m| {
+        let scale = m.scale_factor() as f32;
+        let pos = m.position();
+        let size = m.size();
+        Bounds { x: pos.x as f32 / scale, y: pos.y as f32 / scale, width: size.width as f32 / scale, height: size.height as f32 / scale }
+    }).collect();
+    Some((bounds, screens))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use discard_core::window_state::{Bounds, StateStore};
+
+    #[test]
+    fn branch_current_directory_follows_channel_workspace_mode() {
+        use discard_core::model::WorkspaceMode;
+        use std::path::{Path, PathBuf};
+        assert_eq!(branch_current_directory(Some(WorkspaceMode::MainCheckout), Path::new("/repo/sub"), None), Some(PathBuf::from("/repo/sub")));
+        assert_eq!(branch_current_directory(Some(WorkspaceMode::Worktree), Path::new("/repo"), Some(Path::new("/work"))), Some(PathBuf::from("/work")));
+        assert_eq!(branch_current_directory(Some(WorkspaceMode::Worktree), Path::new("/repo"), None), None);
+        assert_eq!(branch_current_directory(None, Path::new("/repo"), None), None);
+    }
+
+    #[test]
+    fn close_request_prevents_close_and_shows_confirmation_during_a_turn() {
+        use crate::desktop::core::{AppCore, CoreInit};
+        use discard_core::{model::ChannelId, ui_state::UiState};
+        let (commands, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let core = AppCore::new(CoreInit { state: UiState::new(ChannelId::new(), vec![]), commands, project: "p".into(), channel: "c".into(), agent: "a".into(), provider: "p".into() });
+        core.send("hello".into());
+        assert!(request_main_close(&core, true, true));
+        assert_eq!(core.snapshot().banners.confirm.as_deref(), Some("The agent is working. Quit Discard and stop the turn?"));
+    }
+
+    #[test]
+    fn channel_indicators_report_unread_and_pending() {
+        use discard_core::model::{ChannelId, Message, MessageId, Role};
+        let channel = ChannelId::new();
+        let make = |id: &str, role| Message { id: MessageId(id.into()), channel_id: channel.clone(), role, blocks: vec![] };
+        let messages = vec![make("a", Role::User), make("b", Role::Agent), make("c", Role::User)];
+        assert_eq!(channel_indicators(&[], Some("a"), 2), (false, 2));
+        assert!(!channel_indicators(&messages[..1], Some("a"), 0).0);
+        assert!(channel_indicators(&messages, None, 0).0);
+        assert!(!channel_indicators(&messages, Some("missing"), 0).0);
+        assert!(channel_indicators(&messages, Some("a"), 0).0);
+        assert!(!channel_indicators(&messages, Some("b"), 0).0);
+        assert!(!channel_indicators(&messages, Some("c"), 0).0);
+    }
+    #[test]
+    fn clears_pending_confirmation_when_turn_ends() {
+        assert!(should_clear_confirm(false, true));
+        assert!(!should_clear_confirm(true, true));
+        assert!(!should_clear_confirm(false, false));
+    }
+
+    #[test]
+    fn bounds_saved_only_when_restorable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = StateStore::open(&dir.path().join("state.toml"));
+        let screens = [Bounds { x: 0.0, y: 0.0, width: 1920.0, height: 1080.0 }];
+        let outside = Bounds { x: 3000.0, y: 0.0, width: 800.0, height: 600.0 };
+        save_restorable_bounds(&mut state, outside, &screens).unwrap();
+        assert_eq!(state.state().bounds, None);
+        let inside = Bounds { x: 10.0, ..outside };
+        save_restorable_bounds(&mut state, inside, &screens).unwrap();
+        assert_eq!(state.state().bounds, Some(inside));
+    }
+}
+
+#[cfg(all(test, feature = "custom-protocol"))]
+mod startup_tests {
+    #[test]
+    fn normal_cargo_run_uses_bundled_assets() {
+        assert!(!tauri::is_dev(), "the default build must use the bundled web assets");
+    }
+}

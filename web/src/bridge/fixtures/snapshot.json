@@ -2,6 +2,10 @@
   "rev": 1,
   "historyRev": 0,
   "project": "Example",
+  "projectId": "project",
+  "projectPath": "/project",
+  "channelId": "channel",
+  "agentId": "agent",
   "channel": "general",
   "agent": "Agent",
   "provider": "example",
@@ -17,6 +21,7 @@
   "prompts": [],
   "pendingApprovals": 0,
   "unread": false,
+  "newAnchorId": null,
   "archived": false,
   "archiveBusy": false,
   "memberListVisible": true,
@@ -28,6 +33,7 @@
   "slots": {},
   "banners": {
     "reviewCount": 0,
+    "reviewNames": [],
     "problemLines": [],
     "confirm": null,
     "archive": null,
@@ -41,6 +47,12 @@
     "spacingScale": 1.0,
     "protectedBg": "#000000",
     "protectedFg": "#ffffff",
-    "protectedBorder": "#ffffff"
+    "protectedBorder": "#ffffff",
+    "diffColors": {
+      "added": "#ffffff",
+      "removed": "#ffffff",
+      "inlineAdded": "#ffffff",
+      "inlineRemoved": "#ffffff"
+    }
   }
 }

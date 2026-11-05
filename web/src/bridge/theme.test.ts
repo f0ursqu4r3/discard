@@ -22,3 +22,11 @@ test('removes tokens that are absent from the next theme', () => {
   applyTheme({ ...theme, tokens: {} }, root)
   expect(root.style.getPropertyValue('--warning')).toBe('')
 })
+
+test('applies the resolved diff colors', () => {
+  const root = document.createElement('div')
+  const theme: ThemeDto = { mode: 'dark', tokens: {}, radius: null, fontScale: 1, spacingScale: 1, protectedBg: '#000000', protectedFg: '#ffffff', protectedBorder: '#aaaaaa', diffColors: { added: '#123456', removed: '#abcdef', inlineAdded: '#654321', inlineRemoved: '#fedcba' } }
+  applyTheme(theme, root)
+  expect(root.style.getPropertyValue('--diff-added')).toBe('#123456')
+  expect(root.style.getPropertyValue('--diff-removed-inline')).toBe('#fedcba')
+})

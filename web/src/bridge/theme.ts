@@ -15,5 +15,10 @@ export function applyTheme(theme: ThemeDto, root: HTMLElement) {
   root.style.setProperty('--protected-bg', theme.protectedBg)
   root.style.setProperty('--protected-fg', theme.protectedFg)
   root.style.setProperty('--protected-border', theme.protectedBorder)
+  const diffColors = theme.diffColors
+  for (const [name, value] of [['--diff-added', diffColors?.added], ['--diff-removed', diffColors?.removed], ['--diff-added-inline', diffColors?.inlineAdded], ['--diff-removed-inline', diffColors?.inlineRemoved]] as const) {
+    if (value) root.style.setProperty(name, value)
+    else root.style.removeProperty(name)
+  }
   root.classList.toggle('dark', theme.mode === 'dark')
 }

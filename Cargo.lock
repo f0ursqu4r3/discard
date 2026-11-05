@@ -1654,6 +1654,8 @@ dependencies = [
  "discard-providers",
  "discard-ui",
  "keyring",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
  "serde",
  "serde_json",
  "tauri",
