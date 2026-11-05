@@ -4,7 +4,8 @@ use discard_core::approval::Decision;
 use discard_core::event::{AgentStatus, ApprovalId};
 use discard_core::model::{Block, Message, Role};
 use discard_core::timeline::{ApprovalPrompt, ApprovalView};
-use discard_core::worktree::{BranchEntry, list_branches};
+use discard_core::worktree::list_branch_tree;
+use discard_core::branch_tree::{TreeRow, RowKind, current_row, visible_rows};
 use crate::dispatch::{self, Confirm};
 use crate::menus;
 use crate::appearance::{self, AppearanceState};
@@ -20,7 +21,7 @@ use discard_core::settings::SettingsStore;
 use discard_lua::theme::{ProtectedPalette, ThemeOverrides, protected_palette, protected_accent, MIN_CONTRAST};
 use discard_core::diff::{classify_line, looks_like_unified_diff, LineKind};
 use discard_lua::{LoadReport, PluginService, Rendered};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -58,6 +59,15 @@ fn settings_target(count: usize) -> (Action, String) {
     else { (Action::OpenSettings, "Settings".into()) }
 }
 
+fn branch_current_directory(mode: Option<discard_core::model::WorkspaceMode>, project: &std::path::Path, worktree: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    use discard_core::model::WorkspaceMode;
+    match mode {
+        Some(WorkspaceMode::MainCheckout) => Some(project.to_path_buf()),
+        Some(WorkspaceMode::Worktree) => worktree.map(std::path::Path::to_path_buf),
+        None => None,
+    }
+}
+
 /// Up to two capital letters for a server icon. Words split on anything that is not a letter or digit.
 /// A one-word name gives its first two letters.
 fn server_initials(name: &str) -> String {
@@ -87,7 +97,9 @@ pub struct ViewData {
 
 pub struct DiscardView {
     data: ViewData,
-    branches: Vec<BranchEntry>,
+    branch_rows: Vec<TreeRow>,
+    current_branch_row: Option<usize>,
+    collapsed: HashSet<String>,
     branch_refresh: u64,
     server_hovered: bool,
     plugins: Arc<PluginService>,
@@ -155,7 +167,7 @@ impl DiscardView {
         let handle = window.window_handle();
         let project_path = data.project_path.clone();
         cx.spawn(async move |this, cx| {
-            let task = cx.background_spawn(async move { list_branches(std::path::Path::new(&project_path)) });
+            let task = cx.background_spawn(async move { list_branch_tree(std::path::Path::new(&project_path)) });
             let result = task.await;
             let _ = this.update(cx, |view, cx| {
                 if view.branch_refresh == 0 { view.set_branches(result, cx); }
@@ -269,7 +281,9 @@ impl DiscardView {
 
         Self {
             data,
-            branches: Vec::new(),
+            branch_rows: Vec::new(),
+            current_branch_row: None,
+            collapsed: HashSet::new(),
             branch_refresh: 0,
             server_hovered: false,
             plugins,
@@ -607,10 +621,21 @@ fn status_label(status: AgentStatus) -> &'static str {
 }
 
 impl DiscardView {
-    fn set_branches(&mut self, result: discard_core::worktree::Result<Vec<BranchEntry>>, cx: &mut Context<Self>) {
-        self.branches = result.unwrap_or_else(|error| {
+    fn set_branches(&mut self, result: discard_core::worktree::Result<Vec<TreeRow>>, cx: &mut Context<Self>) {
+        self.branch_rows = result.unwrap_or_else(|error| {
             tracing::warn!(%error, "cannot list branches");
             Vec::new()
+        });
+        let cwd = cx.try_global::<Shared>().and_then(|shared| {
+            let store = shared.store.lock().unwrap_or_else(|p| p.into_inner());
+            let channel = store.all_channels_for_project(&discard_core::model::ProjectId(self.data.project_id.clone())).ok()?
+                .into_iter().find(|(channel, _)| channel.id.0 == self.channel_id)?.0;
+            let record = store.worktree_for(&channel.id).ok().flatten();
+            branch_current_directory(Some(channel.workspace_mode), std::path::Path::new(&self.data.project_path), record.as_ref().map(|record| std::path::Path::new(&record.path)))
+        });
+        self.current_branch_row = cwd.as_ref().and_then(|cwd| {
+            let path = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
+            current_row(&self.branch_rows, &path)
         });
         cx.notify();
     }
@@ -620,7 +645,7 @@ impl DiscardView {
         let generation = self.branch_refresh;
         let path = self.data.project_path.clone();
         cx.spawn(async move |this, cx| {
-            let task = cx.background_spawn(async move { list_branches(std::path::Path::new(&path)) });
+            let task = cx.background_spawn(async move { list_branch_tree(std::path::Path::new(&path)) });
             let result = task.await;
             let _ = this.update(cx, |view, cx| {
                 if view.branch_refresh == generation { view.set_branches(result, cx); }
@@ -735,15 +760,27 @@ impl DiscardView {
                         .context_menu({ let target = ContextTarget::Channel { id: self.channel_id.clone() }; menus::to_popup(context_menu(&target, &self.menu_ctx), target) }),
                 ),
             )
-            .when(!self.branches.is_empty(), |panel| panel.child(
+            .when(!self.branch_rows.is_empty(), |panel| panel.child(
                 v_flex().id("branch-list").flex_1().min_h_0().overflow_y_scroll().px(self.space(4.0))
                     .child(div().pt(self.space(2.0)).pb(self.space(1.0)).text_xs().text_color(cx.theme().muted_foreground).child("BRANCHES"))
-                    .children(self.branches.iter().map(|entry| {
-                        let tag = if entry.is_main_checkout { "main" } else if entry.worktree.is_some() { "worktree" } else { "" };
-                        h_flex().w_full().min_w_0().items_center().gap(self.space(2.0)).py(self.space(1.0)).text_sm()
+                    .children(visible_rows(&self.branch_rows, &self.collapsed).into_iter().map(|entry| {
+                        let has_children = self.branch_rows.iter().any(|row| row.parent.as_deref() == Some(&entry.name));
+                        let is_current = self.current_branch_row.is_some_and(|index| std::ptr::eq(&self.branch_rows[index], entry));
+                        let name = entry.name.clone();
+                        let toggle_name = name.clone();
+                        let indicator = if has_children { if self.collapsed.contains(&name) { "▸" } else { "▾" } } else { " " };
+                        h_flex().id(format!("branch-row-{name}")).w_full().min_w_0().items_center().gap(self.space(1.0)).px(self.space(2.0)).py(self.space(1.0)).rounded_md().text_sm()
+                            .when(entry.depth() == 1, |row| row.pl(self.space(6.0)))
                             .text_color(if entry.worktree.is_some() { cx.theme().sidebar_foreground } else { cx.theme().muted_foreground })
-                            .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(entry.branch.clone()))
-                            .child(div().flex_none().text_xs().child(tag))
+                            .when(is_current, |row| row.bg(cx.theme().sidebar_accent).text_color(cx.theme().sidebar_accent_foreground))
+                            .when(has_children, |row| row.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.collapsed.remove(&toggle_name) { this.collapsed.insert(toggle_name.clone()); }
+                                cx.notify();
+                            })))
+                            .child(div().flex_none().child(indicator))
+                            .child(div().flex_none().child(if entry.worktree.is_some() { "●" } else { " " }))
+                            .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(name))
+                            .when(entry.kind == RowKind::Main, |row| row.child(div().flex_none().text_xs().child("main")))
                     }))
             ))
 
@@ -1186,6 +1223,16 @@ fn should_clear_confirm(turn_running: bool, pending: bool) -> bool { !turn_runni
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn branch_current_directory_follows_channel_workspace_mode() {
+        use discard_core::model::WorkspaceMode;
+        use std::path::{Path, PathBuf};
+        assert_eq!(super::branch_current_directory(Some(WorkspaceMode::MainCheckout), Path::new("/repo/sub"), None), Some(PathBuf::from("/repo/sub")));
+        assert_eq!(super::branch_current_directory(Some(WorkspaceMode::Worktree), Path::new("/repo"), Some(Path::new("/work"))), Some(PathBuf::from("/work")));
+        assert_eq!(super::branch_current_directory(Some(WorkspaceMode::Worktree), Path::new("/repo"), None), None);
+        assert_eq!(super::branch_current_directory(None, Path::new("/repo"), None), None);
+    }
+
     #[test]
     fn chrome_icons_are_in_the_default_bundle() {
         use gpui_kit::AssetSource as _;

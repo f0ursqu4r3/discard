@@ -34,31 +34,45 @@ pub struct BranchEntry {
     pub branch: String,
     pub worktree: Option<PathBuf>,
     pub is_main_checkout: bool,
-    pub is_current: bool,
+    pub detached: bool,
     pub is_discard: bool,
 }
 
 /// Combine local branch refs with their checked-out worktrees.
 pub fn parse_branches(worktree_porcelain: &str, branch_refs: &str) -> Vec<BranchEntry> {
     let mut checkouts = HashMap::new();
+    let mut detached_entries = Vec::new();
     for (index, block) in worktree_porcelain.split("\n\n").filter(|block| !block.trim().is_empty()).enumerate() {
         let mut path = None;
         let mut branch = None;
         let mut bare = false;
+        let mut detached = false;
+        let mut prunable = false;
+        let mut head = None;
         for line in block.lines() {
             if let Some(value) = line.strip_prefix("worktree ") { path = Some(PathBuf::from(value)); }
             if let Some(value) = line.strip_prefix("branch refs/heads/") { branch = Some(value); }
             if line == "bare" { bare = true; }
+            if line == "detached" { detached = true; }
+            if line.starts_with("prunable") { prunable = true; }
+            if let Some(value) = line.strip_prefix("HEAD ") { head = Some(value); }
         }
-        if !bare && let (Some(branch), Some(path)) = (branch, path) {
-            checkouts.insert(branch, (path, index == 0));
+        if !bare && !prunable && let Some(path) = path {
+            if detached {
+                if let Some(head) = head.filter(|head| !head.is_empty()) {
+                    detached_entries.push(BranchEntry { branch: head.chars().take(7).collect(), worktree: Some(path), is_main_checkout: index == 0, detached: true, is_discard: false });
+                }
+            } else if let Some(branch) = branch {
+                checkouts.insert(branch, (path, index == 0));
+            }
         }
     }
     let mut entries: Vec<_> = branch_refs.lines().filter(|name| !name.is_empty()).map(|name| {
         let checkout = checkouts.get(name);
         let is_main_checkout = checkout.is_some_and(|(_, main)| *main);
-        BranchEntry { branch: name.to_string(), worktree: checkout.map(|(path, _)| path.clone()), is_main_checkout, is_current: is_main_checkout, is_discard: name.starts_with("discard/") }
+        BranchEntry { branch: name.to_string(), worktree: checkout.map(|(path, _)| path.clone()), is_main_checkout, detached: false, is_discard: name.starts_with("discard/") }
     }).collect();
+    entries.extend(detached_entries);
     entries.sort_by(|a, b| {
         let rank = |e: &BranchEntry| if e.is_main_checkout { 0 } else if e.worktree.is_some() { 1 } else { 2 };
         rank(a).cmp(&rank(b)).then_with(|| a.branch.cmp(&b.branch))
@@ -73,6 +87,23 @@ pub fn list_branches(repo: &Path) -> Result<Vec<BranchEntry>> {
     let worktrees = git(repo, &["worktree", "list", "--porcelain"])?;
     let branches = git(repo, &["for-each-ref", "--format=%(refname:short)", "refs/heads"])?;
     Ok(parse_branches(&worktrees, &branches))
+}
+
+/// Read branches and order them by their worktree ancestry.
+pub fn list_branch_tree(repo: &Path) -> Result<Vec<crate::branch_tree::TreeRow>> {
+    let entries = list_branches(repo)?;
+    let mut distances = HashMap::new();
+    for entry in entries.iter().filter(|entry| entry.worktree.is_some()) {
+        if let Ok(branches) = git(repo, &["for-each-ref", "--contains", &entry.branch, "--format=%(refname:short)", "refs/heads"]) {
+            for branch in branches.lines() {
+                let range = format!("{}..{}", entry.branch, branch);
+                if let Ok(count) = git(repo, &["rev-list", "--count", &range]) && let Ok(count) = count.parse() {
+                    distances.insert((entry.branch.clone(), branch.to_string()), count);
+                }
+            }
+        }
+    }
+    Ok(crate::branch_tree::build_tree(&entries, &|worktree, branch| distances.get(&(worktree.to_string(), branch.to_string())).copied()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -340,7 +371,7 @@ mod tests {
         assert!(parse_branches("", "").is_empty());
         let entries = parse_branches("worktree /repo\nHEAD abc\nbranch refs/heads/main\n", "main\n");
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0], BranchEntry { branch: "main".into(), worktree: Some("/repo".into()), is_main_checkout: true, is_current: true, is_discard: false });
+        assert_eq!(entries[0], BranchEntry { branch: "main".into(), worktree: Some("/repo".into()), is_main_checkout: true, detached: false, is_discard: false });
     }
 
     #[test]
@@ -348,10 +379,10 @@ mod tests {
         let porcelain = "worktree /repo\nbranch refs/heads/z-main\n\nworktree /z\nbranch refs/heads/z/work\n\nworktree /a\nbranch refs/heads/discard/a\n\nworktree /detached\ndetached\n\nworktree /bare\nbare\nbranch refs/heads/bare-branch\n";
         let entries = parse_branches(porcelain, "z/work\nno/tree\nz-main\ndiscard/a\nbare-branch\n");
         assert_eq!(entries.iter().map(|e| e.branch.as_str()).collect::<Vec<_>>(), ["z-main", "discard/a", "z/work", "bare-branch", "no/tree"]);
-        assert!(entries[0].is_current && entries[0].is_main_checkout);
+        assert!(entries[0].is_main_checkout && !entries[0].detached);
         assert!(entries[1].is_discard && entries[1].worktree.as_deref() == Some(Path::new("/a")));
         assert_eq!(entries[2].worktree.as_deref(), Some(Path::new("/z")));
-        assert!(entries[3..].iter().all(|e| e.worktree.is_none() && !e.is_current));
+        assert!(entries[3..].iter().all(|e| e.worktree.is_none() && !e.detached));
     }
 
     #[test]
@@ -363,6 +394,61 @@ mod tests {
         assert_eq!(entries.iter().map(|e| e.branch.as_str()).collect::<Vec<_>>(), ["main", "feature/one"]);
         assert_eq!(entries[1].worktree.as_ref().unwrap().canonicalize().unwrap(), path.canonicalize().unwrap());
         assert!(matches!(list_branches(r._dir.path()), Err(WorktreeError::NotARepo(_))));
+    }
+
+    #[test]
+    fn parser_lists_a_detached_worktree_by_short_sha() {
+        let entries = parse_branches("worktree /repo\nHEAD aaaaaaaaaaaa\nbranch refs/heads/main\n\nworktree /d\nHEAD abcdef1234567890\ndetached\n", "main\n");
+        assert!(entries.contains(&BranchEntry { branch: "abcdef1".into(), worktree: Some("/d".into()), is_main_checkout: false, detached: true, is_discard: false }));
+    }
+
+    #[test]
+    fn parser_treats_a_prunable_worktree_as_no_worktree() {
+        let entries = parse_branches("worktree /repo\nbranch refs/heads/main\n\nworktree /gone\nHEAD abc\nbranch refs/heads/gone\nprunable gitdir file points to non-existent location\n", "main\ngone\n");
+        assert_eq!(entries.iter().find(|e| e.branch == "gone").unwrap().worktree, None);
+    }
+
+    #[test]
+    fn parser_skips_a_detached_block_with_no_head_line() {
+        assert!(parse_branches("worktree /x\ndetached\n", "").is_empty());
+    }
+
+    #[test]
+    fn parser_never_marks_a_bare_first_block_as_main() {
+        let entries = parse_branches("worktree /bare\nbare\n\nworktree /w\nbranch refs/heads/w\n", "w\n");
+        assert!(!entries[0].is_main_checkout);
+    }
+
+    #[test]
+    fn list_branch_tree_nests_by_ancestry_in_a_real_repository() {
+        use crate::branch_tree::RowKind;
+        let r = rig();
+        git(&r.repo, &["branch", "old"]);
+        git(&r.repo, &["commit", "--allow-empty", "-q", "-m", "main"]);
+        let path = r._dir.path().join("other");
+        git(&r.repo, &["worktree", "add", "-q", "-b", "feature/one", path.to_str().unwrap()]);
+        git(&path, &["commit", "--allow-empty", "-q", "-m", "one"]);
+        git(&path, &["checkout", "-q", "-b", "feature/two"]);
+        git(&path, &["commit", "--allow-empty", "-q", "-m", "two"]);
+        git(&path, &["checkout", "-q", "feature/one"]);
+        let rows = list_branch_tree(&r.repo).unwrap();
+        assert_eq!(rows.iter().map(|r| (r.name.as_str(), r.kind, r.parent.as_deref())).collect::<Vec<_>>(), [
+            ("main", RowKind::Main, None), ("old", RowKind::Branch, Some("main")),
+            ("feature/one", RowKind::Worktree, None), ("feature/two", RowKind::Branch, Some("feature/one")),
+        ]);
+    }
+
+    #[test]
+    fn list_branch_tree_is_empty_for_a_repository_with_no_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q"]);
+        assert!(list_branch_tree(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_branch_tree_reports_a_non_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(list_branch_tree(dir.path()), Err(WorktreeError::NotARepo(_))));
     }
 
     fn git(dir: &Path, args: &[&str]) -> String {

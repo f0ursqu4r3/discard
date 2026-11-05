@@ -30,7 +30,14 @@ other. Worktrees live under `$DISCARD_HOME/worktrees/` (default `~/.discard/work
 
 ## Branch list
 
-The channel list shows local branches and marks the main checkout and other worktrees. The list is read-only.
+The channel list shows local branches in a two-level tree. The main checkout and other worktrees are top-level
+rows. A branch without a worktree appears below the worktree whose branch tip is its closest ancestor. If no
+worktree branch is an ancestor, it appears below the main checkout. Ties go to the main checkout, then the
+worktree branch with the first name alphabetically.
+
+A filled marker shows a row with a worktree. Rows without a worktree are dimmed. The current channel's worktree
+row is highlighted, and the main checkout has a `main` tag. Click a parent row to collapse or expand its
+branches. Rows do not start any other actions yet.
 
 ## Archiving
 
