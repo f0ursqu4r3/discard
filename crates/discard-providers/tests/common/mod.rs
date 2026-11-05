@@ -78,6 +78,7 @@ where
     Fut: Future<Output = ()>,
 {
     let spec = SessionSpec {
+        mode: discard_core::provider::SessionMode::Coding,
         cwd: PathBuf::from("."),
         model: None,
         system_prompt: None,

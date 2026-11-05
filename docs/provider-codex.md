@@ -75,3 +75,15 @@ the generated types. It reads the few fields it needs.
 
 Run `discard --provider codex` (or set `DISCARD_PROVIDER`). Each project gets one channel per provider, with
 its own agent and session.
+
+## Conversation sessions
+
+`SessionMode::Conversation` uses a fresh, empty Discard-owned working directory. It starts a new ephemeral thread for each replay. It rejects native resume handles. The selected model must have an exact slug in the installed Codex 0.166.0 model cache. Discard resolves that cache from the provider's `CODEX_HOME`, or `HOME/.codex`. If the cache is missing, open Codex and refresh its model list before retrying. Discard does not change the user's cache, configuration, or authentication.
+
+Discard copies complete model records into a temporary startup catalog. It changes only tool capability fields: patch, shell, experimental tools, delegation, node REPL and tool mode. The model slug and context-window metadata stay intact. `allowProviderModelFallback` is false. `Provider::model_context_window` returns the exact model's published limit when available.
+
+Before sending memory instructions, Discard reads effective configuration without starting a thread. It then disables every inherited named MCP server at startup and checks the final effective controls. It disables plugins, apps, native web, image generation, shell, code mode, delegation, skills, automatic memory, history-note tools, hooks and discovery. An inherited server named `discard-memory` produces an error because its settings could merge into the scoped server. A missing or overridden required control produces an error before prompt delivery.
+
+The only enabled MCP server is scoped Discard memory. The six memory tools appear directly. Codex also exposes three generic MCP resource helpers: `list_mcp_resources`, `list_mcp_resource_templates` and `read_mcp_resource`. These helpers use the same scoped server; they do not grant filesystem access. The empty working directory prevents project instruction discovery. Trusted provider-wide instructions, including global `AGENTS.md`, and administrator policy can still apply. This mode does not isolate the provider from its administrator.
+
+The supported version is pinned because tool registration and catalog fields can change. The opt-in synthetic probe at `.superpowers/sdd/2026-11-05-agents-and-memory/task-3-codex-probe.py` checks effective controls and the actual model-facing tool allowlist against a local test endpoint. It uses a temporary provider home and no real credentials. Ordinary process fixtures verify adapter behavior; they do not prove provider isolation by themselves.

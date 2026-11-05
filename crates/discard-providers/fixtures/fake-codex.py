@@ -4,7 +4,7 @@
 Env: FAKE_CODEX_MODE=approval|hang|exit_early|resume_reject|unsupported   FAKE_CODEX_LOG=<file>
      FAKE_CODEX_FIXTURE=<file>   FAKE_CODEX_CHILD_PID=<file>   FAKE_CODEX_LOGGED_IN=true|false
 """
-import json, os, subprocess, sys, time
+import json, os, subprocess, sys, time, re
 
 args = sys.argv[1:]
 mode = os.environ.get("FAKE_CODEX_MODE", "approval")
@@ -18,7 +18,7 @@ def log(text):
 
 
 if args[:1] == ["--version"]:
-    print("codex-cli 9.9.9")
+    print(os.environ.get("FAKE_CODEX_VERSION", "codex-cli 0.166.0"))
     sys.exit(0)
 if args[:2] == ["login", "status"]:
     if os.environ.get("FAKE_CODEX_LOGGED_IN", "true") == "true":
@@ -28,6 +28,21 @@ if args[:2] == ["login", "status"]:
     sys.exit(1)
 
 log("ARGS " + " ".join(args))
+log("CWD " + os.getcwd())
+effective = json.loads(os.environ.get("FAKE_CODEX_CONFIG", '{}'))
+for i, arg in enumerate(args[:-1]):
+    if arg == "-c":
+        key, raw_value = args[i + 1].split("=", 1)
+        keys = [json.loads(part) if part.startswith('"') else part for part in re.findall(r'"(?:[^"\\]|\\.)*"|[^.]+', key)]
+        target = effective
+        for part in keys[:-1]: target = target.setdefault(part, {})
+        value = json.loads(re.sub(r'("(?:[^"\\]|\\.)*")\s*=', r'\1:', raw_value))
+        def merge(target, source):
+            for key, value in source.items():
+                if isinstance(value, dict): merge(target.setdefault(key, {}), value)
+                else: target[key] = value
+        merge(target, {keys[-1]: value})
+if mode == "control_override": effective.setdefault("features", {})["shell_tool"] = True
 if mode == "exit_early":
     sys.stderr.write("codex: failed to start: invalid config\n")
     sys.exit(1)
@@ -50,6 +65,9 @@ init = read()
 send({"id": init["id"], "result": {"userAgent": "fake", "codexHome": "/tmp/fake-codex"}})
 read()  # the `initialized` notification
 thread = read()
+while thread["method"] == "config/read":
+    send({"id":thread["id"], "result":{"config":effective,"origins":{},"layers":[{"config":effective}]}})
+    thread = read()
 if thread["method"] == "thread/resume" and mode == "resume_reject":
     send({"id": thread["id"], "error": {"code": -32600, "message": "no rollout found for thread id " + thread["params"]["threadId"]}})
     sys.exit(0)

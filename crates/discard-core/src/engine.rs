@@ -231,6 +231,7 @@ impl Engine {
 
         let resume_handle = crate::driver::lock(&self.store).resume_handle(&self.session_id).ok().flatten();
         let spec = SessionSpec {
+            mode: crate::provider::SessionMode::Coding,
             cwd,
             model: self.model.clone(),
             system_prompt: prepared.as_ref().map(|p| p.system_prompt.clone()).or_else(|| self.system_prompt.clone()),

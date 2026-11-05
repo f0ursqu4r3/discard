@@ -66,3 +66,13 @@ Every emitted event keeps the original JSON line in `raw`.
 ## Codex
 
 See `docs/provider-codex.md`. The Codex matrix was verified against a live `codex app-server` in M4.
+
+## Conversation sessions
+
+`SessionMode::Conversation` requires Claude Code 2.1.318 and the documented conversation controls. It uses a fresh, empty Discard-owned working directory and rejects native resume handles. Discard supplies the selected model and refreshed system instructions for a new transcript replay.
+
+The adapter passes `--tools ""`, `--strict-mcp-config`, `--disable-slash-commands`, `--restricted` and `--system-prompt-snapshot off`. It accepts only the scoped Discard memory MCP configuration. It forces `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` in both process environment and explicit session settings. It disables hooks and removes inherited explicit plugin directories. Authentication uses the existing CLI login; Discard does not use `--bare`, copy credentials or change user settings.
+
+The adapter checks the CLI version and required help controls before sending instructions. It rejects detected local managed settings that conflict with memory, hooks or plugin restrictions. Managed policy remains authoritative. Claude can receive remote or MDM policy that the CLI does not expose through an effective-settings API. Discard cannot independently verify that opaque policy, and does not claim administrator or operating-system isolation.
+
+The opt-in synthetic probe at `.superpowers/sdd/2026-11-05-agents-and-memory/task-3-claude-probe.py` checks the actual model-facing tools against local test endpoints. The tested version exposed only the six Discard memory tools. The probe uses a temporary configuration directory and a synthetic API key. Process-fixture tests cover flags, environment overrides, fresh instructions and cleanup.

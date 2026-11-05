@@ -50,7 +50,10 @@ impl Rig {
     }
     /// The answer to a server request, by its id.
     fn answer(&self, id: Value) -> Value {
-        self.received().into_iter().find(|m| m.get("method").is_none() && m["id"] == id).unwrap_or_else(|| panic!("no answer for {id}: {}", self.log_text()))
+        self.received()
+            .into_iter()
+            .find(|m| m.get("method").is_none() && m["id"] == id)
+            .unwrap_or_else(|| panic!("no answer for {id}: {}", self.log_text()))
     }
 }
 
@@ -69,7 +72,15 @@ async fn wait_for_file(path: &Path) {
 }
 
 fn spec() -> SessionSpec {
-    SessionSpec { cwd: PathBuf::from("."), model: None, system_prompt: None, enforcement: EnforcementMode::HostPrompts, resume_handle: None, mcp_config: None }
+    SessionSpec {
+        mode: discard_core::provider::SessionMode::Coding,
+        cwd: PathBuf::from("."),
+        model: None,
+        system_prompt: None,
+        enforcement: EnforcementMode::HostPrompts,
+        resume_handle: None,
+        mcp_config: None,
+    }
 }
 
 #[tokio::test]
@@ -274,4 +285,78 @@ async fn starting_fails_closed_without_interactive_approvals() {
 async fn spawn_failure_is_reported_not_panicked() {
     let err = CodexProvider::new("/nonexistent/codex").start_session(spec()).await.err().unwrap();
     assert!(matches!(err, ProviderError::Spawn(_)));
+}
+
+fn conversation_spec(rig: &Rig) -> SessionSpec {
+    let cache = json!({"client_version":"0.166.0","models":[{"slug":"exact-model","context_window":200000,"unrelated":{"keep":true}}]});
+    std::fs::write(rig.dir.path().join("models_cache.json"), cache.to_string()).unwrap();
+    let mcp = rig.dir.path().join("memory.json");
+    std::fs::write(
+        &mcp,
+        json!({"mcpServers":{"discard-memory":{"url":"http://127.0.0.1:1/mcp","headers":{"Authorization":"Bearer synthetic"}}}})
+            .to_string(),
+    )
+    .unwrap();
+    let mut s = spec();
+    s.mode = discard_core::provider::SessionMode::Conversation;
+    s.model = Some("exact-model".into());
+    s.system_prompt = Some("Synthetic scoped memory.".into());
+    s.mcp_config = Some(mcp);
+    s
+}
+
+#[tokio::test]
+async fn conversation_startup_disables_inherited_servers_before_prompt_and_cleans_catalog() {
+    let rig = Rig::new();
+    let provider = rig
+        .provider("approval")
+        .with_env("CODEX_HOME", rig.dir.path())
+        .with_env("FAKE_CODEX_CONFIG", json!({"mcp_servers":{"inherited":{"command":"must-not-start"}}}).to_string());
+    let s = conversation_spec(&rig);
+    let original = std::fs::read(rig.dir.path().join("models_cache.json")).unwrap();
+    let session = provider.start_session(s).await.unwrap();
+    let request = rig.request("thread/start");
+    assert_eq!(request["params"]["allowProviderModelFallback"], false);
+    assert_eq!(request["params"]["model"], "exact-model");
+    assert_eq!(request["params"]["config"]["mcp_servers"]["inherited"]["enabled"], false);
+    assert_eq!(request["params"]["developerInstructions"], "Synthetic scoped memory.");
+    assert_eq!(request["params"]["config"]["mcp_servers"]["discard-memory"]["enabled_tools"].as_array().unwrap().len(), 6);
+    let cwd = PathBuf::from(request["params"]["cwd"].as_str().unwrap());
+    assert!(std::fs::read_dir(&cwd).unwrap().next().is_none());
+    let catalog = cwd.parent().unwrap().join("models.json");
+    let sanitized: Value = serde_json::from_slice(&std::fs::read(&catalog).unwrap()).unwrap();
+    assert_eq!(sanitized["models"][0]["apply_patch_tool_type"], Value::Null);
+    assert_eq!(sanitized["models"][0]["tool_mode"], "direct");
+    assert_eq!(std::fs::read(rig.dir.path().join("models_cache.json")).unwrap(), original);
+    assert_eq!(provider.model_context_window("exact-model"), Some(200000));
+    assert!(rig.log_text().contains("\"inherited\" = {\"enabled\" = false}"));
+    drop(session);
+    assert!(!catalog.exists());
+}
+
+#[tokio::test]
+async fn conversation_control_override_fails_before_memory_or_transcript_delivery() {
+    let rig = Rig::new();
+    let s = conversation_spec(&rig);
+    let provider = rig.provider("control_override").with_env("CODEX_HOME", rig.dir.path());
+    let error = provider.start_session(s).await.err().unwrap().to_string();
+    assert!(error.contains("shell_tool"), "{error}");
+    assert!(!rig.received().iter().any(|v| v["method"] == "thread/start" || v["method"] == "turn/start"));
+}
+
+#[tokio::test]
+async fn conversation_catalog_errors_never_start_a_thread_or_substitute_model() {
+    for broken in ["missing", "malformed", "wrong-model", "wrong-version"] {
+        let rig = Rig::new();
+        let mut s = conversation_spec(&rig);
+        let path = rig.dir.path().join("models_cache.json");
+        match broken {
+            "missing" => std::fs::remove_file(path).unwrap(),
+            "malformed" => std::fs::write(path, "not json").unwrap(),
+            "wrong-model" => s.model = Some("absent".into()),
+            _ => std::fs::write(path, json!({"client_version":"0.1.0","models":[]}).to_string()).unwrap(),
+        }
+        assert!(rig.provider("approval").with_env("CODEX_HOME", rig.dir.path()).start_session(s).await.is_err());
+        assert!(rig.received().is_empty());
+    }
 }
