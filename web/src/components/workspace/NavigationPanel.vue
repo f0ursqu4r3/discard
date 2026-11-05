@@ -2,6 +2,8 @@
 import type { SnapshotDto } from '@/bridge/types'
 import type { WorkspacePage } from './types'
 import ServerRail from '../ServerRail.vue'
+import type { ProjectMenuAction } from '../project-menu'
+import type { ProjectEntry } from '@/bridge/api'
 import ChannelList from '../ChannelList.vue'
 import UserBar from './UserBar.vue'
 defineProps<{
@@ -19,6 +21,7 @@ const emit = defineEmits<{
   openBranch: [key: string]
   createChannel: []
   approvals: []
+  projectAction: [action: ProjectMenuAction, project: ProjectEntry]
 }>()
 </script>
 <template>
@@ -29,6 +32,8 @@ const emit = defineEmits<{
     <div class="flex min-h-0 flex-1">
       <ServerRail
         :projects="projects"
+        :busy="busy || snapshot.archiveBusy || snapshot.channels.some((channel) => channel.running)"
+        @project-action="(action, project) => emit('projectAction', action, project)"
         :project-id="snapshot.projectId"
         :compact="compact"
         :project="snapshot.project"
@@ -37,12 +42,6 @@ const emit = defineEmits<{
           snapshot.channels.reduce((total, channel) => total + channel.pendingApprovals, 0)
         "
         :direct-messages="page === 'direct-messages'"
-        :target="{
-          type: 'server',
-          id: snapshot.projectId,
-          name: snapshot.project,
-          path: snapshot.projectPath,
-        }"
         @direct-messages="emit('navigate', 'direct-messages')"
         @project="
           (id) =>

@@ -59,6 +59,8 @@ Browser checks use test-only bridge responses. They cover creation, switching, s
 
 This pass does not add agent invitations, agent creation, persistent DMs, or multi-agent dispatch within one channel. Each channel retains one assigned agent. Live Claude and Codex calls are not part of these automated checks.
 
+The rail now keeps Direct Messages visible and disabled with a Soon label until persistent DMs are implemented. Each project has a context menu, including inactive projects. Planned actions remain visible and disabled with TODO markers in code. Settings and New Channel select the target project through the existing guarded flow. Copy, Reveal, and Remove use the clicked project directly. Remove requires confirmation.
+
 ## Project folders
 
 The rail's add button opens the native folder picker. Importing a folder reuses its saved project when the canonical folder matches. Each project has its own rail entry. The selected project loads in the running app and remains selected on the next start. Import does not change another project’s folder.

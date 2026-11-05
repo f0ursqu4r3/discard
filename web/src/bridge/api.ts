@@ -46,3 +46,4 @@ export interface ProjectEntry {
 export const getProjects = () => invoke<ProjectEntry[]>('get_projects')
 export const selectProject = (projectId: string) => invoke<void>('select_project', { projectId })
 export const removeProject = (projectId: string) => invoke<void>('remove_project', { projectId })
+export const revealProject = (path: string) => invoke<void>('settings_reveal_workspace', { path })

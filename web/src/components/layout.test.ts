@@ -195,12 +195,14 @@ test('navigation size conversion survives reload and scaled rail widths', async 
   }
 })
 
-test('DM and project rail entries emit separate navigation events', async () => {
+test('planned DM entry is disabled while project navigation remains available', async () => {
   const rail = mount(ServerRail, {
     props: { project: 'Discard', unread: true, pendingApprovals: 0, directMessages: true },
   })
-  await rail.get('[aria-label="Direct messages"]').trigger('click')
-  expect(rail.emitted('directMessages')).toHaveLength(1)
+  const dm = rail.get('[data-ui-id="direct-messages-button"]')
+  expect(dm.attributes('disabled')).toBeDefined()
+  await dm.trigger('click')
+  expect(rail.emitted('directMessages')).toBeUndefined()
   expect(rail.emitted('project')).toBeUndefined()
   await rail.get('[aria-label="Discard"]').trigger('click')
   expect(rail.emitted('project')).toHaveLength(1)

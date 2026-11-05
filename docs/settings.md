@@ -240,7 +240,9 @@ Reset settings saves a backup at `settings.toml.bak`. Rebuild memory index reads
 ## Context menus and archive
 
 Right-click a message to copy its text, a code block to copy its code, or a channel row to copy its name or archive it.
-Right-click a diff to copy it, a tool call to copy its input or output, an agent to copy its name or open Agent Settings, or the server icon to copy the project name or path or open Workspace Settings. The live streaming row has no context menu. Plugin items follow the Rust items and show the plugin name.
+Right-click a diff to copy it, a tool call to copy its input or output, or an agent to copy its name or open Agent Settings. Every project icon has a context menu. It can open Project Settings, create a channel, reveal the folder in Finder, remove the project after confirmation, or copy its name, path, or ID. Opening a menu does not select the project. Settings and channel creation select the target project through the existing idle-agent guard. Copy, Reveal, and Remove use the clicked project's identity.
+
+Planned project actions remain visible and disabled with a Soon label. Mute, Notifications, Move to, and Copy submenus remain openable. Missing behavior has TODO comments in the menu model. This rule applies to all new and changed UI actions; see AGENTS.md. The live streaming row has no context menu. Plugin items follow the built-in items and show the plugin name. Project menus also open with Shift+F10 or the Menu key while a project icon has focus.
 
 Archive is blocked while a turn runs. If removing a worktree can lose work, Discard lists the items and asks for
 confirmation. Cancel keeps the channel and worktree. After archive, the composer is locked. **Relaunch** starts a new

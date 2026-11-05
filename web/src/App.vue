@@ -18,6 +18,7 @@ import {
   getProjects,
   selectProject,
   removeProject,
+  revealProject,
   type ProjectEntry,
 } from './bridge/api'
 import ChannelList from './components/ChannelList.vue'
@@ -45,6 +46,7 @@ import WorkspacePageView from './components/workspace/WorkspacePage.vue'
 import BrandMark from './components/workspace/BrandMark.vue'
 import UiInspector from './components/workspace/UiInspector.vue'
 import type { WorkspacePage } from './components/workspace/types'
+import type { ProjectMenuAction } from './components/project-menu'
 import type { TranscriptPosition } from './components/workspace/transcript'
 const store = useStore()
 const projects = ref<ProjectEntry[]>([])
@@ -133,6 +135,41 @@ async function action(id: string) {
     await runAction(id)
   } catch (error) {
     toast.error('Could not complete action', { description: String(error) })
+  }
+}
+async function projectAction(id: ProjectMenuAction, project: ProjectEntry) {
+  if (switching.value) return
+  switching.value = true
+  try {
+    if (id === 'copy-name' || id === 'copy-path' || id === 'copy-id') {
+      await navigator.clipboard.writeText(
+        id === 'copy-name' ? project.name : id === 'copy-path' ? project.path : project.id,
+      )
+    } else if (id === 'reveal') {
+      await revealProject(project.path)
+    } else if (id === 'remove') {
+      const wasSelected = store.snapshot?.projectId === project.id
+      await removeProject(project.id)
+      await store.refresh()
+      await refreshProjects()
+      if (wasSelected) navigate('conversation')
+    } else {
+      if (store.snapshot?.projectId !== project.id) {
+        await selectProject(project.id)
+        await store.refresh()
+      }
+      if (store.snapshot?.projectId !== project.id)
+        throw new Error('Project selection did not complete')
+      if (id === 'settings') navigate('project-settings')
+      else {
+        navigate('conversation')
+        newChannelOpen.value = true
+      }
+    }
+  } catch (error) {
+    toast.error('Could not complete project action', { description: String(error) })
+  } finally {
+    switching.value = false
   }
 }
 async function toggleMembers() {
@@ -284,6 +321,7 @@ watch(
     </header>
     <div v-if="store.snapshot?.projectId" class="flex min-h-0 flex-1 gap-1.5 px-1.5 pb-1.5">
       <NavigationPanel
+        @project-action="projectAction"
         :projects="projects"
         v-if="isCompact"
         class="shrink-0"
@@ -313,6 +351,7 @@ watch(
             :max-size="400 + railWidth"
           >
             <NavigationPanel
+              @project-action="projectAction"
               :projects="projects"
               :snapshot="store.snapshot"
               :page="page"

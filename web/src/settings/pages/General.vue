@@ -86,6 +86,7 @@ onUnmounted(() => stop?.())
         Confirm Quit and Safe Mode relaunch while a turn runs
       </p>
     </section>
-    <p class="text-muted-foreground">Reopen last channel · Soon</p>
+    <!-- TODO: Restore the last selected channel on startup. -->
+    <Button variant="ghost" disabled>Reopen last channel · Soon</Button>
   </div>
 </template>

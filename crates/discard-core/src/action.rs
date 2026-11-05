@@ -163,8 +163,11 @@ pub struct FutureItem {
 }
 
 pub const FUTURE_ITEMS: &[FutureItem] = &[
+    // TODO: Connect the native menu to the channel creation dialog.
     FutureItem { label: "New Channel…", tooltip: "Creating a channel from the menu is coming soon." },
+    // TODO: Add a native menu channel picker.
     FutureItem { label: "Switch Channel…", tooltip: "Switching channels from the menu is coming soon." },
+    // TODO: Publish documentation and connect its destination.
     FutureItem { label: "Discard Documentation", tooltip: "The documentation is coming soon." },
 ];
 

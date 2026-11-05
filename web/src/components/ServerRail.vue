@@ -1,49 +1,42 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
-import { serverPillHeight } from './layout';
-import { MessagesSquare, Plus } from '@lucide/vue';
-import { Badge } from './ui/badge';
-import { Button } from './ui/button';
-import { Separator } from './ui/separator';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from './ui/tooltip';
-import ContextMenuHost from './ContextMenuHost.vue';
-import BrandMark from './workspace/BrandMark.vue';
-import { cn } from '@/lib/utils';
-import type { ContextTargetDto } from '../bridge/types';
+import { computed, ref } from 'vue'
+import { serverPillHeight } from './layout'
+import { MessagesSquare, Plus } from '@lucide/vue'
+import { Badge } from './ui/badge'
+import { Button } from './ui/button'
+import { Separator } from './ui/separator'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
+import ProjectContextMenu from './ProjectContextMenu.vue'
+import type { ProjectMenuAction } from './project-menu'
+import type { ProjectEntry } from '../bridge/api'
+import BrandMark from './workspace/BrandMark.vue'
+import { cn } from '@/lib/utils'
 const props = withDefaults(
   defineProps<{
-    projects?: import('@/bridge/api').ProjectEntry[];
-    projectId?: string;
-    project: string;
-    unread: boolean;
-    pendingApprovals: number;
-    reviewCount?: number;
-    target?: ContextTargetDto;
-    directMessages?: boolean;
-    compact?: boolean;
+    projects?: import('@/bridge/api').ProjectEntry[]
+    projectId?: string
+    project: string
+    unread: boolean
+    pendingApprovals: number
+    reviewCount?: number
+    directMessages?: boolean
+    compact?: boolean
+    busy?: boolean
   }>(),
-  { directMessages: false, compact: false }
-);
+  { directMessages: false, compact: false },
+)
 const entries = computed(
-  () =>
-    props.projects ?? [
-      { id: props.projectId ?? '', name: props.project, path: '' },
-    ]
-);
-const selected = (id: string) =>
-  id === (props.projectId ?? '') && !props.directMessages;
-const hovered = ref<string | null>(null);
-const focused = ref<string | null>(null);
+  () => props.projects ?? [{ id: props.projectId ?? '', name: props.project, path: '' }],
+)
+const selected = (id: string) => id === (props.projectId ?? '') && !props.directMessages
+const hovered = ref<string | null>(null)
+const focused = ref<string | null>(null)
 const emit = defineEmits<{
-  project: [id?: string];
-  directMessages: [];
-  addProject: [];
-}>();
+  project: [id?: string]
+  directMessages: []
+  addProject: []
+  projectAction: [action: ProjectMenuAction, project: ProjectEntry]
+}>()
 </script>
 <template>
   <TooltipProvider>
@@ -53,28 +46,26 @@ const emit = defineEmits<{
       :class="
         cn(
           'flex h-full shrink-0 flex-col items-center border-r border-border/60 bg-canvas',
-          compact ? 'w-13' : 'w-18'
+          compact ? 'w-13' : 'w-18',
         )
       "
     >
-      <div
-        data-ui-id="rail-home"
-        class="flex h-16 shrink-0 items-center justify-center"
-      >
+      <div data-ui-id="rail-home" class="flex h-16 shrink-0 items-center justify-center">
         <Tooltip>
           <TooltipTrigger as-child>
+            <!-- TODO: Implement persistent direct messages before enabling this entry. -->
             <Button
               data-ui-id="direct-messages-button"
+              disabled
               :variant="directMessages ? 'default' : 'secondary'"
               :class="cn('rounded-xl', compact ? 'size-9' : 'size-12')"
-              aria-label="Direct messages"
+              aria-label="Direct messages (Soon)"
               :aria-current="directMessages ? 'page' : undefined"
-              @click="emit('directMessages')"
             >
               <MessagesSquare />
             </Button>
           </TooltipTrigger>
-          <TooltipContent side="right">Direct messages</TooltipContent>
+          <TooltipContent side="right">Direct messages · Soon</TooltipContent>
         </Tooltip>
       </div>
       <Separator class="max-w-8" />
@@ -82,8 +73,10 @@ const emit = defineEmits<{
         class="flex min-h-0 w-full flex-1 flex-col items-center gap-3 overflow-x-hidden overflow-y-auto overscroll-contain py-3"
       >
         <div v-for="entry in entries" :key="entry.id" class="w-full">
-          <ContextMenuHost
-            :target="entry.id === projectId ? (target ?? null) : null"
+          <ProjectContextMenu
+            :project="entry"
+            :busy="busy"
+            @action="(action, project) => emit('projectAction', action, project)"
           >
             <div
               @mouseenter="hovered = entry.id"
@@ -93,7 +86,7 @@ const emit = defineEmits<{
               :class="
                 cn(
                   'group relative flex items-center justify-center',
-                  compact ? 'h-10 w-full' : 'h-12 w-full'
+                  compact ? 'h-10 w-full' : 'h-12 w-full',
                 )
               "
             >
@@ -114,9 +107,7 @@ const emit = defineEmits<{
                     :aria-label="entry.name"
                     :aria-current="selected(entry.id) ? 'page' : undefined"
                     :variant="selected(entry.id) ? 'default' : 'secondary'"
-                    :class="
-                      cn('relative rounded-xl', compact ? 'size-9' : 'size-12')
-                    "
+                    :class="cn('relative rounded-xl', compact ? 'size-9' : 'size-12')"
                     @click="emit('project', entry.id)"
                   >
                     <BrandMark
@@ -130,9 +121,7 @@ const emit = defineEmits<{
                       {{ entry.name.slice(0, 2).toUpperCase() }}
                     </span>
                     <Badge
-                      v-if="
-                        entry.id === (projectId ?? '') && pendingApprovals > 0
-                      "
+                      v-if="entry.id === (projectId ?? '') && pendingApprovals > 0"
                       data-testid="approval-badge"
                       class="absolute -right-1 -bottom-1 bg-warning text-background"
                     >
@@ -140,12 +129,10 @@ const emit = defineEmits<{
                     </Badge>
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent side="right"
-                  >{{ entry.name }} · {{ entry.path }}</TooltipContent
-                >
+                <TooltipContent side="right">{{ entry.name }} · {{ entry.path }}</TooltipContent>
               </Tooltip>
             </div>
-          </ContextMenuHost>
+          </ProjectContextMenu>
         </div>
         <Separator class="max-w-8" />
         <Tooltip>
