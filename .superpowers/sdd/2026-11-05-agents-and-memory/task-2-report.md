@@ -16,7 +16,7 @@ Implemented the four memory domains and versioned memory backend. Runtime contex
 All item types live in `discard_core::memory_items`.
 
 - `ItemKind::{Fact, Preference, Instruction, Decision, Commitment}`.
-- `MemoryItem`: UUID string `id`, `scope`, `kind`, `content`, `source_conversation: Option<ChannelId>`, millisecond timestamps, `version: u64`, `deleted`, `origin`, `history: Vec<ItemRevision>`, `recapture_suppression`, `proposal_id`. `path()` returns the virtual path.
+- `MemoryItem`: UUID string `id`, `scope`, `kind`, `content`, `source_conversation: Option<ChannelId>`, millisecond timestamps, `version: u64`, `deleted`, `origin`, `history: Vec<ItemRevision>`, `recapture_suppression`, `paused_capture_conversations`, `change_conversation`, `proposal_id`. `path()` returns the virtual path.
 - `MutationOrigin::{Automatic, User, Approved}`. App-only direct APIs use User or Approved. Never map a model JSON field to this enum.
 - `create_item(scope, kind, content, Option<source>, origin)`, `list_items(scopes)`, `read_item(id)`.
 - `update_item(id, expected_version, content, origin)`, `forget_item(id, expected_version)`, `move_item(id, expected_version, target_scope)`, `undo_item(id, expected_version)`.
@@ -25,7 +25,7 @@ All item types live in `discard_core::memory_items`.
 - `propose_update(agent, Option<project>, source, item_id, expected_version, content)` and `propose_forget(agent, Option<project>, source, item_id, expected_version)` enforce applicable scope access and preserve pending user authorization.
 - `MemoryProposal` retains proposer `agent`, `source_conversation`, creation time, action, and resolution state. `ProposalAction` supports Create (scope/kind/content), Update (item/version/content), and Forget (item/version).
 - `pending_proposals()` returns persisted pending records. App-only `approve_proposal(id)` and `reject_proposal(id)` resolve them. Approval refuses stale target versions. There is no MCP approval tool. Before approval, app callers must also validate that the proposer still exists and is active, using the agent Store; MemoryStore has no agent registry.
-- `memory_changes(source_conversation) -> Vec<MemoryChange>` returns pollable Saved/Proposed records. Saved records use stable `item_id:version` keys; proposals use stable proposal IDs. Consumers deduplicate those keys. The saved record is the current item snapshot, not an append-only event stream. Item source stays its original conversation; proposals retain the requesting conversation.
+- `memory_changes(source_conversation) -> Vec<MemoryChange>` returns pollable Saved/Proposed records. Saved records use stable `item_id:version` keys; proposals use stable proposal IDs. Consumers deduplicate those keys. The saved record is the current item snapshot, not an append-only event stream. Item source stays its original conversation. `change_conversation` associates the current saved mutation with its requesting conversation; revision snapshots retain that association too. Approved corrections and Forget use their proposal source. Saved records appear once under the requesting conversation with the stable item/version key.
 - `private_scopes(agent)` enumerates private folders and item domains independently of conversation records. `delete_private_memory(agent)` removes Agent/AgentProject memory and that agent's proposals. It preserves Global/Project memory.
 - New mutation errors include `ApprovalRequired`, `Suppressed`, `Forbidden`, and `InvalidDocument`.
 
@@ -39,9 +39,11 @@ All item types live in `discard_core::memory_items`.
 
 ## Forget suppression and limits
 
-Forget stores exact SHA-256-derived hashes of trimmed content with named conversation IDs in the item document. Direct app Forget suppresses its original source conversation. Approved in-chat Forget also suppresses the requesting conversation. Automatic capture of the same trimmed content from those conversations returns Suppressed across domains. This remains in effect while the authoritative suppression record exists. Explicit user/app saves bypass suppression. Undo of creation also suppresses its source. Undo does not erase suppression history.
+Forget pauses all automatic capture for the item's original source conversation. Approved in-chat Forget also pauses the requesting conversation. Undo of creation pauses its source conversation. The pause blocks paraphrases, old corrected values, unrelated new facts, and automatic shared-save proposals without trying to recognize semantic equivalence. A fresh conversation has a new ID and no inherited pause. Direct user/approved saves bypass the pause without lifting it. Undo does not lift it.
 
-This detects exact trimmed content only. It does not detect paraphrases, related facts, or recapture from a different conversation. It does not erase transcript messages. Capture guidance excludes temporary facts, guesses, passwords, and tokens; the backend does not claim semantic secret classification.
+`capture_paused(&ChannelId) -> Result<bool>` exposes controller status. App-only `resume_capture(&ChannelId) -> Result<()>` clears that conversation's pause flags under the store lock. No MCP tool or JSON field can resume capture. `MemoryError::CapturePaused` gives the UI a distinct state. Pause flags live in authoritative item documents and survive reopen; no separate metadata shadow exists. Resume changes controller metadata, not item content/version, so the UI must refresh pause status independently of saved item/version keys. If a multi-document resume fails, remaining flags conservatively keep capture paused.
+
+Forget also retains exact SHA-256-derived hashes of trimmed current and all prior item bodies for each affected conversation. These hashes continue to reject exact recapture with `Suppressed` after an explicit resume. Explicit user/approved saves bypass those hashes. Hashes do not detect paraphrases; the conversation pause is what blocks every automatic capture until resume. Neither mechanism erases transcript messages. Capture guidance excludes temporary facts, guesses, passwords, and tokens; the backend does not claim semantic secret classification.
 
 The store serializes mutations through one MemoryStore instance. It does not add a cross-process filesystem lock. Pollable change records replace live notifications for now; the runtime/UI can publish them without another memory subsystem.
 
@@ -51,7 +53,7 @@ RED: initial memory integration tests failed to compile because Scope::AgentProj
 
 GREEN:
 
-- `cargo test -p discard-core -p discard-mcp -p discard-lua`: pass; 755 tests.
+- `cargo test -p discard-core -p discard-mcp -p discard-lua`: pass; 757 tests.
 - `cargo test -p discard-app plugin_memory`: pass; 8 tests.
 - `cargo check --workspace`: pass.
 - `cargo test --workspace --no-run`: pass; all workspace test targets compile.
@@ -60,3 +62,13 @@ GREEN:
 Behavioral tests cover the complete two-agent/two-project matrix, direct-chat access, discovery, both ID/path checks, symlink rejection, stale edits/Undo/delete approvals, moves, history inspection, rejected proposals, shared self-approval attempts, separate read/write grants, bound source identity, original/requesting conversation recapture suppression, private cleanup, and reopen/reconcile/index rebuild/crash recovery.
 
 Serena could not address the worktree. Shell editing used the parent-authorized worktree fallback. No merge or push performed.
+
+## Review fix round 1
+
+Implemented the controller ruling for strict no-immediate-recapture. Conversation-level pauses now block all automatic capture, including paraphrases and old corrected values, until explicit app/user resume or a fresh conversation. Forget records all prior body hashes as well as the current body. Approved in-chat Forget covers original source and requesting conversation. Explicit saves remain possible without silently resuming automation.
+
+Approved Update/Forget now set typed `change_conversation` metadata to the requesting conversation. `memory_changes(requester)` returns the completed Saved mutation there; it does not also emit that current key under the original source. Revision snapshots retain the previous requesting conversation. Reopen tests verify both pause state and completed mutation association.
+
+RED: `cargo test -p discard-core --test memory_items forget_pauses` failed to compile because `capture_paused`, `resume_capture`, and `CapturePaused` did not exist. GREEN: the full memory integration target passes all 11 tests. New tests cover paraphrases, unrelated facts, old corrected bodies, all-version exact suppression after app resume, pause persistence and resume persistence, fresh conversations, explicit User/Approved saves, Undo of creation, requesting-source completion records, and MCP attempts to resume via JSON or an invented tool.
+
+Final checks after this fix: core/MCP/Lua suite passes (757 tests), workspace check passes, and all workspace test targets compile. No merge or push performed.

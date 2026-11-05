@@ -35,6 +35,8 @@ pub struct ItemRevision {
     pub deleted: bool,
     pub updated_at: u64,
     pub origin: MutationOrigin,
+    #[serde(default)]
+    pub change_conversation: Option<ChannelId>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecaptureSuppression {
@@ -48,6 +50,9 @@ pub struct MemoryItem {
     pub kind: ItemKind,
     pub content: String,
     pub source_conversation: Option<ChannelId>,
+    /// Conversation that requested the current mutation; source stays unchanged.
+    #[serde(default)]
+    pub change_conversation: Option<ChannelId>,
     pub created_at: u64,
     pub updated_at: u64,
     pub version: u64,
@@ -57,6 +62,9 @@ pub struct MemoryItem {
     /// Exact trimmed content hashes suppressed for named conversations.
     /// This does not detect paraphrases. Explicit user saves bypass suppression.
     pub recapture_suppression: Vec<RecaptureSuppression>,
+    /// Authoritative conversation capture pauses caused by this item's Forget.
+    #[serde(default)]
+    pub paused_capture_conversations: Vec<ChannelId>,
     pub proposal_id: Option<String>,
 }
 impl MemoryItem {
@@ -274,6 +282,11 @@ impl MemoryStore {
     ) -> Result<MemoryItem> {
         self.resolve(scope, "check.md")?;
         if origin == MutationOrigin::Automatic {
+            if let Some(source) = source {
+                if self.capture_paused(source)? {
+                    return Err(MemoryError::CapturePaused);
+                }
+            }
             let hash = version_of(content.trim());
             if self.all_items()?.iter().any(|i| {
                 i.recapture_suppression
@@ -296,6 +309,7 @@ impl MemoryStore {
             kind,
             content: content.into(),
             source_conversation: source.cloned(),
+            change_conversation: source.cloned(),
             created_at: at,
             updated_at: at,
             version: 1,
@@ -303,6 +317,7 @@ impl MemoryStore {
             origin,
             history: vec![],
             recapture_suppression: vec![],
+            paused_capture_conversations: vec![],
             proposal_id,
         };
         self.persist_item(&item)?;
@@ -338,10 +353,12 @@ impl MemoryStore {
             deleted: item.deleted,
             updated_at: item.updated_at,
             origin: item.origin,
+            change_conversation: item.change_conversation.clone(),
         });
         item.version += 1;
         item.updated_at = now();
         item.origin = origin;
+        item.change_conversation = item.source_conversation.clone();
     }
     /// App-only explicit correction. Automatic inferred corrections need a proposal.
     pub fn update_item(
@@ -365,15 +382,52 @@ impl MemoryStore {
         Ok(item)
     }
     fn suppress(item: &mut MemoryItem, conversation: Option<&ChannelId>) {
-        for source in item.source_conversation.iter().chain(conversation) {
-            let suppression = RecaptureSuppression {
-                source_conversation: source.clone(),
-                content_hash: version_of(item.content.trim()),
-            };
-            if !item.recapture_suppression.contains(&suppression) {
-                item.recapture_suppression.push(suppression);
+        // Conversation-level pause prevents recapture without claiming semantic
+        // equivalence detection. Hashes retain exact suppression after app resume.
+        let sources = item
+            .source_conversation
+            .iter()
+            .chain(conversation)
+            .cloned()
+            .collect::<Vec<_>>();
+        let hashes = std::iter::once(&item.content)
+            .chain(item.history.iter().map(|r| &r.content))
+            .map(|s| version_of(s.trim()))
+            .collect::<Vec<_>>();
+        for source in sources {
+            if !item.paused_capture_conversations.contains(&source) {
+                item.paused_capture_conversations.push(source.clone());
+            }
+            for hash in &hashes {
+                let suppression = RecaptureSuppression {
+                    source_conversation: source.clone(),
+                    content_hash: hash.clone(),
+                };
+                if !item.recapture_suppression.contains(&suppression) {
+                    item.recapture_suppression.push(suppression);
+                }
             }
         }
+    }
+    /// App/controller status. Pauses survive reopen in authoritative item documents.
+    pub fn capture_paused(&self, conversation: &ChannelId) -> Result<bool> {
+        Ok(self
+            .all_items()?
+            .iter()
+            .any(|i| i.paused_capture_conversations.contains(conversation)))
+    }
+    /// App-only explicit user operation. Never expose this as an agent tool.
+    /// Exact forgotten-version hashes stay suppressed after the pause is lifted.
+    pub fn resume_capture(&self, conversation: &ChannelId) -> Result<()> {
+        let _guard = lock(&self.write_lock);
+        for mut item in self.all_items()? {
+            if item.paused_capture_conversations.contains(conversation) {
+                item.paused_capture_conversations
+                    .retain(|c| c != conversation);
+                self.persist_item(&item)?;
+            }
+        }
+        Ok(())
     }
     pub fn forget_item(&self, id: &str, expected: u64) -> Result<MemoryItem> {
         let _guard = lock(&self.write_lock);
@@ -429,6 +483,9 @@ impl MemoryStore {
         let _guard = lock(&self.write_lock);
         if !Scope::applicable(agent, project).contains(scope) {
             return Err(MemoryError::Forbidden);
+        }
+        if self.capture_paused(source)? {
+            return Err(MemoryError::CapturePaused);
         }
         let private = project.map_or_else(
             || Scope::Agent(agent.clone()),
@@ -578,6 +635,7 @@ impl MemoryStore {
                 Self::revise(&mut item, MutationOrigin::Approved);
                 item.deleted = true;
                 item.proposal_id = Some(p.id.clone());
+                item.change_conversation = Some(p.source_conversation.clone());
                 self.persist_item(&item)?;
                 item
             }
@@ -605,6 +663,7 @@ impl MemoryStore {
                 Self::revise(&mut i, MutationOrigin::Approved);
                 i.content = content.clone();
                 i.proposal_id = Some(p.id.clone());
+                i.change_conversation = Some(p.source_conversation.clone());
                 self.persist_item(&i)?;
                 i
             }
@@ -623,7 +682,12 @@ impl MemoryStore {
         let mut changes = self
             .all_items()?
             .into_iter()
-            .filter(|i| i.source_conversation.as_ref() == Some(source))
+            .filter(|i| {
+                i.change_conversation
+                    .as_ref()
+                    .or(i.source_conversation.as_ref())
+                    == Some(source)
+            })
             .map(|item| MemoryChange::Saved {
                 key: format!("{}:{}", item.id, item.version),
                 item,

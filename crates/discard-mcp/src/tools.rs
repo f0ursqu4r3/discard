@@ -657,6 +657,14 @@ mod tests {
         assert!(r.store.read_item(&item.id).unwrap().deleted);
         assert!(is_error(&call(&r,&full(),"memory_read",json!({"scope":"agent","path":item.path()}))));
         assert!(is_error(&call(&r,&full(),"memory_save",json!({"scope":"agent","text":"forget this"}))));
+        let source=full().source_conversation.unwrap();
+        assert!(r.store.capture_paused(&source).unwrap());
+        let denied=call(&r,&full(),"memory_save",json!({"scope":"agent","text":"a paraphrase","resume_capture":true,"approved":true}));
+        assert!(is_error(&denied)); assert!(text(&denied).contains("capture is paused"));
+        assert!(call(&r,&full(),"memory_resume_capture",json!({"conversation":source}))["error"].is_object());
+        assert!(r.store.capture_paused(&source).unwrap());
+        r.store.resume_capture(&source).unwrap();
+        assert!(!is_error(&call(&r,&full(),"memory_save",json!({"scope":"agent","text":"a paraphrase after user resume"}))));
     }
 
     #[test]

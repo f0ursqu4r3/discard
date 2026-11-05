@@ -464,3 +464,171 @@ fn stale_index_after_authoritative_write_cannot_deliver_forgotten_or_old_content
             .is_empty()
     );
 }
+
+#[test]
+fn forget_pauses_all_automatic_capture_until_app_resume_and_preserves_old_hashes() {
+    use discard_core::memory::MemoryError;
+    let d = tempfile::tempdir().unwrap();
+    let a = AgentId("a".into());
+    let source = ChannelId("original".into());
+    let requester = ChannelId("requester".into());
+    let scope = Scope::Agent(a.clone());
+    {
+        let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+        let i = s
+            .create_item(
+                &scope,
+                ItemKind::Fact,
+                "old incorrect value",
+                Some(&source),
+                MutationOrigin::User,
+            )
+            .unwrap();
+        let i = s
+            .update_item(&i.id, i.version, "corrected value", MutationOrigin::User)
+            .unwrap();
+        let p = s
+            .propose_forget(&a, None, &requester, &i.id, i.version)
+            .unwrap();
+        s.approve_proposal(&p.id).unwrap();
+        assert!(s.capture_paused(&source).unwrap());
+        assert!(s.capture_paused(&requester).unwrap());
+        for conversation in [&source, &requester] {
+            for text in [
+                "corrected value",
+                "a paraphrase of corrected value",
+                "old incorrect value",
+                "unrelated new durable fact",
+            ] {
+                assert_eq!(
+                    s.capture_item(&a, None, conversation, &scope, ItemKind::Fact, text)
+                        .unwrap_err(),
+                    MemoryError::CapturePaused
+                );
+            }
+        }
+        assert!(
+            s.create_item(
+                &scope,
+                ItemKind::Fact,
+                "explicit user save",
+                Some(&requester),
+                MutationOrigin::User
+            )
+            .is_ok()
+        );
+        assert!(
+            s.create_item(
+                &scope,
+                ItemKind::Fact,
+                "approved save",
+                Some(&requester),
+                MutationOrigin::Approved
+            )
+            .is_ok()
+        );
+        assert!(s.capture_paused(&requester).unwrap());
+        let fresh = ChannelId("fresh".into());
+        assert!(
+            s.capture_item(&a, None, &fresh, &scope, ItemKind::Fact, "corrected value")
+                .is_ok()
+        );
+    }
+    let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+    assert!(s.capture_paused(&source).unwrap());
+    assert!(s.capture_paused(&requester).unwrap());
+    s.resume_capture(&requester).unwrap();
+    assert!(!s.capture_paused(&requester).unwrap());
+    assert!(s.capture_paused(&source).unwrap());
+    assert!(
+        s.capture_item(
+            &a,
+            None,
+            &requester,
+            &scope,
+            ItemKind::Fact,
+            "a paraphrase after explicit resume"
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        s.capture_item(
+            &a,
+            None,
+            &requester,
+            &scope,
+            ItemKind::Fact,
+            "old incorrect value"
+        )
+        .unwrap_err(),
+        MemoryError::Suppressed
+    );
+    assert_eq!(
+        s.capture_item(
+            &a,
+            None,
+            &requester,
+            &scope,
+            ItemKind::Fact,
+            "corrected value"
+        )
+        .unwrap_err(),
+        MemoryError::Suppressed
+    );
+    drop(s);
+    let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+    assert!(!s.capture_paused(&requester).unwrap());
+    assert!(s.capture_paused(&source).unwrap());
+}
+
+#[test]
+fn undo_creation_pauses_capture_and_approved_changes_follow_requesting_conversation() {
+    use discard_core::memory_items::MemoryChange;
+    let d = tempfile::tempdir().unwrap();
+    let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+    let a = AgentId("a".into());
+    let original = ChannelId("original".into());
+    let current = ChannelId("current".into());
+    let scope = Scope::Agent(a.clone());
+    let i = s
+        .create_item(
+            &scope,
+            ItemKind::Fact,
+            "first",
+            Some(&original),
+            MutationOrigin::Automatic,
+        )
+        .unwrap();
+    let p = s
+        .propose_update(&a, None, &current, &i.id, i.version, "second")
+        .unwrap();
+    let updated = s.approve_proposal(&p.id).unwrap();
+    let changes = s.memory_changes(&current).unwrap();
+    assert!(changes.iter().any(|c|matches!(c,MemoryChange::Saved{key,item} if key==&format!("{}:{}",i.id,updated.version) && item.content=="second")));
+    assert!(!s.memory_changes(&original).unwrap().iter().any(
+        |c| matches!(c,MemoryChange::Saved{key,..} if key==&format!("{}:{}",i.id,updated.version))
+    ));
+    let p = s
+        .propose_forget(&a, None, &current, &i.id, updated.version)
+        .unwrap();
+    let forgotten = s.approve_proposal(&p.id).unwrap();
+    assert!(s.memory_changes(&current).unwrap().iter().any(|c|matches!(c,MemoryChange::Saved{key,item} if key==&format!("{}:{}",i.id,forgotten.version) && item.deleted)));
+    let fresh = ChannelId("fresh".into());
+    let i = s
+        .create_item(
+            &scope,
+            ItemKind::Fact,
+            "undo creation",
+            Some(&fresh),
+            MutationOrigin::Automatic,
+        )
+        .unwrap();
+    s.undo_item(&i.id, i.version).unwrap();
+    assert!(s.capture_paused(&fresh).unwrap());
+    drop(s);
+    let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+    assert!(s.capture_paused(&fresh).unwrap());
+    assert!(s.memory_changes(&current).unwrap().iter().any(
+        |c| matches!(c,MemoryChange::Saved{item,..} if item.id==forgotten.id && item.deleted)
+    ));
+}
