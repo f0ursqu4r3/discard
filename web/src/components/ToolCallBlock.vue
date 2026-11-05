@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Terminal } from '@lucide/vue'
 import { ref, computed } from 'vue'
 import { Button } from './ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './ui/collapsible'
@@ -10,8 +11,8 @@ const lines = computed(() => props.output?.split('\n') ?? [])
 const isDiff = computed(() => !!props.output && looksLikeUnifiedDiff(props.output))
 </script>
 <template>
-  <div class="rounded-md border-l-2 border-primary p-2 text-sm">
-    <p class="font-semibold">{{ name }} {{ summarizeInput(input) }}</p>
+  <div class="overflow-hidden rounded-xl border border-border/60 bg-card p-3 text-xs">
+    <p class="mb-2 flex items-center gap-2 font-semibold"><Terminal class="size-4 shrink-0 text-muted-foreground" /><span>{{ name }}</span><span class="truncate font-mono font-normal text-muted-foreground">{{ summarizeInput(input) }}</span></p>
     <Collapsible v-if="lines.length > 20" v-model:open="expanded">
       <DiffBlock v-if="isDiff" inline :text="lines.slice(0, 20).join('\n')" />
       <pre v-else class="overflow-x-auto whitespace-pre-wrap text-xs text-muted-foreground">{{ lines.slice(0, 20).join('\n') }}</pre>

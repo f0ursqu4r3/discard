@@ -32,8 +32,8 @@ watch(() => [props.text, props.language], (_value, _previous, onCleanup) => {
 async function copy() { if (props.copyText) { await navigator.clipboard.writeText(props.text); return } if (!props.target) return; const text = await runAction('copy_code', props.target); if (text !== null) await navigator.clipboard.writeText(text) }
 </script>
 <template>
-  <div class="rounded-md bg-muted p-2 text-sm">
-    <div class="flex items-center justify-between"><span>{{ language || 'Code' }}</span><Button v-if="target || copyText" variant="ghost" size="sm" @click="copy">Copy</Button></div>
+  <div class="overflow-hidden rounded-xl border border-border/60 bg-card p-3 text-xs">
+    <div class="mb-2 flex items-center justify-between font-medium text-muted-foreground"><span>{{ language || 'Code' }}</span><Button v-if="target || copyText" variant="ghost" size="sm" @click="copy">Copy</Button></div>
     <pre class="overflow-x-auto whitespace-pre-wrap"><code v-if="tokens.length"><template v-for="(line, i) in tokens" :key="i"><span v-for="(token, j) in line" :key="j" :class="token.color">{{ token.content }}</span>{{ i < tokens.length - 1 ? '\n' : '' }}</template></code><code v-else>{{ text }}</code></pre>
   </div>
 </template>

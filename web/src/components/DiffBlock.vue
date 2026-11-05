@@ -8,7 +8,7 @@ async function copy() { if (!props.target) return; const text = await runAction(
 
 </script>
 <template>
-  <div :class="inline ? 'text-xs' : 'rounded-md bg-muted p-2 text-sm'"><div v-if="!inline" class="flex items-center justify-between"><span>Diff</span><Button v-if="target" variant="ghost" size="sm" @click="copy">Copy</Button></div>
+  <div :class="inline ? 'text-xs' : 'overflow-hidden rounded-xl border border-border/60 bg-card p-3 text-xs'"><div v-if="!inline" class="mb-2 flex items-center justify-between font-medium text-muted-foreground"><span>Diff</span><Button v-if="target" variant="ghost" size="sm" @click="copy">Copy</Button></div>
     <pre class="overflow-x-auto"><div v-for="(line, i) in text.split('\n')" :key="i" :data-diff="classifyLine(line)" :class="{ 'text-[color:var(--diff-added)]': !inline && classifyLine(line) === 'added', 'text-[color:var(--diff-removed)]': !inline && classifyLine(line) === 'removed', 'text-[color:var(--diff-added-inline)]': inline && classifyLine(line) === 'added', 'text-[color:var(--diff-removed-inline)]': inline && classifyLine(line) === 'removed', 'text-muted-foreground': classifyLine(line) === 'hunk' }">{{ line || ' ' }}</div></pre>
   </div>
 </template>

@@ -1,6 +1,6 @@
 /** Height of the server indicator, in spacing units. */
-export function serverPillHeight(selected: boolean, hovered: boolean, unread: boolean): number {
-  return selected ? 8 : hovered ? 4 : unread ? 2 : 0
+export function serverPillHeight(selected: boolean, hovered: boolean, unread: boolean, itemHeight = 12): number {
+  return selected ? itemHeight : hovered ? itemHeight / 2 : unread ? 2 : 0
 }
 
 /** Up to two initials from the project name. */
@@ -10,11 +10,15 @@ export function serverInitials(name: string): string {
   if (words.length === 1) return Array.from(words[0]!).slice(0, 2).join('').toUpperCase()
   return (Array.from(words[0]!)[0]! + Array.from(words[1]!)[0]!).toUpperCase()
 }
-/** Save widths only while all three panels are visible. */
-export function savePanelWidths(visible: boolean, count: number): boolean { return visible && count === 3 }
+/** Only persist a complete layout, never the intermediate layout during a mount. */
+export function savePanelWidths(visible: boolean, count: number): boolean { return count === (visible ? 3 : 2) }
 /** Select the settings action and label for the review count. */
 export function settingsTarget(count: number): [string, string] {
   return count > 0 ? ['review_plugins', `Review plugins (${count})`] : ['open_settings', 'Settings']
 }
-/** Side panels report their widths in pixels. */
-export function panelWidths(sizes: number[]): [number, number] { return [sizes[0]!, sizes[2]!] }
+const clampPanel = (value: number) => Math.min(400, Math.max(180, value))
+/** The native store still owns channel-only widths; the displayed panel includes the rail. */
+export function navigationWidth(channelWidth: number, railWidth = 72): number { return clampPanel(channelWidth) + railWidth }
+export function panelWidths(sizes: number[], railWidth = 72, memberWidth = 240): [number, number] {
+  return [clampPanel(sizes[0]! - railWidth), clampPanel(sizes[2] ?? memberWidth)]
+}

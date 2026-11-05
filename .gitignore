@@ -22,6 +22,26 @@ Desktop.ini
 # Ignore subagent-driven-development scratch
 .superpowers
 
+# Frontend dependencies and generated output
+node_modules/
+/web/dist/
+/web/coverage/
+/web/.vite/
+/web/.cache/
+*.tsbuildinfo
+pnpm-debug.log*
+npm-debug.log*
+
+# Local browser checks and test artifacts
+/work/
+/web/test-results/
+/web/playwright-report/
+/web/blob-report/
+
+# Local environment overrides (keep examples in Git)
+.env.local
+.env.*.local
+
 /web/node_modules
 /web/dist
 
