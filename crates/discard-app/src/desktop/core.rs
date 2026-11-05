@@ -316,6 +316,17 @@ impl AppCore {
         }
         if changed { self.clear_slots(); }
     }
+    /// Read the current plugin notice.
+    pub fn plugin_notice(&self) -> Option<String> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).plugin_notice.clone()
+    }
+    /// Update the plugin notice in every window.
+    pub fn set_plugin_notice(&self, notice: Option<String>) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.plugin_notice = notice;
+        state.rev += 1;
+        self.changed.notify_one();
+    }
     /// Record a plugin failure on the protected problem line.
     pub fn plugin_failure(&self, plugin: &str, error: &str) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());

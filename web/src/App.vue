@@ -25,7 +25,6 @@ function savePanels(sizes: number[]) {
 <template>
   <main data-testid="app-root" class="flex h-screen overflow-hidden bg-background text-foreground">
     <template v-if="store.snapshot">
-      <!-- The Settings window is added in a later phase. -->
       <ServerRail :project="store.snapshot.project" :unread="store.snapshot.unread" :pending-approvals="store.snapshot.pendingApprovals" :review-count="store.snapshot.banners.reviewCount" :target="{ type: 'server', id: store.snapshot.projectId, name: store.snapshot.project, path: store.snapshot.projectPath }" @settings="runAction(settingsTarget(store.snapshot.banners.reviewCount)[0])" />
       <div class="min-w-0 flex-1">
         <ResizablePanelGroup direction="horizontal" @layout="savePanels">

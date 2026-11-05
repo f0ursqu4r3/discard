@@ -45,7 +45,7 @@ pub fn run(app: &AppHandle, core: &Arc<AppCore>, actions: &DesktopActions, actio
         plan::TargetedPlan::Nothing => {}
     }
     match plan::plan(action, ctx.turn_running, actions.confirms(), ctx.safe_mode) {
-        Plan::OpenSettings(_) => core.notice("Settings is not built yet".into()),
+        Plan::OpenSettings(page) => if let Err(error) = super::windows::open_settings(app, page) { core.notice(format!("Cannot open Settings: {error}")); },
         Plan::CancelTurn => core.cancel(),
         Plan::ToggleMemberList => { let _ = core.set_member_list_visible(!core.snapshot().member_list_visible); }
         Plan::Ask(ending) => core.ask(ending),

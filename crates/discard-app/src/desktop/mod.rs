@@ -58,6 +58,9 @@ pub struct DesktopConfig {
     pub store: Arc<Mutex<discard_core::store::Store>>,
     pub workspace_mode: discard_core::model::WorkspaceMode,
     pub relaunch: actions::Relaunch,
+    pub providers: Vec<discard_ui::ProviderInfo>,
+    pub recheck: discard_ui::Recheck,
+    pub memory: Arc<discard_core::memory::MemoryStore>,
 }
 pub fn run(
     init: CoreInit,
@@ -70,12 +73,12 @@ pub fn run(
 ) -> Result<(), tauri::Error> {
     let core = Arc::new(AppCore::new(init));
     core.set_plugins(plugins.clone());
-    core.set_load_report(config.load_report);
+    core.set_load_report(config.load_report.clone());
     core.configure_window(&data_dir, &config.project_dir, config.channel_dir.as_deref());
     core.configure_targets(config.project_id, &config.project_dir, config.agent_id);
-    core.configure_branch_source(config.store, config.channel_id.clone(), config.workspace_mode, config.project_dir.clone());
+    core.configure_branch_source(config.store.clone(), config.channel_id.clone(), config.workspace_mode, config.project_dir.clone());
     core.configure_read_marker(&data_dir, &config.channel_id.0);
-    let actions = Arc::new(actions::DesktopActions { settings: settings.clone(), workspace: config.workspace, channel_id: config.channel_id, relaunch: config.relaunch, exiting: AtomicBool::new(false) });
+    let actions = Arc::new(actions::DesktopActions { settings: settings.clone(), workspace: config.workspace, channel_id: config.channel_id.clone(), relaunch: config.relaunch, exiting: AtomicBool::new(false) });
     let event_actions = actions.clone();
     let menu_actions = actions.clone();
     let menu_core = core.clone();
@@ -89,6 +92,8 @@ pub fn run(
     let app = tauri::Builder::default()
         .manage(core.clone())
         .manage(actions.clone())
+        .manage(windows::SettingsRoute::default())
+        .manage(settings::SettingsContext { home: data_dir.clone(), plugins: plugins.clone(), providers: config.providers, recheck: config.recheck, store: config.store, memory: config.memory, channel_id: config.channel_id, load_report: config.load_report, trusted_reviews: Mutex::new(std::collections::HashSet::new()), logs: Mutex::new(settings::logs::LogState::open(&data_dir)) })
         .on_menu_event(move |app, event| {
             let id = event.id().as_ref();
             if let Some(action) = discard_core::action::Action::from_id(id) {
@@ -109,7 +114,7 @@ pub fn run(
                     api.prevent_close();
                 } else if window.label() == "main" && ctx.turn_running { event_core.cancel(); }
             }
-            if matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)) {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)) {
                 let generation = geometry_generation.fetch_add(1, Ordering::Relaxed) + 1;
                 let counter = geometry_generation.clone();
                 let core = event_core.clone();
@@ -161,6 +166,7 @@ pub fn run(
             core.set_theme(theme::theme_dto(&theme_state, mode));
             let theme_core = core.clone();
             let emitter_settings = settings.clone();
+            let settings_events = app.handle().clone();
             runtime.spawn(async move {
                 let mut timer = tokio::time::interval(Duration::from_millis(700));
                 loop {
@@ -175,7 +181,7 @@ pub fn run(
                         let changed = settings.reload_if_changed();
                         (settings.settings().appearance.clone(), changed)
                     };
-                    if changed { theme_core.clear_slots(); }
+                    if changed { theme_core.clear_slots(); let _ = settings_events.emit("discard://settings", ()); }
                     let plugin_theme = plugins
                         .manager()
                         .lock()
@@ -215,7 +221,36 @@ pub fn run(
             commands::context_menu,
             commands::run_action,
             commands::plugin_menu_action,
-            commands::web_shortcuts
+            commands::web_shortcuts,
+            windows::settings_current_page,
+            settings::settings_search,
+            settings::settings_get,
+            settings::settings_set_general,
+            settings::settings_set_appearance,
+            settings::settings_copy_theme,
+            settings::settings_choose_theme,
+            settings::providers::settings_providers,
+            settings::providers::settings_recheck_provider,
+            settings::agents::settings_agent_get,
+            settings::agents::settings_agent_review,
+            settings::agents::settings_agent_save,
+            settings::memory::settings_memory_scopes,
+            settings::memory::settings_memory_read,
+            settings::workspaces::settings_workspaces,
+            settings::workspaces::settings_reveal_workspace,
+            settings::memory::settings_reveal_memory,
+            settings::advanced::settings_advanced_actions,
+            settings::advanced::settings_advanced_run,
+            settings::keybindings::settings_keymap_rows,
+            settings::keybindings::settings_keymap_set,
+            settings::plugins::settings_plugins,
+            settings::plugins::settings_plugin_trust,
+            settings::plugins::settings_plugin_approve,
+            settings::plugins::settings_plugin_reject,
+            settings::plugins::settings_plugin_rollback,
+            settings::plugins::settings_plugin_modified_diff,
+            settings::plugins::settings_plugin_dismiss_notice,
+            settings::logs::settings_logs
         ])
         .build(tauri::generate_context!())?;
     app.run(move |_handle, event| {
@@ -242,3 +277,5 @@ pub mod plan;
 pub mod menu;
 
 pub mod actions;
+
+pub mod settings;

@@ -116,3 +116,47 @@ mod startup_tests {
         assert!(!tauri::is_dev(), "the default build must use the bundled web assets");
     }
 }
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    #[test]
+    fn second_open_focuses_the_existing_window() {
+        assert_eq!(settings_window_action(false), SettingsWindowAction::Create);
+        assert_eq!(settings_window_action(true), SettingsWindowAction::Focus);
+    }
+}
+
+/// Choose whether to create the settings window or focus it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SettingsWindowAction { Create, Focus }
+
+pub fn settings_window_action(exists: bool) -> SettingsWindowAction {
+    if exists { SettingsWindowAction::Focus } else { SettingsWindowAction::Create }
+}
+
+/// Last page requested by a settings entry point.
+#[derive(Default)]
+pub struct SettingsRoute(pub std::sync::Mutex<Option<String>>);
+
+#[tauri::command]
+pub fn settings_current_page(route: tauri::State<'_, SettingsRoute>) -> Option<String> {
+    route.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Open the single settings window, or focus it and select the requested page.
+pub fn open_settings(app: &tauri::AppHandle, page: discard_core::settings_page::SettingsPage) -> tauri::Result<()> {
+    use tauri::{Emitter, Manager};
+    let route = format!("/settings/{}", page.title().to_ascii_lowercase());
+    *app.state::<SettingsRoute>().0.lock().unwrap_or_else(|e| e.into_inner()) = Some(route.clone());
+    if let Some(window) = app.get_webview_window("settings") {
+        window.emit("discard://settings-page", &route)?;
+        window.show()?;
+        window.set_focus()?;
+    } else {
+        tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::App(format!("index.html#{route}").into()))
+            .title("Settings").inner_size(900.0, 650.0).build()?;
+    }
+    Ok(())
+}

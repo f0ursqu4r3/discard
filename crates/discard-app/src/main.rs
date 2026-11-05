@@ -214,7 +214,7 @@ fn run_app(
         channel: workspace.channel.name,
         agent: workspace.agent.name,
         provider: workspace.agent.provider,
-    }, updates_rx, runtime.handle().clone(), settings, plugins, data_dir.to_path_buf(), desktop::DesktopConfig { project_dir, project_id: workspace.project.id.0.clone(), agent_id: workspace.channel.agent_id.0.clone(), channel_dir: branch_dir, channel_id: workspace.channel.id.clone(), load_report, workspace: git_workspace, store, workspace_mode: workspace.channel.workspace_mode, relaunch })?;
+    }, updates_rx, runtime.handle().clone(), settings, plugins, data_dir.to_path_buf(), desktop::DesktopConfig { project_dir, project_id: workspace.project.id.0.clone(), agent_id: workspace.channel.agent_id.0.clone(), channel_dir: branch_dir, channel_id: workspace.channel.id.clone(), load_report, workspace: git_workspace, store, workspace_mode: workspace.channel.workspace_mode, relaunch, providers, recheck, memory: memory_store })?;
     Ok(())
 }
 
