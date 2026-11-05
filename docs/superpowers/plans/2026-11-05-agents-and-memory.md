@@ -57,7 +57,21 @@
 - [ ] Add tests for stale edit, stale Undo, deleted search hits, move between domains, history inspection, and failed shared-write escalation.
 - [ ] Run `cargo test -p discard-core -p discard-mcp -p discard-lua`.
 
-### Task 3: Per-turn agent configuration and context
+### Task 3: Conversation-only provider sessions
+
+**Files:** `crates/discard-core/src/provider.rs`; `crates/discard-providers/src/claude/provider.rs`, `codex/provider.rs`, new provider-mode helpers as needed; provider process fixtures and tests.
+
+**Interfaces:** Add an explicit conversation-only session mode to `SessionSpec`. In this mode only Discard memory MCP tools are available. Preserve the selected provider/model and use app-owned empty working directories. Keep provider authentication intact.
+
+- [ ] Read `.superpowers/sdd/2026-11-05-agents-and-memory/runtime-research.md` for version-matched source evidence and supported CLI controls.
+- [ ] Add process-fixture tests asserting conversation-only controls, disabled inherited MCP/plugins/provider memory, fresh system prompts, and `allowProviderModelFallback:false` for Codex.
+- [ ] Implement Claude's documented tool/settings restrictions and disable both automatic memory and CLAUDE.md context loading with the verified environment switches.
+- [ ] Implement Codex startup catalog sanitization, exact selected-model validation, explicit inherited-server disables, and verified feature controls. Never edit the user's catalog or auth. Required controls that cannot be enforced must produce a visible error.
+- [ ] Check the installed provider's actual tool surface or a supported runtime capability signal. Do not equate fake-process argument tests with proof of isolation. Document any verification limits.
+- [ ] Add tests for missing/incompatible catalogs, missing selected model, malformed MCP settings, and required-control failures. Preserve existing coding-session behavior outside the new mode.
+- [ ] Run provider unit/process tests and compile all workspace test targets. Publish context-budget metadata available from the selected model for Task 4.
+
+### Task 4: Per-turn agent configuration and context
 
 **Files:** `crates/discard-core/src/engine.rs`, `provider.rs`, new `conversation_context.rs`, `observer.rs`, `ui_state.rs`; `crates/discard-app/src/main.rs`; provider adapters and runtime tests.
 
@@ -72,7 +86,7 @@
 - [ ] In conversation-only mode, expose memory tools without external write actions. Project-less chats use an app-owned empty working directory and cannot inherit project plugins or filesystem access.
 - [ ] Run focused engine/context/provider tests, then `cargo test --workspace`.
 
-### Task 4: Desktop agent and conversation controls
+### Task 5: Desktop agent and conversation controls
 
 **Files:** `crates/discard-app/src/desktop/settings/agents.rs`, `settings/mod.rs`, `channels.rs`, `commands.rs`, `core.rs`, `dto.rs`, `mod.rs`; `web/src/bridge/api.ts`, `types.ts`, `store.ts`; agent settings and workspace components.
 
@@ -85,7 +99,7 @@
 - [ ] Add Vue and Rust tests for command payloads, direct-chat selection without a project, multiple conversations, pending edits, and deletion choices.
 - [ ] Run `pnpm --dir web test`, `pnpm --dir web typecheck`, and focused desktop tests.
 
-### Task 5: Memory controls and final integration
+### Task 6: Memory controls and final integration
 
 **Files:** `crates/discard-app/src/desktop/settings/memory.rs`, command registration and DTOs; `web/src/settings/pages/Memory.vue`, conversation memory components and tests; `docs/memory.md`, `docs/settings.md`, provider docs as affected.
 
@@ -94,6 +108,7 @@
 - [ ] Implement all-domain Settings browsing and conversation-scoped memory browsing with inspect/edit/delete/move controls.
 - [ ] Show automatic saves beside responses with Undo. Show shared-write proposals with approve/reject. Reject stale approvals and stale Undo operations with a clear error.
 - [ ] Add a Forget action with an explanation that transcript deletion is separate and a working fresh-conversation action.
+- [ ] Show when automatic capture is paused after Forget/Undo. Provide working app-only resume and fresh-conversation actions; pass the current conversation when forgetting an item sourced elsewhere.
 - [ ] Test memory freshness on the next response, source links, scope restrictions, global/project approval, contradiction handling, and forgotten-item suppression across a fresh conversation.
 - [ ] Update documentation to describe actual new behavior and remove obsolete restart/session-start restrictions.
 - [ ] Run workspace tests, web tests, type checks, lint, and formatting checks. Inspect the working UI where the available runtime permits it.
