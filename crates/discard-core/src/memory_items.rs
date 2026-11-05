@@ -49,6 +49,8 @@ pub struct MemoryItem {
     pub scope: Scope,
     pub kind: ItemKind,
     pub content: String,
+    /// Hash of the last committed body; external edits require reconcile before mutation.
+    pub committed_body_hash: String,
     pub source_conversation: Option<ChannelId>,
     /// Conversation that requested the current mutation; source stays unchanged.
     #[serde(default)]
@@ -244,14 +246,15 @@ impl MemoryStore {
             })
             .collect())
     }
-    fn persist_item(&self, item: &MemoryItem) -> Result<()> {
+    fn persist_item(&self, item: &mut MemoryItem) -> Result<()> {
         self.resolve(&item.scope, "check.md")?;
         if item.content.len() > MAX_FILE_BYTES {
             return Err(MemoryError::TooLarge);
         }
-        let mut metadata = item.clone();
-        metadata.content.clear();
-        self.write_document(".items", &item.id, &metadata, &item.content)?;
+        item.committed_body_hash = version_of(&item.content);
+        // The metadata body snapshot preserves the previous committed revision if
+        // an external editor changes the authoritative readable body.
+        self.write_document(".items", &item.id, item, &item.content)?;
         // Remove old scope entries after moves; history is never indexed.
         for scope in item
             .history
@@ -303,11 +306,12 @@ impl MemoryStore {
             return Err(MemoryError::TooManyFiles);
         }
         let at = now();
-        let item = MemoryItem {
+        let mut item = MemoryItem {
             id: uuid::Uuid::new_v4().to_string(),
             scope: scope.clone(),
             kind,
             content: content.into(),
+            committed_body_hash: version_of(content),
             source_conversation: source.cloned(),
             change_conversation: source.cloned(),
             created_at: at,
@@ -320,7 +324,7 @@ impl MemoryStore {
             paused_capture_conversations: vec![],
             proposal_id,
         };
-        self.persist_item(&item)?;
+        self.persist_item(&mut item)?;
         Ok(item)
     }
     /// App-only direct creation. Agent entry points must use `capture_item`.
@@ -343,7 +347,41 @@ impl MemoryStore {
                 current: item.version.to_string(),
             });
         }
+        Self::check_committed_body(&item)?;
         Ok(item)
+    }
+    fn check_committed_body(item: &MemoryItem) -> Result<()> {
+        if version_of(&item.content) != item.committed_body_hash {
+            return Err(MemoryError::Conflict {
+                path: item.id.clone(),
+                current: format!(
+                    "{}; external markdown edit requires reconcile and reload",
+                    item.version
+                ),
+            });
+        }
+        Ok(())
+    }
+    /// Import external readable-body edits as new user revisions. Caller holds write_lock.
+    pub(crate) fn import_external_items_locked(&self) -> Result<usize> {
+        let mut imported = 0;
+        for id in self.document_ids(".items")? {
+            let current = self.read_item(&id)?;
+            if version_of(&current.content) == current.committed_body_hash {
+                continue;
+            }
+            let (mut committed, _): (MemoryItem, String) = self.read_document(".items", &id)?;
+            if version_of(&committed.content) != committed.committed_body_hash {
+                return Err(document_err(
+                    "committed body snapshot does not match its hash",
+                ));
+            }
+            Self::revise(&mut committed, MutationOrigin::User);
+            committed.content = current.content;
+            self.persist_item(&mut committed)?;
+            imported += 1;
+        }
+        Ok(imported)
     }
     fn revise(item: &mut MemoryItem, origin: MutationOrigin) {
         item.history.push(ItemRevision {
@@ -378,7 +416,7 @@ impl MemoryStore {
         }
         Self::revise(&mut item, origin);
         item.content = content.into();
-        self.persist_item(&item)?;
+        self.persist_item(&mut item)?;
         Ok(item)
     }
     fn suppress(item: &mut MemoryItem, conversation: Option<&ChannelId>) {
@@ -422,23 +460,34 @@ impl MemoryStore {
         let _guard = lock(&self.write_lock);
         for mut item in self.all_items()? {
             if item.paused_capture_conversations.contains(conversation) {
+                Self::check_committed_body(&item)?;
                 item.paused_capture_conversations
                     .retain(|c| c != conversation);
-                self.persist_item(&item)?;
+                self.persist_item(&mut item)?;
             }
         }
         Ok(())
     }
     pub fn forget_item(&self, id: &str, expected: u64) -> Result<MemoryItem> {
+        self.forget_item_in(id, expected, None)
+    }
+    /// App-only direct Forget. Pass the current conversation to pause it as well as the source.
+    pub fn forget_item_in(
+        &self,
+        id: &str,
+        expected: u64,
+        requester: Option<&ChannelId>,
+    ) -> Result<MemoryItem> {
         let _guard = lock(&self.write_lock);
         let mut item = self.versioned_item(id, expected)?;
         if item.deleted {
             return Err(MemoryError::NotFound(id.into()));
         }
-        Self::suppress(&mut item, None);
+        Self::suppress(&mut item, requester);
         Self::revise(&mut item, MutationOrigin::User);
+        item.change_conversation = requester.cloned().or(item.source_conversation.clone());
         item.deleted = true;
-        self.persist_item(&item)?;
+        self.persist_item(&mut item)?;
         Ok(item)
     }
     pub fn move_item(&self, id: &str, expected: u64, scope: &Scope) -> Result<MemoryItem> {
@@ -450,7 +499,7 @@ impl MemoryStore {
         }
         Self::revise(&mut item, MutationOrigin::User);
         item.scope = scope.clone();
-        self.persist_item(&item)?;
+        self.persist_item(&mut item)?;
         Ok(item)
     }
     /// Undo only the current change. Undo of creation forgets the item.
@@ -467,7 +516,7 @@ impl MemoryStore {
             Self::suppress(&mut item, None);
             item.deleted = true;
         }
-        self.persist_item(&item)?;
+        self.persist_item(&mut item)?;
         Ok(item)
     }
     /// Agent capture: identity parameters must come from the runtime, never tool JSON.
@@ -636,7 +685,7 @@ impl MemoryStore {
                 item.deleted = true;
                 item.proposal_id = Some(p.id.clone());
                 item.change_conversation = Some(p.source_conversation.clone());
-                self.persist_item(&item)?;
+                self.persist_item(&mut item)?;
                 item
             }
             ProposalAction::Create {
@@ -664,7 +713,7 @@ impl MemoryStore {
                 i.content = content.clone();
                 i.proposal_id = Some(p.id.clone());
                 i.change_conversation = Some(p.source_conversation.clone());
-                self.persist_item(&i)?;
+                self.persist_item(&mut i)?;
                 i
             }
         };

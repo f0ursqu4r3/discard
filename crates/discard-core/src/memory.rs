@@ -508,7 +508,7 @@ impl MemoryStore {
         self.reconcile_locked()
     }
     pub(crate) fn reconcile_locked(&self) -> Result<ReconcileStats> {
-        let mut stats = ReconcileStats::default();
+        let mut stats = ReconcileStats {indexed:self.import_external_items_locked()?,removed:0};
         let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
         for scope in self.scopes_on_disk() {
             // `list` refuses symlinked scope directories, and skips symlinked files.

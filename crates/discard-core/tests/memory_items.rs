@@ -441,7 +441,8 @@ fn stale_index_after_authoritative_write_cannot_deliver_forgotten_or_old_content
     let path = d.path().join(".items").join(format!("{}.md", i.id));
     let original = std::fs::read_to_string(&path).unwrap();
     // Simulate a committed markdown rename followed by a crash before FTS update.
-    std::fs::write(&path, original.replace("oldindexedword", "newbodyword")).unwrap();
+    let (metadata, _) = original.split_once("\n\n").unwrap();
+    std::fs::write(&path, format!("{metadata}\n\nnewbodyword")).unwrap();
     assert!(
         s.search(&[Scope::Global], "oldindexedword", 10)
             .unwrap()
@@ -631,4 +632,107 @@ fn undo_creation_pauses_capture_and_approved_changes_follow_requesting_conversat
     assert!(s.memory_changes(&current).unwrap().iter().any(
         |c| matches!(c,MemoryChange::Saved{item,..} if item.id==forgotten.id && item.deleted)
     ));
+}
+
+fn externally_replace_item_body(root: &std::path::Path, id: &str, body: &str) {
+    let path = root.join(".items").join(format!("{id}.md"));
+    let document = std::fs::read_to_string(&path).unwrap();
+    let (metadata, _) = document.split_once("\n\n").unwrap();
+    std::fs::write(path, format!("{metadata}\n\n{body}")).unwrap();
+}
+
+#[test]
+fn external_body_edit_conflicts_with_every_stale_mutation_and_proposal_approval() {
+    use discard_core::memory::MemoryError;
+    for mutation in [
+        "update",
+        "move",
+        "forget",
+        "forget_in",
+        "undo",
+        "approve_update",
+        "approve_forget",
+    ] {
+        let d = tempfile::tempdir().unwrap();
+        let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+        let a = AgentId("a".into());
+        let c = ChannelId("c".into());
+        let i = s
+            .create_item(
+                &Scope::Agent(a.clone()),
+                ItemKind::Fact,
+                "A",
+                Some(&c),
+                MutationOrigin::User,
+            )
+            .unwrap();
+        let proposal = match mutation {
+            "approve_update" => Some(
+                s.propose_update(&a, None, &c, &i.id, i.version, "C")
+                    .unwrap(),
+            ),
+            "approve_forget" => Some(s.propose_forget(&a, None, &c, &i.id, i.version).unwrap()),
+            _ => None,
+        };
+        externally_replace_item_body(d.path(), &i.id, "B");
+        let attempt = || match mutation {
+            "update" => s.update_item(&i.id, i.version, "C", MutationOrigin::User),
+            "move" => s.move_item(&i.id, i.version, &Scope::Global),
+            "forget" => s.forget_item(&i.id, i.version),
+            "forget_in" => s.forget_item_in(&i.id, i.version, Some(&c)),
+            "undo" => s.undo_item(&i.id, i.version),
+            _ => s.approve_proposal(&proposal.as_ref().unwrap().id),
+        };
+        let result = attempt();
+        assert!(
+            matches!(result, Err(MemoryError::Conflict { .. })),
+            "{mutation}: {result:?}"
+        );
+        assert_eq!(s.read_item(&i.id).unwrap().content, "B");
+        s.reconcile().unwrap();
+        let imported = s.read_item(&i.id).unwrap();
+        assert_eq!(imported.version, i.version + 1);
+        assert_eq!(imported.content, "B");
+        assert_eq!(imported.history.last().unwrap().content, "A");
+        assert_ne!(imported.committed_body_hash, i.committed_body_hash);
+        let result = attempt();
+        assert!(
+            matches!(result, Err(MemoryError::Conflict { .. })),
+            "after import {mutation}: {result:?}"
+        );
+        s.reconcile().unwrap();
+        assert_eq!(s.read_item(&i.id).unwrap().version, imported.version);
+        assert!(matches!(
+            s.update_item(&i.id, i.version, "stale C", MutationOrigin::User),
+            Err(MemoryError::Conflict { .. })
+        ));
+        s.update_item(&i.id, imported.version, "C", MutationOrigin::User)
+            .unwrap();
+        drop(s);
+        let reopened = MemoryStore::open_in_memory_index(d.path()).unwrap();
+        assert_eq!(reopened.read_item(&i.id).unwrap().content, "C");
+    }
+}
+
+#[test]
+fn direct_app_forget_pauses_original_and_requesting_conversation_without_proposal() {
+    let d = tempfile::tempdir().unwrap();
+    let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+    let original = ChannelId("original".into());
+    let requester = ChannelId("requester".into());
+    let i = s
+        .create_item(
+            &Scope::Global,
+            ItemKind::Fact,
+            "value",
+            Some(&original),
+            MutationOrigin::User,
+        )
+        .unwrap();
+    s.forget_item_in(&i.id, i.version, Some(&requester))
+        .unwrap();
+    assert!(s.capture_paused(&original).unwrap());
+    assert!(s.capture_paused(&requester).unwrap());
+    assert!(s.pending_proposals().unwrap().is_empty());
+    assert!(s.memory_changes(&requester).unwrap().iter().any(|change|matches!(change,discard_core::memory_items::MemoryChange::Saved{item,..} if item.id==i.id && item.deleted)));
 }

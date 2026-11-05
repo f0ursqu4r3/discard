@@ -1,12 +1,12 @@
 # Task 2 report
 
-Implemented the four memory domains and versioned memory backend. Runtime context and UI work remain in Tasks 3–5.
+Implemented the four memory domains and versioned memory backend. Provider controls, runtime context, and UI work remain in Tasks 3–6.
 
 ## Storage and retrieval
 
 - `Scope::AgentProject(AgentId, ProjectId)` uses `agent-projects/<agent>/<project>` for legacy raw files. Both IDs and all existing path components are validated. Scope discovery includes orphan domain folders and item domains.
 - `Scope::applicable(agent, Option<project>)` returns agent-project, project, agent, global in project chats; agent, global in direct chats.
-- Each item has one authoritative `.items/<UUID>.md` document. A JSON metadata comment contains stable ID, domain, kind, source conversation, timestamps, version, history, deletion state, and recapture suppression records. The readable current markdown body is authoritative. The metadata's duplicate `content` field is empty on disk.
+- Each item has one authoritative `.items/<UUID>.md` document. A JSON metadata comment contains stable ID, domain, kind, source conversation, timestamps, version, history, deletion state, and recapture suppression records. The readable current markdown body is authoritative. Metadata retains `committed_body_hash` and a committed `content` snapshot for stale-write detection and import history. The snapshot does not override the readable body.
 - Current live bodies appear under virtual `items/<UUID>.md` paths in existing list/read/search APIs. Hidden history and proposals never enter FTS or prompt blocks. Preferences and instructions enter core blocks on every prepare, in domain precedence order.
 - Writes use the existing `MemoryStore.write_lock` and atomic document replacement. Moves change one document, not two scope files. The index is rebuildable. Search validates virtual hits against current scope, live state, and body hash, including a crash between markdown rename and FTS update.
 - Raw mutation APIs reject virtual item paths. Existing explicit plugin grants can still use legacy raw files; agent tools cannot use raw append/edit to bypass item rules.
@@ -19,7 +19,7 @@ All item types live in `discard_core::memory_items`.
 - `MemoryItem`: UUID string `id`, `scope`, `kind`, `content`, `source_conversation: Option<ChannelId>`, millisecond timestamps, `version: u64`, `deleted`, `origin`, `history: Vec<ItemRevision>`, `recapture_suppression`, `paused_capture_conversations`, `change_conversation`, `proposal_id`. `path()` returns the virtual path.
 - `MutationOrigin::{Automatic, User, Approved}`. App-only direct APIs use User or Approved. Never map a model JSON field to this enum.
 - `create_item(scope, kind, content, Option<source>, origin)`, `list_items(scopes)`, `read_item(id)`.
-- `update_item(id, expected_version, content, origin)`, `forget_item(id, expected_version)`, `move_item(id, expected_version, target_scope)`, `undo_item(id, expected_version)`.
+- `update_item(id, expected_version, content, origin)`, `forget_item(id, expected_version)` / `forget_item_in(id, expected_version, Option<&ChannelId> requester)`, `move_item(id, expected_version, target_scope)`, `undo_item(id, expected_version)`.
 - Mutations retain previous snapshots and increment versions. Stale edits, moves, Forget, approvals, and Undo return `MemoryError::Conflict`. Automatic replacements return `ApprovalRequired`. Undo of creation forgets the item.
 - `capture_item(agent, Option<project>, source_conversation, target_scope, kind, content) -> SaveOutcome::{Saved(MemoryItem), Proposed(MemoryProposal)}`. Pass identity arguments from runtime state. Private automatic capture uses Agent outside a project or the matching AgentProject inside a project. Shared domains create proposals.
 - `propose_update(agent, Option<project>, source, item_id, expected_version, content)` and `propose_forget(agent, Option<project>, source, item_id, expected_version)` enforce applicable scope access and preserve pending user authorization.
@@ -39,7 +39,7 @@ All item types live in `discard_core::memory_items`.
 
 ## Forget suppression and limits
 
-Forget pauses all automatic capture for the item's original source conversation. Approved in-chat Forget also pauses the requesting conversation. Undo of creation pauses its source conversation. The pause blocks paraphrases, old corrected values, unrelated new facts, and automatic shared-save proposals without trying to recognize semantic equivalence. A fresh conversation has a new ID and no inherited pause. Direct user/approved saves bypass the pause without lifting it. Undo does not lift it.
+Forget pauses all automatic capture for the item's original source conversation. Direct app `forget_item_in` and approved in-chat Forget also pause the requesting conversation. Undo of creation pauses its source conversation. The pause blocks paraphrases, old corrected values, unrelated new facts, and automatic shared-save proposals without trying to recognize semantic equivalence. A fresh conversation has a new ID and no inherited pause. Direct user/approved saves bypass the pause without lifting it. Undo does not lift it.
 
 `capture_paused(&ChannelId) -> Result<bool>` exposes controller status. App-only `resume_capture(&ChannelId) -> Result<()>` clears that conversation's pause flags under the store lock. No MCP tool or JSON field can resume capture. `MemoryError::CapturePaused` gives the UI a distinct state. Pause flags live in authoritative item documents and survive reopen; no separate metadata shadow exists. Resume changes controller metadata, not item content/version, so the UI must refresh pause status independently of saved item/version keys. If a multi-document resume fails, remaining flags conservatively keep capture paused.
 
@@ -53,7 +53,7 @@ RED: initial memory integration tests failed to compile because Scope::AgentProj
 
 GREEN:
 
-- `cargo test -p discard-core -p discard-mcp -p discard-lua`: pass; 757 tests.
+- `cargo test -p discard-core -p discard-mcp -p discard-lua`: pass; 759 tests.
 - `cargo test -p discard-app plugin_memory`: pass; 8 tests.
 - `cargo check --workspace`: pass.
 - `cargo test --workspace --no-run`: pass; all workspace test targets compile.
@@ -72,3 +72,17 @@ Approved Update/Forget now set typed `change_conversation` metadata to the reque
 RED: `cargo test -p discard-core --test memory_items forget_pauses` failed to compile because `capture_paused`, `resume_capture`, and `CapturePaused` did not exist. GREEN: the full memory integration target passes all 11 tests. New tests cover paraphrases, unrelated facts, old corrected bodies, all-version exact suppression after app resume, pause persistence and resume persistence, fresh conversations, explicit User/Approved saves, Undo of creation, requesting-source completion records, and MCP attempts to resume via JSON or an invented tool.
 
 Final checks after this fix: core/MCP/Lua suite passes (757 tests), workspace check passes, and all workspace test targets compile. No merge or push performed.
+
+## Review fix round 2
+
+Added committed-body protection for external markdown edits. The item document now persists `committed_body_hash` plus its committed body snapshot in metadata `content`. The readable body remains authoritative. This changes the current format; no migration is provided or required for this new application.
+
+All versioned mutations compare the readable body with its committed hash before they write. A mismatch returns `MemoryError::Conflict` and instructs the caller to reconcile and reload. Update, Move, Forget, Undo, inferred proposal creation, and proposal approval use that check. App Resume also refuses to silently commit an external body while changing pause metadata.
+
+`reconcile()` and `rebuild_index()` explicitly import an external readable-body edit as a new User revision. Import advances the numeric version, preserves the previous committed body in history, and updates the hash/index. A second reconcile is idempotent. A caller holding v1 still conflicts after import advances the item to v2. Reload the item after reconcile before retrying a user edit. The store does not lock out an external filesystem writer; its existing in-process lock serializes app mutations.
+
+Added `forget_item_in(id, expected_version, Option<&ChannelId> requester)` for direct app Forget. It pauses both original source and requesting conversation and associates the completed change with the requester. It creates no model proposal. `forget_item` remains the convenience wrapper with no requester. Memory UI code should pass its current conversation to `forget_item_in`.
+
+RED: the external-body regression test reproduced silent loss: A at v1, external B, stale update(v1,C) returned success and overwrote B. GREEN: all 13 memory integration tests pass. The mutation matrix now checks stale Update, Move, Forget, direct app Forget, Undo, Update approval, and Forget approval before and after reconcile; it also checks prior-body history, reload/reopen, and idempotent import. A direct app Forget test verifies both conversation pauses and requesting-source completed records without a fabricated proposal.
+
+Final checks: core/MCP/Lua suite passes (759 tests); workspace check and all workspace test target compilation pass. No merge or push performed.
