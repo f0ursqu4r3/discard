@@ -34,7 +34,7 @@ pub struct MemoryHit {
     pub snippet: String,
 }
 
-/// Agent memory for plugins. `scope` is `agent`, `project`, or `global`. The runtime has already checked it
+/// Agent memory for plugins. `scope` is `agent-project`, `agent`, `project`, or `global`. The runtime has already checked it
 /// against the plugin's manifest, and the implementation maps it to the ids of this app's agent and project.
 pub trait MemoryHost: Send + Sync {
     fn list(&self, scope: &str) -> Result<Vec<MemoryFile>, String>;

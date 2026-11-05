@@ -58,7 +58,7 @@ pub struct ExecScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryScope {
-    /// Any of `agent`, `project`, `global`.
+    /// Any of `agent-project`, `agent`, `project`, `global`.
     pub scopes: Vec<String>,
     /// Without this, the plugin can list, read, and search, but not append or edit.
     #[serde(default)]
@@ -113,7 +113,7 @@ impl Manifest {
             if mem.scopes.is_empty() {
                 return Err(ManifestError::EmptyScope("memory"));
             }
-            if let Some(bad) = mem.scopes.iter().find(|s| !["agent", "project", "global"].contains(&s.as_str())) {
+            if let Some(bad) = mem.scopes.iter().find(|s| !["agent-project", "agent", "project", "global"].contains(&s.as_str())) {
                 return Err(ManifestError::BadMemoryScope(bad.clone()));
             }
         }

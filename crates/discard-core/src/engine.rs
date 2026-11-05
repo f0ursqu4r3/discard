@@ -64,7 +64,7 @@ pub struct PreparedMemory {
 /// Provides memory to provider sessions. Implemented by the MCP crate.
 pub trait MemoryService: Send + Sync {
     /// `plugin_write` adds the plugin-authoring tools (a second MCP server with its own token).
-    fn prepare(&self, agent: &AgentId, project: &ProjectId, base_prompt: Option<&str>, plugin_write: bool) -> Result<PreparedMemory, String>;
+    fn prepare(&self, agent: &AgentId, project: Option<&ProjectId>, source: &ChannelId, base_prompt: Option<&str>, plugin_write: bool) -> Result<PreparedMemory, String>;
     /// Revoke the token and remove the config file. Must be safe to call twice.
     fn finish(&self, token: &str);
 }
@@ -213,7 +213,7 @@ impl Engine {
 
         // Memory: issue a session token and build the prompt. If this fails, no session starts.
         let prepared = match &self.memory {
-            Some(service) => match service.prepare(&self.agent_id, &self.project_id, self.system_prompt.as_deref(), self.plugin_write) {
+            Some(service) => match service.prepare(&self.agent_id, Some(&self.project_id), &self.channel_id, self.system_prompt.as_deref(), self.plugin_write) {
                 Ok(p) => Some(p),
                 Err(e) => {
                     send(updates, Update::Error(redact(&e)));

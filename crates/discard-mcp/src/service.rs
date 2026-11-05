@@ -94,22 +94,24 @@ fn ensure_guide(store: &MemoryStore, agent: &AgentId) -> Result<(), String> {
 }
 
 impl MemoryService for MemoryRuntime {
-    fn prepare(&self, agent: &AgentId, project: &ProjectId, base_prompt: Option<&str>, plugin_write: bool) -> Result<PreparedMemory, String> {
+    fn prepare(&self, agent: &AgentId, project: Option<&ProjectId>, source: &discard_core::model::ChannelId, base_prompt: Option<&str>, plugin_write: bool) -> Result<PreparedMemory, String> {
         if plugin_write {
             ensure_guide(&self.store, agent)?;
         }
-        let scopes = [Scope::Agent(agent.clone()), Scope::Project(project.clone()), Scope::Global];
+        let scopes = Scope::applicable(agent, project);
         let blocks = self.store.core_blocks(&scopes).map_err(|e| format!("could not read memory: {e}"))?;
         let system_prompt = compose_system_prompt(base_prompt, &blocks);
 
         let identity = |surface: Surface, scopes: &[ScopeKindOrd]| Identity {
             agent: agent.clone(),
-            project: project.clone(),
+            project: project.cloned(),
+            source_conversation: Some(source.clone()),
+            write_scopes: [if project.is_some() {ScopeKindOrd::AgentProject} else {ScopeKindOrd::Agent}].into(),
             surface,
             scopes: scopes.iter().copied().collect(),
             can_write: true,
         };
-        let token = self.registry.issue(identity(Surface::Memory, &[ScopeKindOrd::Agent, ScopeKindOrd::Project, ScopeKindOrd::Global]), TOKEN_TTL)?;
+        let token = self.registry.issue(identity(Surface::Memory, &Scope::applicable(agent,project).iter().map(|s|s.kind().into()).collect::<Vec<_>>()), TOKEN_TTL)?;
         let mut extra_tokens = Vec::new();
         let mut servers = serde_json::Map::new();
         servers.insert(

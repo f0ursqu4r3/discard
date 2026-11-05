@@ -36,3 +36,5 @@ pub mod log_view;
 pub mod memory_page;
 pub mod workspace_page;
 pub mod advanced;
+
+pub mod memory_items;

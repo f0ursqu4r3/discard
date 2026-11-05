@@ -258,7 +258,7 @@ fn _uses(_: ApprovalId) {}
 
 struct FakeMemory {
     fail: bool,
-    prepared: Mutex<Vec<(AgentId, ProjectId, Option<String>)>>,
+    prepared: Mutex<Vec<(AgentId, Option<ProjectId>, Option<String>)>>,
     finished: Mutex<Vec<String>>,
 }
 
@@ -269,8 +269,8 @@ impl FakeMemory {
 }
 
 impl MemoryService for FakeMemory {
-    fn prepare(&self, agent: &AgentId, project: &ProjectId, base: Option<&str>, _plugin_write: bool) -> Result<PreparedMemory, String> {
-        self.prepared.lock().unwrap().push((agent.clone(), project.clone(), base.map(str::to_string)));
+    fn prepare(&self, agent: &AgentId, project: Option<&ProjectId>, _source: &ChannelId, base: Option<&str>, _plugin_write: bool) -> Result<PreparedMemory, String> {
+        self.prepared.lock().unwrap().push((agent.clone(), project.cloned(), base.map(str::to_string)));
         if self.fail {
             return Err("memory is unavailable".into());
         }

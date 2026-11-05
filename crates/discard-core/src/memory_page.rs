@@ -32,6 +32,11 @@ pub fn summaries(
             .iter()
             .map(|(id, a)| (Scope::Agent(id.clone()), a.name.clone())),
     );
+    for (id, agent) in agents {
+        for project in projects {
+            scopes.push((Scope::AgentProject(id.clone(), project.id.clone()), format!("{} · {}", agent.name, project.name)));
+        }
+    }
     for scope in memory.scopes_on_disk() {
         if !scopes.iter().any(|(s, _)| s == &scope) {
             let title = scope.label();
@@ -86,7 +91,7 @@ mod tests {
         let rows = summaries(&m, &[(id, cfg)], &[project]);
         assert_eq!(
             rows.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(),
-            ["Global", "Project", "Agent"]
+            ["Global", "Project", "Agent", "Agent · Project"]
         );
     }
     #[test]

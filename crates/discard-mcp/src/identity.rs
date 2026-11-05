@@ -1,7 +1,7 @@
 //! Who is calling. Each provider session gets its own token, bound to one agent, project, and tool surface.
 
 use discard_core::memory::ScopeKind;
-use discard_core::model::{AgentId, ProjectId};
+use discard_core::model::{AgentId, ChannelId, ProjectId};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -16,7 +16,9 @@ pub enum Surface {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
     pub agent: AgentId,
-    pub project: ProjectId,
+    pub project: Option<ProjectId>,
+    pub source_conversation: Option<ChannelId>,
+    pub write_scopes: BTreeSet<ScopeKindOrd>,
     pub surface: Surface,
     pub scopes: BTreeSet<ScopeKindOrd>,
     pub can_write: bool,
@@ -25,6 +27,7 @@ pub struct Identity {
 /// `ScopeKind` with an ordering, so identities can hold them in a set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ScopeKindOrd {
+    AgentProject,
     Agent,
     Project,
     Global,
@@ -33,6 +36,7 @@ pub enum ScopeKindOrd {
 impl From<ScopeKind> for ScopeKindOrd {
     fn from(k: ScopeKind) -> Self {
         match k {
+            ScopeKind::AgentProject => ScopeKindOrd::AgentProject,
             ScopeKind::Agent => ScopeKindOrd::Agent,
             ScopeKind::Project => ScopeKindOrd::Project,
             ScopeKind::Global => ScopeKindOrd::Global,
@@ -99,7 +103,9 @@ mod tests {
     fn identity(surface: Surface) -> Identity {
         Identity {
             agent: AgentId("a1".into()),
-            project: ProjectId("p1".into()),
+            project: Some(ProjectId("p1".into())),
+            source_conversation: Some(ChannelId("chat".into())),
+            write_scopes: [ScopeKindOrd::Agent].into(),
             surface,
             scopes: [ScopeKindOrd::Agent, ScopeKindOrd::Project].into(),
             can_write: true,

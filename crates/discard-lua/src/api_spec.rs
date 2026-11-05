@@ -70,7 +70,7 @@ pub const NAMESPACES: &[ApiNamespace] = &[
     ApiNamespace {
         name: "memory",
         capability: "memory",
-        doc: "Agent memory: markdown files in the scopes `[capabilities.memory] scopes` names (`agent`, `project`, `global`). Paths are relative, like `notes/todo.md`. `append` and `edit` need `write = true`. Memory under `core/` is added to the agent's instructions.",
+        doc: "Agent memory: markdown files in the scopes `[capabilities.memory] scopes` names (`agent-project`, `agent`, `project`, `global`). Paths are relative, like `notes/todo.md`. `append` and `edit` need `write = true`. Memory under `core/` is added to the agent's instructions.",
         functions: &[
             nsfn("list", "(scope: string) -> { { path: string, version: string, bytes: number } }", "Files in a scope."),
             nsfn("read", "(scope: string, path: string) -> { text: string, version: string }", "Read a file and its version."),

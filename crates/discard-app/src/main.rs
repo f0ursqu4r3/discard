@@ -216,7 +216,7 @@ fn run_app(
     };
     let on_ready: desktop::channels::OnReady = Arc::new(move |core| {
         let project_core = Arc::downgrade(core);
-        plugin_memory.set_project_source(Arc::new(move || project_core.upgrade().map(|core| core.current_project().id).unwrap_or_else(|| discard_core::model::ProjectId(String::new()))));
+        plugin_memory.set_project_source(Arc::new(move || project_core.upgrade().map(|core| core.current_project().id)));
         let core = Arc::downgrade(core);
         plugin_memory.set_active_source(Arc::new(move || discard_core::model::AgentId(core.upgrade().map(|core| core.active_agent_id()).unwrap_or_default())));
     });

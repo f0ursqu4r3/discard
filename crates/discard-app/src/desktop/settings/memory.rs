@@ -33,6 +33,6 @@ pub fn settings_reveal_memory(context: tauri::State<'_, super::SettingsContext>,
     use discard_core::memory::Scope;
     let row = summaries(&context).into_iter().find(|row| row.scope.label() == scope).ok_or("Memory scope is unavailable")?;
     let root = context.home.join("memory");
-    let path = match row.scope { Scope::Global => root.join("global"), Scope::Project(id) => root.join("projects").join(id.0), Scope::Agent(id) => root.join("agents").join(id.0) };
+    let path = match row.scope { Scope::AgentProject(a, p) => root.join("agent-projects").join(a.0).join(p.0), Scope::Global => root.join("global"), Scope::Project(id) => root.join("projects").join(id.0), Scope::Agent(id) => root.join("agents").join(id.0) };
     super::reveal_path(&path)
 }
