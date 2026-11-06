@@ -192,8 +192,8 @@ impl AppCore {
     pub fn begin_channel_change(&self, id: &str) -> Result<(), String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let channel = std::iter::once(&s.active).chain(s.parked.values()).find(|c| c.channel_id == id);
-        if channel.is_some_and(|c| c.ui.turn_running() || c.archive_busy) || !s.changing_channels.insert(id.to_owned()) {
-            return Err("Stop this channel's response before changing its main agent or canonical status.".into());
+        if channel.is_some_and(|c| c.ui.turn_running() || c.archive_busy || c.archive.is_some()) || !s.changing_channels.insert(id.to_owned()) {
+            return Err("Finish this channel's response or archive confirmation before changing its main agent or canonical status.".into());
         }
         Ok(())
     }
@@ -677,7 +677,7 @@ impl AppCore {
     pub fn archive_started(&self) -> bool { self.archive_started_for(None) }
     pub fn archive_started_for(&self, expected_channel: Option<&str>) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.active.channel_id.is_empty() || state.active.read_only || state.changing_agents.contains(&state.active.agent_id) || state.project_busy || expected_channel.is_some_and(|id| id != state.active.channel_id) || state.active.ui.turn_running() || state.active.archived || state.active.archive_busy { return false; }
+        if state.active.channel_id.is_empty() || state.active.read_only || state.changing_agents.contains(&state.active.agent_id) || state.changing_channels.contains(&state.active.channel_id) || state.project_busy || expected_channel.is_some_and(|id| id != state.active.channel_id) || state.active.ui.turn_running() || state.active.archived || state.active.archive_busy { return false; }
         state.active.archive = None;
         state.active.archive_busy = true;
         state.rev += 1;

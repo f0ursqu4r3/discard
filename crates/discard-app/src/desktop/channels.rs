@@ -53,15 +53,19 @@ impl Channels {
         Ok(())
     }
     fn start(&self, channel: &Channel) -> Result<(), String> { self.start_mode(channel, false) }
-    fn start_mode(&self, channel: &Channel, restart: bool) -> Result<(), String> {
-        let (init, mut updates) = (self.launch)(channel)?;
-        if restart { if !self.core.restart_closed_channel(init, channel)? { return Ok(()); } }
-        else { self.core.add_channel(init, channel); }
+    fn refresh_channel_access(&self, channel: &Channel) -> Result<(), String> {
         let (archived, unavailable) = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
             (store.channel_archived(&channel.id).map_err(|e| e.to_string())?, store.agent_archived(&channel.agent_id).unwrap_or(true))
         };
-        self.core.channel_read_only(&channel.id.0, unavailable || archived, archived);
+        self.core.channel_read_only(&channel.id.0, archived || unavailable, archived);
+        Ok(())
+    }
+    fn start_mode(&self, channel: &Channel, restart: bool) -> Result<(), String> {
+        let (init, mut updates) = (self.launch)(channel)?;
+        if restart { if !self.core.restart_closed_channel(init, channel)? { return Ok(()); } }
+        else { self.core.add_channel(init, channel); }
+        self.refresh_channel_access(channel)?;
         let core = self.core.clone();
         let id = channel.id.0.clone();
         let generation = core.channel_runtime_generation(&id).ok_or("Conversation unavailable")?;
@@ -89,6 +93,14 @@ impl Channels {
         if archived && !allow_archived { return Err("This channel is archived.".into()); }
         Ok((value, metadata, archived))
     }
+    fn with_active_project_channel<T>(&self, project: &ProjectId, channel: &ChannelId, operation: impl FnOnce(&Store) -> Result<T, String>) -> Result<T, String> {
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let value = store.load_channel(channel).map_err(|e| e.to_string())?;
+        if value.project_id.as_ref() != Some(project) { return Err("Channel does not belong to this project.".into()); }
+        if store.project_channel_metadata(channel).map_err(|e| e.to_string())?.is_none() { return Err("Project channel metadata is unavailable".into()); }
+        if store.channel_archived(channel).map_err(|e| e.to_string())? { return Err("This channel is archived.".into()); }
+        operation(&store)
+    }
     pub fn list_project_channels(&self, project: &ProjectId) -> Result<Vec<super::dto::ProjectChannelDto>, String> {
         let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         if !store.list_projects().map_err(|e| e.to_string())?.iter().any(|candidate| candidate.id == *project) { return Err("Project unavailable".into()); }
@@ -114,12 +126,11 @@ impl Channels {
         Ok(members)
     }
     pub fn invite_channel_member(&self, project: &ProjectId, channel: &ChannelId, agent: &discard_core::model::AgentId) -> Result<(), String> {
-        let (_, _, _) = self.project_channel(project, channel, false)?;
-        self.store.lock().unwrap_or_else(|e| e.into_inner()).invite_agent_to_channel(project, channel, agent).map_err(|e| e.to_string())
+        self.with_active_project_channel(project, channel, |store| store.invite_agent_to_channel(project, channel, agent).map_err(|e| e.to_string()))
     }
     pub fn select_canonical_branch(&self, project: &ProjectId, branch: &str, channel_id: &ChannelId) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        let (target, _, _) = self.project_channel(project, channel_id, false)?;
+        let (target, _, _) = self.project_channel(project, channel_id, true)?;
         if target.project_id.as_ref() != Some(project) { return Err("Channel does not belong to this project.".into()); }
         let previous = { self.store.lock().unwrap_or_else(|e| e.into_inner()).project_branch_channel(project, branch).map_err(|e| e.to_string())? };
         let mut guarded = vec![target.id.0.clone()];
@@ -135,15 +146,17 @@ impl Channels {
         }
         let result = (|| {
             self.store.lock().unwrap_or_else(|e| e.into_inner()).set_canonical_project_branch(project, branch, channel_id).map_err(|e| e.to_string())?;
+            let updated = self.store.lock().unwrap_or_else(|e| e.into_inner()).load_channel(channel_id).map_err(|e| e.to_string())?;
             if let Some(previous) = previous.as_ref() {
                 if previous.id != target.id { self.core.channel_read_only(&previous.id.0, true, true); }
             }
-            self.core.channel_read_only(&target.id.0, false, false);
-            if self.core.has_channel(&target.id.0) && self.core.channel_session_closed(&target.id.0) { self.start_mode(&target, true)?; }
+            if self.core.has_channel(&updated.id.0) && self.core.channel_session_closed(&updated.id.0) { self.start_mode(&updated, true)?; }
+            else { self.refresh_channel_access(&updated)?; }
             if previous.as_ref().is_some_and(|old| old.id != target.id && self.core.active_channel_id() == old.id.0) {
-                if !self.core.has_channel(&target.id.0) { self.start(&target)?; }
-                self.select_inner(&target.id.0)?;
+                if !self.core.has_channel(&updated.id.0) { self.start(&updated)?; }
+                self.select_inner(&updated.id.0)?;
             }
+            self.core.refresh_branches(self.core.request_branch_refresh());
             Ok(())
         })();
         for id in begun { self.core.end_channel_change(&id); }
@@ -178,12 +191,16 @@ impl Channels {
             if let Some(old) = previous.as_ref().filter(|old| old.id != updated.id) { self.core.channel_read_only(&old.id.0, true, true); }
             if self.core.has_channel(&updated.id.0) {
                 self.core.invalidate_idle_channel(&updated)?;
-                self.start_mode(&updated, true)?;
+                if let Err(error) = self.start_mode(&updated, true) {
+                    self.core.append_channel_notice(&updated.id.0, format!("The canonical general channel changed, but its session could not restart: {error}. Select this channel again to retry."));
+                    return Err(error);
+                }
             } else { self.start(&updated)?; }
-            self.core.channel_read_only(&updated.id.0, false, false);
+            self.refresh_channel_access(&updated)?;
             if previous.as_ref().is_some_and(|old| old.id != updated.id && self.core.active_channel_id() == old.id.0) {
                 self.select_inner(&updated.id.0)?;
             }
+            self.core.refresh_branches(self.core.request_branch_refresh());
             Ok(())
         })();
         for id in begun { self.core.end_channel_change(&id); }
@@ -215,8 +232,7 @@ impl Channels {
         })
     }
     pub fn update_channel_topic(&self, project: &ProjectId, channel: &ChannelId, expected_version: u64, text: &str) -> Result<super::dto::ChannelTopicDto, String> {
-        let (_, _, _) = self.project_channel(project, channel, false)?;
-        let topic = self.store.lock().unwrap_or_else(|e| e.into_inner()).save_channel_topic(channel, expected_version, text, discard_core::model::TopicAuthorKind::User, None).map_err(|e| e.to_string())?;
+        let topic = self.with_active_project_channel(project, channel, |store| store.save_channel_topic(channel, expected_version, text, discard_core::model::TopicAuthorKind::User, None).map_err(|e| e.to_string()))?;
         Ok(super::dto::ChannelTopicDto { channel_id: topic.channel_id.0, text: topic.text, version: topic.version })
     }
     pub fn change_project_main_agent(&self, project: &ProjectId, agent: &discard_core::model::AgentId) -> Result<(), String> {
@@ -232,13 +248,14 @@ impl Channels {
         };
         self.core.begin_channel_change(&channel.id.0)?;
         let result = (|| {
-            let updated = {
-                let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-                store.set_project_main_agent(project, agent).map_err(|e| e.to_string())?;
-                store.ensure_project_general_channel(project, agent).map_err(|e| e.to_string())?
-            };
+            self.store.lock().unwrap_or_else(|e| e.into_inner()).set_project_main_agent(project, agent).map_err(|e| e.to_string())?;
+            let mut updated_identity = channel.clone();
+            updated_identity.agent_id = agent.clone();
+            if self.core.has_channel(&updated_identity.id.0) {
+                self.core.invalidate_idle_channel(&updated_identity)?;
+            }
+            let updated = self.store.lock().unwrap_or_else(|e| e.into_inner()).load_channel(&updated_identity.id).map_err(|e| e.to_string())?;
             if self.core.has_channel(&updated.id.0) {
-                self.core.invalidate_idle_channel(&updated)?;
                 if let Err(error) = self.start_mode(&updated, true) {
                     self.core.append_channel_notice(&updated.id.0, format!("The project main agent changed, but its channel session could not restart: {error}. Select this channel again to retry."));
                     return Err(error);
@@ -630,6 +647,45 @@ mod tests {
         let other_dir = tempfile::tempdir().unwrap();
         let other = service.store.lock().unwrap().import_project_folder(other_dir.path()).unwrap();
         assert!(service.channel_details(&other.id, &general.id).unwrap_err().contains("does not belong"));
+        service.store.lock().unwrap().archive_channel(&general.id).unwrap();
+        assert!(service.update_channel_topic(&project.id, &general.id, 1, "late edit").unwrap_err().contains("archived"));
+        assert!(service.invite_channel_member(&project.id, &general.id, &agent).unwrap_err().contains("archived"));
+    }
+
+    #[tokio::test]
+    async fn topic_validation_and_cas_hold_the_store_lock_against_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let project = store.lock().unwrap().import_project_folder(dir.path()).unwrap();
+        let agent = configured_agent(&store.lock().unwrap());
+        store.lock().unwrap().set_project_main_agent(&project.id, &agent).unwrap();
+        let channel = store.lock().unwrap().ensure_project_general_channel(&project.id, &agent).unwrap();
+        let core = core(&channel, dir.path());
+        let service = Arc::new(Channels::new(core, store.clone(), Handle::current(), launcher()));
+        let (validated_tx, validated_rx) = std::sync::mpsc::sync_channel(0);
+        let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
+        let update_service = service.clone();
+        let project_id = project.id.clone();
+        let channel_id = channel.id.clone();
+        let update = std::thread::spawn(move || update_service.with_active_project_channel(&project_id, &channel_id, |store| {
+            validated_tx.send(()).unwrap();
+            continue_rx.recv().unwrap();
+            store.save_channel_topic(&channel_id, 0, "atomic topic", discard_core::model::TopicAuthorKind::User, None).map_err(|e| e.to_string())
+        }));
+        validated_rx.recv().unwrap();
+        let (archive_started_tx, archive_started_rx) = std::sync::mpsc::sync_channel(0);
+        let archive_store = store.clone();
+        let archive_id = channel.id.clone();
+        let archive = std::thread::spawn(move || {
+            archive_started_tx.send(()).unwrap();
+            archive_store.lock().unwrap().archive_channel(&archive_id).unwrap();
+        });
+        archive_started_rx.recv().unwrap();
+        continue_tx.send(()).unwrap();
+        assert_eq!(update.join().unwrap().unwrap().version, 1);
+        archive.join().unwrap();
+        assert!(store.lock().unwrap().channel_archived(&channel.id).unwrap());
+        assert_eq!(store.lock().unwrap().channel_topic(&channel.id).unwrap().text, "atomic topic");
     }
 
     #[tokio::test]
@@ -657,6 +713,17 @@ mod tests {
         let core = Arc::new(AppCore::new(init));
         core.configure_targets(project.id.0.clone(), dir.path(), old_agent.0.clone());
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher);
+        assert!(core.begin_channel_change(&general.id.0).is_ok());
+        assert!(!core.archive_started_for(Some(&general.id.0)), "archive cannot start while channel identity is changing");
+        core.end_channel_change(&general.id.0);
+        assert!(core.archive_started_for(Some(&general.id.0)));
+        assert!(service.change_project_main_agent(&project.id, &new_agent).unwrap_err().contains("archive confirmation"), "channel identity cannot change while the archive worker is active");
+        assert_eq!(store.lock().unwrap().project_main_agent(&project.id).unwrap(), Some(old_agent.clone()));
+        core.archive_finished(super::super::plan::ArchiveStep::NeedsConfirm(vec!["dirty worktree".into()]));
+        assert!(service.change_project_main_agent(&project.id, &new_agent).unwrap_err().contains("archive confirmation"));
+        assert_eq!(store.lock().unwrap().load_channel(&general.id).unwrap().agent_id, old_agent);
+        assert!(core.archive_started_for(Some(&general.id.0)), "accepting an archive confirmation can restart the archive worker");
+        core.archive_finished(super::super::plan::ArchiveStep::Failed("simulated archive failure".into()));
         assert!(service.change_project_main_agent(&project.id, &new_agent).unwrap_err().contains("simulated launcher failure"));
         assert_eq!(store.lock().unwrap().load_channel(&general.id).unwrap().agent_id, new_agent);
         assert!(core.snapshot().notice.unwrap_or_default().contains("Select this channel again to retry"));
@@ -664,5 +731,54 @@ mod tests {
         service.select(&general.id.0).unwrap();
         assert_eq!(core.active_context().0, new_agent);
         assert!(!core.send_to(Some(&general.id.0), "new agent is ready".into()).is_err());
+    }
+
+    #[tokio::test]
+    async fn canonical_branch_selection_promotes_a_linked_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let project = store.import_project_folder(dir.path()).unwrap();
+        let agent = configured_agent(&store);
+        let archived = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "Feature old".into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+        let current = Channel { id: ChannelId::new(), name: "Feature current".into(), ..archived.clone() };
+        store.create_named_channel(&archived, Some("feature/shared"), None).unwrap();
+        store.create_named_channel(&current, Some("feature/shared"), None).unwrap();
+        assert!(store.channel_archived(&archived.id).unwrap());
+        let core = core(&current, dir.path());
+        let store = Arc::new(Mutex::new(store));
+        let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
+        service.select_canonical_branch(&project.id, "feature/shared", &archived.id).unwrap();
+        assert_eq!(core.active_channel_id(), archived.id.0);
+        assert!(!store.lock().unwrap().channel_archived(&archived.id).unwrap());
+        assert!(store.lock().unwrap().channel_archived(&current.id).unwrap());
+    }
+
+    #[tokio::test]
+    async fn canonical_branch_refresh_keeps_an_archived_lead_read_only_with_an_open_sender() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let project = store.lock().unwrap().import_project_folder(dir.path()).unwrap();
+        let agent = configured_agent(&store.lock().unwrap());
+        let channel = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "Feature".into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+        store.lock().unwrap().create_named_channel(&channel, Some("feature"), None).unwrap();
+        store.lock().unwrap().set_agent_archived(&agent, true).unwrap();
+        let receivers = Arc::new(Mutex::new(Vec::new()));
+        let launch: Launcher = {
+            let receivers = receivers.clone(); let store = store.clone();
+            Arc::new(move |channel| {
+                let cfg = store.lock().unwrap().load_agent(&channel.agent_id).unwrap();
+                let (commands, receiver) = mpsc::unbounded_channel(); receivers.lock().unwrap().push(receiver);
+                let (_, updates) = mpsc::unbounded_channel();
+                Ok((CoreInit { state: UiState::new(channel.id.clone(), vec![]), commands, project: "Project".into(), channel: channel.name.clone(), agent: cfg.name, provider: cfg.provider }, updates))
+            })
+        };
+        let (init, _) = launch(&channel).unwrap();
+        let core = Arc::new(AppCore::new(init));
+        core.configure_targets(project.id.0.clone(), dir.path(), agent.0.clone());
+        let service = Channels::new(core.clone(), store.clone(), Handle::current(), launch);
+        service.select_canonical_branch(&project.id, "feature", &channel.id).unwrap();
+        assert!(core.snapshot().composer_disabled, "canonical selection preserves archived-agent read-only state");
+        assert!(core.send_to(Some(&channel.id.0), "must not be sent".into()).is_err());
+        assert!(matches!(receivers.lock().unwrap()[0].try_recv(), Err(mpsc::error::TryRecvError::Empty)));
     }
 }

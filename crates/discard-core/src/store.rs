@@ -1645,6 +1645,9 @@ impl Store {
     /// Hide a channel from its project. Its history stays in the database.
     pub fn restore_channel(&self, channel: &ChannelId) -> Result<()> {
         let row = self.load_channel(channel)?;
+        if self.project_channel_metadata(channel)?.is_some_and(|metadata| metadata.kind == ProjectChannelKind::ArchivedLegacy) {
+            return Err(StoreError::Invalid("This project channel is retained history. Choose it through canonical channel details to make it active.".into()));
+        }
         if self.agent_archived(&row.agent_id)? {
             return Err(StoreError::Invalid("Restore the agent first.".into()));
         }
@@ -2900,6 +2903,23 @@ mod agent_lifecycle_tests {
             agent,
             channel,
         }
+    }
+    #[test]
+    fn restore_rejects_archived_legacy_project_channels_but_keeps_direct_restore() {
+        let fixture = channel_fixture();
+        let original = fixture.store.ensure_project_general_channel(&fixture.project.id, &fixture.agent).unwrap();
+        let replacement = fixture.store.create_conversation(&fixture.agent, Some(&fixture.project.id), "general").unwrap();
+        fixture.store.set_canonical_project_channel(&fixture.project.id, &original.id).unwrap();
+        fixture.store.set_canonical_project_channel(&fixture.project.id, &replacement.id).unwrap();
+        assert!(fixture.store.channel_archived(&original.id).unwrap());
+        let error = fixture.store.restore_channel(&original.id).unwrap_err().to_string();
+        assert!(error.contains("Choose it through canonical channel details"));
+        assert!(fixture.store.channel_archived(&original.id).unwrap(), "restore must not unarchive a linked legacy channel");
+
+        let direct = fixture.store.default_conversation(&fixture.agent).unwrap();
+        fixture.store.archive_channel(&direct.id).unwrap();
+        fixture.store.restore_channel(&direct.id).unwrap();
+        assert!(!fixture.store.channel_archived(&direct.id).unwrap(), "direct chat restore remains available");
     }
     fn config() -> AgentConfig {
         AgentConfig {
