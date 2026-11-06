@@ -16,6 +16,16 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, mpsc::UnboundedSender};
 
+fn display_project_path(path: &str, home: Option<&Path>) -> String {
+    if let Some(home) = home.filter(|home| !home.as_os_str().is_empty())
+        && let Ok(relative) = Path::new(path).strip_prefix(home)
+    {
+        return if relative.as_os_str().is_empty() { "~".into() }
+            else { Path::new("~").join(relative).to_string_lossy().into_owned() };
+    }
+    path.to_owned()
+}
+
 pub struct CoreInit {
     pub state: UiState,
     pub commands: UnboundedSender<Command>,
@@ -143,6 +153,10 @@ impl AppCore {
         s.project = project.map(|p| p.name.clone()).unwrap_or_default();
         s.project_id = project.map(|p| p.id.0.clone()).unwrap_or_default();
         s.project_path = project.map(|p| p.path.clone()).unwrap_or_default();
+        s.branches.clear();
+        s.current_branch = None;
+        s.collapsed.clear();
+        self.branch_generation.fetch_add(1, Ordering::SeqCst);
         s.rev += 1;
         self.changed.notify_one();
     }
@@ -352,6 +366,7 @@ impl AppCore {
                 project: state.project.clone(),
                 project_id: state.project_id.clone(),
                 project_path: state.project_path.clone(),
+                project_display_path: display_project_path(&state.project_path, std::env::home_dir().as_deref()),
                 active_project_id: state.active.project_id.as_ref().map(|id| id.0.clone()),
                 composer_disabled: state.active.channel_id.is_empty() || state.active.read_only || state.active.archived,
                 channel_id: state.active.channel_id.clone(),
@@ -454,14 +469,20 @@ impl AppCore {
         state.active.mode = mode;
     }
     pub fn request_branch_refresh(&self) -> u64 { self.branch_generation.fetch_add(1, Ordering::SeqCst) + 1 }
-    /// Reload the tree and determine the current worktree away from the UI thread.
+    /// Reload the selected project's tree, even without an active conversation.
     pub fn refresh_branches(&self, generation: u64) {
         let source = self.branch_source.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let Some(source) = source else { return };
-        let (channel, mode) = { let state = self.state.lock().unwrap_or_else(|e| e.into_inner()); (discard_core::model::ChannelId(state.active.channel_id.clone()), state.active.mode) };
-        let worktree = source.store.lock().unwrap_or_else(|e| e.into_inner()).worktree_for(&channel).ok().flatten().map(|record| PathBuf::from(record.path));
-        let current = super::windows::branch_current_directory(Some(mode), &source.project, worktree.as_deref());
-        let rows = discard_core::worktree::list_branch_tree(&source.project).unwrap_or_default();
+        let (project, channel, mode, active_project) = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            (PathBuf::from(&state.project_path), discard_core::model::ChannelId(state.active.channel_id.clone()), state.active.mode,
+                state.active.project_id.as_ref().is_some_and(|id| id.0 == state.project_id))
+        };
+        if project.as_os_str().is_empty() { return; }
+        let current = source.filter(|source| active_project && source.project == project).and_then(|source| {
+            let worktree = source.store.lock().unwrap_or_else(|e| e.into_inner()).worktree_for(&channel).ok().flatten().map(|record| PathBuf::from(record.path));
+            super::windows::branch_current_directory(Some(mode), &project, worktree.as_deref())
+        });
+        let rows = discard_core::worktree::list_branch_tree(&project).unwrap_or_default();
         let selected = current.and_then(|path| current_row(&rows, &path.canonicalize().unwrap_or(path)));
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if self.branch_generation.load(Ordering::SeqCst) == generation {
@@ -847,6 +868,17 @@ mod read_tests {
         let snapshot = core.snapshot();
         assert!(!snapshot.branches[0].current);
         assert!(snapshot.branches[1].current);
+    }
+
+    #[test]
+    fn project_display_paths_abbreviate_only_the_current_home_directory() {
+        let home = Some(Path::new("/Users/example"));
+        assert_eq!(display_project_path("/Users/example", home), "~");
+        assert_eq!(display_project_path("/Users/example/git/project", home), "~/git/project");
+        assert_eq!(display_project_path("/Users/example-other/project", home), "/Users/example-other/project");
+        assert_eq!(display_project_path("/Users/other/project", home), "/Users/other/project");
+        assert_eq!(display_project_path("/project", None), "/project");
+        assert_eq!(display_project_path("", home), "");
     }
 
     #[test]

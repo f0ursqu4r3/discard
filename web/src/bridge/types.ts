@@ -79,6 +79,7 @@ export interface SnapshotDto {
   project: string
   projectId: string
   projectPath: string
+  projectDisplayPath: string
   channelId: string
   agentId: string
   channel: string

@@ -82,7 +82,7 @@ onUnmounted(() => {
 })
 
 const branchCount = computed(() =>
-  currentProject.value ? props.snapshot.branches.filter((row) => row.kind === 'branch').length : 0,
+  props.snapshot.branches.filter((row) => !row.detached).length,
 )
 </script>
 <template>
@@ -111,7 +111,7 @@ const branchCount = computed(() =>
             </div>
             <div>
               <dt class="text-muted-foreground">Folder</dt>
-              <dd class="mt-1 break-all">{{ snapshot.projectPath }}</dd>
+              <dd class="mt-1 break-all">{{ snapshot.projectDisplayPath }}</dd>
               <Button
                 data-ui-id="change-project-folder"
                 variant="outline"
@@ -191,7 +191,7 @@ const branchCount = computed(() =>
         <div class="min-w-0">
           <h2 class="text-xl font-semibold">{{ snapshot.project }}</h2>
           <p class="truncate text-sm text-muted-foreground">
-            {{ snapshot.projectPath }}
+            {{ snapshot.projectDisplayPath }}
           </p>
         </div>
       </div>

@@ -59,6 +59,7 @@ beforeEach(() => {
     projectId: '',
     project: '',
     projectPath: '',
+    projectDisplayPath: '',
     activeProjectId: null,
     composerDisabled: false,
     turnRunning: false,

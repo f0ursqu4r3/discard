@@ -29,6 +29,7 @@ impl Channels {
             project
         };
         self.core.select_sidebar_project(Some(&project));
+        self.core.refresh_branches(self.core.request_branch_refresh());
         Ok(())
     }
     pub fn restore(&self) -> Result<(), String> {
@@ -266,6 +267,52 @@ mod tests {
         assert_eq!(store.visible_projects().unwrap().len(), 2);
         core.clear_project();
         assert!(core.current_project().id.0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sidebar_branches_follow_the_project_without_a_conversation() {
+        let repo = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["commit", "--allow-empty", "-m", "initial"],
+            vec!["branch", "feature"],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
+                .args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        }
+        let store = Store::open_in_memory().unwrap();
+        let project = store.import_project_folder(repo.path()).unwrap();
+        let other_project = store.import_project_folder(other.path()).unwrap();
+        let (commands, _) = mpsc::unbounded_channel();
+        let core = Arc::new(AppCore::new(CoreInit {
+            state: UiState::new(ChannelId(String::new()), vec![]), commands,
+            project: String::new(), channel: String::new(), agent: String::new(), provider: String::new(),
+        }));
+        let store = Arc::new(Mutex::new(store));
+        let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
+        service.activate_project(&project.id).unwrap();
+        let snapshot = core.snapshot();
+        assert_eq!(snapshot.branches.iter().map(|row| row.key.as_str()).collect::<Vec<_>>(), vec!["main", "feature"]);
+        assert!(snapshot.channel_id.is_empty());
+        assert!(store.lock().unwrap().channels_for_project(&project.id).unwrap().is_empty());
+
+        // A conversation's branch source must not override the browsed project.
+        core.configure_branch_source(store, ChannelId("elsewhere".into()), WorkspaceMode::MainCheckout, other.path().into());
+        core.refresh_branches(core.request_branch_refresh());
+        assert_eq!(core.snapshot().branches.len(), 2);
+        assert!(core.snapshot().branches.iter().all(|row| !row.current));
+        let stale = core.request_branch_refresh();
+        service.activate_project(&other_project.id).unwrap();
+        core.refresh_branches(stale);
+        assert!(core.snapshot().branches.is_empty());
+        service.activate_project(&project.id).unwrap();
+        assert_eq!(core.snapshot().branches.len(), 2);
+        core.select_sidebar_project(None);
+        core.refresh_branches(core.request_branch_refresh());
+        assert!(core.snapshot().branches.is_empty());
     }
 
     #[tokio::test]

@@ -916,13 +916,10 @@ watch(
             :project-id="store.snapshot.projectId"
             :active-project-id="store.snapshot.activeProjectId"
             :project-path="store.snapshot.projectPath"
+            :project-display-path="store.snapshot.projectDisplayPath"
             :agent="store.snapshot.agent"
             :channel="store.snapshot.channel"
-            :branches="
-              store.snapshot.activeProjectId === store.snapshot.projectId
-                ? store.snapshot.branches
-                : []
-            "
+            :branches="store.snapshot.branches"
             :unread="store.snapshot.unread"
             :pending-approvals="store.snapshot.pendingApprovals"
             :target="{ type: 'channel', id: store.snapshot.channelId }"

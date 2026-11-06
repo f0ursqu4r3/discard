@@ -46,6 +46,7 @@ const props = withDefaults(
     channelId?: string;
     project?: string;
     projectPath?: string;
+    projectDisplayPath?: string;
     channel?: string;
     agent?: string;
     unread?: boolean;
@@ -140,7 +141,7 @@ const approvals = computed(
               class="block truncate text-xs text-muted-foreground"
               :title="projectPath"
             >
-              {{ projectPath }}
+              {{ projectDisplayPath ?? projectPath }}
             </span>
           </span>
           <ChevronDown

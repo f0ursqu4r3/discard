@@ -3,6 +3,7 @@ import { expect, test, vi } from 'vite-plus/test'
 import WorkspacePage from './WorkspacePage.vue'
 import ContextPanel from './ContextPanel.vue'
 import UserBar from './UserBar.vue'
+import NavigationPanel from './NavigationPanel.vue'
 import snapshotFixture from '@/bridge/fixtures/snapshot.json'
 import type { MessageDto, SnapshotDto } from '@/bridge/types'
 vi.mock('@/bridge/api', () => ({
@@ -13,6 +14,55 @@ vi.mock('@/bridge/api', () => ({
 }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
 const snapshot = snapshotFixture as SnapshotDto
+test.each([null, 'another-project'])(
+  'project navigation shows branches with active project %s',
+  (activeProjectId) => {
+    const selected: SnapshotDto = {
+      ...snapshot,
+      activeProjectId,
+      channelId: '',
+      projectPath: '/Users/example/git/discard',
+      projectDisplayPath: '~/git/discard',
+      branches: [
+        {
+          key: 'main',
+          label: 'main',
+          kind: 'main',
+          depth: 0,
+          current: false,
+          collapsed: false,
+          hasChildren: true,
+        },
+        {
+          key: 'feature',
+          label: 'feature',
+          kind: 'branch',
+          depth: 1,
+          current: false,
+          collapsed: false,
+          hasChildren: false,
+        },
+      ],
+    }
+    const view = mount(NavigationPanel, { props: { page: 'agents', snapshot: selected } })
+    expect(view.get('[data-ui-id="project-header"]').text()).toContain('~/git/discard')
+    expect(view.get('[data-ui-id="project-header"]').text()).not.toContain('/Users/example')
+    expect(view.find('[title="/Users/example/git/discard"]').exists()).toBe(true)
+    expect(view.findAll('[data-ui-id^="branches-row-"]')).toHaveLength(2)
+    expect(view.findAll('[data-ui-id^="worktrees-row-"]')).toHaveLength(1)
+    expect(view.get('[data-ui-id="branches-row-main"]').attributes('disabled')).toBeDefined()
+
+    const overview = mount(WorkspacePage, {
+      props: { page: 'overview', snapshot: selected, messages: [] },
+    })
+    const branchCard = overview
+      .findAll('[data-slot="card"]')
+      .find((card) => card.text().includes('Branches'))
+    expect(branchCard?.text()).toContain('2')
+    expect(overview.text()).toContain('~/git/discard')
+  },
+)
+
 const messages: MessageDto[] = [
   {
     id: 'project-message',

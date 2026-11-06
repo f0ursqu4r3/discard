@@ -7,6 +7,7 @@
   "project": "Example",
   "projectId": "project",
   "projectPath": "/project",
+  "projectDisplayPath": "/project",
   "channelId": "channel",
   "agentId": "agent",
   "channel": "general",
