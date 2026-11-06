@@ -112,4 +112,21 @@
 - [x] Test memory freshness on the next response, source links, scope restrictions, global/project approval, contradiction handling, and forgotten-item suppression across a fresh conversation.
 - [x] Update documentation to describe actual new behavior and remove obsolete restart/session-start restrictions.
 - [x] Run workspace tests, web tests, type checks, lint, and formatting checks. Inspect the working UI where the available runtime permits it.
-- [ ] Review the complete change against every requirement in the spec. Resolve important findings before reporting completion.
+- [x] Review the complete change against every requirement in the spec. Resolve important findings before reporting completion.
+
+## Completion and verification
+
+Implementation and final review are complete. All review findings are resolved.
+
+- Rust workspace: 1,083 tests passed; 10 opt-in live tests ignored.
+- Web: 136 tests passed. Workspace compilation, web type checks, lint, formatting, and production build passed.
+- Installed Claude and Codex synthetic probes verified restricted tool exposure and actual scoped memory calls. No authenticated cloud or native GUI smoke test is claimed.
+- Repository-wide Rust formatting retains its reproduced baseline failure. The web build retains its existing large-chunk warning.
+
+### Recorded implementation decisions
+
+- Forget pauses automatic capture in affected source/requesting conversations until explicit Resume or a fresh conversation. This blocks paraphrase recapture; unrelated automatic saves also pause until the user resumes or starts fresh.
+- Provider/admin-managed policy remains part of the trusted provider. Detected conflicts are rejected. Isolation against an overriding administrator would require a different provider API or host boundary.
+- Settings uses versioned item commands, and fresh conversations derive context from stored conversations. Callers of obsolete raw-file Settings commands must use the item API.
+- Unrelated Rust formatting remains outside this feature. The repository-wide formatting check therefore remains failing until a separate formatting change.
+- Retained history opens even when its transport cannot restart, with the error visible. Sending can remain unavailable until a successful retry.

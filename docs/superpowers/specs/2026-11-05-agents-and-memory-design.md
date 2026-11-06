@@ -20,12 +20,12 @@ Approved in chat on 2026-11-05. This is a new application; data migrations and b
 
 ## Memory domains
 
-| Domain | Visibility |
-| --- | --- |
-| Global | All agents in every context |
-| Agent | One agent across projects and outside projects |
-| Project | All agents in one project |
-| Agent-project | One agent in one project |
+| Domain        | Visibility                                     |
+| ------------- | ---------------------------------------------- |
+| Global        | All agents in every context                    |
+| Agent         | One agent across projects and outside projects |
+| Project       | All agents in one project                      |
+| Agent-project | One agent in one project                       |
 
 Enforce boundaries in the application, not only in prompts. General chats read global and agent memory. Project chats also read their project and matching agent-project memory.
 
