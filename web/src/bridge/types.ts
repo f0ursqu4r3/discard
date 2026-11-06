@@ -15,6 +15,8 @@ export interface HistoryDto {
   messages: MessageDto[]
 }
 export interface ChannelDto {
+  agentId: string
+  projectId: string | null
   id: string
   name: string
   agent: string
@@ -69,6 +71,8 @@ export interface BannersDto {
   safeMode: boolean
 }
 export interface SnapshotDto {
+  activeProjectId: string | null
+  composerDisabled: boolean
   rev: number
   historyRev: number
   project: string

@@ -74,7 +74,9 @@ test('every rail project has its own target without selecting it', () => {
   menus[1]!.vm.$emit('action', 'settings', second)
   expect(wrapper.emitted('projectAction')).toEqual([['settings', second]])
   expect(wrapper.emitted('project')).toBeUndefined()
-  expect(wrapper.get('[data-ui-id="direct-messages-button"]').attributes('disabled')).toBeDefined()
+  expect(
+    wrapper.get('[data-ui-id="direct-messages-button"]').attributes('disabled'),
+  ).toBeUndefined()
 })
 
 test('opening an inactive project menu preserves its target and disabled entries', async () => {

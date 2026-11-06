@@ -151,7 +151,7 @@ onUnmounted(() => window.removeEventListener('focus', read))
               :message="liveMessage"
               :agent="agent"
               :prompts="prompts"
-              show-cursor
+              :show-cursor="running"
             />
           </MessageScrollerItem>
           <Empty v-if="!messages.length && !hasLiveRow(running, live.length)" class="m-auto">

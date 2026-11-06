@@ -74,6 +74,8 @@ impl UiState {
     }
 
     /// The user pressed send.
+    pub fn channel_id(&self) -> &ChannelId { &self.channel_id }
+
     pub fn user_sent(&mut self, text: &str) {
         self.history.push(Message {
             id: MessageId::new(),

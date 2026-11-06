@@ -47,3 +47,36 @@ export const getProjects = () => invoke<ProjectEntry[]>('get_projects')
 export const selectProject = (projectId: string) => invoke<void>('select_project', { projectId })
 export const removeProject = (projectId: string) => invoke<void>('remove_project', { projectId })
 export const revealProject = (path: string) => invoke<void>('settings_reveal_workspace', { path })
+
+export interface AgentEntry {
+  id: string
+  name: string
+  avatar: string | null
+  provider: string
+  model: string
+  systemPrompt: string
+  policy: string
+  pluginWrite: boolean
+  archived: boolean
+}
+export interface ConversationEntry {
+  workspaceMode: string
+  id: string
+  name: string
+  agentId: string
+  agent: string
+  provider: string
+  model: string | null
+  projectId: string | null
+  archived: boolean
+  agentArchived: boolean
+  deleted: boolean
+}
+export const getAgents = () => invoke<AgentEntry[]>('settings_agent_get')
+export const getConversations = () => invoke<ConversationEntry[]>('get_conversations')
+export const openAgentChat = (agentId: string) => invoke<string>('open_agent_chat', { agentId })
+export const createConversation = (agentId: string, projectId: string | null, name: string) =>
+  invoke<string>('create_conversation', { agentId, projectId, name })
+
+export const restoreConversation = (channelId: string) =>
+  invoke<void>('restore_conversation', { channelId })

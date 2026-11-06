@@ -28,6 +28,7 @@ struct ChannelState {
     ui: UiState,
     commands: UnboundedSender<Command>,
     channel: String,
+    project_name: String,
     agent: String,
     provider: String,
     channel_id: String,
@@ -38,18 +39,21 @@ struct ChannelState {
     archive: Option<String>,
     archived: bool,
     archive_busy: bool,
+    read_only: bool,
 }
 impl ChannelState {
     fn new(init: CoreInit) -> Self {
-        Self { ui: init.state, commands: init.commands, channel: init.channel, agent: init.agent,
-            provider: init.provider, channel_id: String::new(), agent_id: String::new(), project_id: None,
+        let channel_id = init.state.channel_id().0.clone();
+        Self { ui: init.state, commands: init.commands, channel: init.channel, project_name: init.project, agent: init.agent,
+            provider: init.provider, channel_id, agent_id: String::new(), project_id: None,
             mode: discard_core::model::WorkspaceMode::MainCheckout, new_anchor: None,
-            archive: None, archived: false, archive_busy: false }
+            archive: None, archived: false, archive_busy: false, read_only: false }
     }
 }
 struct State {
     project: String,
     project_busy: bool,
+    changing_agents: HashSet<String>,
     runtime_generation: u64,
     active: ChannelState,
     parked: BTreeMap<String, ChannelState>,
@@ -87,6 +91,7 @@ impl AppCore {
             state: Mutex::new(State {
                 project,
                 project_busy: false,
+                changing_agents: HashSet::new(),
                 runtime_generation: 0,
                 active: ChannelState::new(init),
                 parked: BTreeMap::new(),
@@ -128,6 +133,62 @@ impl AppCore {
         self.replace_project(CoreInit { state: UiState::new(channel.id.clone(), vec![]), commands, project: String::new(), channel: String::new(), agent: String::new(), provider: String::new() }, &project, &channel);
         *self.branch_source.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.clear_slots();
+    }
+    /// Browse projects independently of the active conversation.
+    pub fn select_sidebar_project(&self, project: Option<&discard_core::model::Project>) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.project = project.map(|p| p.name.clone()).unwrap_or_default();
+        s.project_id = project.map(|p| p.id.0.clone()).unwrap_or_default();
+        s.project_path = project.map(|p| p.path.clone()).unwrap_or_default();
+        s.rev += 1;
+        self.changed.notify_one();
+    }
+    pub fn saved_conversation(&self) -> Option<String> { self.state.lock().unwrap_or_else(|e| e.into_inner()).window.state().selected_conversation }
+    pub fn has_channel(&self, id: &str) -> bool { let s = self.state.lock().unwrap_or_else(|e| e.into_inner()); s.active.channel_id == id || s.parked.contains_key(id) }
+    pub fn agent_sessions_closed(&self, id: &str) -> bool {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        std::iter::once(&s.active).chain(s.parked.values()).any(|c| c.agent_id == id && c.commands.is_closed())
+    }
+    pub fn begin_agent_change(&self, id: &str) -> Result<(), String> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.changing_agents.contains(id) || std::iter::once(&s.active).chain(s.parked.values()).any(|c| c.agent_id == id && (c.ui.turn_running() || c.archive_busy)) {
+            return Err("Stop this agent's responses before changing its lifecycle.".into());
+        }
+        s.changing_agents.insert(id.to_owned()); Ok(())
+    }
+    pub fn end_agent_change(&self, id: &str) { self.state.lock().unwrap_or_else(|e| e.into_inner()).changing_agents.remove(id); }
+    pub fn refresh_agent(&self, id: &str, config: &discard_core::agent::AgentConfig, read_only: bool) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let State { active, parked, .. } = &mut *s;
+        for channel in std::iter::once(active).chain(parked.values_mut()).filter(|c| c.agent_id == id) {
+            channel.agent = config.name.clone(); channel.provider = config.provider.clone(); channel.read_only = read_only;
+        }
+        s.rev += 1; drop(s); self.clear_slots(); self.changed.notify_one();
+    }
+    pub fn channel_read_only(&self, id: &str, read_only: bool, archived: bool) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let channel = if s.active.channel_id == id { Some(&mut s.active) } else { s.parked.get_mut(id) };
+        if let Some(channel) = channel { channel.read_only = read_only; channel.archived = archived; }
+        s.rev += 1; self.changed.notify_one();
+    }
+    pub fn remove_agent_channels(&self, id: &str) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.parked.retain(|_, c| c.agent_id != id);
+        let removed_active = s.active.agent_id == id;
+        if removed_active {
+            let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+            s.active = ChannelState::new(CoreInit { state: UiState::new(discard_core::model::ChannelId(String::new()), vec![]), commands, project: String::new(), channel: String::new(), agent: String::new(), provider: String::new() });
+            let _ = s.window.set_selected_conversation(None);
+            s.history_rev += 1;
+        }
+        s.rev += 1; drop(s);
+        if removed_active { self.clear_branch_source(); }
+        self.changed.notify_one();
+    }
+    pub fn clear_branch_source(&self) {
+        *self.branch_source.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.branch_generation.fetch_add(1, Ordering::SeqCst);
+        self.set_branches(vec![], None);
     }
     pub fn current_project(&self) -> discard_core::model::Project {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -180,18 +241,23 @@ impl AppCore {
         s.rev += 1;
         self.changed.notify_one();
     }
-    pub fn can_switch(&self) -> Result<(), String> {
+    pub fn can_switch(&self) -> Result<(), String> { self.can_switch_inner(false) }
+    pub(crate) fn can_switch_for_project(&self) -> Result<(), String> { self.can_switch_inner(true) }
+    fn can_switch_inner(&self, project_change: bool) -> Result<(), String> {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if s.project_busy || s.active.archive_busy || s.active.archive.is_some() || s.confirm.is_some() { Err("Finish the open confirmation before switching channels.".into()) } else { Ok(()) }
+        if (s.project_busy && !project_change) || s.active.archive_busy || s.active.archive.is_some() || s.confirm.is_some() { Err("Finish the open confirmation before switching channels.".into()) } else { Ok(()) }
     }
-    pub fn switch_channel(&self, id: &str) -> Result<(), String> {
+    pub fn switch_channel(&self, id: &str) -> Result<(), String> { self.switch_channel_inner(id, false) }
+    pub(crate) fn switch_channel_for_project(&self, id: &str) -> Result<(), String> { self.switch_channel_inner(id, true) }
+    fn switch_channel_inner(&self, id: &str, project_change: bool) -> Result<(), String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if s.active.channel_id == id { return Ok(()); }
-        if s.project_busy || s.active.archive_busy || s.active.archive.is_some() || s.confirm.is_some() { return Err("Finish the open confirmation before switching channels.".into()); }
-        if !s.parked.get(id).is_some_and(|c| !c.archived) { return Err("This channel is unavailable.".into()); }
+        if (s.project_busy && !project_change) || s.active.archive_busy || s.active.archive.is_some() || s.confirm.is_some() { return Err("Finish the open confirmation before switching channels.".into()); }
+        if !s.parked.contains_key(id) { return Err("This channel is unavailable.".into()); }
+        s.window.set_selected_conversation(Some(id))?;
         let next = s.parked.remove(id).expect("channel checked under lock");
         let previous = std::mem::replace(&mut s.active, next);
-        s.parked.insert(previous.channel_id.clone(), previous);
+        if !previous.channel_id.is_empty() { s.parked.insert(previous.channel_id.clone(), previous); }
         s.current_branch = None;
         s.rev += 1; s.history_rev += 1;
         self.branch_generation.fetch_add(1, Ordering::SeqCst);
@@ -210,7 +276,7 @@ impl AppCore {
             let history_rev = state.history_rev;
             let theme = state.theme.clone();
             let labels = SlotLabels {
-                project: state.project.clone(),
+                project: state.active.project_name.clone(),
                 channel: state.active.channel.clone(),
                 agent_name: state.active.agent.clone(),
                 provider: state.active.provider.clone(),
@@ -226,8 +292,8 @@ impl AppCore {
                 has_children: state.branches.iter().any(|child| child.parent.as_ref() == Some(&row.name)),
             }).collect();
             let mut channels: Vec<_> = std::iter::once(&state.active).chain(state.parked.values())
-                    .filter(|channel| !channel.archived).map(|channel| ChannelDto {
-                        id: channel.channel_id.clone(), name: channel.channel.clone(), agent: channel.agent.clone(),
+                    .filter(|channel| !channel.channel_id.is_empty()).map(|channel| ChannelDto {
+                        id: channel.channel_id.clone(), agent_id: channel.agent_id.clone(), project_id: channel.project_id.as_ref().map(|id| id.0.clone()), name: channel.channel.clone(), agent: channel.agent.clone(),
                         provider: channel.provider.clone(), workspace_mode: channel.mode.as_str().into(),
                         running: channel.ui.turn_running(), pending_approvals: channel.ui.pending_approvals(),
                         unread: super::windows::channel_indicators(channel.ui.history(), state.window.last_read(&channel.channel_id), channel.ui.pending_approvals()).0,
@@ -240,6 +306,8 @@ impl AppCore {
                 project: state.project.clone(),
                 project_id: state.project_id.clone(),
                 project_path: state.project_path.clone(),
+                active_project_id: state.active.project_id.as_ref().map(|id| id.0.clone()),
+                composer_disabled: state.active.channel_id.is_empty() || state.active.read_only || state.active.archived,
                 channel_id: state.active.channel_id.clone(),
                 agent_id: state.active.agent_id.clone(),
                 channel: state.active.channel.clone(),
@@ -491,7 +559,7 @@ impl AppCore {
     pub fn archive_started(&self) -> bool { self.archive_started_for(None) }
     pub fn archive_started_for(&self, expected_channel: Option<&str>) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.project_busy || expected_channel.is_some_and(|id| id != state.active.channel_id) || state.active.ui.turn_running() || state.active.archived || state.active.archive_busy { return false; }
+        if state.active.channel_id.is_empty() || state.active.read_only || state.changing_agents.contains(&state.active.agent_id) || state.project_busy || expected_channel.is_some_and(|id| id != state.active.channel_id) || state.active.ui.turn_running() || state.active.archived || state.active.archive_busy { return false; }
         state.active.archive = None;
         state.active.archive_busy = true;
         state.rev += 1;
@@ -520,7 +588,7 @@ impl AppCore {
     }
     pub fn menu_context(&self) -> discard_core::action::MenuContext {
         use discard_core::action::{MenuContext, MenuTarget, PluginMenuItem};
-        let (turn_running, archived) = { let state = self.state.lock().unwrap_or_else(|e| e.into_inner()); (state.active.ui.turn_running(), state.active.archived) };
+        let (turn_running, archived) = { let state = self.state.lock().unwrap_or_else(|e| e.into_inner()); (state.active.ui.turn_running(), state.active.archived || state.active.read_only || state.active.channel_id.is_empty()) };
         let safe_mode = self.load_report.lock().unwrap_or_else(|e| e.into_inner()).safe_mode;
         let plugins = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
         let Some(plugins) = plugins.as_ref() else { return MenuContext { turn_running, archived, safe_mode, ..Default::default() } };
@@ -564,7 +632,7 @@ impl AppCore {
         }
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if channel.is_some_and(|id| id != s.active.channel_id) { return Err("The channel changed. Send the message again.".into()); }
-        if s.project_busy || s.active.ui.turn_running() || s.active.archived || s.active.archive_busy || s.active.archive.is_some() {
+        if s.active.channel_id.is_empty() || s.active.read_only || s.changing_agents.contains(&s.active.agent_id) || s.project_busy || s.active.ui.turn_running() || s.active.archived || s.active.archive_busy || s.active.archive.is_some() {
             return Err("This channel cannot send a message right now.".into());
         }
         if s.active.commands.send(Command::Send(text.clone())).is_ok() {
@@ -639,7 +707,7 @@ mod read_tests {
     fn direct_conversation_context_does_not_use_selected_sidebar_project() {
         let channel = ChannelId::new();
         let (commands, _) = tokio::sync::mpsc::unbounded_channel();
-        let core = AppCore::new(CoreInit { state: UiState::new(channel.clone(), vec![]), commands, project: "Selected sidebar project".into(), channel: "Direct".into(), agent: "A".into(), provider: "fake".into() });
+        let core = AppCore::new(CoreInit { state: UiState::new(ChannelId(String::new()), vec![]), commands, project: "Selected sidebar project".into(), channel: "Direct".into(), agent: "A".into(), provider: "fake".into() });
         let (commands, _) = tokio::sync::mpsc::unbounded_channel();
         let direct = discard_core::model::Channel { id: channel.clone(), agent_id: AgentId::new(), project_id: None, name: "Direct".into(), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout };
         core.add_channel(CoreInit { state: UiState::new(channel.clone(), vec![]), commands, project: String::new(), channel: "Direct".into(), agent: "A".into(), provider: "fake".into() }, &direct);

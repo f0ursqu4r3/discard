@@ -44,7 +44,7 @@ test('new divider is before its message', () => {
 })
 test('live row and thinking line follow running state', () => {
   expect(hasLiveRow(false, 0)).toBe(false)
-  expect(hasLiveRow(false, 2)).toBe(false)
+  expect(hasLiveRow(false, 2)).toBe(true)
   expect(hasLiveRow(true, 0)).toBe(false)
   expect(hasLiveRow(true, 1)).toBe(true)
   expect(thinkingLine(false, ['Claude'])).toBeNull()
@@ -126,4 +126,45 @@ test('tool call summary uses the preferred field and truncates long input', () =
   })
   expect(block.text()).toContain(`${'x'.repeat(120)}…`)
   expect(block.text()).not.toContain('hidden')
+})
+
+test('model-change and context-summary system notices stay visible in history', () => {
+  const view = mount(MessageList, {
+    props: {
+      conversationId: 'direct',
+      running: false,
+      live: [],
+      newAnchorId: null,
+      messages: [
+        {
+          id: 'model',
+          role: 'system',
+          blocks: [{ type: 'markdown', text: 'Model changed from old to exact-model.' }],
+          continuesGroup: false,
+        },
+        {
+          id: 'summary',
+          role: 'system',
+          blocks: [{ type: 'markdown', text: 'Older messages use a saved context summary.' }],
+          continuesGroup: true,
+        },
+      ],
+    },
+  })
+  expect(view.text()).toContain('System')
+  expect(view.text()).toContain('Model changed from old to exact-model.')
+  expect(view.text()).toContain('Older messages use a saved context summary.')
+})
+test('an unsaved reply remains visible and has no streaming cursor after the turn stops', () => {
+  const view = mount(MessageList, {
+    props: {
+      conversationId: 'direct',
+      messages: [],
+      live: [{ type: 'markdown', text: 'Copy this unsaved reply.' }],
+      running: false,
+      newAnchorId: null,
+    },
+  })
+  expect(view.text()).toContain('Copy this unsaved reply.')
+  expect(view.find('[data-testid="stream-cursor"]').exists()).toBe(false)
 })

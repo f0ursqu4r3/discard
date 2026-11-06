@@ -387,6 +387,13 @@ impl Store {
         Ok(channel)
     }
 
+    /// All saved conversations, including retained histories of deleted agents.
+    pub fn all_conversations(&self) -> Result<Vec<Channel>> {
+        let mut stmt = self.conn.prepare("SELECT id FROM channels ORDER BY ord")?;
+        let ids = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<std::result::Result<Vec<_>, _>>()?;
+        ids.into_iter().map(|id| self.load_channel(&ChannelId(id))).collect()
+    }
+
     pub fn conversations_for_agent(&self, agent: &AgentId) -> Result<Vec<Channel>> {
         let mut stmt=self.conn.prepare("SELECT id,project_id,name,workspace_mode FROM channels WHERE agent_id=?1 ORDER BY ord")?;
         let rows=stmt.query_map(params![agent.0],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?;
@@ -538,6 +545,12 @@ impl Store {
     }
 
     /// Hide a channel from its project. Its history stays in the database.
+    pub fn restore_channel(&self, channel: &ChannelId) -> Result<()> {
+        let row = self.load_channel(channel)?;
+        if self.agent_archived(&row.agent_id)? { return Err(StoreError::Invalid("Restore the agent first.".into())); }
+        self.conn.execute("UPDATE channels SET archived=0 WHERE id=?1", params![channel.0])?;
+        Ok(())
+    }
     pub fn archive_channel(&self, channel: &ChannelId) -> Result<()> {
         let n = self.conn.execute("UPDATE channels SET archived = 1 WHERE id = ?1", params![channel.0])?;
         if n == 0 {

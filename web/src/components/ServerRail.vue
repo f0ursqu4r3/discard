@@ -53,19 +53,18 @@ const emit = defineEmits<{
       <div data-ui-id="rail-home" class="flex h-16 shrink-0 items-center justify-center">
         <Tooltip>
           <TooltipTrigger as-child>
-            <!-- TODO: Implement persistent direct messages before enabling this entry. -->
             <Button
               data-ui-id="direct-messages-button"
-              disabled
+              @click="emit('directMessages')"
               :variant="directMessages ? 'default' : 'secondary'"
               :class="cn('rounded-xl', compact ? 'size-9' : 'size-12')"
-              aria-label="Direct messages (Soon)"
+              aria-label="Direct messages"
               :aria-current="directMessages ? 'page' : undefined"
             >
               <MessagesSquare />
             </Button>
           </TooltipTrigger>
-          <TooltipContent side="right">Direct messages · Soon</TooltipContent>
+          <TooltipContent side="right">Direct messages</TooltipContent>
         </Tooltip>
       </div>
       <Separator class="max-w-8" />

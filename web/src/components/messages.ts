@@ -1,6 +1,6 @@
 /** Whether a streaming reply has a visible row. */
-export function hasLiveRow(running: boolean, blocks: number): boolean {
-  return running && blocks > 0
+export function hasLiveRow(_running: boolean, blocks: number): boolean {
+  return blocks > 0
 }
 /** Show the agents that are thinking. */
 export function thinkingLine(running: boolean, agents: string[]): string | null {

@@ -49,18 +49,13 @@ impl Emit for WebEmit {
 }
 /// Startup data for the main desktop window.
 pub struct DesktopConfig {
-    pub empty_workspace: bool,
+    pub startup_channel: Option<discard_core::model::Channel>,
+    pub sidebar_project: Option<discard_core::model::Project>,
     pub launcher: channels::Launcher,
     pub on_ready: channels::OnReady,
-    pub project_dir: PathBuf,
-    pub project_id: String,
-    pub agent_id: String,
-    pub channel_dir: Option<PathBuf>,
-    pub channel_id: discard_core::model::ChannelId,
     pub load_report: discard_lua::LoadReport,
     pub workspace: Arc<discard_core::workspace::GitWorkspace>,
     pub store: Arc<Mutex<discard_core::store::Store>>,
-    pub workspace_mode: discard_core::model::WorkspaceMode,
     pub relaunch: actions::Relaunch,
     pub providers: Vec<actions::ProviderInfo>,
     pub recheck: actions::Recheck,
@@ -78,14 +73,19 @@ pub fn run(
     let core = Arc::new(AppCore::new(init));
     core.set_plugins(plugins.clone());
     core.set_load_report(config.load_report.clone());
-    core.configure_window(&data_dir, &config.project_dir, config.channel_dir.as_deref());
-    core.configure_targets(config.project_id.clone(), &config.project_dir, config.agent_id);
-    core.configure_branch_source(config.store.clone(), config.channel_id.clone(), config.workspace_mode, config.project_dir.clone());
-    core.configure_read_marker(&data_dir, &config.channel_id.0);
+    let project_dir: PathBuf = config.sidebar_project.as_ref().map(|p| p.path.clone().into()).unwrap_or_default();
+    core.configure_window(&data_dir, &project_dir, None);
+    core.select_sidebar_project(config.sidebar_project.as_ref());
+    if let Some(channel) = &config.startup_channel {
+        core.configure_targets(channel.project_id.as_ref().map(|p| p.0.clone()).unwrap_or_default(), &project_dir, channel.agent_id.0.clone());
+        core.configure_read_marker(&data_dir, &channel.id.0);
+        if channel.project_id.is_some() { core.configure_branch_source(config.store.clone(), channel.id.clone(), channel.workspace_mode, project_dir.clone()); }
+    }
     (config.on_ready)(&core);
-    let channels = Arc::new(channels::Channels::new(core.clone(), config.store.clone(), discard_core::model::ProjectId(config.project_id.clone()), config.project_dir.clone(), runtime.clone(), config.launcher));
-    if let Err(error) = channels.restore() { core.notice(format!("Could not restore channels: {error}")); }
-    if config.empty_workspace { core.clear_project(); }
+    let channels = Arc::new(channels::Channels::new(core.clone(), config.store.clone(), runtime.clone(), config.launcher));
+    if config.startup_channel.is_none() {
+        if let Err(error) = channels.restore() { core.notice(format!("Could not restore conversation: {error}")); }
+    }
     let actions = Arc::new(actions::DesktopActions { settings: settings.clone(), workspace: config.workspace, relaunch: config.relaunch, exiting: AtomicBool::new(false) });
     let refresh_core = core.clone();
     runtime.spawn(async move {
@@ -225,6 +225,7 @@ pub fn run(
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_snapshot, commands::choose_project_folder, commands::get_projects, commands::select_project, commands::remove_project,
+            commands::restore_conversation, commands::get_conversations, commands::create_conversation, commands::open_agent_chat,
             commands::create_channel, commands::switch_channel, commands::open_branch_channel,
             commands::get_history,
             commands::send_message,
@@ -253,6 +254,7 @@ pub fn run(
             settings::agents::settings_agent_get,
             settings::agents::settings_agent_review,
             settings::agents::settings_agent_save,
+            settings::agents::settings_agent_defaults, settings::agents::settings_agent_create, settings::agents::settings_agent_archive, settings::agents::settings_agent_delete,
             settings::memory::settings_memory_scopes,
             settings::memory::settings_memory_read,
             settings::workspaces::settings_workspaces,

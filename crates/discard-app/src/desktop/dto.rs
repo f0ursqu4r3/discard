@@ -10,6 +10,7 @@ pub type BlockDto = Block;
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelDto {
+    pub agent_id: String, pub project_id: Option<String>,
     pub id: String, pub name: String, pub agent: String, pub provider: String,
     pub workspace_mode: String, pub running: bool, pub unread: bool, pub pending_approvals: usize,
 }
@@ -94,6 +95,8 @@ pub struct BannersDto {
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotDto {
+    pub active_project_id: Option<String>,
+    pub composer_disabled: bool,
     pub rev: u64,
     pub history_rev: u64,
     pub project: String,
@@ -143,6 +146,8 @@ pub fn history_dto(messages: &[Message]) -> Vec<MessageDto> {
 #[cfg(test)]
 fn sample_snapshot() -> SnapshotDto {
     SnapshotDto {
+        active_project_id: Some("project".into()),
+        composer_disabled: false,
         rev: 1,
         history_rev: 0,
         project: "Example".into(),
