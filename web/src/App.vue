@@ -18,6 +18,7 @@ import {
   openBranchChannel,
   chooseProjectFolder,
   getProjects,
+  getProjectChannels,
   getConversations,
   selectProject,
   removeProject,
@@ -27,6 +28,7 @@ import {
   type ProjectEntry,
   type HistoryMatch,
 } from './bridge/api'
+import type { ProjectChannelDto } from './bridge/types'
 import ChannelList from './components/ChannelList.vue'
 import ChannelHeader from './components/ChannelHeader.vue'
 import MessageList from './components/MessageList.vue'
@@ -45,7 +47,6 @@ import { Empty, EmptyHeader, EmptyMedia, EmptyTitle, EmptyDescription } from './
 import { Button } from './components/ui/button'
 import { Badge } from './components/ui/badge'
 import { Toaster } from './components/ui/sonner'
-import CreateChannelDialog from './components/workspace/CreateChannelDialog.vue'
 import NavigationPanel from './components/workspace/NavigationPanel.vue'
 import ContextPanel from './components/workspace/ContextPanel.vue'
 import WorkspacePageView from './components/workspace/WorkspacePage.vue'
@@ -64,9 +65,47 @@ const integratedTitlebar = isTauri() && /mac/i.test(navigator.platform)
 const store = useStore()
 const agentAvatar = useAgentAvatar(() => store.snapshot?.agentId)
 const projects = ref<ProjectEntry[]>([])
+const projectChannels = ref<ProjectChannelDto[]>([])
+const detailsChannelId = ref<string | null>(null)
+let projectChannelRequest = 0
+async function refreshProjectChannels(projectId: string | null) {
+  const request = ++projectChannelRequest
+  projectChannels.value = []
+  if (!projectId) return
+  try {
+    const channels = await getProjectChannels(projectId)
+    if (request === projectChannelRequest && store.snapshot?.projectId === projectId)
+      projectChannels.value = channels
+  } catch (error) {
+    if (request === projectChannelRequest)
+      toast.error('Could not load project channels', { description: String(error) })
+  }
+}
+async function refreshProjectContext() {
+  await store.refresh()
+  await refreshProjectChannels(store.snapshot?.projectId || null)
+}
 async function refreshProjects() {
   projects.value = await getProjects()
 }
+watch(
+  () => store.snapshot?.projectId,
+  (projectId) => void refreshProjectChannels(projectId || null),
+  { immediate: true },
+)
+let stopProjectCatalogue: UnlistenFn | undefined
+onMounted(async () => {
+  try {
+    const stop = await listen(
+      'discard://conversations',
+      () => void refreshProjectChannels(store.snapshot?.projectId || null),
+    )
+    if (disposed) stop()
+    else stopProjectCatalogue = stop
+  } catch (error) {
+    toast.error(String(error))
+  }
+})
 watch(
   () => store.snapshot?.projectId,
   () => {
@@ -142,9 +181,9 @@ onUnmounted(() => {
   disposed = true
   stopConversationOpened?.()
   stopAgentProfile?.()
+  stopProjectCatalogue?.()
 })
-const newChannelOpen = ref(false),
-  switching = ref(false),
+const switching = ref(false),
   sending = ref(false)
 const inspector = ref(false)
 const isWide = useMediaQuery('(min-width: 1280px)')
@@ -157,6 +196,11 @@ const showContextPanel = computed(
     page.value === 'conversation' &&
     !!store.snapshot?.channelId &&
     !!store.snapshot?.memberListVisible,
+)
+const archivedLegacy = computed(
+  () =>
+    projectChannels.value.find((channel) => channel.id === store.snapshot?.channelId)?.kind ===
+    'archived_legacy',
 )
 const railWidth = computed(
   () => 72 * (store.snapshot?.theme.spacingScale ?? 1) * (store.snapshot?.theme.fontScale ?? 1),
@@ -280,9 +324,10 @@ async function action(id: string) {
       return
     }
     if (id.startsWith('select_project:')) {
-      await selectProject(id.slice('select_project:'.length))
+      const channelId = await selectProject(id.slice('select_project:'.length))
       await store.refresh()
-      navigate('overview')
+      await refreshProjectChannels(store.snapshot?.projectId || null)
+      if (channelId) navigate('conversation')
       return
     }
     if (id === 'remove_project' && store.snapshot) {
@@ -317,14 +362,11 @@ async function projectAction(id: ProjectMenuAction, project: ProjectEntry) {
       if (store.snapshot?.projectId !== project.id) {
         await selectProject(project.id)
         await store.refresh()
+        await refreshProjectChannels(store.snapshot?.projectId || null)
       }
       if (store.snapshot?.projectId !== project.id)
         throw new Error('Project selection did not complete')
       if (id === 'settings') navigate('project-settings')
-      else {
-        navigate('conversation')
-        newChannelOpen.value = true
-      }
     }
   } catch (error) {
     toast.error('Could not complete project action', { description: String(error) })
@@ -464,11 +506,27 @@ async function selectChannel(id: string) {
   try {
     await switchChannel(id)
     await store.refresh()
+    await refreshProjectChannels(store.snapshot?.projectId || null)
     navigate('conversation')
   } catch (error) {
     toast.error('Could not open channel', { description: String(error) })
   } finally {
     switching.value = false
+  }
+}
+async function inspectChannel(id: string) {
+  detailsChannelId.value = id
+  sidebarMode.value = 'profile'
+  if (isWide.value) {
+    if (!store.snapshot?.memberListVisible) {
+      try {
+        await setMemberListVisible(true)
+      } catch (error) {
+        toast.error('Could not open channel details', { description: String(error) })
+      }
+    }
+  } else {
+    contextOpen.value = true
   }
 }
 async function openBranch(key: string) {
@@ -477,16 +535,13 @@ async function openBranch(key: string) {
   try {
     await openBranchChannel(key)
     await store.refresh()
+    await refreshProjectChannels(store.snapshot?.projectId || null)
     navigate('conversation')
   } catch (error) {
     toast.error('Could not open branch', { description: String(error) })
   } finally {
     switching.value = false
   }
-}
-async function channelCreated() {
-  await store.refresh()
-  navigate('conversation')
 }
 async function showApprovals() {
   const channels = store.snapshot?.channels ?? []
@@ -511,7 +566,8 @@ watch([isWide, isCompact], () => {
 })
 watch(
   () => store.snapshot?.channelId,
-  () => {
+  (channelId) => {
+    detailsChannelId.value = channelId ?? null
     conversationTab.value = 'conversation'
     messageJump.value = null
     if (searchAgent.value?.id !== store.snapshot?.agentId || store.snapshot?.activeProjectId)
@@ -566,14 +622,15 @@ watch(
         class="shrink-0"
         compact
         :snapshot="store.snapshot"
+        :project-channels="projectChannels"
         :page="navigationPage"
         @navigate="navigateFromSidebar"
         @action="action"
         @toggle-branch="toggleBranch"
         :busy="switching"
         @select-channel="selectChannel"
+        @inspect-channel="inspectChannel"
         @open-branch="openBranch"
-        @create-channel="newChannelOpen = true"
         @approvals="showApprovals"
       />
       <ResizablePanelGroup
@@ -593,14 +650,15 @@ watch(
               @project-action="projectAction"
               :projects="projects"
               :snapshot="store.snapshot"
+              :project-channels="projectChannels"
               :page="navigationPage"
               @navigate="navigateFromSidebar"
               @action="action"
               @toggle-branch="toggleBranch"
               :busy="switching"
               @select-channel="selectChannel"
+              @inspect-channel="inspectChannel"
               @open-branch="openBranch"
-              @create-channel="newChannelOpen = true"
               @approvals="showApprovals"
             />
           </ResizablePanel>
@@ -682,8 +740,8 @@ watch(
                 :live="store.snapshot.liveBlocks"
                 :running="store.snapshot.turnRunning"
                 :new-anchor-id="store.snapshot.newAnchorId"
-                :agent="store.snapshot.agent"
-                :agent-avatar="agentAvatar"
+                :agent="store.snapshot.activeProjectId ? 'Agent' : store.snapshot.agent"
+                :agent-avatar="store.snapshot.activeProjectId ? null : agentAvatar"
                 :prompts="store.snapshot.prompts"
               />
               <div
@@ -801,19 +859,33 @@ watch(
                 </Button>
               </div>
               <Button
-                v-if="store.snapshot.archived"
+                v-if="store.snapshot.archived && !archivedLegacy"
                 class="mx-5 my-2"
                 variant="outline"
                 @click="restoreCurrentConversation"
               >
                 Restore conversation
               </Button>
+              <Button
+                v-if="store.snapshot.archived && archivedLegacy"
+                class="mx-5 my-2"
+                variant="outline"
+                @click="inspectChannel(store.snapshot.channelId)"
+              >
+                View channel details
+              </Button>
               <p
                 v-if="store.snapshot.composerDisabled && store.snapshot.channelId"
                 class="px-5 py-2 text-xs text-muted-foreground"
               >
-                Read only. You can restore archived agents from their profile. Deleted agents cannot
-                send messages.
+                <template v-if="archivedLegacy">
+                  Archived project history. Choose its details to select it as the canonical
+                  channel.
+                </template>
+                <template v-else>
+                  Read only. You can restore archived agents from their profile. Deleted agents
+                  cannot send messages.
+                </template>
               </p>
               <Notices
                 :banners="store.snapshot.banners"
@@ -883,23 +955,17 @@ watch(
                   (page === 'conversation' && !store.snapshot.activeProjectId)
                 "
                 :snapshot="store.snapshot"
+                :project-channels="projectChannels"
+                :details-channel-id="detailsChannelId"
                 @action="action"
+                @main-agent-changed="refreshProjectContext"
+                @canonical-changed="refreshProjectContext"
                 @approvals="navigate('conversation')"
               />
             </div>
           </ResizablePanel>
         </template>
       </ResizablePanelGroup>
-      <CreateChannelDialog
-        v-model:open="newChannelOpen"
-        :project="navigationPage === 'direct-messages' ? 'Direct chat' : store.snapshot.project"
-        :project-id="navigationPage === 'direct-messages' ? null : store.snapshot.projectId || null"
-        :channel-id="store.snapshot.channelId"
-        :agent="store.snapshot.agent"
-        :provider="store.snapshot.provider"
-        :has-git="store.snapshot.branches.length > 0"
-        @created="channelCreated"
-      />
       <Sheet v-model:open="navigationOpen">
         <SheetContent side="left" class="gap-0" :show-close-button="false">
           <SheetTitle class="sr-only">Workspace navigation</SheetTitle>
@@ -909,6 +975,7 @@ watch(
           </Button>
           <ChannelList
             :channels="store.snapshot.channels"
+            :project-channels="projectChannels"
             :channel-id="store.snapshot.channelId"
             class="min-h-0 flex-1"
             :page="navigationPage"
@@ -928,8 +995,8 @@ watch(
             @toggle-branch="toggleBranch"
             :busy="switching"
             @select-channel="selectChannel"
+            @inspect-channel="inspectChannel"
             @open-branch="openBranch"
-            @create-channel="newChannelOpen = true"
             @approvals="showApprovals"
           />
         </SheetContent>
@@ -960,7 +1027,11 @@ watch(
               (page === 'conversation' && !store.snapshot.activeProjectId)
             "
             :snapshot="store.snapshot"
+            :project-channels="projectChannels"
+            :details-channel-id="detailsChannelId"
             @action="action"
+            @main-agent-changed="refreshProjectContext"
+            @canonical-changed="refreshProjectContext"
             @approvals="
               () => {
                 navigate('conversation')

@@ -1,0 +1,35 @@
+[
+  {
+    "id": "general-id",
+    "projectId": "project",
+    "name": "general",
+    "agentId": "agent-a",
+    "workspaceMode": "main_checkout",
+    "kind": "general",
+    "branch": null,
+    "archived": false,
+    "archivedInto": null
+  },
+  {
+    "id": "branch-id",
+    "projectId": "project",
+    "name": "feature/x",
+    "agentId": "agent-a",
+    "workspaceMode": "worktree",
+    "kind": "branch",
+    "branch": "feature/x",
+    "archived": false,
+    "archivedInto": null
+  },
+  {
+    "id": "legacy-id",
+    "projectId": "project",
+    "name": "old discussion",
+    "agentId": "agent-b",
+    "workspaceMode": "worktree",
+    "kind": "archived_legacy",
+    "branch": "feature/x",
+    "archived": true,
+    "archivedInto": "branch-id"
+  }
+]

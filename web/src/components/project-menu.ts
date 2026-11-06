@@ -1,6 +1,5 @@
 export type ProjectMenuAction =
   | 'settings'
-  | 'new-channel'
   | 'remove'
   | 'reveal'
   | 'copy-name'
@@ -77,7 +76,8 @@ export function projectMenu(busy: boolean): ProjectMenuEntry[] {
     // TODO: Persist project display names, icons, and colors separately from disk paths.
     planned('Project Appearance…'),
     separator,
-    { kind: 'action', label: 'New Channel…', action: 'new-channel', disabled: busy },
+    // TODO: Create branch-bound project channels and select their canonical channel.
+    planned('New Channel…'),
     // TODO: Add categories within a project and persist channel membership.
     planned('New Category…'),
     // TODO: Create scheduled agent tasks with their own execution and notification model.

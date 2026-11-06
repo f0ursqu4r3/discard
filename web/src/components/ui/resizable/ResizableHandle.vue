@@ -1,24 +1,21 @@
 <script setup lang="ts">
-import type {
-  SplitterResizeHandleEmits,
-  SplitterResizeHandleProps,
-} from 'reka-ui';
-import type { HTMLAttributes } from 'vue';
-import { reactiveOmit } from '@vueuse/core';
-import { cn } from '@/lib/utils';
-import { EllipsisVertical } from '@lucide/vue';
-import { SplitterResizeHandle, useForwardPropsEmits } from 'reka-ui';
+import type { SplitterResizeHandleEmits, SplitterResizeHandleProps } from 'reka-ui'
+import type { HTMLAttributes } from 'vue'
+import { reactiveOmit } from '@vueuse/core'
+import { cn } from '@/lib/utils'
+import { EllipsisVertical } from '@lucide/vue'
+import { SplitterResizeHandle, useForwardPropsEmits } from 'reka-ui'
 
 const props = defineProps<
   SplitterResizeHandleProps & {
-    class?: HTMLAttributes['class'];
-    withHandle?: boolean;
+    class?: HTMLAttributes['class']
+    withHandle?: boolean
   }
->();
-const emits = defineEmits<SplitterResizeHandleEmits>();
+>()
+const emits = defineEmits<SplitterResizeHandleEmits>()
 
-const delegatedProps = reactiveOmit(props, 'class', 'withHandle');
-const forwarded = useForwardPropsEmits(delegatedProps, emits);
+const delegatedProps = reactiveOmit(props, 'class', 'withHandle')
+const forwarded = useForwardPropsEmits(delegatedProps, emits)
 </script>
 
 <template>
@@ -28,16 +25,13 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits);
     :class="
       cn(
         'relative flex w-1.5 shrink-0 my-3 items-center justify-center bg-transparent text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary focus-visible:text-primary focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none data-[orientation=vertical]:my-0 data-[orientation=vertical]:mx-3 data-[orientation=vertical]:h-1.5 data-[orientation=vertical]:w-full [&[data-orientation=vertical]>svg]:rotate-90',
-        props.class
+        props.class,
       )
     "
   >
     <template v-if="props.withHandle">
       <slot>
-        <EllipsisVertical
-          aria-hidden="true"
-          class="pointer-events-none h-5 w-3 shrink-0"
-        />
+        <EllipsisVertical aria-hidden="true" class="pointer-events-none h-5 w-3 shrink-0" />
       </slot>
     </template>
   </SplitterResizeHandle>

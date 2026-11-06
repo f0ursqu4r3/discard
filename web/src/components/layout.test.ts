@@ -5,6 +5,8 @@ import ChannelList from './ChannelList.vue'
 import ServerRail from './ServerRail.vue'
 import UserBar from './workspace/UserBar.vue'
 import type { WorkspacePage } from './workspace/types'
+import archivedChannelsFixture from '../bridge/fixtures/project-channels.json'
+import type { ProjectChannelDto } from '../bridge/types'
 
 describe('server rail', () => {
   test.each([
@@ -257,8 +259,95 @@ test('DM navigation omits the project header and channel controls', async () => 
     global: { renderStubDefaultSlot: true },
   })
   expect(nav.find('[data-ui-id="project-header"]').exists()).toBe(false)
-  expect(nav.find('[data-ui-id="project-navigation"]').exists()).toBe(false)
+  expect(nav.find('[data-ui-id="project-navigation"]').exists()).toBe(true)
   expect(nav.getComponent({ name: 'AgentsNavigation' }).props('projectId')).toBeNull()
+})
+
+test('project general channel stays available from a direct chat context', async () => {
+  const list = mount(ChannelList, {
+    global: { stubs: { AgentsNavigation: true } },
+    props: {
+      page: 'direct-messages',
+      projectId: 'selected-project',
+      activeProjectId: null,
+      branches: [],
+      projectChannels: [
+        {
+          id: 'general-id',
+          projectId: 'selected-project',
+          name: 'general',
+          agentId: 'agent',
+          workspaceMode: 'main_checkout',
+          kind: 'general',
+          branch: null,
+          archived: false,
+          archivedInto: null,
+        },
+      ],
+    },
+  })
+  const general = list.get('[data-ui-id="project-general-channel"]')
+  expect(general.attributes('disabled')).toBeUndefined()
+  await general.trigger('click')
+  expect(list.emitted('selectChannel')).toEqual([['general-id']])
+})
+
+test('branch rows can open selected-project channels from a direct chat context', async () => {
+  const list = mount(ChannelList, {
+    global: { stubs: { AgentsNavigation: true } },
+    props: {
+      page: 'direct-messages',
+      projectId: 'selected-project',
+      activeProjectId: null,
+      branches: [
+        {
+          key: 'feature/x',
+          label: 'feature/x',
+          kind: 'branch',
+          depth: 0,
+          current: false,
+          collapsed: false,
+          hasChildren: false,
+        },
+      ],
+    },
+  })
+  await list.get('[data-ui-id="branches-row-feature/x"]').trigger('click')
+  expect(list.emitted('openBranch')).toEqual([['feature/x']])
+})
+
+test('archived legacy history opens details instead of attempting a restore', async () => {
+  const list = mount(ChannelList, {
+    global: { stubs: { AgentsNavigation: true } },
+    props: {
+      projectId: 'project',
+      activeProjectId: 'project',
+      branches: [],
+      projectChannels: archivedChannelsFixture as ProjectChannelDto[],
+    },
+  })
+  expect(list.text()).toContain('Archived histories')
+  await list.get('[data-ui-id="archived-history-toggle"]').trigger('click')
+  await list.get('[data-ui-id="archived-history-legacy-id"]').trigger('click')
+  expect(list.emitted('inspectChannel')).toEqual([['legacy-id']])
+  expect(list.emitted('selectChannel')).toBeUndefined()
+})
+
+test('project conversation creation stays visible, disabled, and marked Soon', async () => {
+  const list = mount(ChannelList, {
+    attachTo: document.body,
+    global: { stubs: { AgentsNavigation: true } },
+    props: { projectId: 'project', activeProjectId: 'project', branches: [] },
+  })
+  await list.get('[data-ui-id="project-header"]').trigger('click')
+  const item = [...document.body.querySelectorAll('[role="menuitem"]')].find((entry) =>
+    entry.textContent?.includes('New conversation'),
+  )
+  expect(item?.textContent).toContain('New conversation')
+  expect(item?.textContent).toContain('Soon')
+  expect(item?.getAttribute('aria-disabled')).toBe('true')
+  expect(list.emitted('createChannel')).toBeUndefined()
+  list.unmount()
 })
 
 test.each<WorkspacePage>([

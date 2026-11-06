@@ -44,7 +44,7 @@ async function openChanged(open: boolean) {
   }
 }
 function select(action: ProjectMenuAction) {
-  if (props.busy && ['settings', 'new-channel', 'remove'].includes(action)) return
+  if (props.busy && ['settings', 'remove'].includes(action)) return
   if (action === 'remove') confirmRemove.value = true
   else emit('action', action, props.project)
 }

@@ -1,8 +1,6 @@
 import { shallowMount, flushPromises } from '@vue/test-utils'
-import { defineComponent } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import AgentsNavigation from './components/workspace/AgentsNavigation.vue'
 import { beforeEach, afterEach, expect, test, vi } from 'vite-plus/test'
 import fixture from './bridge/fixtures/snapshot.json'
 import type { MessageDto, SnapshotDto } from './bridge/types'
@@ -31,6 +29,7 @@ vi.mock('./bridge/shortcuts', () => ({ useWebShortcuts: vi.fn() }))
 vi.mock('./bridge/api', async (original) => ({
   ...(await original<object>()),
   getProjects: vi.fn(async () => []),
+  getProjectChannels: vi.fn(async () => []),
   sendMessage: mocks.send,
   runAction: mocks.run,
 }))
@@ -45,10 +44,8 @@ import AgentProfileDialog from './components/agents/AgentProfileDialog.vue'
 import Composer from './components/Composer.vue'
 import MessageList from './components/MessageList.vue'
 import NavigationPanel from './components/workspace/NavigationPanel.vue'
-import CreateChannelDialog from './components/workspace/CreateChannelDialog.vue'
 import MemoryBrowser from './components/memory/MemoryBrowser.vue'
 import { Button } from './components/ui/button'
-import { Select } from './components/ui/select'
 let view: ReturnType<typeof shallowMount> | undefined
 beforeEach(() => {
   vi.clearAllMocks()
@@ -96,6 +93,56 @@ test('a valid DM opens with no project and uses contact navigation', () => {
   expect(wrapper.find('[data-ui-id="main-panel"]').exists()).toBe(true)
   expect(wrapper.getComponent(Composer).props('archived')).toBe(false)
   expect(wrapper.getComponent(NavigationPanel).props('page')).toBe('direct-messages')
+  expect(wrapper.getComponent(MessageList).props('agent')).toBe(mocks.store.snapshot!.agent)
+})
+
+test('project transcript labels saved replies neutrally after the main agent changes', () => {
+  mocks.store.snapshot = {
+    ...mocks.store.snapshot!,
+    activeProjectId: 'project',
+    agent: 'Previous main agent',
+  }
+  const previous = app()
+  expect(previous.getComponent(MessageList).props('agent')).toBe('Agent')
+  previous.unmount()
+  mocks.store.snapshot = { ...mocks.store.snapshot!, agent: 'New main agent' }
+  const current = app()
+  expect(current.getComponent(MessageList).props('agent')).toBe('Agent')
+})
+
+test('project selection opens the returned general channel', async () => {
+  vi.mocked(invoke).mockImplementation(async (name) => {
+    if (name === 'select_project') return 'general-channel'
+  })
+  mocks.store.refresh.mockImplementationOnce(async () => {
+    mocks.store.snapshot = {
+      ...mocks.store.snapshot!,
+      projectId: 'target-project',
+      activeProjectId: 'target-project',
+      channelId: 'general-channel',
+    }
+  })
+  const wrapper = app()
+  wrapper.getComponent(NavigationPanel).vm.$emit('navigate', 'overview')
+  wrapper.getComponent(NavigationPanel).vm.$emit('action', 'select_project:target-project')
+  await flushPromises()
+  expect(invoke).toHaveBeenCalledWith('select_project', { projectId: 'target-project' })
+  expect(mocks.store.snapshot?.channelId).toBe('general-channel')
+  expect(wrapper.getComponent(NavigationPanel).props('page')).toBe('conversation')
+})
+
+test('conversation-opened event returns to the restored project transcript', async () => {
+  mocks.store.snapshot = { ...mocks.store.snapshot!, activeProjectId: null, channelId: 'dm' }
+  const wrapper = app()
+  wrapper.getComponent(NavigationPanel).vm.$emit('navigate', 'overview')
+  mocks.store.snapshot = {
+    ...mocks.store.snapshot!,
+    activeProjectId: 'project',
+    channelId: 'general',
+  }
+  catalogHandlers.get('discard://conversation-opened')?.forEach((handler) => handler())
+  await flushPromises()
+  expect(wrapper.getComponent(NavigationPanel).props('page')).toBe('conversation')
 })
 test('fresh startup has contact navigation and no active composer', () => {
   mocks.store.snapshot = {
@@ -116,8 +163,8 @@ test('DM new-conversation context stays direct while a sidebar project is select
     project: 'Project',
   }
   const wrapper = app()
-  expect(wrapper.getComponent(CreateChannelDialog).props('projectId')).toBeNull()
   expect(wrapper.getComponent(NavigationPanel).props('page')).toBe('direct-messages')
+  expect(wrapper.getComponent(ContextPanel).props('directMessage')).toBe(true)
 })
 test('Direct Messages returns to the active DM from a project page without reopening it', async () => {
   mocks.store.snapshot = { ...mocks.store.snapshot!, projectId: 'project' }
@@ -250,75 +297,6 @@ test('model failure offers retry and model settings; failed persistence offers c
     mocks.store.snapshot!.agentId,
   )
   expect(mocks.run).not.toHaveBeenCalledWith('open_agent_settings')
-})
-
-test('top-level menu creation refreshes the same-context conversation catalog', async () => {
-  let created = false
-  const agent = { id: 'a', name: 'Robin', provider: 'codex', model: 'exact', archived: false }
-  vi.mocked(invoke).mockImplementation(async (name, payload) => {
-    if (name === 'settings_agent_get') return [agent]
-    if (name === 'get_conversations')
-      return created
-        ? [
-            {
-              id: 'new-menu-chat',
-              inDmList: true,
-              isDefault: false,
-              name: 'New menu discussion',
-              agentId: 'a',
-              agent: 'Robin',
-              projectId: null,
-              archived: false,
-              agentArchived: false,
-              deleted: false,
-            },
-          ]
-        : []
-    if (name === 'create_conversation') {
-      expect(payload).toEqual({ agentId: 'a', projectId: null, name: 'New menu discussion' })
-      created = true
-      catalogHandlers.get('discard://conversations')?.forEach((handler) => handler())
-      return 'new-menu-chat'
-    }
-  })
-  const panel = defineComponent({
-    name: 'NavigationPanel',
-    components: { AgentsNavigation },
-    template: '<AgentsNavigation :project-id="null" />',
-  })
-  view = shallowMount(App, {
-    global: {
-      renderStubDefaultSlot: true,
-      stubs: {
-        NavigationPanel: panel,
-        AgentsNavigation: false,
-        CreateChannelDialog: false,
-        DialogContent: { template: '<div><slot /></div>' },
-        Button: false,
-        Input: false,
-        ResizablePanelGroup: { template: '<div><slot /></div>' },
-        ResizablePanel: { template: '<div><slot /></div>' },
-      },
-    },
-  })
-  await flushPromises()
-  const navigation = view.getComponent(AgentsNavigation)
-  expect(navigation.text()).not.toContain('New menu discussion')
-  view.getComponent({ name: 'NavigationPanel' }).vm.$emit('createChannel')
-  await flushPromises()
-  const topLevelDialog = view
-    .findAllComponents(CreateChannelDialog)
-    .find((dialog) => dialog.props('open'))!
-  expect(topLevelDialog).toBeDefined()
-  await topLevelDialog.get('#channel-name').setValue('New menu discussion')
-  topLevelDialog.getComponent(Select).vm.$emit('update:modelValue', 'a')
-  await flushPromises()
-  await topLevelDialog.get('form').trigger('submit')
-  await flushPromises()
-  expect(mocks.store.refresh).toHaveBeenCalled()
-  expect(navigation.props('projectId')).toBeNull()
-  expect(navigation.text()).not.toContain('New menu discussion')
-  expect(navigation.text()).toContain('Robin')
 })
 
 test('memory source and fresh-conversation events open the transcript and keep sidebar selection', async () => {

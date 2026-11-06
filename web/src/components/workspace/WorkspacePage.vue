@@ -81,9 +81,7 @@ onUnmounted(() => {
   stops.forEach((stop) => stop())
 })
 
-const branchCount = computed(() =>
-  props.snapshot.branches.filter((row) => !row.detached).length,
-)
+const branchCount = computed(() => props.snapshot.branches.filter((row) => !row.detached).length)
 </script>
 <template>
   <FriendsList v-if="page === 'direct-messages'" @action="emit('action', $event)" />

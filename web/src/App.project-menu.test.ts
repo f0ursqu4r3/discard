@@ -4,7 +4,7 @@ import fixture from './bridge/fixtures/snapshot.json'
 import type { SnapshotDto } from './bridge/types'
 const mocks = vi.hoisted(() => ({
   store: { snapshot: null as SnapshotDto | null, history: [], refresh: vi.fn(async () => {}) },
-  selectProject: vi.fn(async () => {}),
+  selectProject: vi.fn(async () => ''),
   removeProject: vi.fn(async () => {}),
   revealProject: vi.fn(async () => {}),
   error: vi.fn(),
@@ -21,7 +21,6 @@ vi.mock('./bridge/api', async (original) => ({
 vi.mock('vue-sonner', () => ({ toast: { error: mocks.error } }))
 import App from './App.vue'
 import NavigationPanel from './components/workspace/NavigationPanel.vue'
-import CreateChannelDialog from './components/workspace/CreateChannelDialog.vue'
 const target = { id: 'other-project', name: 'Other project', path: '/other-project' }
 const wrappers: ReturnType<typeof shallowMount>[] = []
 beforeEach(() => {
@@ -51,13 +50,14 @@ test('inactive project settings select the target before showing the page', asyn
   expect(mocks.selectProject).toHaveBeenCalledWith(target.id)
   expect(wrapper.getComponent(NavigationPanel).props('page')).toBe('project-settings')
 })
-test('failed project selection does not open a channel dialog for the current project', async () => {
-  mocks.selectProject.mockRejectedValueOnce(new Error('Agents must be idle'))
+test('project selection opens the returned channel instead of the overview', async () => {
+  mocks.selectProject.mockResolvedValueOnce('general-channel')
   const wrapper = app()
-  wrapper.getComponent(NavigationPanel).vm.$emit('projectAction', 'new-channel', target)
+  wrapper.getComponent(NavigationPanel).vm.$emit('navigate', 'overview')
+  wrapper.getComponent(NavigationPanel).vm.$emit('action', 'select_project:other-project')
   await flushPromises()
-  expect(wrapper.getComponent(CreateChannelDialog).props('open')).toBe(false)
-  expect(mocks.error).toHaveBeenCalled()
+  expect(mocks.selectProject).toHaveBeenCalledWith('other-project')
+  expect(wrapper.getComponent(NavigationPanel).props('page')).toBe('conversation')
 })
 test('remove and reveal use the target without selecting it', async () => {
   const wrapper = app()

@@ -37,6 +37,7 @@ test('all planned entries lack executable actions, including nested notification
   expect(planned.length).toBeGreaterThan(20)
   for (const entry of planned) expect(entry).not.toHaveProperty('action')
   expect(entries).toContainEqual({ kind: 'planned', label: 'New Group…', control: undefined })
+  expect(entries).toContainEqual({ kind: 'planned', label: 'New Channel…', control: undefined })
   expect(entries).toContainEqual({
     kind: 'planned-radio',
     labels: ['All Activity', 'Needs Attention', 'None'],
@@ -47,7 +48,6 @@ test('busy projects block navigation and removal but retain copy and reveal', ()
   const actions = flatten(projectMenu(true)).filter((entry) => entry.kind === 'action')
   expect(actions.filter((entry) => entry.disabled).map((entry) => entry.action)).toEqual([
     'settings',
-    'new-channel',
     'remove',
   ])
   expect(actions.filter((entry) => !entry.disabled).map((entry) => entry.action)).toEqual([
@@ -95,6 +95,11 @@ test('opening an inactive project menu preserves its target and disabled entries
   )
   expect(planned?.getAttribute('aria-disabled')).toBe('true')
   expect(planned?.textContent).toContain('Soon')
+  const newChannel = [...document.querySelectorAll('[role="menuitem"]')].find((item) =>
+    item.textContent?.includes('New Channel'),
+  )
+  expect(newChannel?.getAttribute('aria-disabled')).toBe('true')
+  expect(newChannel?.textContent).toContain('Soon')
   const renderer = wrapper.getComponent(ProjectMenuItems)
   renderer.vm.$emit('action', 'copy-path')
   expect(wrapper.emitted('action')).toEqual([['copy-path', second]])

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { GitBranch, FolderGit2, Hash, Activity, ShieldCheck } from '@lucide/vue'
-import type { SnapshotDto } from '@/bridge/types'
+import type { ProjectChannelDto, SnapshotDto } from '@/bridge/types'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../ui/tabs'
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card'
 import { Badge } from '../ui/badge'
@@ -11,13 +11,21 @@ import AgentSummary from '../agents/AgentSummary.vue'
 import MemberList from '../MemberList.vue'
 import MemoryBrowser from '../memory/MemoryBrowser.vue'
 import PluginElement from '@/plugin/PluginElement.vue'
+import ProjectChannelDetails from './ProjectChannelDetails.vue'
 const props = defineProps<{
   snapshot: SnapshotDto
+  projectChannels?: ProjectChannelDto[]
+  detailsChannelId?: string | null
   directMessage?: boolean
   profileRequest?: number
   agentAvatar?: string | null
 }>()
-const emit = defineEmits<{ action: [id: string]; approvals: [] }>()
+const emit = defineEmits<{
+  action: [id: string]
+  approvals: []
+  mainAgentChanged: []
+  canonicalChanged: []
+}>()
 const tab = ref('context')
 watch(
   () => [props.snapshot.agentId, props.profileRequest],
@@ -25,7 +33,19 @@ watch(
     tab.value = 'context'
   },
 )
-const branch = computed(() => props.snapshot.branches.find((row) => row.current)?.label)
+const channelMetadata = computed(() =>
+  props.projectChannels?.find((channel) => channel.id === props.snapshot.channelId),
+)
+const branch = computed(
+  () => channelMetadata.value?.branch ?? props.snapshot.branches.find((row) => row.current)?.label,
+)
+const detailsChannelId = computed(() => props.detailsChannelId || props.snapshot.channelId)
+const generalRunning = computed(() => {
+  const general = props.projectChannels?.find((channel) => channel.kind === 'general')
+  return (
+    !!general && !!props.snapshot.channels.find((channel) => channel.id === general.id)?.running
+  )
+})
 </script>
 <template>
   <Tabs v-model="tab" data-ui-id="context-panel" class="flex h-full min-h-0 flex-col gap-0 bg-card">
@@ -52,6 +72,14 @@ const branch = computed(() => props.snapshot.branches.find((row) => row.current)
         @profile="emit('action', `view_agent_profile:${$event}`)"
       />
       <div v-else class="flex flex-col gap-3">
+        <ProjectChannelDetails
+          v-if="snapshot.activeProjectId && snapshot.channelId"
+          :project-id="snapshot.activeProjectId"
+          :channel-id="detailsChannelId"
+          :general-running="generalRunning"
+          @main-agent-changed="emit('mainAgentChanged')"
+          @canonical-changed="emit('canonicalChanged')"
+        />
         <Card v-if="!directMessage" data-ui-id="branch-context" size="sm">
           <CardHeader>
             <CardTitle class="flex items-center gap-2 text-sm">

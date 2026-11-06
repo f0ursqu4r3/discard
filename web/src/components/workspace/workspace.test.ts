@@ -50,7 +50,7 @@ test.each([null, 'another-project'])(
     expect(view.find('[title="/Users/example/git/discard"]').exists()).toBe(true)
     expect(view.findAll('[data-ui-id^="branches-row-"]')).toHaveLength(2)
     expect(view.findAll('[data-ui-id^="worktrees-row-"]')).toHaveLength(1)
-    expect(view.get('[data-ui-id="branches-row-main"]').attributes('disabled')).toBeDefined()
+    expect(view.get('[data-ui-id="branches-row-main"]').attributes('disabled')).toBeUndefined()
 
     const overview = mount(WorkspacePage, {
       props: { page: 'overview', snapshot: selected, messages: [] },

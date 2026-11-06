@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { SnapshotDto } from '@/bridge/types'
+import type { ProjectChannelDto } from '@/bridge/types'
 import type { WorkspacePage } from './types'
 import ServerRail from '../ServerRail.vue'
 import type { ProjectMenuAction } from '../project-menu'
@@ -9,6 +10,7 @@ import UserBar from './UserBar.vue'
 defineProps<{
   projects?: import('@/bridge/api').ProjectEntry[]
   snapshot: SnapshotDto
+  projectChannels?: ProjectChannelDto[]
   page: WorkspacePage
   compact?: boolean
   busy?: boolean
@@ -18,8 +20,8 @@ const emit = defineEmits<{
   action: [id: string]
   toggleBranch: [key: string]
   selectChannel: [id: string]
+  inspectChannel: [id: string]
   openBranch: [key: string]
-  createChannel: []
   approvals: []
   projectAction: [action: ProjectMenuAction, project: ProjectEntry]
 }>()
@@ -57,6 +59,7 @@ const emit = defineEmits<{
         :page="page"
         :busy="busy"
         :channels="snapshot.channels"
+        :project-channels="projectChannels"
         :channel-id="snapshot.channelId"
         :project="snapshot.project"
         :project-id="snapshot.projectId"
@@ -73,8 +76,8 @@ const emit = defineEmits<{
         @action="emit('action', $event)"
         @toggle-branch="emit('toggleBranch', $event)"
         @select-channel="emit('selectChannel', $event)"
+        @inspect-channel="emit('inspectChannel', $event)"
         @open-branch="emit('openBranch', $event)"
-        @create-channel="emit('createChannel')"
         @approvals="emit('approvals')"
       />
     </div>

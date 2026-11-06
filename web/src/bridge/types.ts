@@ -26,6 +26,42 @@ export interface ChannelDto {
   unread: boolean
   pendingApprovals: number
 }
+export interface ProjectChannelDto {
+  id: string
+  projectId: string
+  name: string
+  agentId: string
+  workspaceMode: string
+  kind: 'general' | 'branch' | 'archived_legacy'
+  branch: string | null
+  archived: boolean
+  archivedInto: string | null
+}
+export interface ChannelTopicDto {
+  channelId: string
+  text: string
+  version: number
+}
+export interface ChannelTopicRevisionDto {
+  channelId: string
+  text: string
+  version: number
+  authorKind: string
+  authorId: string | null
+}
+export interface ChannelMemberDto {
+  id: string
+  name: string
+  provider: string
+  archived: boolean
+}
+export interface ChannelDetailsDto {
+  channel: ProjectChannelDto
+  topic: ChannelTopicDto
+  topicHistory: ChannelTopicRevisionDto[]
+  members: ChannelMemberDto[]
+  mainAgentId: string | null
+}
 export interface PromptDto {
   approvalId: string
   tool: string

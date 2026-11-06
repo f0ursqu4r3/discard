@@ -1,5 +1,12 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { HistoryDto, SnapshotDto } from './types'
+import type {
+  ChannelDetailsDto,
+  ChannelMemberDto,
+  ChannelTopicDto,
+  HistoryDto,
+  ProjectChannelDto,
+  SnapshotDto,
+} from './types'
 export const getSnapshot = () => invoke<SnapshotDto>('get_snapshot')
 export const getHistory = () => invoke<HistoryDto>('get_history')
 export const sendMessage = (channelId: string, text: string) =>
@@ -34,6 +41,30 @@ export const createChannel = (name: string, workspaceMode: string, sourceChannel
   invoke<string>('create_channel', { name, workspaceMode, sourceChannel })
 export const switchChannel = (channelId: string) => invoke<void>('switch_channel', { channelId })
 export const openBranchChannel = (key: string) => invoke<string>('open_branch_channel', { key })
+export const getProjectChannels = (projectId: string) =>
+  invoke<ProjectChannelDto[]>('get_project_channels', { projectId })
+export const getProjectMembers = (projectId: string) =>
+  invoke<ChannelMemberDto[]>('get_project_members', { projectId })
+export const getChannelDetails = (projectId: string, channelId: string) =>
+  invoke<ChannelDetailsDto>('get_channel_details', { projectId, channelId })
+export const updateChannelTopic = (
+  projectId: string,
+  channelId: string,
+  expectedVersion: number,
+  text: string,
+) =>
+  invoke<ChannelTopicDto>('update_channel_topic', {
+    projectId,
+    channelId,
+    expectedVersion,
+    text,
+  })
+export const setProjectMainAgent = (projectId: string, agentId: string) =>
+  invoke<void>('set_project_main_agent', { projectId, agentId })
+export const selectCanonicalProjectChannel = (projectId: string, channelId: string) =>
+  invoke<void>('select_canonical_project_channel', { projectId, channelId })
+export const selectCanonicalBranch = (projectId: string, branch: string, channelId: string) =>
+  invoke<void>('select_canonical_branch', { projectId, branch, channelId })
 
 export const chooseProjectFolder = (changeCurrent: boolean) =>
   invoke<boolean>('choose_project_folder', { changeCurrent })
@@ -44,7 +75,7 @@ export interface ProjectEntry {
   path: string
 }
 export const getProjects = () => invoke<ProjectEntry[]>('get_projects')
-export const selectProject = (projectId: string) => invoke<void>('select_project', { projectId })
+export const selectProject = (projectId: string) => invoke<string>('select_project', { projectId })
 export const removeProject = (projectId: string) => invoke<void>('remove_project', { projectId })
 export const revealProject = (path: string) => invoke<void>('settings_reveal_workspace', { path })
 
