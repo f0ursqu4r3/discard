@@ -4,6 +4,11 @@
 #      FAKE_CLAUDE_CHILD_PID=<file>   FAKE_CLAUDE_LOGGED_IN=true|false
 log() { [ -n "${FAKE_CLAUDE_LOG:-}" ] && printf '%s\n' "$*" >>"$FAKE_CLAUDE_LOG"; return 0; }
 
+if [ "${FAKE_CLAUDE_HANG_SETUP:-}" = "${1:-}" ]; then
+  echo $$ >"$FAKE_CLAUDE_CHILD_PID"
+  exec sleep 300
+fi
+
 case "${1:-}" in
   --version) echo "2.1.318 (Fake Claude)"; exit 0 ;;
   --help) echo "${FAKE_CLAUDE_HELP:---tools --strict-mcp-config --restricted --disable-slash-commands --system-prompt-snapshot --settings}"; exit 0 ;;

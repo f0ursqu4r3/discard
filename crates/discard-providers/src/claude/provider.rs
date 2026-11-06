@@ -156,14 +156,14 @@ impl Provider for ClaudeProvider {
             if spec.resume_handle.is_some() {
                 return Err(crate::conversation::setup("Claude conversation sessions require a fresh transcript replay"));
             }
-            let version = tokio::time::timeout(SETUP_TIMEOUT, self.command().arg("--version").output())
+            let version = tokio::time::timeout(SETUP_TIMEOUT, self.command().arg("--version").kill_on_drop(true).output())
                 .await
                 .map_err(|_| crate::conversation::setup("Claude version check timed out"))?
                 .map_err(|e| crate::conversation::setup(e.to_string()))?;
             if !version.status.success() || !String::from_utf8_lossy(&version.stdout).starts_with("2.1.318 ") {
                 return Err(crate::conversation::setup("Claude Code 2.1.318 is required for the verified conversation controls"));
             }
-            let help = tokio::time::timeout(SETUP_TIMEOUT, self.command().arg("--help").output())
+            let help = tokio::time::timeout(SETUP_TIMEOUT, self.command().arg("--help").kill_on_drop(true).output())
                 .await
                 .map_err(|_| crate::conversation::setup("Claude control check timed out"))?
                 .map_err(|e| crate::conversation::setup(e.to_string()))?;

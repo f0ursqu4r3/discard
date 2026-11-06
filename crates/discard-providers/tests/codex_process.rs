@@ -360,3 +360,20 @@ async fn conversation_catalog_errors_never_start_a_thread_or_substitute_model() 
         assert!(rig.received().is_empty());
     }
 }
+
+#[tokio::test]
+async fn conversation_version_timeout_kills_setup_process() {
+    let rig = Rig::new();
+    let s = conversation_spec(&rig);
+    let error = rig
+        .provider("approval")
+        .with_env("CODEX_HOME", rig.dir.path())
+        .with_env("FAKE_CODEX_HANG_SETUP", "1")
+        .start_session(s)
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("timed out"), "{error}");
+    assert_setup_process_terminated(&rig.pid_file()).await;
+}

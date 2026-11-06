@@ -29,8 +29,20 @@ pub(crate) fn memory_config(doc: &Value) -> Result<Value, ProviderError> {
     }
     let server = &servers["discard-memory"];
     let url = server.get("url").and_then(Value::as_str).ok_or_else(|| setup("memory server URL is missing"))?;
-    if !(url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:") || url == "http://127.0.0.1/mcp") {
-        return Err(setup("memory server must use a local HTTP endpoint"));
+    let parsed = url::Url::parse(url).map_err(|_| setup("memory server must use a local HTTP endpoint"))?;
+    let loopback = match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(host)) => host == "localhost",
+        None => false,
+    };
+    let has_user_info = !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || url
+            .split_once("://")
+            .is_some_and(|(_, rest)| rest.split(['/', '?', '#']).next().is_some_and(|authority| authority.contains('@')));
+    if parsed.scheme() != "http" || !loopback || has_user_info {
+        return Err(setup("memory server must use a local HTTP endpoint without user information"));
     }
     if server.get("command").is_some() || server.get("args").is_some() {
         return Err(setup("memory MCP must not execute a process"));
@@ -280,6 +292,25 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn memory_config_uses_the_parsed_loopback_host_and_rejects_user_info() {
+        let document = |url: &str| json!({"mcpServers":{"discard-memory":{"url":url,"headers":{"Authorization":"Bearer synthetic"}}}});
+        for url in [
+            "http://127.0.0.1:80@example.com/mcp",
+            "http://localhost:80@example.com/mcp",
+            "http://user@127.0.0.1/mcp",
+            "http://@127.0.0.1/mcp",
+            "http://127.0.0.1.evil.example/mcp",
+            "https://127.0.0.1/mcp",
+            "not a URL",
+        ] {
+            assert!(memory_config(&document(url)).is_err(), "accepted {url}");
+        }
+        for url in ["http://127.0.0.1:1234/mcp", "http://localhost:1234/mcp", "http://[::1]:1234/mcp"] {
+            assert!(memory_config(&document(url)).is_ok(), "rejected {url}");
+        }
     }
 
     #[test]

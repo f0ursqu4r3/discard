@@ -17,6 +17,11 @@ def log(text):
             f.write(text + "\n")
 
 
+if args[:1] == ["--version"] and os.environ.get("FAKE_CODEX_HANG_SETUP"):
+    with open(os.environ["FAKE_CODEX_CHILD_PID"], "w") as f:
+        f.write(str(os.getpid()))
+    time.sleep(300)
+
 if args[:1] == ["--version"]:
     print(os.environ.get("FAKE_CODEX_VERSION", "codex-cli 0.166.0"))
     sys.exit(0)

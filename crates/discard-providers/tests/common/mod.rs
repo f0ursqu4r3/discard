@@ -147,3 +147,15 @@ pub fn approval_id_of(events: &[Event]) -> ApprovalId {
         .expect("an approval request")
 }
 
+
+/// Setup timeouts must kill their child. Clean up a regression before failing.
+pub async fn assert_setup_process_terminated(path: &std::path::Path) {
+    let pid: i32 = std::fs::read_to_string(path).expect("setup process wrote its PID").trim().parse().unwrap();
+    let alive = || nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+    for _ in 0..50 {
+        if !alive() { return; }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::Signal::SIGKILL);
+    panic!("timed-out setup process {pid} remained alive");
+}

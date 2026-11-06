@@ -270,3 +270,21 @@ async fn conversation_missing_required_control_fails_before_session() {
     assert!(error.contains("required conversation control"), "{error}");
     assert!(!rig.log_text().contains("STDIN"));
 }
+
+async fn check_conversation_setup_timeout_kills_child(argument: &str) {
+    let rig = Rig::new();
+    let s = conversation_spec(&rig);
+    let error = rig.provider("approval").with_env("FAKE_CLAUDE_HANG_SETUP", argument).start_session(s).await.err().unwrap().to_string();
+    assert!(error.contains("timed out"), "{error}");
+    assert_setup_process_terminated(&rig.pid_file()).await;
+}
+
+#[tokio::test]
+async fn conversation_version_timeout_kills_setup_process() {
+    check_conversation_setup_timeout_kills_child("--version").await;
+}
+
+#[tokio::test]
+async fn conversation_help_timeout_kills_setup_process() {
+    check_conversation_setup_timeout_kills_child("--help").await;
+}

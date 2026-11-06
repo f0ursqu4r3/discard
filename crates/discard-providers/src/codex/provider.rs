@@ -208,7 +208,7 @@ impl Provider for CodexProvider {
                 return Err(setup("Codex conversation sessions require a fresh replay, not a native resume"));
             }
             let model = spec.model.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| setup("select an exact Codex model"))?;
-            let version = tokio::time::timeout(SETUP_TIMEOUT, self.command().arg("--version").output())
+            let version = tokio::time::timeout(SETUP_TIMEOUT, self.command().arg("--version").kill_on_drop(true).output())
                 .await
                 .map_err(|_| setup("Codex version check timed out"))?
                 .map_err(|e| setup(e.to_string()))?;
