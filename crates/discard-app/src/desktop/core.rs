@@ -65,6 +65,7 @@ struct State {
     project: String,
     project_busy: bool,
     changing_agents: HashSet<String>,
+    changing_channels: HashSet<String>,
     runtime_generation: u64,
     active: ChannelState,
     parked: BTreeMap<String, ChannelState>,
@@ -104,6 +105,7 @@ impl AppCore {
                 project,
                 project_busy: false,
                 changing_agents: HashSet::new(),
+                changing_channels: HashSet::new(),
                 runtime_generation: 0,
                 active: ChannelState::new(init),
                 parked: BTreeMap::new(),
@@ -181,6 +183,35 @@ impl AppCore {
         target.runtime_generation = next_generation;
         target.commands = init.commands; target.agent = init.agent; target.provider = init.provider;
         target.project_name = init.project; target.channel = init.channel;
+        target.agent_id = channel.agent_id.0.clone();
+        target.project_id = channel.project_id.clone();
+        target.mode = channel.workspace_mode;
+        s.runtime_generation = next_generation;
+        s.rev += 1; self.changed.notify_one(); Ok(true)
+    }
+    pub fn begin_channel_change(&self, id: &str) -> Result<(), String> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let channel = std::iter::once(&s.active).chain(s.parked.values()).find(|c| c.channel_id == id);
+        if channel.is_some_and(|c| c.ui.turn_running() || c.archive_busy) || !s.changing_channels.insert(id.to_owned()) {
+            return Err("Stop this channel's response before changing its main agent or canonical status.".into());
+        }
+        Ok(())
+    }
+    pub fn end_channel_change(&self, id: &str) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.changing_channels.remove(id);
+    }
+    pub fn invalidate_idle_channel(&self, channel: &discard_core::model::Channel) -> Result<bool, String> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let next_generation = s.runtime_generation + 1;
+        let target = if s.active.channel_id == channel.id.0 { Some(&mut s.active) } else { s.parked.get_mut(&channel.id.0) };
+        let Some(target) = target else { return Ok(false) };
+        if target.ui.turn_running() || target.archive_busy { return Err("Stop this conversation before restarting its session.".into()); }
+        let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        drop(receiver);
+        target.runtime_generation = next_generation;
+        target.commands = commands;
+        target.agent_id = channel.agent_id.0.clone(); target.project_id = channel.project_id.clone(); target.mode = channel.workspace_mode;
         s.runtime_generation = next_generation;
         s.rev += 1; self.changed.notify_one(); Ok(true)
     }
@@ -478,12 +509,18 @@ impl AppCore {
                 state.active.project_id.as_ref().is_some_and(|id| id.0 == state.project_id))
         };
         if project.as_os_str().is_empty() { return; }
-        let current = source.filter(|source| active_project && source.project == project).and_then(|source| {
-            let worktree = source.store.lock().unwrap_or_else(|e| e.into_inner()).worktree_for(&channel).ok().flatten().map(|record| PathBuf::from(record.path));
-            super::windows::branch_current_directory(Some(mode), &project, worktree.as_deref())
-        });
+        let (canonical_branch, current) = source.filter(|source| active_project && source.project == project).map(|source| {
+            let store = source.store.lock().unwrap_or_else(|e| e.into_inner());
+            let metadata = store.project_channel_metadata(&channel).ok().flatten();
+            let canonical_branch = metadata.as_ref().and_then(|m| (m.kind == discard_core::model::ProjectChannelKind::Branch).then(|| m.branch.clone()).flatten());
+            let legacy = metadata.is_none();
+            let worktree = legacy.then(|| store.worktree_for(&channel).ok().flatten().map(|record| PathBuf::from(record.path))).flatten();
+            let current = legacy.then(|| super::windows::branch_current_directory(Some(mode), &project, worktree.as_deref())).flatten();
+            (canonical_branch, current)
+        }).unwrap_or((None, None));
         let rows = discard_core::worktree::list_branch_tree(&project).unwrap_or_default();
-        let selected = current.and_then(|path| current_row(&rows, &path.canonicalize().unwrap_or(path)));
+        let selected = canonical_branch.and_then(|branch| rows.iter().position(|row| row.name == branch))
+            .or_else(|| current.and_then(|path| current_row(&rows, &path.canonicalize().unwrap_or(path))));
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if self.branch_generation.load(Ordering::SeqCst) == generation {
             state.branches = rows;
@@ -713,7 +750,7 @@ impl AppCore {
         }
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if channel.is_some_and(|id| id != s.active.channel_id) { return Err("The channel changed. Send the message again.".into()); }
-        if s.active.channel_id.is_empty() || s.active.read_only || s.changing_agents.contains(&s.active.agent_id) || s.project_busy || s.active.ui.turn_running() || s.active.archived || s.active.archive_busy || s.active.archive.is_some() {
+        if s.active.channel_id.is_empty() || s.active.read_only || s.changing_agents.contains(&s.active.agent_id) || s.changing_channels.contains(&s.active.channel_id) || s.project_busy || s.active.ui.turn_running() || s.active.archived || s.active.archive_busy || s.active.archive.is_some() {
             return Err("This channel cannot send a message right now.".into());
         }
         if s.active.commands.send(Command::Send(text.clone())).is_ok() {

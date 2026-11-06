@@ -14,6 +14,57 @@ pub struct ChannelDto {
     pub id: String, pub name: String, pub agent: String, pub provider: String,
     pub workspace_mode: String, pub running: bool, pub unread: bool, pub pending_approvals: usize,
 }
+
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectChannelDto {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub agent_id: String,
+    pub workspace_mode: String,
+    pub kind: String,
+    pub branch: Option<String>,
+    pub archived: bool,
+    pub archived_into: Option<String>,
+}
+
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelTopicDto {
+    pub channel_id: String,
+    pub text: String,
+    pub version: u64,
+}
+
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelTopicRevisionDto {
+    pub channel_id: String,
+    pub text: String,
+    pub version: u64,
+    pub author_kind: String,
+    pub author_id: Option<String>,
+}
+
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelDetailsDto {
+    pub channel: ProjectChannelDto,
+    pub topic: ChannelTopicDto,
+    pub topic_history: Vec<ChannelTopicRevisionDto>,
+    pub members: Vec<ChannelMemberDto>,
+    pub main_agent_id: Option<String>,
+}
+
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelMemberDto {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub archived: bool,
+}
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryDto { pub channel_id: String, pub rev: u64, pub messages: Vec<MessageDto> }

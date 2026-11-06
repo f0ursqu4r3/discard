@@ -97,22 +97,11 @@ async fn fresh_navigation_direct_chats_fixed_projects_and_saved_selection_are_in
         .unwrap()
         .import_project_folder(project_dir.path())
         .unwrap();
-    channels.activate_project(&project.id).unwrap();
-    assert_eq!(core.active_channel_id(), direct);
-    assert!(
-        store
-            .lock()
-            .unwrap()
-            .channels_for_project(&project.id)
-            .unwrap()
-            .is_empty()
-    );
-    let project_one = channels
-        .create_conversation(&agent, Some(&project.id), "First project chat")
-        .unwrap();
-    let project_two = channels
-        .create_conversation(&agent, Some(&project.id), "Second project chat")
-        .unwrap();
+    let project_one = channels.activate_project(&project.id).unwrap();
+    assert_ne!(core.active_channel_id(), direct);
+    assert_eq!(core.snapshot().channel, "general");
+    assert_eq!(store.lock().unwrap().channels_for_project(&project.id).unwrap().len(), 1);
+    assert!(channels.create_conversation(&agent, Some(&project.id), "Second project chat").unwrap_err().contains("general channel"));
     let direct_two = channels
         .create_conversation(&agent, None, "Another direct chat")
         .unwrap();
@@ -121,7 +110,7 @@ async fn fresh_navigation_direct_chats_fixed_projects_and_saved_selection_are_in
     channels.select(&project_one).unwrap();
     assert_eq!(core.active_context().1, Some(project.id.clone()));
     channels.select(&direct_two).unwrap();
-    assert_ne!(project_one, project_two);
+    assert_eq!(store.lock().unwrap().last_project_channel(&project.id).unwrap().unwrap().id.0, project_one, "direct selection leaves saved project navigation unchanged");
     assert_ne!(direct, direct_two);
     let restored = empty_core(dir.path());
     let reopen = service(restored.clone(), store.clone());
@@ -135,7 +124,7 @@ async fn fresh_navigation_direct_chats_fixed_projects_and_saved_selection_are_in
             .channels_for_project(&project.id)
             .unwrap()
             .len(),
-        2
+        1
     );
 }
 #[tokio::test]

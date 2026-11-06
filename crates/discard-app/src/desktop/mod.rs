@@ -226,6 +226,8 @@ pub fn run(
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_snapshot, commands::choose_project_folder, commands::get_projects, commands::select_project, commands::remove_project,
+            commands::get_project_channels, commands::get_project_members, commands::get_channel_details, commands::update_channel_topic, commands::set_project_main_agent,
+            commands::invite_channel_member, commands::select_canonical_branch, commands::select_canonical_project_channel,
             commands::search_agent_history, commands::restore_conversation, commands::get_conversations, commands::create_conversation, commands::open_agent_chat,
             commands::create_channel, commands::switch_channel, commands::open_branch_channel,
             commands::get_history,

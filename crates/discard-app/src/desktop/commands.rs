@@ -119,12 +119,64 @@ pub fn get_projects(context: State<'_, super::settings::SettingsContext>) -> Res
     Ok(context.store.lock().unwrap_or_else(|e| e.into_inner()).visible_projects().map_err(|e| e.to_string())?.into_iter().map(|p| serde_json::json!({"id":p.id.0,"name":p.name,"path":p.path})).collect())
 }
 #[tauri::command]
-pub async fn select_project(channels: State<'_, Arc<super::channels::Channels>>, project_id: String) -> Result<(), String> {
+pub async fn select_project(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String) -> Result<String, String> {
     let channels = channels.inner().clone();
     channels.core.begin_project_change()?;
     let core = channels.core.clone();
     let result = tauri::async_runtime::spawn_blocking(move || channels.activate_project(&discard_core::model::ProjectId(project_id))).await.map_err(|e| e.to_string()).and_then(|r| r);
-    core.end_project_change(); result
+    core.end_project_change();
+    let channel_id = result?;
+    use tauri::Emitter;
+    let _ = app.emit("discard://conversation-opened", channel_id.clone());
+    let _ = app.emit("discard://conversations", ());
+    Ok(channel_id)
+}
+
+#[tauri::command]
+pub async fn get_project_channels(channels: State<'_, Arc<super::channels::Channels>>, project_id: String) -> Result<Vec<super::dto::ProjectChannelDto>, String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.list_project_channels(&discard_core::model::ProjectId(project_id))).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn get_project_members(channels: State<'_, Arc<super::channels::Channels>>, project_id: String) -> Result<Vec<super::dto::ChannelMemberDto>, String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.list_project_members(&discard_core::model::ProjectId(project_id))).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn invite_channel_member(channels: State<'_, Arc<super::channels::Channels>>, project_id: String, channel_id: String, agent_id: String) -> Result<(), String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.invite_channel_member(&discard_core::model::ProjectId(project_id), &discard_core::model::ChannelId(channel_id), &discard_core::model::AgentId(agent_id))).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn select_canonical_branch(channels: State<'_, Arc<super::channels::Channels>>, project_id: String, branch: String, channel_id: String) -> Result<(), String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.select_canonical_branch(&discard_core::model::ProjectId(project_id), &branch, &discard_core::model::ChannelId(channel_id))).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn select_canonical_project_channel(channels: State<'_, Arc<super::channels::Channels>>, project_id: String, channel_id: String) -> Result<(), String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.select_canonical_general(&discard_core::model::ProjectId(project_id), &discard_core::model::ChannelId(channel_id))).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn get_channel_details(channels: State<'_, Arc<super::channels::Channels>>, project_id: String, channel_id: String) -> Result<super::dto::ChannelDetailsDto, String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.channel_details(&discard_core::model::ProjectId(project_id), &discard_core::model::ChannelId(channel_id))).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn update_channel_topic(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, channel_id: String, expected_version: u64, text: String) -> Result<super::dto::ChannelTopicDto, String> {
+    let channels = channels.inner().clone();
+    let topic = tauri::async_runtime::spawn_blocking(move || channels.update_channel_topic(&discard_core::model::ProjectId(project_id), &discard_core::model::ChannelId(channel_id), expected_version, &text)).await.map_err(|e| e.to_string())??;
+    use tauri::Emitter;
+    let _ = app.emit("discard://channel-details", topic.channel_id.clone());
+    Ok(topic)
+}
+#[tauri::command]
+pub async fn set_project_main_agent(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, agent_id: String) -> Result<(), String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.change_project_main_agent(&discard_core::model::ProjectId(project_id), &discard_core::model::AgentId(agent_id))).await.map_err(|e| e.to_string())??;
+    use tauri::Emitter;
+    let _ = app.emit("discard://conversations", ());
+    Ok(())
 }
 #[tauri::command]
 pub async fn remove_project(channels: State<'_, Arc<super::channels::Channels>>, project_id: String) -> Result<(), String> {

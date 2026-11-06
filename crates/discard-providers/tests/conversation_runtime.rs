@@ -231,6 +231,27 @@ async fn each_turn_refreshes_personality_memory_model_and_retains_only_own_histo
 }
 
 #[tokio::test]
+async fn conversation_prompt_refreshes_topic_without_writing_it_to_the_transcript() {
+    let mut rig = Rig::new(vec![Step::text("first answer"), Step::text("second answer"), Step::idle()]).await;
+    rig.store.lock().unwrap().save_channel_topic(&rig.channel, 0, "Old topic", discard_core::model::TopicAuthorKind::User, None).unwrap();
+    rig.commands.send(Command::Send("first request".into())).unwrap();
+    rig.done().await;
+    let prior = rig.store.lock().unwrap().messages_for_channel(&rig.channel).unwrap();
+    rig.store.lock().unwrap().save_channel_topic(&rig.channel, 1, "Fresh topic", discard_core::model::TopicAuthorKind::User, None).unwrap();
+    rig.commands.send(Command::Send("second request".into())).unwrap();
+    rig.done().await;
+
+    let sent = rig.probe.sent.lock().unwrap().clone();
+    assert!(sent[0].contains("Old topic"));
+    assert!(sent[1].contains("Fresh topic"));
+    assert!(!sent[1].contains("Old topic"));
+    let messages = rig.store.lock().unwrap().messages_for_channel(&rig.channel).unwrap();
+    assert_eq!(&messages[..prior.len()], &prior[..], "topic edits do not delete or rewrite transcript messages");
+    assert!(!messages.iter().any(|message| format!("{:?}", message.blocks).contains("Fresh topic")));
+    rig.close().await;
+}
+
+#[tokio::test]
 async fn agent_identity_reaches_each_turn_and_renames_preserve_history() {
     let mut rig = Rig::new(vec![Step::text("Hello"), Step::idle()]).await;
     rig.edit(|c| {
