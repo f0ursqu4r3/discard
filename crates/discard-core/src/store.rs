@@ -285,10 +285,8 @@ impl Store {
                     (ProjectChannelKind::Branch, branch)
                 } else if name.trim().eq_ignore_ascii_case("general") {
                     (ProjectChannelKind::General, String::new())
-                } else if archived {
-                    (ProjectChannelKind::ArchivedLegacy, String::new())
                 } else {
-                    (ProjectChannelKind::ArchivedLegacy, format!("unbound:{id}"))
+                    (ProjectChannelKind::ArchivedLegacy, String::new())
                 };
                 groups
                     .entry((
@@ -314,9 +312,6 @@ impl Store {
                 });
                 let canonical = channels.iter().find(|c| !c.1).map(|c| c.0.clone());
                 for (id, was_archived, _) in channels {
-                    if group.starts_with("unbound:") && !was_archived {
-                        continue;
-                    }
                     let is_canonical = canonical.as_deref() == Some(id.as_str());
                     let (kind, branch) = if group == "general" && canonical.is_some() {
                         (
@@ -345,7 +340,7 @@ impl Store {
                         canonical.clone()
                     };
                     tx.execute("INSERT INTO project_channels(channel_id,project_id,kind,branch_name,archived_into) VALUES(?1,?2,?3,?4,?5)", params![id,project,kind,branch,link])?;
-                    if group.starts_with("unbound:")
+                    if group.starts_with("legacy:")
                         || (canonical.is_some() && !is_canonical)
                         || was_archived
                     {
@@ -359,7 +354,8 @@ impl Store {
                 SELECT c.project_id,c.agent_id FROM channels c WHERE c.project_id IS NOT NULL;
                 INSERT OR IGNORE INTO project_main_agents(project_id,agent_id)
                 SELECT p.id,(SELECT c.agent_id FROM channels c JOIN agents a ON a.id=c.agent_id
-                    WHERE c.project_id=p.id AND a.archived=0 AND a.deleted=0 ORDER BY c.ord LIMIT 1)
+                    WHERE c.project_id=p.id AND a.archived=0 AND a.deleted=0
+                    ORDER BY CASE WHEN c.id=(SELECT pc.channel_id FROM project_channels pc WHERE pc.project_id=c.project_id AND pc.kind='general') THEN 0 ELSE 1 END,c.ord LIMIT 1)
                 FROM projects p WHERE EXISTS(SELECT 1 FROM channels c JOIN agents a ON a.id=c.agent_id
                     WHERE c.project_id=p.id AND a.archived=0 AND a.deleted=0);")?;
             tx.pragma_update(None, "user_version", 4)?;
@@ -372,6 +368,54 @@ impl Store {
     fn require_active_agent(&self, agent: &AgentId) -> Result<()> {
         if self.agent_archived(agent)? {
             return Err(StoreError::Invalid("Restore the agent first.".into()));
+        }
+        Ok(())
+    }
+
+    fn reconcile_general_agent(
+        conn: &Connection,
+        project: &ProjectId,
+        agent: &AgentId,
+    ) -> Result<()> {
+        let channel: Option<(String, String, bool)> = conn
+            .query_row(
+                "SELECT pc.channel_id,c.agent_id,a.deleted FROM project_channels pc
+                 JOIN channels c ON c.id=pc.channel_id JOIN agents a ON a.id=c.agent_id
+                 WHERE pc.project_id=?1 AND pc.kind='general' AND c.archived=0",
+                params![project.0],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((channel, current_agent, current_agent_deleted)) = channel else {
+            return Ok(());
+        };
+        if !current_agent_deleted {
+            conn.execute(
+                "INSERT OR IGNORE INTO project_agents(project_id,agent_id) VALUES(?1,?2)",
+                params![project.0, current_agent],
+            )?;
+            conn.execute(
+                "INSERT OR IGNORE INTO channel_agents(channel_id,agent_id) VALUES(?1,?2)",
+                params![channel, current_agent],
+            )?;
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO project_agents(project_id,agent_id) VALUES(?1,?2)",
+            params![project.0, agent.0],
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO channel_agents(channel_id,agent_id) VALUES(?1,?2)",
+            params![channel, agent.0],
+        )?;
+        if current_agent != agent.0 {
+            conn.execute(
+                "UPDATE channels SET agent_id=?2 WHERE id=?1",
+                params![channel, agent.0],
+            )?;
+            conn.execute(
+                "INSERT INTO sessions(id,channel_id) VALUES(?1,?2)",
+                params![SessionId::new().0, channel],
+            )?;
         }
         Ok(())
     }
@@ -485,6 +529,7 @@ impl Store {
                 params![stale, channel_id],
             )?;
         }
+        Self::reconcile_general_agent(&tx, project, &main_agent)?;
         tx.execute(
             "INSERT OR IGNORE INTO project_main_agents(project_id,agent_id) VALUES(?1,?2)",
             params![project.0, main_agent.0],
@@ -512,42 +557,12 @@ impl Store {
         if !exists {
             return Err(StoreError::NotFound(format!("project {}", project.0)));
         }
-        let old: Option<String> = tx
-            .query_row(
-                "SELECT agent_id FROM project_main_agents WHERE project_id=?1",
-                params![project.0],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let changed = old.as_deref() != Some(agent.0.as_str());
         tx.execute("INSERT INTO project_main_agents(project_id,agent_id) VALUES(?1,?2) ON CONFLICT(project_id) DO UPDATE SET agent_id=excluded.agent_id", params![project.0,agent.0])?;
         tx.execute(
             "INSERT OR IGNORE INTO project_agents(project_id,agent_id) VALUES(?1,?2)",
             params![project.0, agent.0],
         )?;
-        let general: Option<String> = tx
-            .query_row(
-                "SELECT channel_id FROM project_channels WHERE project_id=?1 AND kind='general'",
-                params![project.0],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(channel) = general {
-            tx.execute(
-                "INSERT OR IGNORE INTO channel_agents(channel_id,agent_id) VALUES(?1,?2)",
-                params![channel, agent.0],
-            )?;
-            if changed {
-                tx.execute(
-                    "UPDATE channels SET agent_id=?2 WHERE id=?1",
-                    params![channel, agent.0],
-                )?;
-                tx.execute(
-                    "INSERT INTO sessions(id,channel_id) VALUES(?1,?2)",
-                    params![SessionId::new().0, channel],
-                )?;
-            }
-        }
+        Self::reconcile_general_agent(&tx, project, agent)?;
         tx.commit()?;
         Ok(())
     }
@@ -679,14 +694,31 @@ impl Store {
         channel: &ChannelId,
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        let valid: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM channels c LEFT JOIN project_channels pc ON pc.channel_id=c.id WHERE c.id=?1 AND c.project_id=?2 AND c.archived=0 AND lower(trim(c.name))='general' AND (pc.channel_id IS NULL OR pc.kind!='branch'))",params![channel.0,project.0],|r|r.get(0))?;
-        if !valid {
+        let selected_agent: Option<String> = tx.query_row(
+            "SELECT c.agent_id FROM channels c LEFT JOIN project_channels pc ON pc.channel_id=c.id
+             WHERE c.id=?1 AND c.project_id=?2 AND lower(trim(c.name))='general'
+             AND (c.archived=0 OR pc.kind='archived_legacy') AND (pc.channel_id IS NULL OR pc.kind!='branch')",
+            params![channel.0, project.0],
+            |r| r.get(0),
+        ).optional()?;
+        let Some(selected_agent) = selected_agent else {
             return Err(StoreError::Invalid(
-                "Select an active general channel from this project.".into(),
+                "Select a general channel from this project.".into(),
             ));
-        }
+        };
+        let saved_main: Option<String> = tx.query_row(
+            "SELECT agent_id FROM project_main_agents WHERE project_id=?1",
+            params![project.0],
+            |r| r.get(0),
+        ).optional()?;
+        let main_agent = saved_main.unwrap_or(selected_agent);
+        self.require_active_agent(&AgentId(main_agent.clone()))?;
         tx.execute("UPDATE project_channels SET kind='archived_legacy',branch_name=NULL,archived_into=?2 WHERE project_id=?1 AND kind='general' AND channel_id!=?2",params![project.0,channel.0])?;
+        tx.execute("UPDATE channels SET archived=1 WHERE project_id=?1 AND id!=?2 AND id IN (SELECT channel_id FROM project_channels WHERE project_id=?1 AND kind='archived_legacy' AND archived_into=?2)",params![project.0,channel.0])?;
         tx.execute("INSERT INTO project_channels(channel_id,project_id,kind) VALUES(?1,?2,'general') ON CONFLICT(channel_id) DO UPDATE SET project_id=excluded.project_id,kind='general',branch_name=NULL,archived_into=NULL",params![channel.0,project.0])?;
+        tx.execute("UPDATE channels SET archived=0 WHERE id=?1",params![channel.0])?;
+        tx.execute("INSERT INTO project_main_agents(project_id,agent_id) VALUES(?1,?2) ON CONFLICT(project_id) DO UPDATE SET agent_id=excluded.agent_id",params![project.0,main_agent])?;
+        Self::reconcile_general_agent(&tx,project,&AgentId(main_agent))?;
         tx.commit()?;
         Ok(())
     }
@@ -713,6 +745,7 @@ impl Store {
             ));
         }
         tx.execute("UPDATE project_channels SET kind='archived_legacy',archived_into=?3 WHERE project_id=?1 AND kind='branch' AND branch_name=?2 AND channel_id!=?3",params![project.0,branch,channel.0])?;
+        tx.execute("UPDATE channels SET archived=1 WHERE id IN (SELECT channel_id FROM project_channels WHERE project_id=?1 AND kind='archived_legacy' AND branch_name=?2 AND archived_into=?3)",params![project.0,branch,channel.0])?;
         tx.execute("INSERT INTO project_channels(channel_id,project_id,kind,branch_name) VALUES(?1,?2,'branch',?3)
             ON CONFLICT(channel_id) DO UPDATE SET project_id=excluded.project_id,kind='branch',branch_name=excluded.branch_name,archived_into=NULL",params![channel.0,project.0,branch])?;
         tx.execute(
@@ -873,21 +906,43 @@ impl Store {
     }
 
     pub fn bind_branch(&self, channel: &ChannelId, branch: &str) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "INSERT INTO channel_branches (channel_id, branch) VALUES (?1, ?2)",
-            params![channel.0, branch],
-        )?;
-        let project: Option<String> = tx.query_row(
-            "SELECT project_id FROM channels WHERE id=?1",
-            params![channel.0],
-            |r| r.get(0),
-        )?;
-        if let Some(project) = project {
-            tx.execute("INSERT INTO project_channels(channel_id,project_id,kind,branch_name) VALUES(?1,?2,'branch',?3)
-                ON CONFLICT(channel_id) DO UPDATE SET project_id=excluded.project_id,kind='branch',branch_name=excluded.branch_name,archived_into=NULL",params![channel.0,project,branch])?;
+        self.conn.execute_batch("SAVEPOINT bind_branch")?;
+        let result = (|| {
+            self.conn.execute(
+                "INSERT INTO channel_branches (channel_id, branch) VALUES (?1, ?2)",
+                params![channel.0, branch],
+            )?;
+            let project: Option<String> = self.conn.query_row(
+                "SELECT project_id FROM channels WHERE id=?1",
+                params![channel.0],
+                |r| r.get(0),
+            )?;
+            if let Some(project) = project {
+                self.conn.execute(
+                    "UPDATE project_channels SET kind='archived_legacy',archived_into=?3
+                     WHERE project_id=?1 AND kind='branch' AND branch_name=?2 AND channel_id!=?3",
+                    params![project, branch, channel.0],
+                )?;
+                self.conn.execute(
+                    "UPDATE channels SET archived=1 WHERE id IN (
+                        SELECT channel_id FROM project_channels
+                        WHERE project_id=?1 AND kind='archived_legacy' AND branch_name=?2 AND archived_into=?3
+                    )",
+                    params![project, branch, channel.0],
+                )?;
+                self.conn.execute("INSERT INTO project_channels(channel_id,project_id,kind,branch_name) VALUES(?1,?2,'branch',?3)
+                    ON CONFLICT(channel_id) DO UPDATE SET project_id=excluded.project_id,kind='branch',branch_name=excluded.branch_name,archived_into=NULL",params![channel.0,project,branch])?;
+                self.conn.execute("UPDATE channels SET archived=0 WHERE id=?1",params![channel.0])?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.conn.execute_batch("RELEASE bind_branch")?,
+            Err(error) => {
+                self.conn.execute_batch("ROLLBACK TO bind_branch; RELEASE bind_branch")?;
+                return Err(error);
+            }
         }
-        tx.commit()?;
         Ok(())
     }
     pub fn channel_branch(&self, channel: &ChannelId) -> Result<Option<String>> {
@@ -1169,10 +1224,15 @@ impl Store {
         self.agent_archived(id)?;
         let tx = self.conn.unchecked_transaction()?;
         let channels = self.conversations_for_agent(id)?;
-        let projects: Vec<String> = channels
-            .iter()
-            .filter_map(|c| c.project_id.as_ref().map(|p| p.0.clone()))
-            .collect();
+        let projects: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT project_id FROM project_agents WHERE agent_id=?1
+                 UNION SELECT project_id FROM project_main_agents WHERE agent_id=?1
+                 UNION SELECT project_id FROM channels WHERE agent_id=?1 AND project_id IS NOT NULL",
+            )?;
+            stmt.query_map(params![id.0], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
         let mut result = DeleteAgentResult::default();
         if options.delete_private_memory {
             result
@@ -1194,6 +1254,11 @@ impl Store {
                 );
         }
         if options.delete_conversations {
+            tx.execute(
+                "UPDATE project_channels SET archived_into=NULL
+                 WHERE archived_into IN (SELECT id FROM channels WHERE agent_id=?1)",
+                params![id.0],
+            )?;
             for channel in channels {
                 for sql in [
                     "DELETE FROM project_last_channels WHERE channel_id=?1",
@@ -1255,6 +1320,14 @@ impl Store {
                 WHERE pa.project_id=?1 AND a.archived=0 AND a.deleted=0 ORDER BY pa.rowid LIMIT 1",
                 params![project],
             )?;
+            let replacement: Option<String> = tx.query_row(
+                "SELECT agent_id FROM project_main_agents WHERE project_id=?1",
+                params![project],
+                |r| r.get(0),
+            ).optional()?;
+            if let Some(agent) = replacement {
+                Self::reconcile_general_agent(&tx, &ProjectId(project), &AgentId(agent))?;
+            }
         }
         tx.commit()?;
         Ok(result)
@@ -3270,7 +3343,9 @@ mod agent_lifecycle_tests {
 
     #[test]
     fn v3_migration_collapses_duplicate_channels_without_losing_messages() {
-        let conn = Connection::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("v3.db");
+        let conn = Connection::open(&db).unwrap();
         conn.execute_batch(SCHEMA_V1).unwrap();
         conn.execute_batch(SCHEMA_V2).unwrap();
         conn.execute_batch("ALTER TABLE worktrees ADD COLUMN owned INTEGER NOT NULL DEFAULT 1; CREATE TABLE channel_branches(channel_id TEXT PRIMARY KEY REFERENCES channels(id),branch TEXT NOT NULL);").unwrap();
@@ -3282,8 +3357,15 @@ mod agent_lifecycle_tests {
             params![cfg.to_toml().unwrap()],
         )
         .unwrap();
-        for id in ["old", "new", "general-old", "general-new"] {
-            conn.execute("INSERT INTO channels(id,project_id,name,agent_id,workspace_mode) VALUES(?1,'p',?2,'a','main_checkout')",params![id,if id.starts_with("general"){"General"}else{"Branch"}]).unwrap();
+        conn.execute(
+            "INSERT INTO agents(id,config_toml) VALUES('b',?1)",
+            params![cfg.to_toml().unwrap()],
+        )
+        .unwrap();
+        for id in ["old", "new", "general-old", "general-new", "planning"] {
+            let name = if id.starts_with("general") { "General" } else if id == "planning" { "Planning" } else { "Branch" };
+            let agent = if id == "general-new" { "b" } else { "a" };
+            conn.execute("INSERT INTO channels(id,project_id,name,agent_id,workspace_mode) VALUES(?1,'p',?2,?3,'main_checkout')",params![id,name,agent]).unwrap();
             conn.execute(
                 "INSERT INTO sessions(id,channel_id) VALUES(?1,?2)",
                 params![format!("s-{id}"), id],
@@ -3332,7 +3414,12 @@ mod agent_lifecycle_tests {
                 .unwrap(),
             true
         );
-        for id in ["old", "new", "general-old", "general-new"] {
+        assert_eq!(store.project_main_agent(&ProjectId("p".into())).unwrap(), Some(AgentId("b".into())));
+        assert_eq!(store.load_channel(&ChannelId("general-new".into())).unwrap().agent_id, AgentId("b".into()));
+        assert_eq!(store.channel_archived(&ChannelId("planning".into())).unwrap(), true);
+        assert!(!store.channels_for_project(&ProjectId("p".into())).unwrap().iter().any(|c| c.id.0 == "planning"));
+        assert_eq!(store.messages_for_channel(&ChannelId("planning".into())).unwrap().len(), 1);
+        for id in ["old", "new", "general-old", "general-new", "planning"] {
             assert_eq!(
                 store
                     .messages_for_channel(&ChannelId(id.into()))
@@ -3341,6 +3428,27 @@ mod agent_lifecycle_tests {
                 1
             );
         }
+
+        store.select_project_channel(&ProjectId("p".into()), &ChannelId("new".into())).unwrap();
+        store.set_canonical_project_branch(&ProjectId("p".into()), "topic", &ChannelId("old".into())).unwrap();
+        assert!(store.channel_archived(&ChannelId("new".into())).unwrap());
+        assert!(!store.channel_archived(&ChannelId("old".into())).unwrap());
+        assert!(store.last_project_channel(&ProjectId("p".into())).unwrap().is_none());
+        assert_eq!(store.project_branch_channel(&ProjectId("p".into()), "topic").unwrap().unwrap().id, ChannelId("old".into()));
+
+        store.select_project_channel(&ProjectId("p".into()), &ChannelId("general-new".into())).unwrap();
+        let old_general_session = store.latest_session(&ChannelId("general-old".into())).unwrap();
+        store.set_canonical_project_channel(&ProjectId("p".into()), &ChannelId("general-old".into())).unwrap();
+        assert!(store.channel_archived(&ChannelId("general-new".into())).unwrap());
+        assert!(!store.channel_archived(&ChannelId("general-old".into())).unwrap());
+        assert_eq!(store.load_channel(&ChannelId("general-old".into())).unwrap().agent_id, AgentId("b".into()));
+        assert_ne!(store.latest_session(&ChannelId("general-old".into())).unwrap(), old_general_session);
+        assert!(store.last_project_channel(&ProjectId("p".into())).unwrap().is_none());
+        assert_eq!(store.project_channel_or_fallback(&ProjectId("p".into()), &AgentId("b".into())).unwrap().id, ChannelId("general-old".into()));
+        drop(store);
+        let store = Store::open(&db).unwrap();
+        assert!(store.channel_archived(&ChannelId("planning".into())).unwrap());
+        assert_eq!(store.messages_for_channel(&ChannelId("planning".into())).unwrap().len(), 1);
     }
 
     #[test]
@@ -3367,6 +3475,101 @@ mod agent_lifecycle_tests {
         assert!(f.store.channel_topic_history(&general.id).unwrap().is_empty());
         assert!(f.store.channel_agents(&general.id).unwrap().is_empty());
         assert!(f.store.last_project_channel(&f.project.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn named_branch_creation_uses_a_savepoint_and_rolls_back_later_failures() {
+        let f = channel_fixture();
+        let branch = Channel {
+            id: ChannelId::new(),
+            project_id: Some(f.project.id.clone()),
+            name: "Feature".into(),
+            agent_id: f.agent.clone(),
+            workspace_mode: WorkspaceMode::MainCheckout,
+        };
+        f.store.create_named_channel(&branch, Some("feature/one"), None).unwrap();
+        assert_eq!(f.store.project_branch_channel(&f.project.id, "feature/one").unwrap().unwrap().id, branch.id);
+        assert!(f.store.latest_session(&branch.id).unwrap().is_some());
+
+        let failing = Channel { id: ChannelId::new(), name: "Will roll back".into(), ..branch.clone() };
+        let bad_worktree = WorktreeRecord {
+            channel_id: ChannelId::new(),
+            path: "/w/fail".into(),
+            branch: "feature/two".into(),
+            base_commit: "abc".into(),
+            repo: f.project.path.clone(),
+            owned: true,
+        };
+        assert!(f.store.create_named_channel(&failing, Some("feature/two"), Some(&bad_worktree)).is_err());
+        assert!(matches!(f.store.load_channel(&failing.id), Err(StoreError::Sqlite(_))));
+        assert_eq!(f.store.latest_session(&failing.id).unwrap(), None);
+        assert_eq!(f.store.channel_branch(&failing.id).unwrap(), None);
+        assert!(f.store.project_branch_channel(&f.project.id, "feature/two").unwrap().is_none());
+    }
+
+    #[test]
+    fn deleting_either_owner_of_a_linked_branch_keeps_the_other_history() {
+        for delete_archive_first in [false, true] {
+            let store = Store::open_in_memory().unwrap();
+            let project = Project { id: ProjectId::new(), name: "P".into(), path: "/p".into() };
+            store.insert_project(&project).unwrap();
+            let archive_agent = store.create_agent(&config()).unwrap();
+            let canonical_agent = store.create_agent(&config()).unwrap();
+            let archived = store.create_conversation(&archive_agent, Some(&project.id), "Old branch").unwrap();
+            let canonical = store.create_conversation(&canonical_agent, Some(&project.id), "Current branch").unwrap();
+            store.bind_branch(&archived.id, "feature/shared").unwrap();
+            store.set_canonical_project_branch(&project.id, "feature/shared", &canonical.id).unwrap();
+            for channel in [&archived, &canonical] {
+                store.insert_message(&Message { id: MessageId::new(), channel_id: channel.id.clone(), role: Role::User, blocks: vec![Block::Markdown { text: channel.name.clone() }] }).unwrap();
+            }
+
+            if delete_archive_first {
+                store.delete_agent(&archive_agent, DeleteAgentOptions { delete_conversations: true, delete_private_memory: false }).unwrap();
+                assert_eq!(store.messages_for_channel(&canonical.id).unwrap().len(), 1);
+                store.delete_agent(&canonical_agent, DeleteAgentOptions { delete_conversations: true, delete_private_memory: false }).unwrap();
+            } else {
+                store.delete_agent(&canonical_agent, DeleteAgentOptions { delete_conversations: true, delete_private_memory: false }).unwrap();
+                assert_eq!(store.messages_for_channel(&archived.id).unwrap().len(), 1);
+                assert_eq!(store.project_channel_metadata(&archived.id).unwrap().unwrap().archived_into, None);
+                store.delete_agent(&archive_agent, DeleteAgentOptions { delete_conversations: true, delete_private_memory: false }).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn general_agent_reconciles_on_reuse_same_setting_and_main_agent_deletion() {
+        let store = Store::open_in_memory().unwrap();
+        let project = Project { id: ProjectId::new(), name: "P".into(), path: "/p".into() };
+        store.insert_project(&project).unwrap();
+        let main = store.create_agent(&config()).unwrap();
+        let legacy_agent = store.create_agent(&config()).unwrap();
+        let legacy_general = store.create_conversation(&legacy_agent, Some(&project.id), "general").unwrap();
+        let message = Message { id: MessageId::new(), channel_id: legacy_general.id.clone(), role: Role::User, blocks: vec![Block::Markdown { text: "history".into() }] };
+        store.insert_message(&message).unwrap();
+        let old_session = store.latest_session(&legacy_general.id).unwrap();
+
+        let general = store.ensure_project_general_channel(&project.id, &main).unwrap();
+        assert_eq!(general.id, legacy_general.id);
+        assert_eq!(general.agent_id, main);
+        assert_ne!(store.latest_session(&general.id).unwrap(), old_session);
+        assert_eq!(store.messages_for_channel(&general.id).unwrap(), vec![message.clone()]);
+        assert_eq!(store.channel_agents(&general.id).unwrap(), vec![legacy_agent.clone(), main.clone()]);
+
+        let wrong_session = SessionId::new();
+        store.conn.execute("UPDATE channels SET agent_id=?2 WHERE id=?1", params![general.id.0, legacy_agent.0]).unwrap();
+        store.create_session(&wrong_session, &general.id).unwrap();
+        let before_repair = store.latest_session(&general.id).unwrap();
+        store.set_project_main_agent(&project.id, &main).unwrap();
+        assert_eq!(store.load_channel(&general.id).unwrap().agent_id, main);
+        assert_ne!(store.latest_session(&general.id).unwrap(), before_repair);
+
+        store.invite_agent_to_channel(&project.id, &general.id, &legacy_agent).unwrap();
+        let before_delete = store.latest_session(&general.id).unwrap();
+        store.delete_agent(&main, DeleteAgentOptions { delete_conversations: false, delete_private_memory: false }).unwrap();
+        assert_eq!(store.project_main_agent(&project.id).unwrap(), Some(legacy_agent.clone()));
+        assert_eq!(store.load_channel(&general.id).unwrap().agent_id, legacy_agent);
+        assert_ne!(store.latest_session(&general.id).unwrap(), before_delete);
+        assert_eq!(store.messages_for_channel(&general.id).unwrap(), vec![message]);
     }
 
     #[test]
