@@ -39,7 +39,7 @@ const projectAgents = computed(() => [
 const currentProject = computed(
   () => props.snapshot.activeProjectId === props.snapshot.projectId && !!props.snapshot.channelId,
 )
-let stop: UnlistenFn | undefined
+const stops: UnlistenFn[] = []
 let disposed = false,
   generation = 0
 async function reload() {
@@ -57,19 +57,25 @@ async function reload() {
 watch(() => props.snapshot.projectId, reload, { immediate: true })
 onMounted(async () => {
   try {
-    const unlisten = await listen('discard://agents', () => {
-      void reload()
-    })
-    if (disposed) unlisten()
-    else stop = unlisten
+    for (const event of ['discard://agents', 'discard://conversations']) {
+      const unlisten = await listen(event, () => {
+        void reload()
+      })
+      if (disposed) {
+        unlisten()
+        return
+      }
+      stops.push(unlisten)
+    }
   } catch (cause) {
     if (!disposed) error.value = String(cause)
   }
 })
 onUnmounted(() => {
   disposed = true
-  stop?.()
+  stops.forEach((stop) => stop())
 })
+
 const dmTab = ref('conversation')
 const branchCount = computed(() =>
   currentProject.value ? props.snapshot.branches.filter((row) => row.kind === 'branch').length : 0,

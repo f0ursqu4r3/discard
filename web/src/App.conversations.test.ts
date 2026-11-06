@@ -1,4 +1,7 @@
 import { shallowMount, flushPromises } from '@vue/test-utils'
+import { defineComponent } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
+import AgentsNavigation from './components/workspace/AgentsNavigation.vue'
 import { beforeEach, afterEach, expect, test, vi } from 'vite-plus/test'
 import fixture from './bridge/fixtures/snapshot.json'
 import type { MessageDto, SnapshotDto } from './bridge/types'
@@ -11,6 +14,15 @@ const mocks = vi.hoisted(() => ({
   send: vi.fn(async () => {}),
   copy: vi.fn(async () => {}),
   run: vi.fn(),
+}))
+const catalogHandlers = new Map<string, Set<() => void>>()
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(async (event: string, handler: () => void) => {
+    if (!catalogHandlers.has(event)) catalogHandlers.set(event, new Set())
+    catalogHandlers.get(event)!.add(handler)
+    return () => catalogHandlers.get(event)?.delete(handler)
+  }),
 }))
 vi.mock('./bridge/store', () => ({ useStore: () => mocks.store }))
 vi.mock('./bridge/shortcuts', () => ({ useWebShortcuts: vi.fn() }))
@@ -29,6 +41,7 @@ import { Button } from './components/ui/button'
 let view: ReturnType<typeof shallowMount> | undefined
 beforeEach(() => {
   vi.clearAllMocks()
+  catalogHandlers.clear()
   mocks.store.snapshot = {
     ...structuredClone(fixture),
     projectId: '',
@@ -134,4 +147,69 @@ test('model failure offers retry and model settings; failed persistence offers c
     .trigger('click')
   await flushPromises()
   expect(mocks.run).toHaveBeenCalledWith('open_agent_settings')
+})
+
+test('top-level menu creation refreshes the same-context conversation catalog', async () => {
+  let created = false
+  const agent = { id: 'a', name: 'Robin', provider: 'codex', model: 'exact', archived: false }
+  vi.mocked(invoke).mockImplementation(async (name, payload) => {
+    if (name === 'settings_agent_get') return [agent]
+    if (name === 'get_conversations')
+      return created
+        ? [
+            {
+              id: 'new-menu-chat',
+              name: 'New menu discussion',
+              agentId: 'a',
+              agent: 'Robin',
+              projectId: null,
+              archived: false,
+              agentArchived: false,
+              deleted: false,
+            },
+          ]
+        : []
+    if (name === 'create_conversation') {
+      expect(payload).toEqual({ agentId: 'a', projectId: null, name: 'New menu discussion' })
+      created = true
+      catalogHandlers.get('discard://conversations')?.forEach((handler) => handler())
+      return 'new-menu-chat'
+    }
+  })
+  const panel = defineComponent({
+    name: 'NavigationPanel',
+    components: { AgentsNavigation },
+    template: '<AgentsNavigation :project-id="null" />',
+  })
+  view = shallowMount(App, {
+    global: {
+      renderStubDefaultSlot: true,
+      stubs: {
+        NavigationPanel: panel,
+        AgentsNavigation: false,
+        CreateChannelDialog: false,
+        DialogContent: { template: '<div><slot /></div>' },
+        Button: false,
+        Input: false,
+        ResizablePanelGroup: { template: '<div><slot /></div>' },
+        ResizablePanel: { template: '<div><slot /></div>' },
+      },
+    },
+  })
+  await flushPromises()
+  const navigation = view.getComponent(AgentsNavigation)
+  expect(navigation.text()).not.toContain('New menu discussion')
+  view.getComponent({ name: 'NavigationPanel' }).vm.$emit('createChannel')
+  await flushPromises()
+  const topLevelDialog = view
+    .findAllComponents(CreateChannelDialog)
+    .find((dialog) => dialog.props('open'))!
+  expect(topLevelDialog).toBeDefined()
+  await topLevelDialog.get('#channel-name').setValue('New menu discussion')
+  await topLevelDialog.get('#conversation-agent').setValue('a')
+  await topLevelDialog.get('form').trigger('submit')
+  await flushPromises()
+  expect(mocks.store.refresh).toHaveBeenCalled()
+  expect(navigation.props('projectId')).toBeNull()
+  expect(navigation.text()).toContain('New menu discussion')
 })

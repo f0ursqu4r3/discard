@@ -145,6 +145,25 @@ impl AppCore {
     }
     pub fn saved_conversation(&self) -> Option<String> { self.state.lock().unwrap_or_else(|e| e.into_inner()).window.state().selected_conversation }
     pub fn has_channel(&self, id: &str) -> bool { let s = self.state.lock().unwrap_or_else(|e| e.into_inner()); s.active.channel_id == id || s.parked.contains_key(id) }
+    pub fn agent_channel_ids(&self, id: &str) -> Vec<String> {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        std::iter::once(&s.active).chain(s.parked.values()).filter(|c| c.agent_id == id).map(|c| c.channel_id.clone()).collect()
+    }
+    pub fn channel_session_closed(&self, id: &str) -> bool {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        std::iter::once(&s.active).chain(s.parked.values()).find(|c| c.channel_id == id).is_some_and(|c| c.commands.is_closed())
+    }
+    /// Replace only a closed transport. Preserve transcript, notices and unsaved reply blocks.
+    pub fn restart_closed_channel(&self, init: CoreInit, channel: &discard_core::model::Channel) -> Result<bool, String> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let target = if s.active.channel_id == channel.id.0 { Some(&mut s.active) } else { s.parked.get_mut(&channel.id.0) };
+        let Some(target) = target else { return Ok(false) };
+        if !target.commands.is_closed() { return Ok(false); }
+        if target.ui.turn_running() { return Err("Stop this conversation before restarting its session.".into()); }
+        target.commands = init.commands; target.agent = init.agent; target.provider = init.provider;
+        target.project_name = init.project; target.channel = init.channel;
+        s.rev += 1; self.changed.notify_one(); Ok(true)
+    }
     pub fn agent_sessions_closed(&self, id: &str) -> bool {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         std::iter::once(&s.active).chain(s.parked.values()).any(|c| c.agent_id == id && c.commands.is_closed())

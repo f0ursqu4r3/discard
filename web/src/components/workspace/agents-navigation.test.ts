@@ -143,3 +143,30 @@ test.each([null, 'project'])(
     view.unmount()
   },
 )
+
+test('shared conversation notification refreshes a menu-created chat in the same context', async () => {
+  const view = mount(AgentsNavigation, {
+    props: { projectId: null },
+    global: { stubs: { CreateChannelDialog: true } },
+  })
+  await flushPromises()
+  expect(view.text()).not.toContain('Menu-created discussion')
+  vi.mocked(invoke).mockImplementation(async (name) => {
+    if (name === 'settings_agent_get') return agents
+    if (name === 'get_conversations')
+      return [
+        ...conversations,
+        { ...conversations[0], id: 'from-menu', name: 'Menu-created discussion' },
+      ]
+  })
+  expect(handlers.has('discard://conversations')).toBe(true)
+  handlers.get('discard://conversations')!()
+  await flushPromises()
+  expect(view.text()).toContain('Menu-created discussion')
+  await view
+    .findAll('button')
+    .find((b) => b.text().includes('Menu-created discussion'))!
+    .trigger('click')
+  expect(view.emitted('select')).toEqual([['from-menu']])
+  view.unmount()
+})

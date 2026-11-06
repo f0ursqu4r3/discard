@@ -24,8 +24,8 @@ const agents = ref<AgentEntry[]>([]),
 const error = ref(''),
   opening = ref(false),
   creating = ref(false)
-let stop: UnlistenFn | undefined,
-  disposed = false
+const stops: UnlistenFn[] = []
+let disposed = false
 const visible = computed(() => conversations.value.filter((c) => c.projectId === props.projectId))
 async function reload() {
   try {
@@ -53,19 +53,25 @@ function created(id: string) {
 }
 watch(() => props.projectId, reload)
 onMounted(async () => {
-  const unlisten = await listen('discard://agents', () => {
-    void reload()
-  })
-  if (disposed) {
-    unlisten()
-    return
+  try {
+    for (const event of ['discard://agents', 'discard://conversations']) {
+      const unlisten = await listen(event, () => {
+        void reload()
+      })
+      if (disposed) {
+        unlisten()
+        return
+      }
+      stops.push(unlisten)
+    }
+    await reload()
+  } catch (cause) {
+    if (!disposed) error.value = String(cause)
   }
-  stop = unlisten
-  await reload()
 })
 onUnmounted(() => {
   disposed = true
-  stop?.()
+  stops.forEach((stop) => stop())
 })
 </script>
 <template>

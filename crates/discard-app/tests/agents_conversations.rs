@@ -50,7 +50,13 @@ fn service(core: Arc<AppCore>, store: Arc<Mutex<Store>>) -> Channels {
             let cfg = store.load_agent(&channel.agent_id).unwrap();
             let history = store.messages_for_channel(&channel.id).unwrap();
             let (commands, receiver) = mpsc::unbounded_channel();
-            receivers.lock().unwrap().push(receiver);
+            if store.channel_archived(&channel.id).unwrap()
+                || store.agent_archived(&channel.agent_id).unwrap_or(true)
+            {
+                drop(receiver);
+            } else {
+                receivers.lock().unwrap().push(receiver);
+            }
             let (_, updates) = mpsc::unbounded_channel();
             Ok((
                 CoreInit {
@@ -407,4 +413,79 @@ fn deletion_preflights_every_owned_checkout_and_preserves_dirty_and_borrowed_wor
     store.save_worktree(&records[1]).unwrap();
     clean_agent_worktrees(&store, &agent).unwrap();
     assert!(roots.iter().all(|root| !root.exists()));
+}
+
+#[tokio::test]
+async fn restoring_agent_rebuilds_only_closed_history_and_keeps_usable_unsaved_reply() {
+    use discard_core::{
+        driver::TurnOutcome,
+        event::{Event, EventId, EventKind, SessionId},
+        ui_state::Update,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let agent = store.lock().unwrap().create_agent(&config()).unwrap();
+    let active = store.lock().unwrap().default_conversation(&agent).unwrap();
+    let history = store
+        .lock()
+        .unwrap()
+        .create_conversation(&agent, None, "Archived history")
+        .unwrap();
+    store.lock().unwrap().archive_channel(&history.id).unwrap();
+    let core = empty_core(dir.path());
+    let channels = service(core.clone(), store.clone());
+    channels.select(&history.id.0).unwrap();
+    channels.select(&active.id.0).unwrap();
+    core.send_to(Some(&active.id.0), "Question".into()).unwrap();
+    core.apply_channel(
+        &active.id.0,
+        Update::Event(Box::new(Event {
+            id: EventId::new(),
+            session_id: SessionId::new(),
+            seq: 1,
+            kind: EventKind::TextDelta {
+                text: "Keep this unsaved reply".into(),
+            },
+            raw: None,
+        })),
+    );
+    core.apply_channel(
+        &active.id.0,
+        Update::ResponseSaveFailed("Copy the reply before sending again.".into()),
+    );
+    core.apply_channel(&active.id.0, Update::TurnFinished(TurnOutcome::Failed));
+    let before = core.snapshot();
+    let before_history = core.history_snapshot();
+    assert!(core.agent_sessions_closed(&agent.0));
+    store
+        .lock()
+        .unwrap()
+        .set_agent_archived(&agent, true)
+        .unwrap();
+    core.refresh_agent(&agent.0, &config(), true);
+    store
+        .lock()
+        .unwrap()
+        .set_agent_archived(&agent, false)
+        .unwrap();
+    channels.reload_agent(&agent.0).unwrap();
+    let after = core.snapshot();
+    assert_eq!(after.channel_id, before.channel_id);
+    assert_eq!(
+        after.live_blocks, before.live_blocks,
+        "restoring parked history must not discard a usable conversation's reply"
+    );
+    assert_eq!(after.notice, before.notice);
+    assert_eq!(core.history_snapshot().messages, before_history.messages);
+    assert!(
+        core.has_channel(&history.id.0),
+        "the parked history must remain cached"
+    );
+    channels.select(&history.id.0).unwrap();
+    assert!(core.snapshot().composer_disabled);
+    channels.restore_conversation(&history.id.0).unwrap();
+    assert!(!core.snapshot().composer_disabled);
+    channels.select(&active.id.0).unwrap();
+    assert_eq!(core.snapshot().live_blocks, before.live_blocks);
+    assert_eq!(core.snapshot().notice, before.notice);
 }

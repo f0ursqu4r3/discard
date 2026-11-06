@@ -39,9 +39,11 @@ impl Channels {
         }
         Ok(())
     }
-    fn start(&self, channel: &Channel) -> Result<(), String> {
+    fn start(&self, channel: &Channel) -> Result<(), String> { self.start_mode(channel, false) }
+    fn start_mode(&self, channel: &Channel, restart: bool) -> Result<(), String> {
         let (init, mut updates) = (self.launch)(channel)?;
-        self.core.add_channel(init, channel);
+        if restart { if !self.core.restart_closed_channel(init, channel)? { return Ok(()); } }
+        else { self.core.add_channel(init, channel); }
         let (archived, unavailable) = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
             (store.channel_archived(&channel.id).map_err(|e| e.to_string())?, store.agent_archived(&channel.agent_id).unwrap_or(true))
@@ -104,9 +106,22 @@ impl Channels {
     }
     pub fn reload_agent(&self, id: &str) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        let selected = (self.core.active_agent_id() == id).then(|| self.core.active_channel_id());
-        self.core.remove_agent_channels(id);
-        if let Some(selected) = selected { self.select_inner(&selected)?; }
+        let channels = self.core.agent_channel_ids(id);
+        let (cfg, unavailable) = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            (store.load_agent(&discard_core::model::AgentId(id.to_owned())).map_err(|e| e.to_string())?, store.agent_archived(&discard_core::model::AgentId(id.to_owned())).unwrap_or(true))
+        };
+        self.core.refresh_agent(id, &cfg, unavailable);
+        for id in channels {
+            let (channel, archived) = {
+                let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+                let channel = store.load_channel(&ChannelId(id.clone())).map_err(|e| e.to_string())?;
+                let archived = store.channel_archived(&channel.id).map_err(|e| e.to_string())?;
+                (channel, archived)
+            };
+            if self.core.channel_session_closed(&id) { self.start_mode(&channel, true)?; }
+            self.core.channel_read_only(&id, unavailable || archived, archived);
+        }
         Ok(())
     }
     pub fn open_agent(&self, agent: &discard_core::model::AgentId) -> Result<String, String> {

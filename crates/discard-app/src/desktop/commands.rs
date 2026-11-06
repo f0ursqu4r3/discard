@@ -171,9 +171,13 @@ pub fn get_conversations(context: State<'_, super::settings::SettingsContext>) -
     }).collect()
 }
 #[tauri::command]
-pub async fn create_conversation(channels: State<'_, Arc<super::channels::Channels>>, agent_id: String, project_id: Option<String>, name: String) -> Result<String, String> {
+pub async fn create_conversation(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, agent_id: String, project_id: Option<String>, name: String) -> Result<String, String> {
     let channels = channels.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || channels.create_conversation(&discard_core::model::AgentId(agent_id), project_id.map(discard_core::model::ProjectId).as_ref(), &name)).await.map_err(|e| e.to_string())?
+    let result = tauri::async_runtime::spawn_blocking(move || channels.create_conversation(&discard_core::model::AgentId(agent_id), project_id.map(discard_core::model::ProjectId).as_ref(), &name)).await.map_err(|e| e.to_string())?;
+    // Creation can persist before runtime selection fails. Refresh every catalog in either case.
+    use tauri::Emitter;
+    let _ = app.emit("discard://conversations", ());
+    result
 }
 #[tauri::command]
 pub async fn open_agent_chat(channels: State<'_, Arc<super::channels::Channels>>, agent_id: String) -> Result<String, String> {
