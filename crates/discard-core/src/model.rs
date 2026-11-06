@@ -24,6 +24,64 @@ text_id!(AgentId);
 text_id!(ChannelId);
 text_id!(MessageId);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectChannelKind {
+    General,
+    Branch,
+    ArchivedLegacy,
+}
+
+impl ProjectChannelKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Branch => "branch",
+            Self::ArchivedLegacy => "archived_legacy",
+        }
+    }
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "general" => Some(Self::General),
+            "branch" => Some(Self::Branch),
+            "archived_legacy" => Some(Self::ArchivedLegacy),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectChannelMetadata {
+    pub project_id: ProjectId,
+    pub channel_id: ChannelId,
+    pub kind: ProjectChannelKind,
+    pub branch: Option<String>,
+    pub archived_into: Option<ChannelId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelTopic {
+    pub channel_id: ChannelId,
+    pub text: String,
+    pub version: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TopicAuthorKind {
+    User,
+    Agent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelTopicRevision {
+    pub channel_id: ChannelId,
+    pub text: String,
+    pub version: u64,
+    pub author_kind: TopicAuthorKind,
+    pub author_id: Option<AgentId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
     pub id: ProjectId,
@@ -70,12 +128,28 @@ pub struct Channel {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Block {
-    Markdown { text: String },
-    Code { language: Option<String>, text: String },
-    Diff { text: String },
-    ToolCall { call_id: String, name: String, input: serde_json::Value, output: Option<String> },
+    Markdown {
+        text: String,
+    },
+    Code {
+        language: Option<String>,
+        text: String,
+    },
+    Diff {
+        text: String,
+    },
+    ToolCall {
+        call_id: String,
+        name: String,
+        input: serde_json::Value,
+        output: Option<String>,
+    },
     /// Rendered by Rust. Not overridable by plugins.
-    Approval { approval_id: String, tool: String, summary: String },
+    Approval {
+        approval_id: String,
+        tool: String,
+        summary: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
