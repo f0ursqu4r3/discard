@@ -31,7 +31,7 @@ async fn turn(commands: &mpsc::UnboundedSender<Command>, updates: &mut mpsc::Unb
                 kinds.push(e.kind);
             }
             Update::TurnFinished(outcome) => return (outcome, reply, kinds),
-            Update::Error(m) | Update::SetupNeeded(m) => panic!("engine problem: {m}"),
+            Update::Error(m) | Update::ResponseSaveFailed(m) | Update::SetupNeeded(m) => panic!("engine problem: {m}"),
             Update::ApprovalState { .. } | Update::Notice(_) | Update::ResponseCompleted(_) | Update::ConversationMarker(_) | Update::MemoryChanges { .. } => {}
         }
     }

@@ -29,8 +29,16 @@ struct Rig {
 }
 impl Rig {
     async fn new(script: Vec<Step>) -> Self {
+        let provider = Arc::new(FakeProvider::new(script).with_resume_handle("must-not-resume"));
+        let probe = provider.probe.clone();
+        Self::with_provider(provider, probe).await
+    }
+    async fn with_provider(
+        provider: Arc<dyn discard_core::provider::Provider>,
+        probe: Probe,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open_in_memory().unwrap();
+        let store = Store::open(&dir.path().join("store.db")).unwrap();
         let agent = store
             .create_agent(&AgentConfig {
                 name: "A".into(),
@@ -45,8 +53,6 @@ impl Rig {
         let channel = store.default_conversation(&agent).unwrap();
         let session = store.latest_session(&channel.id).unwrap().unwrap();
         let store = Arc::new(Mutex::new(store));
-        let provider = Arc::new(FakeProvider::new(script).with_resume_handle("must-not-resume"));
-        let probe = provider.probe.clone();
         let memory = Arc::new(
             MemoryStore::open(&dir.path().join("memory"), &dir.path().join("index.db")).unwrap(),
         );
@@ -653,5 +659,234 @@ async fn facts_follow_request_relevance_but_all_preferences_and_instructions_rem
     assert!(system.contains("Use short sentences"));
     assert!(system.contains("Keep decisions explicit"));
     drop(specs);
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn response_insert_failure_keeps_live_reply_and_never_claims_saved_id() {
+    let mut rig = Rig::new(vec![Step::text("recover this reply"), Step::Hang]).await;
+    let connection = rusqlite::Connection::open(rig._dir.path().join("store.db")).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_agent_message BEFORE INSERT ON messages WHEN NEW.role='agent' BEGIN SELECT RAISE(ABORT, 'test disk write failed'); END;").unwrap();
+    rig.commands.send(Command::Send("request".into())).unwrap();
+    let mut updates = vec![rig.updates.recv().await.unwrap()];
+    rig.memory
+        .capture_item(
+            &rig.agent,
+            None,
+            &rig.channel,
+            &Scope::Agent(rig.agent.clone()),
+            ItemKind::Fact,
+            "saved before transcript failure",
+        )
+        .unwrap();
+    rig.commands.send(Command::Cancel).unwrap();
+    updates.extend(rig.done().await);
+    assert!(
+        !updates
+            .iter()
+            .any(|u| matches!(u, Update::MemoryChanges { .. }))
+    );
+    assert!(
+        !updates
+            .iter()
+            .any(|u| matches!(u, Update::ResponseCompleted(_)))
+    );
+    let mut ui = discard_core::ui_state::UiState::new(rig.channel.clone(), vec![]);
+    ui.user_sent("request");
+    for update in updates {
+        ui.apply(update);
+    }
+    assert!(ui.notice().is_some_and(|s| s.contains("Copy")));
+    assert!(!ui.turn_running());
+    assert_eq!(
+        ui.live_blocks(),
+        &[Block::Markdown {
+            text: "recover this reply".into()
+        }]
+    );
+    assert_eq!(ui.history().len(), 1);
+    assert!(
+        rig.store
+            .lock()
+            .unwrap()
+            .response_memory(&rig.channel)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(rig.runtime.registry().active(), 0);
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn user_insert_failure_prevents_provider_turn() {
+    let mut rig = Rig::new(vec![Step::text("must not run"), Step::idle()]).await;
+    let connection = rusqlite::Connection::open(rig._dir.path().join("store.db")).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_user_message BEFORE INSERT ON messages WHEN NEW.role='user' BEGIN SELECT RAISE(ABORT, 'test disk write failed'); END;").unwrap();
+    rig.commands.send(Command::Send("request".into())).unwrap();
+    let updates = rig.done().await;
+    assert!(
+        updates
+            .iter()
+            .any(|u| matches!(u,Update::Error(s) if s.contains("could not save")))
+    );
+    assert!(rig.probe.specs.lock().unwrap().is_empty());
+    assert!(
+        rig.store
+            .lock()
+            .unwrap()
+            .messages_for_channel(&rig.channel)
+            .unwrap()
+            .is_empty()
+    );
+    rig.close().await;
+}
+
+struct BatchProvider {
+    inner: FakeProvider,
+    calls: std::sync::atomic::AtomicUsize,
+    cancel: bool,
+}
+#[async_trait::async_trait]
+impl discard_core::provider::Provider for BatchProvider {
+    fn id(&self) -> &str {
+        "fake"
+    }
+    fn capabilities(&self) -> &discard_core::capability::CapabilityMatrix {
+        discard_core::provider::Provider::capabilities(&self.inner)
+    }
+    async fn check_setup(&self) -> discard_core::provider::SetupStatus {
+        discard_core::provider::SetupStatus::Ready
+    }
+    async fn start_session(
+        &self,
+        spec: discard_core::provider::SessionSpec,
+    ) -> Result<
+        Box<dyn discard_core::provider::ProviderSession>,
+        discard_core::provider::ProviderError,
+    > {
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut fake = FakeProvider::new(if call == 0 {
+            vec![Step::text("successful first summary"), Step::idle()]
+        } else if self.cancel {
+            vec![Step::Hang]
+        } else {
+            vec![Step::Emit(discard_core::event::EventKind::Error {
+                message: "second batch failed".into(),
+            })]
+        });
+        fake.probe = self.inner.probe.clone();
+        discard_core::provider::Provider::start_session(&fake, spec).await
+    }
+}
+
+#[tokio::test]
+async fn later_summary_batch_failure_or_cancel_keeps_original_boundary_and_cleans_up() {
+    for cancel in [false, true] {
+        let provider = Arc::new(BatchProvider {
+            inner: FakeProvider::new(vec![]),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            cancel,
+        });
+        let probe = provider.inner.probe.clone();
+        let mut rig = Rig::with_provider(provider, probe).await;
+        let old = discard_core::conversation_context::ConversationContext {
+            provider: Some("fake".into()),
+            model: Some("one".into()),
+            summary: Some("previous durable summary".into()),
+            through: None,
+        };
+        rig.store
+            .lock()
+            .unwrap()
+            .set_conversation_context(&rig.channel, &old)
+            .unwrap();
+        for _ in 0..15 {
+            rig.store
+                .lock()
+                .unwrap()
+                .insert_message(&Message {
+                    id: MessageId::new(),
+                    channel_id: rig.channel.clone(),
+                    role: Role::User,
+                    blocks: vec![Block::Markdown {
+                        text: "x".repeat(4000),
+                    }],
+                })
+                .unwrap();
+        }
+        rig.commands.send(Command::Send("current".into())).unwrap();
+        if cancel {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while rig.probe.sent.lock().unwrap().len() < 2 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            rig.commands.send(Command::Cancel).unwrap();
+        }
+        let updates = rig.done().await;
+        let expected = if cancel {
+            discard_core::driver::TurnOutcome::Cancelled
+        } else {
+            discard_core::driver::TurnOutcome::Failed
+        };
+        assert!(
+            updates
+                .iter()
+                .any(|u| matches!(u,Update::TurnFinished(outcome) if *outcome==expected))
+        );
+        if cancel {
+            assert!(!updates.iter().any(|u| matches!(u, Update::Error(_))));
+        }
+        assert_eq!(
+            rig.store
+                .lock()
+                .unwrap()
+                .conversation_context(&rig.channel)
+                .unwrap(),
+            old
+        );
+        assert_eq!(rig.probe.specs.lock().unwrap().len(), 2);
+        assert_eq!(rig.runtime.registry().active(), 0);
+        assert!(
+            std::fs::read_dir(rig._dir.path().join("run"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        rig.close().await;
+    }
+}
+
+#[tokio::test]
+async fn user_memory_edit_during_response_is_not_an_assistant_save_marker() {
+    let mut rig = Rig::new(vec![Step::text("reply"), Step::Hang]).await;
+    rig.commands.send(Command::Send("request".into())).unwrap();
+    while !matches!(rig.updates.recv().await, Some(Update::Event(_))) {}
+    rig.memory
+        .create_item(
+            &Scope::Agent(rig.agent.clone()),
+            ItemKind::Fact,
+            "user's own edit",
+            Some(&rig.channel),
+            MutationOrigin::User,
+        )
+        .unwrap();
+    rig.commands.send(Command::Cancel).unwrap();
+    let updates = rig.done().await;
+    assert!(
+        !updates
+            .iter()
+            .any(|u| matches!(u, Update::MemoryChanges { .. }))
+    );
+    assert!(
+        rig.store
+            .lock()
+            .unwrap()
+            .response_memory(&rig.channel)
+            .unwrap()
+            .is_empty()
+    );
     rig.close().await;
 }

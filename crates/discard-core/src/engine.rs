@@ -149,12 +149,13 @@ impl Engine {
         Ok(snapshot)
     }
 
-    fn marker(&self, text: String, updates: &mpsc::UnboundedSender<Update>) {
-        let message = self.store_message(Role::System, vec![Block::Markdown { text }]);
+    fn marker(&self, text: String, updates: &mpsc::UnboundedSender<Update>) -> Result<(), String> {
+        let message = self.store_message(Role::System, vec![Block::Markdown { text }])?;
         send(updates, Update::ConversationMarker(message));
+        Ok(())
     }
 
-    async fn conversation_input(&self, current: &str, history: &[Message], system: &str, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) -> Result<String, String> {
+    async fn conversation_input(&self, current: &str, history: &[Message], system: &str, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) -> Result<String, crate::conversation_context::ContextError> {
         use crate::conversation_context as context;
         let budget = context::input_budget(self.provider.model_context_window(self.model.as_deref().unwrap_or("")));
         context::required_fits(system, current, budget)?;
@@ -184,18 +185,18 @@ impl Engine {
             summarized = true;
         }
         if state.provider.as_deref().is_some_and(|p| p != self.provider.id()) || state.provider.is_some() && state.model != self.model {
-            self.marker(format!("Model changed to {} / {}. Conversation history is retained.", self.provider.id(), self.model.as_deref().unwrap_or("")), updates);
+            self.marker(format!("Model changed to {} / {}. Conversation history is retained.", self.provider.id(), self.model.as_deref().unwrap_or("")), updates)?;
         }
         state.provider = Some(self.provider.id().into()); state.model = self.model.clone();
         crate::driver::lock(&self.store).set_conversation_context(&self.channel_id, &state).map_err(|e| e.to_string())?;
         if state.summary.is_some() {
-            if summarized { self.marker("Older messages were summarized. The full conversation remains saved.".into(), updates); }
+            if summarized { self.marker("Older messages were summarized. The full conversation remains saved.".into(), updates)?; }
             send(updates, Update::Notice("This response uses a summary of older messages. The full conversation remains saved.".into()));
         }
         Ok(input)
     }
 
-    async fn summarize(&self, prompt: &str, commands: &mut mpsc::UnboundedReceiver<Command>) -> Result<String, String> {
+    async fn summarize(&self, prompt: &str, commands: &mut mpsc::UnboundedReceiver<Command>) -> Result<String, crate::conversation_context::ContextError> {
         let service = self.memory.as_ref().ok_or("Conversation summaries require scoped read-only memory tools.")?;
         let prepared = service.prepare_summary(&self.agent_id, self.project_id.as_ref(), &self.channel_id)?;
         let _revoke = RevokeOnDrop { service: service.clone(), token: prepared.token.clone() };
@@ -239,12 +240,11 @@ impl Engine {
         self.observe(observer::turn_finished(outcome));
     }
 
-    fn store_message(&self, role: Role, blocks: Vec<Block>) -> Message {
+    fn store_message(&self, role: Role, blocks: Vec<Block>) -> Result<Message, String> {
         let message = Message { id: MessageId::new(), channel_id: self.channel_id.clone(), role, blocks };
-        if let Err(e) = crate::driver::lock(&self.store).insert_message(&message) {
-            warn!(error = %e, "could not store a message");
-        }
-        message
+        crate::driver::lock(&self.store).insert_message(&message)
+            .map_err(|e| format!("Discard could not save the {} message: {}", role.as_str(), redact(&e.to_string())))?;
+        Ok(message)
     }
 
     async fn turn(
@@ -266,7 +266,11 @@ impl Engine {
     async fn turn_snapshot(&self, sequencer: &mut Sequencer, text: String, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) {
         let history = crate::driver::lock(&self.store).messages_for_channel(&self.channel_id);
         let previous_changes = self.memory.as_ref().map(|m| m.changes(&self.channel_id)).transpose();
-        self.store_message(Role::User, vec![Block::Markdown { text: text.clone() }]);
+        if let Err(error) = self.store_message(Role::User, vec![Block::Markdown { text: text.clone() }]) {
+            send(updates, Update::Error(format!("{error}. Retry after resolving the storage error.")));
+            self.finish(updates, crate::driver::TurnOutcome::Failed);
+            return;
+        }
         self.observe(observer::message_sent(&self.channel_id.0, &text));
 
         let enforcement = match self.provider.capabilities().enforcement_for(self.policy) {
@@ -346,7 +350,11 @@ impl Engine {
             let history = match history { Ok(h) => h, Err(e) => { send(updates, Update::Error(e.to_string())); self.finish(updates, crate::driver::TurnOutcome::Failed); return; } };
             match self.conversation_input(&text, &history, prepared.as_ref().map(|p| p.system_prompt.as_str()).unwrap_or(""), commands, updates).await {
                 Ok(input) => input,
-                Err(error) => { send(updates, Update::Error(error)); self.finish(updates, crate::driver::TurnOutcome::Failed); return; }
+                Err(crate::conversation_context::ContextError::Cancelled) => {
+                    send(updates, Update::Notice("History summary cancelled. The saved summary is unchanged.".into()));
+                    self.finish(updates, crate::driver::TurnOutcome::Cancelled); return;
+                }
+                Err(error) => { send(updates, Update::Error(error.to_string())); self.finish(updates, crate::driver::TurnOutcome::Failed); return; }
             }
         } else { text.clone() };
         let resume_handle = if self.mode == crate::provider::SessionMode::Coding { crate::driver::lock(&self.store).resume_handle(&self.session_id).ok().flatten() } else { None };
@@ -456,14 +464,24 @@ impl Engine {
 
         let changes = match (&self.memory, previous_changes) {
             (Some(memory), Ok(Some(before))) => match memory.changes(&self.channel_id) {
-                Ok(after) => after.into_iter().filter(|c| !before.contains(c)).collect::<Vec<_>>(),
+                Ok(after) => after.into_iter().filter(|c| !before.contains(c)).filter(|change| match change {
+                    crate::memory_items::MemoryChange::Saved { item, .. } => item.origin != crate::memory_items::MutationOrigin::User,
+                    crate::memory_items::MemoryChange::Proposed(_) => true,
+                }).collect::<Vec<_>>(),
                 Err(e) => { send(updates, Update::Error(e)); vec![] }
             },
             (_, Err(e)) => { send(updates, Update::Error(e)); vec![] },
             _ => vec![],
         };
         if !timeline.blocks().is_empty() || !changes.is_empty() {
-            let response = self.store_message(Role::Agent, timeline.blocks().to_vec());
+            let response = match self.store_message(Role::Agent, timeline.blocks().to_vec()) {
+                Ok(response) => response,
+                Err(error) => {
+                    send(updates, Update::ResponseSaveFailed(format!("{error}. Copy the reply before sending another message, then resolve the storage error.")));
+                    self.finish(updates, crate::driver::TurnOutcome::Failed);
+                    return;
+                }
+            };
             if self.mode == crate::provider::SessionMode::Conversation { send(updates, Update::ResponseCompleted(response.clone())); }
             let mut recorded = Vec::new();
             for change in changes {

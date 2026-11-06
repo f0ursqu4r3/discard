@@ -90,13 +90,31 @@ pub fn required_fits(system: &str, current: &str, budget: usize) -> Result<(), S
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ContextError {
+    #[error("History summary cancelled.")]
+    Cancelled,
+    #[error("{0}")]
+    Failed(String),
+}
+impl From<String> for ContextError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+impl From<&str> for ContextError {
+    fn from(message: &str) -> Self {
+        Self::Failed(message.into())
+    }
+}
+
 /// One bounded, read-only provider request. The caller owns and revokes its scoped token.
 pub async fn summarize(
     provider: &dyn crate::provider::Provider,
     spec: crate::provider::SessionSpec,
     prompt: &str,
     commands: &mut tokio::sync::mpsc::UnboundedReceiver<crate::ui_state::Command>,
-) -> Result<String, String> {
+) -> Result<String, ContextError> {
     use crate::{event::EventKind, ui_state::Command};
     let start = tokio::time::timeout(
         std::time::Duration::from_secs(60),
@@ -105,7 +123,7 @@ pub async fn summarize(
     let mut session = tokio::select! {
         result = start => result.map_err(|_| "History summary setup timed out. Retry.".to_string())?.map_err(|e| e.to_string())?,
         command = commands.recv() => match command {
-            Some(Command::Cancel) | None => return Err("History summary cancelled. Send your request again to retry.".into()),
+            Some(Command::Cancel) | None => return Err(ContextError::Cancelled),
             _ => return Err("History summary setup interrupted. Send your request again to retry.".into()),
         }
     };
@@ -121,14 +139,14 @@ pub async fn summarize(
                     Some(event) => match event.kind {
                         EventKind::TextDelta { text } => { summary.push_str(&text); if summary.len() > crate::conversation_context::SUMMARY_LIMIT { return Err("History summary exceeded its limit. Retry or select another model.".into()); } },
                         EventKind::StatusChange { status: crate::event::AgentStatus::Idle } => return Ok(summary),
-                        EventKind::Error { message } => return Err(crate::redact::redact(&message)),
+                        EventKind::Error { message } => return Err(ContextError::Failed(crate::redact::redact(&message))),
                         EventKind::ApprovalRequest { .. } | EventKind::ToolCallStart { .. } => return Err("The summary model attempted to use a tool. Retry or select another model.".into()),
                         _ => {},
                     },
                     None => return Err("The summary model stopped before completing its summary. Retry.".into()),
                 },
                 command = commands.recv() => match command {
-                    Some(Command::Cancel) | None => return Err("History summary cancelled. Send your request again to retry.".into()),
+                    Some(Command::Cancel) | None => return Err(ContextError::Cancelled),
                     Some(Command::Send(_)) => return Err("A response is already running. Send your request again after it finishes.".into()),
                     _ => {},
                 },

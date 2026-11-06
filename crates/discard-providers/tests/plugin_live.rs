@@ -83,7 +83,7 @@ async fn build_plugin(provider: Arc<dyn Provider>, model: Option<&str>) {
                 }
             }
             Update::TurnFinished(outcome) => break outcome,
-            Update::Error(m) | Update::SetupNeeded(m) => panic!("engine problem: {m}"),
+            Update::Error(m) | Update::ResponseSaveFailed(m) | Update::SetupNeeded(m) => panic!("engine problem: {m}"),
             Update::ApprovalState { .. } | Update::Notice(_) | Update::ResponseCompleted(_) | Update::ConversationMarker(_) | Update::MemoryChanges { .. } => {}
         }
     };

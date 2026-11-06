@@ -764,6 +764,7 @@ dependencies = [
  "discard-lua",
  "discard-mcp",
  "nix",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
