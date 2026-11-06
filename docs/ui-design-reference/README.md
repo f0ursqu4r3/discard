@@ -406,13 +406,13 @@ Attaching files or diffs must use structured attachment/context references. The 
 
 ### Agent identity
 
-Each agent has a durable ID, name, stable handle, role, avatar/fallback, provider, optional model ID, personality/system instructions, and memory. Presence comes from actual runtime state.
+Each agent has a durable ID, editable name, optional avatar, provider, required exact model ID, optional personality/system instructions, and separate learned memory. Presence comes from actual runtime state. Stable handles and a separate role field remain planned.
 
-The target already stores `provider`, optional `model`, `system_prompt`, approval policy, avatar, and plugin-write permission in `AgentConfig`. Reuse those fields. “CLI default” in the UI maps to an absent model override, not the literal model name `CLI default` passed to a provider.
+AgentConfig stores `provider`, optional `model`, `system_prompt`, approval policy, avatar, and plugin-write permission. The normal conversation form requires a nonempty exact model ID even though the storage type can represent no model. It does not offer a CLI-default choice or silently select another model.
 
-The reference model control is a text field for a model ID. Do not invent a model catalog or hard-code an availability list. A provider change resets the draft override to the provider default. Saving a profile must not silently restart an active run. Define when edited settings take effect and show that state.
+The model control accepts an exact model ID. Suggestions come from saved agent configurations for the selected provider. They are not a fabricated availability catalog. A provider change keeps the draft model text; the user must select or enter an exact model supported by that provider. Saving does not restart an active response. The current response keeps its configuration snapshot, and edits apply to the next response without restarting the app.
 
-Role, stable handle, response style, and default DM project context need an explicit persistence mapping. Keep policy and plugin-write settings under the existing approval rules. A personality edit must not change capability grants.
+Stable handles and separate role/response-style fields remain planned. Default direct conversations have no project. Personality uses the saved `system_prompt` field. Keep policy and plugin-write settings under the existing approval rules. A personality edit must not change capability grants.
 
 ### Membership
 

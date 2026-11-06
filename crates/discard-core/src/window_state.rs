@@ -63,6 +63,7 @@ impl Default for PanelWidths {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowState {
+    pub selected_conversation: Option<String>,
     /// `None` until a window position was saved.
     pub bounds: Option<Bounds>,
     pub panels: PanelWidths,
@@ -72,7 +73,7 @@ pub struct WindowState {
 
 impl Default for WindowState {
     fn default() -> Self {
-        Self { bounds: None, panels: PanelWidths::default(), member_list_visible: true, last_read: BTreeMap::new() }
+        Self { selected_conversation: None, bounds: None, panels: PanelWidths::default(), member_list_visible: true, last_read: BTreeMap::new() }
     }
 }
 
@@ -98,6 +99,11 @@ impl StateStore {
 
     pub fn state(&self) -> WindowState {
         self.state.clone()
+    }
+
+    pub fn set_selected_conversation(&mut self, id: Option<&str>) -> Result<(), String> {
+        if self.path.as_os_str().is_empty() { self.state.selected_conversation = id.map(str::to_owned); return Ok(()); }
+        self.save(WindowState { selected_conversation: id.map(str::to_owned), ..self.state.clone() })
     }
 
     pub fn last_read(&self, channel: &str) -> Option<&str> { self.state.last_read.get(channel).map(String::as_str) }
@@ -175,6 +181,10 @@ fn clamp_width(width: f32) -> f32 {
 
 fn render(state: &WindowState) -> String {
     let mut text = String::from("# Written by Discard. Safe to delete.\n");
+    if let Some(id) = &state.selected_conversation {
+        let values: toml::Table = [("selected_conversation".into(), toml::Value::String(id.clone()))].into_iter().collect();
+        text.push_str(&toml::to_string(&values).expect("strings serialize"));
+    }
     if let Some(b) = state.bounds {
         text.push_str(&format!(
             "\n[window]\nx = {:?}\ny = {:?}\nwidth = {:?}\nheight = {:?}\n",
@@ -221,6 +231,7 @@ fn read_state(table: &toml::Table) -> WindowState {
     };
     let last_read = table.get("last_read").and_then(toml::Value::as_table).map(|values| values.iter().filter_map(|(key, value)| value.as_str().filter(|s| !s.is_empty()).map(|s| (key.clone(), s.to_owned()))).collect()).unwrap_or_default();
     WindowState {
+        selected_conversation: table.get("selected_conversation").and_then(toml::Value::as_str).map(str::to_owned),
         last_read,
         bounds,
         member_list_visible: layout.and_then(|l| l.get("member_list_visible")).and_then(toml::Value::as_bool).unwrap_or(true),

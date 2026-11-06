@@ -196,10 +196,9 @@ Missing capabilities show as "No". **Re-check** runs the setup check again. Disc
 
 ### Agents page
 
-Select an agent to edit its model, system prompt, approval policy, and `plugin.write`. The name and provider are
-read-only. The page lists changes before save. A looser policy or enabling `plugin.write` requires an explicit
-confirmation. Choices that the provider cannot enforce are disabled and show the reason. Changes apply at the next
-launch. Use **Relaunch** after saving to apply them.
+Create agents with a generated editable name, optional avatar, connected provider, exact model ID, and optional personality. Multiple agents can use the same model. Personality stays separate from learned memory. Review the changes before save. A looser permission policy or enabling `plugin.write` requires explicit confirmation. Unsupported choices show the reason.
+
+Saved edits apply without restarting. A running response keeps its original configuration; changes apply to the next response. Archive preserves conversations and memory and supports restoration. Permanent deletion offers separate choices for conversations and private memory. Global and project memory stay saved. Retained deleted-agent conversations remain readable.
 
 ### Plugins page
 
@@ -223,7 +222,11 @@ Record, reset, or unbind shortcuts. Locked actions cannot be edited. Changes app
 
 ### Memory page
 
-Browse scopes and read memory files. Use **Reveal** to open a scope folder. Editing and deleting files are not available here.
+Browse all global, agent, project, and agent-project memory, including orphan domains. Inspect each item's kind, timestamps, source conversation, version, and history. Edit text, move the item to another domain, or use **Forget** to remove it from retrieval. Moving to a shared domain explicitly shares the item. Pending proposals have **Approve** and **Reject** controls.
+
+**Reveal item file** selects the actual item document. **Import file edits and reload** imports external body edits as a new version and resolves the file conflict before another edit. Reload replaces the inspector draft; copy that draft first if needed.
+
+The conversation Memory panel shows applicable items. Automatic saves and approved updates appear beside their saved response with versioned Undo. Forget and Undo of a new save pause automatic capture. The conversation provides explicit Resume and fresh-conversation actions. Forget does not erase transcript messages. See [Saved memory](memory.md) for domain boundaries and pause behavior.
 
 ### Workspaces page
 
@@ -318,7 +321,7 @@ and the engine runs for it. A Mac app usually stays open with no window. Discard
   Confirm. A second request replaces the first.
 - After the first write to a file that could not be parsed, the "file" problem disappears. Discard does not tell you
   that the old text is now in `settings.toml.invalid`.
-- Key changes need a relaunch. The Memory and Workspaces pages are read-only.
+- Key changes need a relaunch. The Workspaces page is read-only. Agent and memory changes apply without a relaunch.
 - Plugin-declared settings are not built. `settings.toml` holds `version`, `general`, `appearance`, and `keybindings`. Unknown keys stay in the
   file, but nothing reads them.
 - Greyed menu items have no tooltip.

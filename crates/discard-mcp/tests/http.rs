@@ -1,7 +1,7 @@
 //! The MCP server over real HTTP on loopback.
 
 use discard_core::memory::{MemoryStore, Scope};
-use discard_core::model::{AgentId, ProjectId};
+use discard_core::model::AgentId;
 use discard_mcp::identity::{Identity, ScopeKindOrd, Surface, TokenRegistry};
 use discard_mcp::tools::McpHandler;
 use discard_mcp::McpServer;
@@ -29,7 +29,7 @@ async fn rig() -> Rig {
 fn identity(agent: &str) -> Identity {
     Identity {
         agent: AgentId(agent.into()),
-        project: ProjectId("p1".into()),
+        project: None, source_conversation: Some(discard_core::model::ChannelId("chat".into())), write_scopes: [ScopeKindOrd::Agent].into(),
         surface: Surface::Memory,
         scopes: [ScopeKindOrd::Agent, ScopeKindOrd::Project].into(),
         can_write: true,
@@ -95,7 +95,7 @@ async fn the_server_listens_on_loopback_only() {
 async fn missing_wrong_and_malformed_credentials_are_refused_without_running_anything() {
     let r = rig().await;
     let t = r.token("a1");
-    let append = rpc("tools/call", json!({"name": "memory_append", "arguments": {"scope": "agent", "path": "x.md", "text": "nope"}}));
+    let append = rpc("tools/call", json!({"name": "memory_save", "arguments": {"scope": "agent", "path": "x.md", "text": "nope"}}));
     for auth in [None, Some("Bearer wrong"), Some("Bearer "), Some("Bearer"), Some(&*format!("Basic {t}")), Some(&*t)] {
         let reply = http(r.server.addr(), "POST", auth, None, &append).await;
         assert_eq!(reply.status, 401, "{auth:?}");
@@ -165,9 +165,10 @@ async fn oversized_bodies_are_refused() {
 async fn sessions_for_different_agents_cannot_read_each_others_private_memory() {
     let r = rig().await;
     let (a, b) = (r.token("agent-a"), r.token("agent-b"));
-    let write = rpc("tools/call", json!({"name": "memory_append", "arguments": {"scope": "agent", "path": "secret.md", "text": "a's secret"}}));
+    let write = rpc("tools/call", json!({"name": "memory_save", "arguments": {"scope": "agent", "path": "secret.md", "text": "a's secret"}}));
     assert_eq!(http(r.server.addr(), "POST", Some(&format!("Bearer {a}")), None, &write).await.status, 200);
-    let read = rpc("tools/call", json!({"name": "memory_read", "arguments": {"scope": "agent", "path": "secret.md"}}));
+    let item=r.store.list_items(&[Scope::Agent(AgentId("agent-a".into()))]).unwrap().remove(0);
+    let read = rpc("tools/call", json!({"name": "memory_read", "arguments": {"scope": "agent", "path": item.path()}}));
     let as_b = http(r.server.addr(), "POST", Some(&format!("Bearer {b}")), None, &read).await.json();
     assert_eq!(as_b["result"]["isError"], true);
     let as_a = http(r.server.addr(), "POST", Some(&format!("Bearer {a}")), None, &read).await.json();

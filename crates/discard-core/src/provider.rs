@@ -31,8 +31,17 @@ pub enum SetupStatus {
     NotLoggedIn { login_command: String },
 }
 
+/// The conversation profile must remove coding tools and provider-owned memory.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionMode {
+    #[default]
+    Coding,
+    Conversation,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionSpec {
+    pub mode: SessionMode,
     pub cwd: PathBuf,
     pub model: Option<String>,
     pub system_prompt: Option<String>,
@@ -48,6 +57,10 @@ pub trait Provider: Send + Sync {
     fn id(&self) -> &str;
     fn capabilities(&self) -> &CapabilityMatrix;
     async fn check_setup(&self) -> SetupStatus;
+    /// Catalog context limit for the exact model, when the provider publishes one.
+    fn model_context_window(&self, _model: &str) -> Option<u64> {
+        None
+    }
     /// Start a provider session. Fails closed if the provider cannot enforce `spec.enforcement`.
     async fn start_session(&self, spec: SessionSpec) -> Result<Box<dyn ProviderSession>, ProviderError>;
 }

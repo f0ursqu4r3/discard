@@ -27,7 +27,7 @@ fn rig() -> Rig {
 }
 
 fn who(surface: Surface, can_write: bool) -> Identity {
-    Identity { agent: AgentId("a1".into()), project: ProjectId("p1".into()), surface, scopes: [ScopeKindOrd::Agent].into(), can_write }
+    Identity { agent: AgentId("a1".into()), project: Some(ProjectId("p1".into())), source_conversation: Some(discard_core::model::ChannelId("chat".into())), write_scopes: [ScopeKindOrd::AgentProject].into(), surface, scopes: [ScopeKindOrd::Agent].into(), can_write }
 }
 
 fn writer() -> Identity {

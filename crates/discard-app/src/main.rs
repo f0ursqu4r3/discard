@@ -89,6 +89,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     run_app(&options, &data_dir, settings, relaunch)
 }
 
+/// Only the deliberate Builder path creates a Coding workspace.
+fn startup_workspace(store: &Store, project_dir: &Path, options: &args::Options) -> discard_core::store::Result<Option<discard_core::bootstrap::Workspace>> {
+    if options.builder { discard_core::bootstrap::ensure_workspace(store, project_dir, &options.provider, Role::Builder, options.workspace).map(Some) }
+    else { Ok(None) }
+}
+
 fn run_app(
     options: &args::Options,
     data_dir: &Path,
@@ -97,8 +103,8 @@ fn run_app(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let settings = Arc::new(Mutex::new(settings));
     let store = Arc::new(Mutex::new(Store::open(&data_dir.join("discard.db"))?));
-    let empty_workspace = { let store = lock(&store); !store.list_projects()?.is_empty() && store.visible_projects()?.is_empty() };
-    let project_dir = { let store = lock(&store); store.selected_project()?.or_else(|| if empty_workspace { store.list_projects().ok()?.into_iter().next() } else { None }) }.map(|project| PathBuf::from(project.path)).unwrap_or(std::env::current_dir()?);
+    let selected_project = lock(&store).selected_project()?;
+    let project_dir = if options.builder { std::env::current_dir()? } else { selected_project.as_ref().map(|p| PathBuf::from(&p.path)).unwrap_or_default() };
 
     // No provider process survives a restart. Fail orphaned turns and expire their approvals.
     let report = lock(&store).reconcile(&HashSet::new())?;
@@ -110,18 +116,14 @@ fn run_app(
         );
     }
 
-    if options.workspace == WorkspaceChoice::Worktree && !WorktreeManager::is_repo(&project_dir) {
+    if options.builder && options.workspace == WorkspaceChoice::Worktree && !WorktreeManager::is_repo(&project_dir) {
         eprintln!("discard: --worktree needs a git repository, and {} is not inside one", project_dir.display());
         std::process::exit(2);
     }
-    let workspace = discard_core::bootstrap::ensure_workspace(
-        &lock(&store),
-        &project_dir,
-        &options.provider,
-        if options.builder { Role::Builder } else { Role::Default },
-        options.workspace,
-    )?;
-    info!(project = %workspace.project.name, channel = %workspace.channel.name, "workspace ready");
+    // Normal startup creates no project, agent, or conversation. Builder is an explicit Coding path.
+    let workspace = startup_workspace(&lock(&store), &project_dir, options)?;
+    let startup_channel = workspace.as_ref().map(|w| w.channel.clone());
+    let sidebar_project = workspace.as_ref().map(|w| w.project.clone()).or(selected_project);
 
     // The engine and provider processes run on tokio. Tauri owns the main thread.
     let runtime = tokio::runtime::Runtime::new()?;
@@ -158,8 +160,8 @@ fn run_app(
     // Approved plugins get the files and memory their manifests ask for. Drafts are tested in a manager with none.
     let plugin_memory = Arc::new(plugin_memory::PluginMemory::new(
         Arc::clone(&memory_store),
-        workspace.channel.agent_id.clone(),
-        workspace.project.id.clone(),
+        startup_channel.as_ref().map(|c| c.agent_id.clone()).unwrap_or_else(|| discard_core::model::AgentId(String::new())),
+        startup_channel.as_ref().and_then(|c| c.project_id.clone()),
     ));
     let manager = Arc::new(Mutex::new(PluginManager::with_host(PluginLimits::default(), Host::live(Some(plugin_memory.clone())))));
     manager.lock().unwrap_or_else(|p| p.into_inner()).load(discard_lua::bundled::default_ui())?;
@@ -182,24 +184,36 @@ fn run_app(
     ))?;
 
     let git_workspace = Arc::new(GitWorkspace::new(&data_dir.join("worktrees"), Arc::clone(&store)));
-    let branch_worktree = lock(&store).worktree_for(&workspace.channel.id)?.map(|record| std::path::PathBuf::from(record.path));
-    let branch_dir = desktop::windows::branch_current_directory(Some(workspace.channel.workspace_mode), &project_dir, branch_worktree.as_deref());
     let launcher: desktop::channels::Launcher = {
         let store = store.clone(); let git_workspace = git_workspace.clone(); let memory = memory.clone();
         let manager = manager.clone(); let handle = runtime.handle().clone();
+        let conversation_dir = data_dir.join("conversations");
+        let session_mode = if options.builder { discard_core::provider::SessionMode::Coding } else { discard_core::provider::SessionMode::Conversation };
         Arc::new(move |channel| {
-            let project = lock(&store).list_projects().map_err(|e| e.to_string())?.into_iter().find(|p| p.id == channel.project_id).ok_or("Project unavailable")?;
-            let project_dir = PathBuf::from(&project.path);
+            let project = channel.project_id.as_ref().map(|id| {
+                lock(&store).list_projects().map_err(|e| e.to_string())?.into_iter().find(|p| &p.id == id).ok_or_else(|| "Project unavailable".to_string())
+            }).transpose()?;
+            let project_dir = project.as_ref().map(|p| PathBuf::from(&p.path)).unwrap_or_else(|| conversation_dir.clone());
             let (agent, session_id, history) = {
                 let store = lock(&store);
                 (store.load_agent(&channel.agent_id).map_err(|e| e.to_string())?,
                  store.latest_session(&channel.id).map_err(|e| e.to_string())?.ok_or("This channel has no session")?,
                  store.messages_for_channel(&channel.id).map_err(|e| e.to_string())?)
             };
+            let read_only = {
+                let store = lock(&store);
+                store.agent_archived(&channel.agent_id).unwrap_or(true) || store.channel_archived(&channel.id).map_err(|e| e.to_string())?
+            };
+            if read_only {
+                let (commands, _) = mpsc::unbounded_channel();
+                let (_, updates) = mpsc::unbounded_channel();
+                return Ok((CoreInit { state: UiState::new(channel.id.clone(), history), commands, project: project.as_ref().map(|p| p.name.clone()).unwrap_or_default(), channel: channel.name.clone(), agent: agent.name, provider: agent.provider }, updates));
+            }
             let provider = provider_for(&agent.provider)?;
             let (commands_tx, commands_rx) = mpsc::unbounded_channel();
             let (updates_tx, updates_rx) = mpsc::unbounded_channel();
             let engine = Engine {
+        mode: session_mode, providers: discard_core::bootstrap::PROVIDERS.iter().filter_map(|id| provider_for(id).ok()).collect(),
                 store: store.clone(), agent_id: channel.agent_id.clone(), project_id: channel.project_id.clone(),
                 memory: Some(memory.clone()), plugin_write: agent.plugin_write,
                 workspace_mode: channel.workspace_mode, workspace: Some(git_workspace.clone()),
@@ -210,18 +224,21 @@ fn run_app(
             };
             handle.spawn(engine.run(commands_rx, updates_tx));
             Ok((CoreInit { state: UiState::new(channel.id.clone(), history), commands: commands_tx,
-                project: project.name.clone(), channel: channel.name.clone(), agent: agent.name, provider: agent.provider }, updates_rx))
+                project: project.as_ref().map(|p|p.name.clone()).unwrap_or_default(), channel: channel.name.clone(), agent: agent.name, provider: agent.provider }, updates_rx))
         })
     };
     let on_ready: desktop::channels::OnReady = Arc::new(move |core| {
         let project_core = Arc::downgrade(core);
-        plugin_memory.set_project_source(Arc::new(move || project_core.upgrade().map(|core| core.current_project().id).unwrap_or_else(|| discard_core::model::ProjectId(String::new()))));
+        plugin_memory.set_project_source(Arc::new(move || project_core.upgrade().and_then(|core| core.active_context().1)));
         let core = Arc::downgrade(core);
         plugin_memory.set_active_source(Arc::new(move || discard_core::model::AgentId(core.upgrade().map(|core| core.active_agent_id()).unwrap_or_default())));
     });
-    let (init, updates_rx) = launcher(&workspace.channel)?;
-
-    desktop::run(init, updates_rx, runtime.handle().clone(), settings, plugins, data_dir.to_path_buf(), desktop::DesktopConfig { empty_workspace, project_dir, project_id: workspace.project.id.0.clone(), agent_id: workspace.channel.agent_id.0.clone(), channel_dir: branch_dir, channel_id: workspace.channel.id.clone(), load_report, workspace: git_workspace, store, workspace_mode: workspace.channel.workspace_mode, relaunch, providers, recheck, memory: memory_store, launcher, on_ready })?;
+    let (init, updates_rx) = if let Some(channel) = &startup_channel { launcher(channel)? } else {
+        let (commands, _) = mpsc::unbounded_channel();
+        let (_, updates) = mpsc::unbounded_channel();
+        (CoreInit { state: UiState::new(discard_core::model::ChannelId(String::new()), vec![]), commands, project: String::new(), channel: String::new(), agent: String::new(), provider: String::new() }, updates)
+    };
+    desktop::run(init, updates_rx, runtime.handle().clone(), settings, plugins, data_dir.to_path_buf(), desktop::DesktopConfig { startup_channel, sidebar_project, load_report, workspace: git_workspace, store, relaunch, providers, recheck, memory: memory_store, launcher, on_ready })?;
     Ok(())
 }
 
@@ -229,6 +246,16 @@ fn run_app(
 mod tests {
     use super::*;
 
+    #[test]
+    fn normal_startup_creates_no_project_agent_or_conversation() {
+        let store = Store::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let options = args::Options { provider: "claude".into(), safe_mode: false, builder: false, workspace: WorkspaceChoice::Auto };
+        assert!(startup_workspace(&store, dir.path(), &options).unwrap().is_none());
+        assert!(store.list_projects().unwrap().is_empty());
+        assert!(store.all_agents().unwrap().is_empty());
+        assert!(store.all_conversations().unwrap().is_empty());
+    }
     #[test]
     fn opening_settings_in_a_missing_directory_creates_nothing() {
         let tmp = tempfile::tempdir().unwrap();

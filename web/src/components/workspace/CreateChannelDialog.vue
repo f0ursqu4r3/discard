@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { Hash, LoaderCircle, Bot, GitBranch, Folder } from '@lucide/vue'
-import { toast } from 'vue-sonner'
-import { createChannel } from '@/bridge/api'
+import { createConversation, getAgents, type AgentEntry } from '@/bridge/api'
 import {
   Dialog,
   DialogContent,
@@ -11,46 +9,44 @@ import {
   DialogDescription,
   DialogFooter,
 } from '../ui/dialog'
-import { Field, FieldGroup, FieldLabel, FieldDescription, FieldError } from '../ui/field'
 import { Input } from '../ui/input'
 import { Button } from '../ui/button'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select'
 const open = defineModel<boolean>('open', { default: false })
 const props = defineProps<{
   project: string
-  channelId: string
-  agent: string
-  provider: string
-  hasGit: boolean
+  projectId?: string | null
+  channelId?: string
+  agent?: string
+  provider?: string
+  hasGit?: boolean
 }>()
 const emit = defineEmits<{ created: [id: string] }>()
 const name = ref(''),
-  mode = ref('worktree'),
+  agentId = ref(''),
   error = ref(''),
   busy = ref(false),
-  source = ref('')
-watch(open, (value) => {
-  if (value) {
-    name.value = ''
-    error.value = ''
-    mode.value = props.hasGit ? 'worktree' : 'main_checkout'
-    source.value = props.channelId
+  agents = ref<AgentEntry[]>([])
+let context: string | null = null
+watch(open, async (value) => {
+  if (!value) return
+  name.value = ''
+  agentId.value = ''
+  error.value = ''
+  context = props.projectId ?? null
+  try {
+    agents.value = (await getAgents()).filter((a) => !a.archived)
+  } catch (cause) {
+    error.value = String(cause)
   }
 })
 async function submit() {
-  if (busy.value) return
-  const value = name.value.trim().replace(/^#+/, '').toLowerCase()
-  if (!value || value.length > 64 || !/^[\p{L}\p{N}_./-]+$/u.test(value)) {
-    error.value = 'Use 1–64 letters, numbers, dashes, underscores, dots, or slashes.'
-    return
-  }
+  if (busy.value || !name.value.trim() || !agentId.value) return
   busy.value = true
   error.value = ''
   try {
-    const id = await createChannel(value, mode.value, source.value)
+    const id = await createConversation(agentId.value, context, name.value.trim())
     open.value = false
     emit('created', id)
-    toast.success(`Created #${value}`)
   } catch (cause) {
     error.value = String(cause)
   } finally {
@@ -69,100 +65,37 @@ async function submit() {
   >
     <DialogContent
       data-ui-id="create-channel-dialog"
-      class="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-md"
       :show-close-button="!busy"
-      @interact-outside="
-        (event) => {
-          if (busy) event.preventDefault()
-        }
-      "
-      @escape-key-down="
-        (event) => {
-          if (busy) event.preventDefault()
-        }
-      "
+      class="sm:max-w-md"
     >
       <DialogHeader>
-        <DialogTitle>Create channel</DialogTitle>
-        <DialogDescription>{{ project }}</DialogDescription>
+        <DialogTitle>New conversation</DialogTitle>
+        <DialogDescription>{{ project }}. This conversation keeps this context.</DialogDescription>
       </DialogHeader>
-      <form
-        id="create-channel-form"
-        data-ui-id="create-channel-form"
-        class="flex flex-col gap-5"
-        @submit.prevent="submit"
-      >
-        <FieldGroup>
-          <Field :data-invalid="!!error">
-            <FieldLabel for="channel-name">Channel name</FieldLabel>
-            <div class="relative">
-              <Hash
-                class="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
-              />
-              <Input
-                id="channel-name"
-                v-model="name"
-                data-ui-id="channel-name-input"
-                class="pl-9"
-                placeholder="feat/session-isolation"
-                autocomplete="off"
-                :maxlength="64"
-                :disabled="busy"
-                :aria-invalid="!!error"
-                :aria-describedby="error ? 'channel-error' : undefined"
-              />
-            </div>
-          </Field>
-          <Field>
-            <FieldLabel for="channel-workspace">Workspace</FieldLabel>
-            <Select v-model="mode" :disabled="busy">
-              <SelectTrigger
-                id="channel-workspace"
-                data-ui-id="channel-workspace-select"
-                class="w-full"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="worktree" :disabled="!hasGit">
-                  <GitBranch class="size-4" />
-                  New isolated worktree
-                </SelectItem>
-                <SelectItem value="main_checkout">
-                  <Folder class="size-4" />
-                  Project folder
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <FieldDescription>
-              {{
-                mode === 'worktree'
-                  ? 'A new branch and worktree will be created when the agent starts work.'
-                  : 'The agent will work directly in your project folder.'
-              }}
-            </FieldDescription>
-          </Field>
-          <Field>
-            <FieldLabel>Agent</FieldLabel>
-            <div
-              data-ui-id="channel-agent"
-              class="flex items-center gap-3 rounded-lg border bg-muted/40 p-3"
-            >
-              <span
-                class="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary"
-              >
-                <Bot class="size-4" />
-              </span>
-              <div class="min-w-0">
-                <p class="truncate text-sm font-medium">{{ agent }}</p>
-                <p class="text-xs text-muted-foreground">
-                  {{ provider }} · Uses this agent’s settings
-                </p>
-              </div>
-            </div>
-          </Field>
-        </FieldGroup>
-        <FieldError v-if="error" id="channel-error" role="alert">{{ error }}</FieldError>
+      <form id="create-channel-form" class="space-y-3" @submit.prevent="submit">
+        <label class="block" for="channel-name">Conversation name</label>
+        <Input
+          id="channel-name"
+          v-model="name"
+          data-ui-id="channel-name-input"
+          :disabled="busy"
+          required
+        />
+        <label class="block" for="conversation-agent">Agent</label>
+        <select
+          id="conversation-agent"
+          v-model="agentId"
+          :disabled="busy"
+          required
+          class="w-full rounded-md border bg-background p-2"
+        >
+          <option disabled value="">Choose an agent</option>
+          <option v-for="agent in agents" :key="agent.id" :value="agent.id">
+            {{ agent.name }} · {{ agent.provider }} · {{ agent.model }}
+          </option>
+        </select>
+        <p v-if="!agents.length">Create or restore an agent in Manage agents first.</p>
+        <p v-if="error" role="alert">{{ error }}</p>
       </form>
       <DialogFooter>
         <Button variant="ghost" :disabled="busy" @click="open = false">Cancel</Button>
@@ -170,10 +103,9 @@ async function submit() {
           type="submit"
           form="create-channel-form"
           data-ui-id="create-channel-submit"
-          :disabled="busy || !name.trim()"
+          :disabled="busy || !name.trim() || !agentId"
         >
-          <LoaderCircle v-if="busy" class="motion-safe:animate-spin" />
-          {{ busy ? 'Creating…' : 'Create channel' }}
+          {{ busy ? 'Creating…' : 'Create conversation' }}
         </Button>
       </DialogFooter>
     </DialogContent>

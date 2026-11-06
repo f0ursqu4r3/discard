@@ -10,6 +10,7 @@ defineProps<{
   newAnchorId: string | null
   agent?: string
   prompts?: PromptDto[]
+  memoryRevision?: number
   conversationId: string
   position?: TranscriptPosition
 }>()

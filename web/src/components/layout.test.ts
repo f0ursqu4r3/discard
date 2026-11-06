@@ -41,7 +41,10 @@ describe('server rail', () => {
 
 test('Git branches and worktrees populate separate lists and open their branch', async () => {
   const list = mount(ChannelList, {
+    global: { stubs: { AgentsNavigation: true } },
     props: {
+      projectId: 'project',
+      activeProjectId: 'project',
       branches: [
         {
           key: 'main',
@@ -74,7 +77,10 @@ test('Git branches and worktrees populate separate lists and open their branch',
 
 test('saved conversations stay behind Git navigation while approvals remain accessible', async () => {
   const list = mount(ChannelList, {
+    global: { stubs: { AgentsNavigation: true } },
     props: {
+      projectId: 'project',
+      activeProjectId: 'project',
       projectPath: '/channel-test',
       channelId: 'first',
       branches: [],
@@ -82,6 +88,8 @@ test('saved conversations stay behind Git navigation while approvals remain acce
         {
           id: 'first',
           name: 'general',
+          agentId: 'a',
+          projectId: 'project',
           agent: 'Builder',
           provider: 'codex',
           workspaceMode: 'main_checkout',
@@ -92,6 +100,8 @@ test('saved conversations stay behind Git navigation while approvals remain acce
         {
           id: 'second',
           name: 'tests',
+          agentId: 'a',
+          projectId: 'project',
           agent: 'Builder',
           provider: 'codex',
           workspaceMode: 'worktree',
@@ -157,7 +167,10 @@ test('saved widths exclude the project rail', async () => {
 
 test('a branch row without children has no collapse control', async () => {
   const list = mount(ChannelList, {
+    global: { stubs: { AgentsNavigation: true } },
     props: {
+      projectId: 'project',
+      activeProjectId: 'project',
       branches: [
         {
           key: 'a',
@@ -195,14 +208,14 @@ test('navigation size conversion survives reload and scaled rail widths', async 
   }
 })
 
-test('planned DM entry is disabled while project navigation remains available', async () => {
+test('DM entry opens contacts while project navigation remains available', async () => {
   const rail = mount(ServerRail, {
     props: { project: 'Discard', unread: true, pendingApprovals: 0, directMessages: true },
   })
   const dm = rail.get('[data-ui-id="direct-messages-button"]')
-  expect(dm.attributes('disabled')).toBeDefined()
+  expect(dm.attributes('disabled')).toBeUndefined()
   await dm.trigger('click')
-  expect(rail.emitted('directMessages')).toBeUndefined()
+  expect(rail.emitted('directMessages')).toHaveLength(1)
   expect(rail.emitted('project')).toBeUndefined()
   await rail.get('[aria-label="Discard"]').trigger('click')
   expect(rail.emitted('project')).toHaveLength(1)

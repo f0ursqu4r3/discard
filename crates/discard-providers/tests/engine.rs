@@ -55,7 +55,7 @@ fn start_full(
         .unwrap();
     let channel = Channel {
         id: ChannelId::new(),
-        project_id: project.id,
+        project_id: Some(project.id),
         name: "c".into(),
         agent_id: agent,
         workspace_mode: WorkspaceMode::MainCheckout,
@@ -66,9 +66,10 @@ fn start_full(
     let store = Arc::new(Mutex::new(store));
     let probe = provider.probe.clone();
     let engine = Engine {
+        mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::clone(&store),
         agent_id: agent_id.clone(),
-        project_id: project_id.clone(),
+        project_id: Some(project_id.clone()),
         memory,
         plugin_write: false,
         workspace_mode: discard_core::model::WorkspaceMode::MainCheckout,
@@ -258,7 +259,7 @@ fn _uses(_: ApprovalId) {}
 
 struct FakeMemory {
     fail: bool,
-    prepared: Mutex<Vec<(AgentId, ProjectId, Option<String>)>>,
+    prepared: Mutex<Vec<(AgentId, Option<ProjectId>, Option<String>)>>,
     finished: Mutex<Vec<String>>,
 }
 
@@ -269,8 +270,8 @@ impl FakeMemory {
 }
 
 impl MemoryService for FakeMemory {
-    fn prepare(&self, agent: &AgentId, project: &ProjectId, base: Option<&str>, _plugin_write: bool) -> Result<PreparedMemory, String> {
-        self.prepared.lock().unwrap().push((agent.clone(), project.clone(), base.map(str::to_string)));
+    fn prepare(&self, agent: &AgentId, project: Option<&ProjectId>, _source: &ChannelId, base: Option<&str>, _plugin_write: bool) -> Result<PreparedMemory, String> {
+        self.prepared.lock().unwrap().push((agent.clone(), project.cloned(), base.map(str::to_string)));
         if self.fail {
             return Err("memory is unavailable".into());
         }
@@ -457,16 +458,17 @@ fn start_workspace(
     store.insert_project(&project).unwrap();
     let agent_id = AgentId::new();
     store.insert_agent(&agent_id, &AgentConfig { name: "A".into(), avatar: None, provider: "fake".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
-    let channel = Channel { id: ChannelId::new(), project_id: project.id.clone(), name: "general".into(), agent_id: agent_id.clone(), workspace_mode: mode };
+    let channel = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "general".into(), agent_id: agent_id.clone(), workspace_mode: mode };
     store.insert_channel(&channel).unwrap();
     let session = SessionId::new();
     store.create_session(&session, &channel.id).unwrap();
     let store = Arc::new(Mutex::new(store));
     let probe = provider.probe.clone();
     let engine = Engine {
+        mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::clone(&store),
         agent_id,
-        project_id: project.id,
+        project_id: Some(project.id),
         memory,
         plugin_write: false,
         workspace_mode: mode,

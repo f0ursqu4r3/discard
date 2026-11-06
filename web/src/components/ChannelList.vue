@@ -13,8 +13,8 @@ import {
   Boxes,
   ShieldCheck,
   Plus,
-  Bot,
 } from '@lucide/vue'
+import AgentsNavigation from './workspace/AgentsNavigation.vue'
 import BrandMark from './workspace/BrandMark.vue'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
@@ -31,6 +31,8 @@ import type { BranchRowDto, ChannelDto, ContextTargetDto } from '../bridge/types
 import type { WorkspacePage } from './workspace/types'
 const props = withDefaults(
   defineProps<{
+    projectId?: string
+    activeProjectId?: string | null
     branches: BranchRowDto[]
     channels?: ChannelDto[]
     channelId?: string
@@ -111,30 +113,30 @@ const approvals = computed(
           <Users v-else class="size-7 shrink-0 text-muted-foreground" />
           <span class="min-w-0 flex-1">
             <span class="block truncate text-sm font-semibold">
-              {{ page === 'direct-messages' ? 'Direct messages' : project }}
+              {{ page === 'direct-messages' || !projectId ? 'Agents' : project }}
             </span>
             <span class="block truncate text-xs text-muted-foreground" :title="projectPath">
-              {{ page === 'direct-messages' ? 'Your agents' : projectPath }}
+              {{ page === 'direct-messages' || !projectId ? 'Direct chats' : projectPath }}
             </span>
           </span>
           <ChevronDown class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent data-ui-id="project-menu" align="start" class="w-60">
-        <DropdownMenuItem @select="emit('navigate', 'overview')">
+        <DropdownMenuItem :disabled="!projectId" @select="emit('navigate', 'overview')">
           <Monitor />
           Project overview
         </DropdownMenuItem>
         <DropdownMenuItem :disabled="busy" @select="emit('createChannel')">
           <Plus />
-          New channel
+          New conversation
         </DropdownMenuItem>
         <DropdownMenuItem @select="emit('action', 'open_agent_settings')">
           <Users />
           Manage agents
         </DropdownMenuItem>
         <DropdownMenuSeparator />
-        <DropdownMenuItem @select="emit('navigate', 'project-settings')">
+        <DropdownMenuItem :disabled="!projectId" @select="emit('navigate', 'project-settings')">
           <Settings />
           Project settings
         </DropdownMenuItem>
@@ -148,30 +150,15 @@ const approvals = computed(
       data-ui-id="channel-panel-scroll"
       class="flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto overscroll-contain p-2.5"
     >
-      <template v-if="page === 'direct-messages'">
-        <Button
-          variant="outline"
-          size="sm"
-          class="justify-start"
-          @click="emit('action', 'open_agent_settings')"
-        >
-          <Plus data-icon="inline-start" />
-          Manage agents
-        </Button>
-        <div class="mt-5 flex flex-col gap-1">
-          <h2 class="px-2 pb-2 text-xs font-semibold text-muted-foreground">Agents</h2>
-          <Button
-            variant="secondary"
-            size="sm"
-            class="justify-start"
-            @click="emit('navigate', 'direct-messages')"
-          >
-            <Bot data-icon="inline-start" />
-            <span class="truncate">{{ agent }}</span>
-          </Button>
-        </div>
-      </template>
-      <template v-else>
+      <AgentsNavigation
+        :project-id="page === 'direct-messages' || !projectId ? null : projectId"
+        :project="project"
+        :channel-id="channelId"
+        :busy="busy"
+        @select="emit('selectChannel', $event)"
+        @action="emit('action', $event)"
+      />
+      <template v-if="page !== 'direct-messages' && projectId">
         <div data-ui-id="project-navigation" class="flex flex-col gap-0.5">
           <Button
             v-for="item in navigation"
@@ -225,7 +212,7 @@ const approvals = computed(
               type="button"
               :data-ui-id="`${group.id}-row-${row.key}`"
               :aria-current="row.current && page === 'conversation' ? 'page' : undefined"
-              :disabled="busy"
+              :disabled="busy || !activeProjectId || activeProjectId !== projectId"
               :title="row.label"
               :class="
                 cn(

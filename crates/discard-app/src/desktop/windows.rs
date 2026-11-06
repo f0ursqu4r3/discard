@@ -159,3 +159,13 @@ pub fn open_settings(app: &tauri::AppHandle, page: discard_core::settings_page::
     }
     Ok(())
 }
+
+/// Show a conversation selected by a source link or a fresh-conversation action.
+pub(crate) fn show_conversation(app: &tauri::AppHandle) {
+    use tauri::{Emitter, Manager};
+    let _ = app.emit("discard://conversation-opened", ());
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}

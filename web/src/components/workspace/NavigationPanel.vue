@@ -47,7 +47,7 @@ const emit = defineEmits<{
           (id) =>
             id && id !== snapshot.projectId
               ? emit('action', `select_project:${id}`)
-              : emit('navigate', 'conversation')
+              : emit('navigate', 'overview')
         "
         @add-project="emit('action', 'import_project')"
       />
@@ -59,12 +59,14 @@ const emit = defineEmits<{
         :channels="snapshot.channels"
         :channel-id="snapshot.channelId"
         :project="snapshot.project"
+        :project-id="snapshot.projectId"
+        :active-project-id="snapshot.activeProjectId"
         :project-path="snapshot.projectPath"
         :agent="snapshot.agent"
         :channel="snapshot.channel"
         :unread="snapshot.unread"
         :pending-approvals="snapshot.pendingApprovals"
-        :branches="snapshot.branches"
+        :branches="snapshot.activeProjectId === snapshot.projectId ? snapshot.branches : []"
         :target="{ type: 'channel', id: snapshot.channelId }"
         @navigate="emit('navigate', $event)"
         @action="emit('action', $event)"

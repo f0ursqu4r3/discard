@@ -14,9 +14,11 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+tempfile = "3"
+url = "2"
 
 [dev-dependencies]
+rusqlite.workspace = true
 discard-mcp = { path = "../discard-mcp" }
 discard-lua = { path = "../discard-lua" }
 serde_json.workspace = true
-tempfile = "3"

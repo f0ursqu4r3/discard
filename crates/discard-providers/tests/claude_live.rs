@@ -19,6 +19,7 @@ async fn real_claude_asks_for_approval_and_runs_the_approved_command() {
 
     let dir = tempfile::tempdir().unwrap();
     let spec = SessionSpec {
+        mode: discard_core::provider::SessionMode::Coding,
         cwd: dir.path().to_path_buf(),
         model: Some("haiku".into()),
         system_prompt: None,
@@ -52,6 +53,7 @@ async fn real_claude_does_not_run_a_denied_command() {
     let p = ClaudeProvider::new("claude");
     let dir = tempfile::tempdir().unwrap();
     let spec = SessionSpec {
+        mode: discard_core::provider::SessionMode::Coding,
         cwd: dir.path().to_path_buf(),
         model: Some("haiku".into()),
         system_prompt: None,

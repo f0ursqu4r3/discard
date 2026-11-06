@@ -7,21 +7,21 @@ use discard_lua::{MemoryFile, MemoryHit, MemoryHost, MemoryText};
 use std::sync::{Arc, Mutex};
 use std::cell::RefCell;
 thread_local! { static EVENT_AGENT: RefCell<Option<AgentId>> = const { RefCell::new(None) }; }
-thread_local! { static EVENT_PROJECT: RefCell<Option<ProjectId>> = const { RefCell::new(None) }; }
-type ActiveProject = Arc<dyn Fn() -> ProjectId + Send + Sync>;
+thread_local! { static EVENT_PROJECT: RefCell<Option<Option<ProjectId>>> = const { RefCell::new(None) }; }
+type ActiveProject = Arc<dyn Fn() -> Option<ProjectId> + Send + Sync>;
 type ActiveAgent = Arc<dyn Fn() -> AgentId + Send + Sync>;
 
 pub struct PluginMemory {
     store: Arc<MemoryStore>,
     agent: AgentId,
-    project: ProjectId,
+    project: Option<ProjectId>,
     active: Mutex<Option<ActiveAgent>>,
     active_project: Mutex<Option<ActiveProject>>,
 }
 
 impl PluginMemory {
-    pub fn new(store: Arc<MemoryStore>, agent: AgentId, project: ProjectId) -> Self {
-        Self { store, agent, project, active: Mutex::new(None), active_project: Mutex::new(None) }
+    pub fn new(store: Arc<MemoryStore>, agent: AgentId, project: impl Into<Option<ProjectId>>) -> Self {
+        Self { store, agent, project: project.into(), active: Mutex::new(None), active_project: Mutex::new(None) }
     }
 
     pub fn set_active_source(&self, source: ActiveAgent) { *self.active.lock().unwrap_or_else(|e| e.into_inner()) = Some(source); }
@@ -33,14 +33,14 @@ impl PluginMemory {
         callback()
     }
     pub fn set_project_source(&self, source: ActiveProject) { *self.active_project.lock().unwrap_or_else(|e| e.into_inner()) = Some(source); }
-    pub fn for_context<T>(agent: AgentId, project: ProjectId, callback: impl FnOnce() -> T) -> T {
-        struct Restore(Option<ProjectId>);
+    pub fn for_context<T>(agent: AgentId, project: impl Into<Option<ProjectId>>, callback: impl FnOnce() -> T) -> T {
+        struct Restore(Option<Option<ProjectId>>);
         impl Drop for Restore { fn drop(&mut self) { EVENT_PROJECT.with(|scope| { scope.replace(self.0.take()); }); } }
-        let previous = EVENT_PROJECT.with(|scope| scope.replace(Some(project)));
+        let previous = EVENT_PROJECT.with(|scope| scope.replace(Some(project.into())));
         let _restore = Restore(previous);
         Self::for_agent(agent, callback)
     }
-    fn project(&self) -> ProjectId {
+    fn project(&self) -> Option<ProjectId> {
         EVENT_PROJECT.with(|scope| scope.borrow().clone()).unwrap_or_else(|| {
             self.active_project.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or_else(|| self.project.clone(), |source| source())
         })
@@ -53,7 +53,8 @@ impl PluginMemory {
     fn scope(&self, name: &str) -> Result<Scope, String> {
         match name {
             "agent" => Ok(Scope::Agent(self.agent())),
-            "project" => Ok(Scope::Project(self.project())),
+            "project" => Ok(Scope::Project(self.project().ok_or("no project in this conversation")?)),
+            "agent-project" => Ok(Scope::AgentProject(self.agent(), self.project().ok_or("no project in this conversation")?)),
             "global" => Ok(Scope::Global),
             other => Err(format!("unknown memory scope `{other}`")),
         }
@@ -62,27 +63,27 @@ impl PluginMemory {
 
 impl MemoryHost for PluginMemory {
     fn list(&self, scope: &str) -> Result<Vec<MemoryFile>, String> {
-        let files = self.store.list(&self.scope(scope)?).map_err(|e| e.to_string())?;
+        let files = self.store.plugin_list(&self.scope(scope)?).map_err(|e| e.to_string())?;
         Ok(files.into_iter().map(|f| MemoryFile { path: f.path, version: f.version, bytes: f.bytes }).collect())
     }
 
     fn read(&self, scope: &str, path: &str) -> Result<MemoryText, String> {
-        let c = self.store.read(&self.scope(scope)?, path).map_err(|e| e.to_string())?;
+        let c = self.store.plugin_read(&self.scope(scope)?, path).map_err(|e| e.to_string())?;
         Ok(MemoryText { text: c.text, version: c.version })
     }
 
     fn search(&self, scopes: &[String], query: &str, limit: usize) -> Result<Vec<MemoryHit>, String> {
         let scopes = scopes.iter().map(|s| self.scope(s)).collect::<Result<Vec<_>, _>>()?;
-        let hits = self.store.search(&scopes, query, limit).map_err(|e| e.to_string())?;
+        let hits = self.store.plugin_search(&scopes, query, limit).map_err(|e| e.to_string())?;
         Ok(hits.into_iter().map(|h| MemoryHit { scope: h.scope, path: h.path, snippet: h.snippet }).collect())
     }
 
     fn append(&self, scope: &str, path: &str, text: &str) -> Result<String, String> {
-        self.store.append(&self.scope(scope)?, path, text).map_err(|e| e.to_string())
+        self.store.plugin_append(&self.scope(scope)?, path, text).map_err(|e| e.to_string())
     }
 
     fn edit(&self, scope: &str, path: &str, old: &str, new: &str, expected_version: &str) -> Result<String, String> {
-        self.store.edit(&self.scope(scope)?, path, old, new, expected_version).map_err(|e| e.to_string())
+        self.store.plugin_edit(&self.scope(scope)?, path, old, new, expected_version).map_err(|e| e.to_string())
     }
 }
 
@@ -109,11 +110,11 @@ mod tests {
     fn project_scope_follows_selection_but_callback_keeps_its_origin() {
         let r = rig();
         let h = host(&r, "agent");
-        h.set_project_source(Arc::new(|| ProjectId("selected".into())));
+        h.set_project_source(Arc::new(|| Some(ProjectId("selected".into()))));
         PluginMemory::for_context(AgentId("agent".into()), ProjectId("origin".into()), || h.append("project", "notes.md", "origin").unwrap());
         assert!(h.list("project").unwrap().is_empty());
         h.append("project", "notes.md", "selected").unwrap();
-        assert_eq!(r.store.read(&Scope::Project(ProjectId("origin".into())), "notes.md").unwrap().text, "origin");
+        assert_eq!(r.store.plugin_read(&Scope::Project(ProjectId("origin".into())), "notes.md").unwrap().text, "origin");
         assert_eq!(h.read("project", "notes.md").unwrap().text, "selected");
     }
     #[test]
@@ -123,9 +124,9 @@ mod tests {
         h.append("agent", "n.md", "mine").unwrap();
         h.append("project", "n.md", "ours").unwrap();
         h.append("global", "n.md", "everyone").unwrap();
-        assert_eq!(r.store.read(&Scope::Agent(AgentId("a1".into())), "n.md").unwrap().text, "mine");
-        assert_eq!(r.store.read(&Scope::Project(ProjectId("p1".into())), "n.md").unwrap().text, "ours");
-        assert_eq!(r.store.read(&Scope::Global, "n.md").unwrap().text, "everyone");
+        assert_eq!(r.store.plugin_read(&Scope::Agent(AgentId("a1".into())), "n.md").unwrap().text, "mine");
+        assert_eq!(r.store.plugin_read(&Scope::Project(ProjectId("p1".into())), "n.md").unwrap().text, "ours");
+        assert_eq!(r.store.plugin_read(&Scope::Global, "n.md").unwrap().text, "everyone");
     }
 
     #[test]
@@ -165,8 +166,8 @@ mod tests {
         h.set_active_source(Arc::new(|| AgentId("active".into())));
         PluginMemory::for_agent(AgentId("background".into()), || h.append("agent", "notes.md", "background").unwrap());
         h.append("agent", "notes.md", "active").unwrap();
-        assert_eq!(r.store.read(&Scope::Agent(AgentId("background".into())), "notes.md").unwrap().text, "background");
-        assert_eq!(r.store.read(&Scope::Agent(AgentId("active".into())), "notes.md").unwrap().text, "active");
+        assert_eq!(r.store.plugin_read(&Scope::Agent(AgentId("background".into())), "notes.md").unwrap().text, "background");
+        assert_eq!(r.store.plugin_read(&Scope::Agent(AgentId("active".into())), "notes.md").unwrap().text, "active");
         assert!(r.store.list(&Scope::Agent(AgentId("initial".into()))).unwrap().is_empty());
     }
 
@@ -183,7 +184,26 @@ mod tests {
             h.append("agent", "notes.md", "after").unwrap();
             assert!(h.read("agent", "notes.md").unwrap().text.contains("before"));
         });
-        assert!(r.store.read(&Scope::Agent(AgentId("first".into())), "notes.md").unwrap().text.contains("after"));
+        assert!(r.store.plugin_read(&Scope::Agent(AgentId("first".into())), "notes.md").unwrap().text.contains("after"));
         assert!(h.list("agent").unwrap().is_empty(), "next callback sees the newly selected agent");
+    }
+}
+
+#[cfg(test)]
+mod optional_project_tests {
+    use super::*;
+    #[test]
+    fn projectless_callback_rejects_project_scopes_and_restores_selected_project() {
+        let d=tempfile::tempdir().unwrap();
+        let store=Arc::new(MemoryStore::open_in_memory_index(d.path()).unwrap());
+        let agent=AgentId("a".into());
+        let host=PluginMemory::new(store,agent.clone(),Some(ProjectId("selected".into())));
+        PluginMemory::for_context(agent,None,|| {
+            assert!(host.list("project").is_err());
+            assert!(host.list("agent-project").is_err());
+            host.append("agent","private.md","private").unwrap();
+        });
+        host.append("agent-project","project.md","scoped").unwrap();
+        assert_eq!(host.read("agent-project","project.md").unwrap().text,"scoped");
     }
 }

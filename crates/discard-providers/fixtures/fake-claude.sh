@@ -4,12 +4,20 @@
 #      FAKE_CLAUDE_CHILD_PID=<file>   FAKE_CLAUDE_LOGGED_IN=true|false
 log() { [ -n "${FAKE_CLAUDE_LOG:-}" ] && printf '%s\n' "$*" >>"$FAKE_CLAUDE_LOG"; return 0; }
 
+if [ "${FAKE_CLAUDE_HANG_SETUP:-}" = "${1:-}" ]; then
+  echo $$ >"$FAKE_CLAUDE_CHILD_PID"
+  exec sleep 300
+fi
+
 case "${1:-}" in
-  --version) echo "9.9.9 (Fake Claude)"; exit 0 ;;
+  --version) echo "2.1.318 (Fake Claude)"; exit 0 ;;
+  --help) echo "${FAKE_CLAUDE_HELP:---tools --allowedTools --strict-mcp-config --restricted --disable-slash-commands --system-prompt-snapshot --settings}"; exit 0 ;;
   auth) echo "{\"loggedIn\":${FAKE_CLAUDE_LOGGED_IN:-true},\"email\":\"never-read@example.invalid\"}"; exit 0 ;;
 esac
 
 log "ARGS $*"
+log "CWD $PWD"
+log "MEMORY_ENV ${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-} ${CLAUDE_CODE_DISABLE_CLAUDE_MDS:-} ${CLAUDE_CODE_PLUGIN_DIRS:-}"
 mode="${FAKE_CLAUDE_MODE:-approval}"
 fixture="${FAKE_CLAUDE_FIXTURE:?}"
 

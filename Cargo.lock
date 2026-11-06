@@ -690,6 +690,7 @@ dependencies = [
  "keyring",
  "objc2",
  "objc2-app-kit",
+ "rusqlite",
  "serde",
  "serde_json",
  "tauri",
@@ -764,12 +765,14 @@ dependencies = [
  "discard-lua",
  "discard-mcp",
  "nix",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 

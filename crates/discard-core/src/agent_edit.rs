@@ -5,9 +5,9 @@ use crate::model::AgentId;
 use crate::store::{Store, StoreError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentDraft { pub model: Option<String>, pub system_prompt: String, pub policy: ApprovalPolicy, pub plugin_write: bool }
+pub struct AgentDraft { pub name: String, pub avatar: Option<String>, pub provider: String, pub model: Option<String>, pub system_prompt: String, pub policy: ApprovalPolicy, pub plugin_write: bool }
 impl From<&AgentConfig> for AgentDraft {
-    fn from(c: &AgentConfig) -> Self { Self { model: c.model.clone(), system_prompt: c.system_prompt.clone(), policy: c.policy, plugin_write: c.plugin_write } }
+    fn from(c: &AgentConfig) -> Self { Self { name:c.name.clone(), avatar:c.avatar.clone(), provider:c.provider.clone(), model: c.model.clone(), system_prompt: c.system_prompt.clone(), policy: c.policy, plugin_write: c.plugin_write } }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldChange { pub field: &'static str, pub before: String, pub after: String }
@@ -43,12 +43,19 @@ pub fn review(current: &AgentConfig, draft: &AgentDraft, matrix: &CapabilityMatr
         changes.push(FieldChange { field: "Model", before: model(&current.model), after: model(&draft.model) });
     }
     let mut add = |field, before: String, after: String| { if before != after { changes.push(FieldChange { field, before, after }); } };
+    add("Name",current.name.clone(),draft.name.clone());
+    if current.avatar != draft.avatar { add("Avatar",format!("{:?}",current.avatar),format!("{:?}",draft.avatar)); }
+    add("Provider",current.provider.clone(),draft.provider.clone());
     add("System prompt", current.system_prompt.clone(), draft.system_prompt.clone());
     add("Approval policy", policy(current.policy), policy(draft.policy));
     add("plugin.write", flag(current.plugin_write), flag(draft.plugin_write));
     let id = AgentId(String::new());
     let needs_confirm = (current.policy != draft.policy && AgentChange::SetPolicy { agent: id.clone(), from: current.policy, to: draft.policy }.needs_user_approval(&Initiator::User)) || (current.plugin_write != draft.plugin_write && AgentChange::SetPluginWrite { agent: id, enabled: draft.plugin_write }.needs_user_approval(&Initiator::User));
-    let blocked = (current.policy != draft.policy).then(|| matrix.enforcement_for(draft.policy).err().map(|e| e.to_string())).flatten();
+    let blocked = if draft.provider != matrix.provider {
+        Some("Select the capability matrix for this provider.".into())
+    } else {
+        (current.policy != draft.policy || current.provider != draft.provider).then(|| matrix.enforcement_for(draft.policy).err().map(|e| e.to_string())).flatten()
+    };
     AgentReview { changes, needs_confirm, blocked }
 }
 
@@ -58,6 +65,7 @@ pub fn save(store: &Store, id: &AgentId, draft: &AgentDraft, matrix: &Capability
     if result.changes.is_empty() { return Err(SaveError::Unchanged); }
     if let Some(reason) = result.blocked { return Err(SaveError::Blocked(reason)); }
     if result.needs_confirm && !confirmed { return Err(SaveError::NeedsConfirm); }
+    cfg.name=draft.name.clone(); cfg.avatar=draft.avatar.clone(); cfg.provider=draft.provider.clone();
     cfg.model = draft.model.clone(); cfg.system_prompt = draft.system_prompt.clone(); cfg.policy = draft.policy; cfg.plugin_write = draft.plugin_write;
     store.update_agent(id, &cfg)?;
     Ok(cfg)
@@ -71,7 +79,7 @@ mod tests {
     fn setup(policy: ApprovalPolicy) -> (Store, AgentId, AgentConfig, CapabilityMatrix) {
         let store = Store::open_in_memory().unwrap();
         let id = AgentId::new();
-        let cfg = AgentConfig { name: "A".into(), avatar: None, provider: "p".into(), model: None, system_prompt: "old".into(), policy, plugin_write: false };
+        let cfg = AgentConfig { name: "A".into(), avatar: None, provider: "p".into(), model: Some("old-model".into()), system_prompt: "old".into(), policy, plugin_write: false };
         store.insert_agent(&id, &cfg).unwrap();
         let matrix = CapabilityMatrix { provider: "p".into(), matrix_version: 1, cli_version: "1".into(), capabilities: Capabilities { interactive_approvals: true, tool_call_visibility: true, per_session_mcp: true, session_resume: true, cancellation: true, pre_execution_blocking: true } };
         (store, id, cfg, matrix)
@@ -142,4 +150,24 @@ mod tests {
         assert_eq!(saved.model, draft.model);
         assert_eq!(saved.system_prompt, draft.system_prompt);
     }
+    #[test]
+    fn identity_and_personality_edits_preserve_agent_and_conversation_ids() {
+        let (store,id,cfg,matrix)=setup(ApprovalPolicy::Ask);
+        let direct=store.ensure_default_conversation(&id).unwrap();
+        let mut draft=AgentDraft::from(&cfg); draft.name="Robin".into(); draft.avatar=Some("avatar.png".into()); draft.system_prompt="Be precise".into();
+        let saved=save(&store,&id,&draft,&matrix,false).unwrap();
+        assert_eq!(saved.name,"Robin"); assert_eq!(saved.avatar,draft.avatar); assert_eq!(saved.system_prompt,draft.system_prompt);
+        assert_eq!(store.default_conversation(&id).unwrap().id,direct.id);
+        draft.provider="other".into();
+        assert!(matches!(save(&store,&id,&draft,&matrix,false),Err(SaveError::Blocked(_))));
+    }
+
+    #[test]
+    fn user_cannot_clear_the_selected_model() {
+        let (store,id,cfg,matrix)=setup(ApprovalPolicy::Ask);
+        let mut draft=AgentDraft::from(&cfg); draft.model=None;
+        assert!(matches!(save(&store,&id,&draft,&matrix,false),Err(SaveError::Store(StoreError::Invalid(_)))));
+        assert_eq!(store.load_agent(&id).unwrap(),cfg);
+    }
+
 }

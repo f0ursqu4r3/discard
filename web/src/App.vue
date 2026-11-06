@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { useMediaQuery } from '@vueuse/core'
 import { ScanEye, LoaderCircle, GitPullRequest, ListChecks } from '@lucide/vue'
 import { toast } from 'vue-sonner'
@@ -19,6 +20,7 @@ import {
   selectProject,
   removeProject,
   revealProject,
+  restoreConversation,
   type ProjectEntry,
 } from './bridge/api'
 import ChannelList from './components/ChannelList.vue'
@@ -65,6 +67,26 @@ const drafts = reactive<Record<string, string>>({})
 const transcriptPositions = reactive<Record<string, TranscriptPosition>>({})
 const page = ref<WorkspacePage>('conversation')
 const conversationTab = ref('conversation')
+const navigationPage = computed<WorkspacePage>(() =>
+  page.value === 'conversation' && !store.snapshot?.activeProjectId
+    ? 'direct-messages'
+    : page.value,
+)
+let stopConversationOpened: UnlistenFn | undefined
+let disposed = false
+onMounted(async () => {
+  try {
+    const stop = await listen('discard://conversation-opened', () => navigate('conversation'))
+    if (disposed) stop()
+    else stopConversationOpened = stop
+  } catch (error) {
+    toast.error(String(error))
+  }
+})
+onUnmounted(() => {
+  disposed = true
+  stopConversationOpened?.()
+})
 const newChannelOpen = ref(false),
   switching = ref(false),
   sending = ref(false)
@@ -122,7 +144,7 @@ async function action(id: string) {
     if (id.startsWith('select_project:')) {
       await selectProject(id.slice('select_project:'.length))
       await store.refresh()
-      navigate('conversation')
+      navigate('overview')
       return
     }
     if (id === 'remove_project' && store.snapshot) {
@@ -218,6 +240,37 @@ async function send(text: string) {
   } finally {
     sending.value = false
   }
+}
+async function copyUnsavedReply() {
+  const text =
+    store.snapshot?.liveBlocks
+      .map((block) => ('text' in block ? block.text : ''))
+      .filter(Boolean)
+      .join('\n\n') ?? ''
+  try {
+    await navigator.clipboard.writeText(text)
+    toast.success('Reply copied')
+  } catch (cause) {
+    toast.error(String(cause))
+  }
+}
+async function restoreCurrentConversation() {
+  const id = store.snapshot?.channelId
+  if (!id) return
+  try {
+    await restoreConversation(id)
+    await store.refresh()
+  } catch (cause) {
+    toast.error(String(cause))
+  }
+}
+async function retry() {
+  const last = [...store.history].reverse().find((message) => message.role === 'user')
+  const text = last?.blocks
+    .map((block) => ('text' in block ? block.text : ''))
+    .filter(Boolean)
+    .join('\n\n')
+  if (text) await send(text)
 }
 async function stop() {
   if (store.snapshot)
@@ -319,7 +372,7 @@ watch(
         <ScanEye />
       </Button>
     </header>
-    <div v-if="store.snapshot?.projectId" class="flex min-h-0 flex-1 gap-1.5 px-1.5 pb-1.5">
+    <div v-if="store.snapshot" class="flex min-h-0 flex-1 gap-1.5 px-1.5 pb-1.5">
       <NavigationPanel
         @project-action="projectAction"
         :projects="projects"
@@ -327,7 +380,7 @@ watch(
         class="shrink-0"
         compact
         :snapshot="store.snapshot"
-        :page="page"
+        :page="navigationPage"
         @navigate="navigate"
         @action="action"
         @toggle-branch="toggleBranch"
@@ -354,7 +407,7 @@ watch(
               @project-action="projectAction"
               :projects="projects"
               :snapshot="store.snapshot"
-              :page="page"
+              :page="navigationPage"
               @navigate="navigate"
               @action="action"
               @toggle-branch="toggleBranch"
@@ -381,9 +434,11 @@ watch(
             <ChannelHeader
               :channel="heading || ''"
               :subtitle="
-                page === 'direct-messages' ? 'Direct messages' : store.snapshot.projectPath
+                store.snapshot.activeProjectId
+                  ? projects.find((p) => p.id === store.snapshot?.activeProjectId)?.name
+                  : 'Direct chat'
               "
-              :direct-message="page === 'direct-messages'"
+              :direct-message="!store.snapshot.activeProjectId"
               :compact="isCompact"
               :member-list-visible="showContextPanel || contextOpen"
               @toggle-members="toggleMembers"
@@ -395,7 +450,7 @@ watch(
                 :plugin="store.snapshot.slots.channel_header.plugin"
               />
             </ChannelHeader>
-            <template v-if="page === 'conversation'">
+            <template v-if="page === 'conversation' && store.snapshot.channelId">
               <Tabs
                 v-model="conversationTab"
                 data-ui-id="conversation-tabs"
@@ -408,11 +463,13 @@ watch(
                     <Badge v-if="changes.length" variant="secondary">{{ changes.length }}</Badge>
                   </TabsTrigger>
                   <TabsTrigger value="run">Run</TabsTrigger>
-                  <TabsTrigger value="review">Merge review</TabsTrigger>
+                  <!-- TODO: Implement merge review. -->
+                  <TabsTrigger value="review" disabled>Merge review · Soon</TabsTrigger>
                 </TabsList>
               </Tabs>
               <MessageList
                 :conversation-id="store.snapshot.channelId"
+                :memory-revision="store.snapshot.memoryRev"
                 :position="transcriptPositions[store.snapshot.channelId]"
                 @save-position="(id, position) => (transcriptPositions[id] = position)"
                 v-if="conversationTab === 'conversation'"
@@ -487,6 +544,18 @@ watch(
                 </Empty>
               </div>
             </template>
+            <div
+              v-else-if="
+                page === 'direct-messages' || (page === 'conversation' && !store.snapshot.channelId)
+              "
+              class="flex flex-1 flex-col items-center justify-center gap-3 p-6"
+            >
+              <p>Choose an agent or conversation in the navigation.</p>
+              <Button @click="action('open_agent_settings')">Manage agents</Button>
+              <Button variant="outline" @click="action('import_project')">
+                Import project folder
+              </Button>
+            </div>
             <WorkspacePageView
               v-else
               :page="page"
@@ -507,13 +576,48 @@ watch(
                   :prompt="prompt"
                 />
               </template>
+              <div
+                v-if="
+                  store.snapshot.notice && !store.snapshot.turnRunning && store.snapshot.channelId
+                "
+                class="flex flex-wrap gap-2 px-5 py-2"
+              >
+                <Button
+                  v-if="store.snapshot.liveBlocks.length"
+                  variant="outline"
+                  @click="copyUnsavedReply"
+                >
+                  Copy reply before sending again
+                </Button>
+                <Button v-if="!store.snapshot.composerDisabled" variant="outline" @click="retry">
+                  Retry last message
+                </Button>
+                <Button variant="outline" @click="action('open_agent_settings')">
+                  Choose model
+                </Button>
+              </div>
+              <Button
+                v-if="store.snapshot.archived"
+                class="mx-5 my-2"
+                variant="outline"
+                @click="restoreCurrentConversation"
+              >
+                Restore conversation
+              </Button>
+              <p
+                v-if="store.snapshot.composerDisabled && store.snapshot.channelId"
+                class="px-5 py-2 text-xs text-muted-foreground"
+              >
+                Read only. You can restore archived agents in Manage agents. Deleted agents cannot
+                send messages.
+              </p>
               <Notices
                 :banners="store.snapshot.banners"
                 :notice="store.snapshot.notice"
                 :archived="store.snapshot.archived"
               />
             </div>
-            <template v-if="page === 'conversation'">
+            <template v-if="page === 'conversation' && store.snapshot.channelId">
               <p
                 v-if="thinkingLine(store.snapshot.turnRunning, [store.snapshot.agent])"
                 class="flex items-center gap-2 px-5 py-1 text-xs text-muted-foreground"
@@ -526,7 +630,7 @@ watch(
                 v-model:draft="drafts[store.snapshot.channelId]"
                 :channel="store.snapshot.channel"
                 :agent="store.snapshot.agent"
-                :archived="store.snapshot.archived"
+                :archived="store.snapshot.composerDisabled || store.snapshot.archived"
                 :busy="
                   switching ||
                   sending ||
@@ -557,7 +661,7 @@ watch(
           >
             <div class="h-full overflow-hidden rounded-xl border border-border/60">
               <ContextPanel
-                :direct-message="page === 'direct-messages'"
+                :direct-message="!store.snapshot.activeProjectId"
                 :snapshot="store.snapshot"
                 @action="action"
                 @approvals="navigate('conversation')"
@@ -568,7 +672,8 @@ watch(
       </ResizablePanelGroup>
       <CreateChannelDialog
         v-model:open="newChannelOpen"
-        :project="store.snapshot.project"
+        :project="navigationPage === 'direct-messages' ? 'Direct chat' : store.snapshot.project"
+        :project-id="navigationPage === 'direct-messages' ? null : store.snapshot.projectId || null"
         :channel-id="store.snapshot.channelId"
         :agent="store.snapshot.agent"
         :provider="store.snapshot.provider"
@@ -586,12 +691,18 @@ watch(
             :channels="store.snapshot.channels"
             :channel-id="store.snapshot.channelId"
             class="min-h-0 flex-1"
-            :page="page"
+            :page="navigationPage"
             :project="store.snapshot.project"
+            :project-id="store.snapshot.projectId"
+            :active-project-id="store.snapshot.activeProjectId"
             :project-path="store.snapshot.projectPath"
             :agent="store.snapshot.agent"
             :channel="store.snapshot.channel"
-            :branches="store.snapshot.branches"
+            :branches="
+              store.snapshot.activeProjectId === store.snapshot.projectId
+                ? store.snapshot.branches
+                : []
+            "
             :unread="store.snapshot.unread"
             :pending-approvals="store.snapshot.pendingApprovals"
             :target="{ type: 'channel', id: store.snapshot.channelId }"
@@ -615,7 +726,7 @@ watch(
           </Button>
           <ContextPanel
             class="min-h-0 flex-1"
-            :direct-message="page === 'direct-messages'"
+            :direct-message="!store.snapshot.activeProjectId"
             :snapshot="store.snapshot"
             @action="action"
             @approvals="
@@ -627,14 +738,6 @@ watch(
           />
         </SheetContent>
       </Sheet>
-    </div>
-    <div
-      v-else-if="store.snapshot"
-      data-ui-id="empty-workspace"
-      class="flex flex-1 flex-col items-center justify-center gap-4"
-    >
-      <p>No projects added</p>
-      <Button @click="action('import_project')">Import project folder</Button>
     </div>
     <div v-else class="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
       <LoaderCircle class="size-4 motion-safe:animate-spin" />

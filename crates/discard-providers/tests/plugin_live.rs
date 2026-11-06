@@ -37,7 +37,7 @@ async fn build_plugin(provider: Arc<dyn Provider>, model: Option<&str>) {
     db.insert_project(&project).unwrap();
     let agent_id = AgentId::new();
     db.insert_agent(&agent_id, &AgentConfig { name: "Builder".into(), avatar: None, provider: "any".into(), model: model.map(str::to_string), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: true }).unwrap();
-    let channel = Channel { id: ChannelId::new(), project_id: project.id.clone(), name: "builder".into(), agent_id: agent_id.clone(), workspace_mode: WorkspaceMode::MainCheckout };
+    let channel = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "builder".into(), agent_id: agent_id.clone(), workspace_mode: WorkspaceMode::MainCheckout };
     db.insert_channel(&channel).unwrap();
     let session = SessionId::new();
     db.create_session(&session, &channel.id).unwrap();
@@ -50,9 +50,10 @@ async fn build_plugin(provider: Arc<dyn Provider>, model: Option<&str>) {
     let memory: Arc<dyn MemoryService> = runtime.clone();
 
     let engine = Engine {
+        mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::new(Mutex::new(db)),
         agent_id,
-        project_id: project.id.clone(),
+        project_id: Some(project.id.clone()),
         memory: Some(memory),
         plugin_write: true,
         workspace_mode: discard_core::model::WorkspaceMode::MainCheckout,
@@ -82,8 +83,8 @@ async fn build_plugin(provider: Arc<dyn Provider>, model: Option<&str>) {
                 }
             }
             Update::TurnFinished(outcome) => break outcome,
-            Update::Error(m) | Update::SetupNeeded(m) => panic!("engine problem: {m}"),
-            Update::ApprovalState { .. } | Update::Notice(_) => {}
+            Update::Error(m) | Update::ResponseSaveFailed(m) | Update::SetupNeeded(m) => panic!("engine problem: {m}"),
+            Update::ApprovalState { .. } | Update::Notice(_) | Update::ResponseCompleted(_) | Update::ConversationMarker(_) | Update::MemoryChanges { .. } => {}
         }
     };
     assert_eq!(outcome, TurnOutcome::Completed, "tools used: {tools:?}");

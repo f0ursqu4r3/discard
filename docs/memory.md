@@ -1,63 +1,64 @@
-# Agent memory
+# Saved memory
 
-Memory is a set of markdown files. They are the source of truth. A SQLite FTS5 index makes them searchable,
-and the index can always be rebuilt from the files.
+Discard stores each memory as an editable item. It refreshes applicable memory before every response, including replies in existing conversations. A restart is not required. Current user instructions take priority over saved memory.
 
-## Layout
+## Domains and conversation context
+
+| Domain | Visibility |
+| --- | --- |
+| Global | All agents in every conversation |
+| Agent | One agent across projects and direct conversations |
+| Project | All agents in one project |
+| Agent-project | One agent in one project |
+
+A direct conversation reads global and agent memory. A project conversation also reads its project and matching agent-project memory. The application enforces these boundaries. Selecting another project in the sidebar does not change the active conversation's memory.
+
+Memory precedence is agent-project, project, agent, then global. Conflicting items remain available for inspection. All applicable instructions and preferences enter each response. Other items are selected by word overlap with the current request and recent messages in that conversation. Scoped read and search tools provide access to other applicable items. This selection is not semantic retrieval. Other conversations' transcripts are not loaded.
+
+## Saves and approvals
+
+Agents receive guidance to save durable facts, preferences, decisions, and ongoing commitments. Guidance excludes temporary details, guesses, passwords, and tokens. The application does not provide semantic secret detection.
+
+Automatic saves use agent memory in direct conversations and agent-project memory in project conversations. Global and project writes require user approval. Memory proposals show the proposed text and domain with **Approve** and **Reject**. Inferred updates and contradictions also require clarification or approval. User corrections can replace saved text. Previous values remain in version history.
+
+**Automatic save** cards appear beside the response that saved them. **Approved update** cards identify approved changes, including approvals made after the response ended. User edits in Settings are not labeled as automatic saves. **Undo** uses the saved version. A later change can make Undo or an approval stale. Discard then shows an error; reload memory and inspect the current item before retrying.
+
+If memory approval succeeds but its response notice cannot be saved, Discard reports that memory is approved and saved. The decision controls close. **Reload memory** or **Retry memory notice** retries the saved association without approving again. The recovered card keeps the original approved version, even after a later edit. A stale Undo still requires inspection of the current item.
+
+## Controls
+
+Open the conversation's **Memory** panel to browse applicable items. Open **Settings → Memory** to browse all four domains, including retained items whose agents or projects are no longer present.
+
+**Inspect** shows the item's text, kind, domain, version, creation and update times, source link, and version history. **Save edit** changes the text. **Move** changes its domain; a move to global or project memory explicitly shares the item. **Open source conversation** loads the saved conversation, including retained archived or deleted-agent history. An unavailable source is marked and does not prevent inspection.
+
+Approved plugin writes also create versioned items. They appear in Settings and each applicable conversation view. Plugin `core/` paths create instruction items; other paths create fact items. These items support the same edit, history, Move, Forget, and Undo controls. Their metadata retains the original plugin scope and path. They have no inferred source conversation and do not appear as automatic assistant saves. After Move or Forget, a plugin cannot recreate the item through its old path. See [plugin memory](plugins.md#files-and-memory) for the path and grant rules.
+
+**Reveal item file** selects the actual `.items/<UUID>.md` file. If you edit that file outside Discard, versioned changes fail until **Import file edits and reload** imports the readable body as a new user revision. Copy an unsaved editor draft before reload if you want to keep it. A normal reload does not import external file edits.
+
+## Forget and automatic capture
+
+**Forget** removes an item from retrieval. It preserves its version history. It pauses automatic capture in the item's source conversation and in the requesting conversation. Undo of a new automatic save also forgets the item and pauses capture. The pause survives restart and blocks paraphrases and unrelated automatic saves as well as exact recapture. Explicit user saves and approved updates remain possible.
+
+The conversation shows the pause with **Resume automatic capture** and **Start fresh conversation**. Only an explicit app action can resume capture. Model tool calls and model JSON cannot resume it. After resume, exact trimmed values from the forgotten item's current and previous versions remain suppressed in the affected conversations. This exact check does not recognize paraphrases.
+
+A fresh conversation uses the same agent and optional project. It copies neither the transcript nor the capture pause. Its applicable saved memory remains available. Forget does not erase transcript messages. Transcript deletion is a separate operation. Old source messages can still affect a response in the old conversation.
+
+## Storage and tool boundaries
 
 Under `$DISCARD_HOME` (default `~/.discard`):
 
 | Path | Content |
 | --- | --- |
-| `memory/agents/<agent-id>/` | Private to one agent |
-| `memory/projects/<project-id>/` | Shared by agents in one project |
-| `memory/global/` | Shared by all agents |
-| `memory-index.db` | FTS5 index. Safe to delete. Discard rebuilds it at startup. |
-| `run/` | Per-session MCP config files (mode 0600, directory mode 0700). Deleted when a turn ends. |
+| `memory/.items/<UUID>.md` | Authoritative readable item body and metadata, including domain and history |
+| `memory/.proposals/<UUID>.md` | Pending or resolved proposal |
+| `memory/agents/`, `memory/projects/`, `memory/agent-projects/`, `memory/global/` | Legacy raw read compatibility; new plugin writes use versioned items |
+| `memory-index.db` | Rebuildable FTS5 index of live memory |
+| `run/` | Temporary scoped MCP configuration files, removed after the turn |
 
-Files under `core/` in a scope are **core blocks**. Discard adds them to the system prompt at the start of a
-session. Other files are reached through the tools.
+Only live current item content enters retrieval. Deleted values, history, and pending proposals do not enter the search index or prompts. Each item has one authoritative document. Moves update that document. Writes are atomic and serialized within one MemoryStore instance. The store does not lock external file editors or other processes.
 
-## Tools
+Conversation providers receive a scoped loopback MCP server with six tools: `memory_list`, `memory_read`, `memory_search`, `memory_save`, `memory_edit`, and `memory_forget`. Agent tools cannot directly approve shared writes, change personality, or resume capture. Token-bound identity supplies the agent, optional project, and source conversation. Model fields cannot grant access to another scope. Summary requests use read-only memory access.
 
-The Claude session connects to a local MCP server (HTTP on `127.0.0.1`, random port, bearer token).
+Scope IDs and relative markdown paths are validated. Symbolic links are rejected. Search treats query terms as plain text. Provider tokens are revoked after the turn and expire after six hours at the latest. The server rejects non-loopback Host headers and request bodies over 1 MB.
 
-| Tool | Purpose |
-| --- | --- |
-| `memory_list` | List files in a scope |
-| `memory_read` | Read a file. The result starts with the file version. |
-| `memory_search` | Full-text search over the scopes the session may use |
-| `memory_append` | Add a note. Creates the file if needed. |
-| `memory_edit` | Replace one piece of text. Needs the version from `memory_read`. A stale version is refused. |
-
-Discard approves calls to its own memory tools by policy (`mcp__discard-memory__*`). Each decision is written to
-the approval audit table with the decider `Policy("builtin-memory-tools")`. All other tools still ask the user.
-
-## Safety rules
-
-- Scope IDs are canonical. A caller names `agent`, `project`, or `global`. Discard maps that to the IDs bound to
-  the session token. Callers never pass paths for scopes.
-- Paths are relative, end in `.md`, use only `a-z 0-9 . _ -` and `/`, and are at most 5 levels deep.
-  Symbolic links are rejected at every level.
-- Writes are atomic (temporary file, then rename). Writes are serialized.
-- A file holds at most 64 KB. A scope holds at most 500 files.
-- Search queries are plain words. FTS5 operators in a query are treated as text.
-- Each provider session gets its own token (64 hex characters). The token is revoked when the turn ends, and it
-  expires after 6 hours at the latest.
-- The server refuses requests whose `Host` header is not loopback (DNS rebinding defense), and bodies over 1 MB.
-- Text in a memory block is wrapped in a `<memory>` tag. A closing tag inside the text is escaped. The system
-  prompt tells the agent that memory text is data, not instructions.
-
-## Limits you should know
-
-- **Session tokens are not a defense against a hostile agent with shell access.** An agent that can run
-  commands as your user can read other session config files. The tokens route calls and give an audit trail.
-  They do not isolate agents from each other at the operating system level.
-- **A resumed Claude session keeps its first system prompt.** Claude records the system prompt once per
-  conversation. Core blocks edited after the first turn do not change the prompt of that conversation. They
-  appear in the next new session. The conversation history still holds what the agent saved earlier.
-- Background consolidation of memory ("sleep-time" agents) is not built.
-
-## Settings
-
-The Memory page lists scopes and lets you read files or reveal a scope folder. The Advanced page can rebuild the memory index from those files.
+Tokens route requests and enforce application scope access. They do not isolate a hostile process with the user's filesystem access. Background memory consolidation is not implemented. No data migration is provided for this new application.

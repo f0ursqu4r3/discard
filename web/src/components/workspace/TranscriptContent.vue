@@ -16,6 +16,10 @@ import {
 } from '../ui/message-scroller'
 import { Empty, EmptyHeader, EmptyMedia, EmptyTitle, EmptyDescription } from '../ui/empty'
 import MessageRow from '../MessageRow.vue'
+import MemoryResponse from '../memory/MemoryResponse.vue'
+import MemoryCaptureStatus from '../memory/MemoryCaptureStatus.vue'
+import { useMemory } from '../memory/useMemory'
+import { Button } from '../ui/button'
 import { hasLiveRow, rowCount } from '../messages'
 const props = defineProps<{
   messages: MessageDto[]
@@ -24,10 +28,20 @@ const props = defineProps<{
   newAnchorId: string | null
   agent?: string
   prompts?: PromptDto[]
+  memoryRevision?: number
   conversationId: string
   position?: TranscriptPosition
 }>()
-const emit = defineEmits<{ savePosition: [id: string, position: TranscriptPosition] }>()
+const memory = useMemory(
+  () => props.conversationId || null,
+  () => !!props.conversationId,
+)
+watch([() => props.messages.at(-1)?.id, () => props.running, () => props.memoryRevision], () => {
+  void memory.reload()
+})
+const emit = defineEmits<{
+  savePosition: [id: string, position: TranscriptPosition]
+}>()
 const host = ref<HTMLElement | null>(null)
 const scroller = useMessageScrollerContext()
 let restoreFrame = 0
@@ -55,7 +69,9 @@ function read() {
     lastRead = undefined
   })
 }
-watch([scrollable, visibility, () => props.messages.at(-1)?.id], read, { flush: 'post' })
+watch([scrollable, visibility, () => props.messages.at(-1)?.id], read, {
+  flush: 'post',
+})
 onMounted(async () => {
   window.addEventListener('focus', read)
   if (!props.position) return
@@ -72,7 +88,10 @@ onMounted(async () => {
     }
     if (
       position.messageId &&
-      scroller.scrollToMessage(position.messageId, { align: 'start', behavior: 'auto' })
+      scroller.scrollToMessage(position.messageId, {
+        align: 'start',
+        behavior: 'auto',
+      })
     ) {
       const anchor = [...viewport.querySelectorAll<HTMLElement>('[data-message-id]')].find(
         (item) => item.dataset.messageId === position.messageId,
@@ -108,9 +127,21 @@ onUnmounted(() => window.removeEventListener('focus', read))
   <div
     ref="host"
     data-ui-id="message-view"
-    class="relative min-h-0 flex-1"
+    class="relative flex min-h-0 flex-1 flex-col"
     :data-row-count="rowCount(messages.length, hasLiveRow(running, live.length))"
   >
+    <div v-if="memory.data.value.paused" class="mx-6 my-2">
+      <MemoryCaptureStatus :channel-id="conversationId" :paused="true" @changed="memory.reload" />
+    </div>
+    <p v-if="memory.error.value" role="alert" class="mx-6 text-xs">
+      Memory could not load: {{ memory.error.value }}
+    </p>
+    <div v-if="memory.data.value.warnings?.length" class="mx-6 space-y-2 text-xs">
+      <p v-for="warning in memory.data.value.warnings" :key="warning" role="status">
+        {{ warning }}
+      </p>
+      <Button size="sm" variant="outline" @click="memory.reload">Retry memory notice</Button>
+    </div>
     <MessageScroller>
       <MessageScrollerViewport
         data-ui-id="message-viewport"
@@ -140,6 +171,12 @@ onUnmounted(() => window.removeEventListener('focus', read))
               :agent="agent"
               :prompts="prompts"
             />
+            <MemoryResponse
+              :records="memory.data.value.responses.filter((r) => r.responseId === message.id)"
+              :proposals="memory.data.value.proposals"
+              :channel-id="conversationId"
+              @changed="memory.reload"
+            />
           </MessageScrollerItem>
           <MessageScrollerItem
             class="[content-visibility:visible]"
@@ -151,7 +188,7 @@ onUnmounted(() => window.removeEventListener('focus', read))
               :message="liveMessage"
               :agent="agent"
               :prompts="prompts"
-              show-cursor
+              :show-cursor="running"
             />
           </MessageScrollerItem>
           <Empty v-if="!messages.length && !hasLiveRow(running, live.length)" class="m-auto">

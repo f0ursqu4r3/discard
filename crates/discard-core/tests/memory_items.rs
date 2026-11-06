@@ -1,0 +1,953 @@
+use discard_core::memory::{MemoryStore, Scope};
+use discard_core::memory_items::{ItemKind, MutationOrigin, SaveOutcome};
+use discard_core::model::{AgentId, ChannelId, ProjectId};
+
+#[test]
+fn domains_versions_forget_and_undo_preserve_boundaries() {
+    let d = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open_in_memory_index(d.path()).unwrap();
+    let a = AgentId("a".into());
+    let b = AgentId("b".into());
+    let p = ProjectId("p".into());
+    let q = ProjectId("q".into());
+    let source = ChannelId("chat".into());
+    let scope = Scope::AgentProject(a.clone(), p.clone());
+    assert_eq!(
+        Scope::applicable(&a, Some(&p)),
+        vec![
+            scope.clone(),
+            Scope::Project(p.clone()),
+            Scope::Agent(a.clone()),
+            Scope::Global
+        ]
+    );
+    assert_eq!(
+        Scope::applicable(&a, None),
+        vec![Scope::Agent(a.clone()), Scope::Global]
+    );
+    let item = store
+        .create_item(
+            &scope,
+            ItemKind::Preference,
+            "prefer apples",
+            Some(&source),
+            MutationOrigin::Automatic,
+        )
+        .unwrap();
+    assert!(
+        store
+            .search(&Scope::applicable(&b, Some(&p)), "apples", 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .search(&Scope::applicable(&a, Some(&q)), "apples", 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .search(&Scope::applicable(&a, Some(&p)), "apples", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    let updated = store
+        .update_item(
+            &item.id,
+            item.version,
+            "prefer oranges",
+            MutationOrigin::User,
+        )
+        .unwrap();
+    assert!(
+        store
+            .update_item(&item.id, item.version, "stale", MutationOrigin::User)
+            .is_err()
+    );
+    assert!(
+        store
+            .update_item(
+                &item.id,
+                updated.version,
+                "inferred",
+                MutationOrigin::Automatic
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .search(&[scope.clone()], "apples", 10)
+            .unwrap()
+            .is_empty()
+    );
+    let moved = store
+        .move_item(&item.id, updated.version, &Scope::Agent(a.clone()))
+        .unwrap();
+    assert!(store.search(&[scope], "oranges", 10).unwrap().is_empty());
+    assert!(store.undo_item(&item.id, updated.version).is_err());
+    let forgotten = store.forget_item(&item.id, moved.version).unwrap();
+    store.rebuild_index().unwrap();
+    assert!(
+        store
+            .search(&Scope::applicable(&a, Some(&p)), "oranges", 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .create_item(
+                &Scope::Agent(a.clone()),
+                ItemKind::Preference,
+                "prefer oranges",
+                Some(&source),
+                MutationOrigin::Automatic
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .create_item(
+                &Scope::Agent(a.clone()),
+                ItemKind::Preference,
+                "prefer oranges",
+                Some(&source),
+                MutationOrigin::User
+            )
+            .is_ok()
+    );
+    assert!(store.read_item(&item.id).unwrap().history.len() >= 3);
+    let restored = store.undo_item(&item.id, forgotten.version).unwrap();
+    assert!(!restored.deleted);
+    assert_eq!(restored.content, "prefer oranges");
+}
+
+#[test]
+fn shared_capture_is_a_proposal_and_only_app_can_approve() {
+    let d = tempfile::tempdir().unwrap();
+    let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+    let a = AgentId("a".into());
+    let c = ChannelId("chat".into());
+    let outcome = s
+        .capture_item(
+            &a,
+            None,
+            &c,
+            &Scope::Global,
+            ItemKind::Fact,
+            "shared needle",
+        )
+        .unwrap();
+    let SaveOutcome::Proposed(proposal) = outcome else {
+        panic!("shared save bypassed approval")
+    };
+    assert!(s.search(&[Scope::Global], "needle", 10).unwrap().is_empty());
+    assert_eq!(s.pending_proposals().unwrap().len(), 1);
+    let item = s.approve_proposal(&proposal.id).unwrap();
+    assert_eq!(item.source_conversation, Some(c));
+    assert_eq!(s.search(&[Scope::Global], "needle", 10).unwrap().len(), 1);
+    assert!(s.approve_proposal(&proposal.id).is_err());
+    assert!(
+        s.capture_item(
+            &a,
+            None,
+            &ChannelId("chat".into()),
+            &Scope::Agent(AgentId("other".into())),
+            ItemKind::Fact,
+            "private"
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn both_domain_ids_are_validated_and_cleanup_finds_orphan_domains() {
+    let d = tempfile::tempdir().unwrap();
+    let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+    for (a, p) in [("../x", "p"), ("a", "../x")] {
+        assert!(
+            s.list(&Scope::AgentProject(AgentId(a.into()), ProjectId(p.into())))
+                .is_err()
+        );
+    }
+    let a = AgentId("a".into());
+    s.create(
+        &Scope::AgentProject(a.clone(), ProjectId("orphan".into())),
+        "x.md",
+        "x",
+    )
+    .unwrap();
+    assert!(
+        s.private_scopes(&a)
+            .unwrap()
+            .contains(&Scope::AgentProject(a, ProjectId("orphan".into())))
+    );
+}
+
+#[test]
+fn reopen_and_index_recovery_never_retrieve_history_or_deleted_items() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("memory");
+    let index = d.path().join("index.db");
+    let a = AgentId("a".into());
+    let old = Scope::Agent(a.clone());
+    let new = Scope::AgentProject(a.clone(), ProjectId("p".into()));
+    let id;
+    {
+        let s = MemoryStore::open(&root, &index).unwrap();
+        let i = s
+            .create_item(
+                &old,
+                ItemKind::Fact,
+                "historicalsecret",
+                None,
+                MutationOrigin::User,
+            )
+            .unwrap();
+        id = i.id.clone();
+        let i = s
+            .update_item(&id, i.version, "livevalue", MutationOrigin::User)
+            .unwrap();
+        let i = s.move_item(&id, i.version, &new).unwrap();
+        assert!(s.replace(&new, &i.path(), "bypass", "1").is_err());
+        assert!(s.append(&new, &i.path(), "bypass").is_err());
+        assert!(s.delete(&new, &i.path()).is_err());
+    }
+    std::fs::remove_file(&index).unwrap();
+    let s = MemoryStore::open(&root, &index).unwrap();
+    s.reconcile().unwrap();
+    for rebuild in [false, true] {
+        if rebuild {
+            s.rebuild_index().unwrap();
+        }
+        assert!(
+            s.search(&[old.clone(), new.clone()], "historicalsecret", 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            s.search(&[old.clone()], "livevalue", 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(s.search(&[new.clone()], "livevalue", 10).unwrap().len(), 1);
+    }
+    let i = s.read_item(&id).unwrap();
+    assert_eq!(i.history[0].content, "historicalsecret");
+    s.forget_item(&id, i.version).unwrap();
+    drop(s);
+    let s = MemoryStore::open(&root, &index).unwrap();
+    s.rebuild_index().unwrap();
+    assert!(s.search(&[old, new], "livevalue", 10).unwrap().is_empty());
+    assert!(
+        s.core_blocks(&Scope::applicable(&a, None))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn complete_domain_matrix_and_private_cleanup_keep_shared_memory() {
+    let d = tempfile::tempdir().unwrap();
+    let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+    let agents = [AgentId("a".into()), AgentId("b".into())];
+    let projects = [ProjectId("p".into()), ProjectId("q".into())];
+    let mut scopes = vec![Scope::Global];
+    scopes.extend(agents.iter().cloned().map(Scope::Agent));
+    scopes.extend(projects.iter().cloned().map(Scope::Project));
+    for a in &agents {
+        for p in &projects {
+            scopes.push(Scope::AgentProject(a.clone(), p.clone()));
+        }
+    }
+    for scope in &scopes {
+        s.create_item(
+            scope,
+            ItemKind::Preference,
+            &format!("matrix {}", scope.label()),
+            None,
+            MutationOrigin::User,
+        )
+        .unwrap();
+    }
+    for a in &agents {
+        for p in [None, Some(&projects[0]), Some(&projects[1])] {
+            let applicable = Scope::applicable(a, p);
+            let items = s.list_items(&applicable).unwrap();
+            assert_eq!(
+                items.iter().map(|i| i.scope.clone()).collect::<Vec<_>>(),
+                applicable
+            );
+            assert_eq!(
+                s.search(&applicable, "matrix", 20).unwrap().len(),
+                applicable.len()
+            );
+            assert_eq!(s.core_blocks(&applicable).unwrap().len(), applicable.len());
+        }
+    }
+    assert_eq!(s.scopes_on_disk().len(), scopes.len());
+    s.delete_private_memory(&agents[0]).unwrap();
+    assert!(
+        s.list_items(&[Scope::Agent(agents[0].clone())])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        s.private_scopes(&agents[0])
+            .unwrap()
+            .iter()
+            .all(|scope| s.list_items(&[scope.clone()]).unwrap().is_empty())
+    );
+    assert_eq!(
+        s.list_items(&[
+            Scope::Global,
+            Scope::Project(projects[0].clone()),
+            Scope::Agent(agents[1].clone())
+        ])
+        .unwrap()
+        .len(),
+        3
+    );
+}
+
+#[test]
+fn item_documents_and_nested_scope_symlinks_are_refused() {
+    let d = tempfile::tempdir().unwrap();
+    let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), d.path().join(".items")).unwrap();
+    assert!(
+        s.create_item(
+            &Scope::Global,
+            ItemKind::Fact,
+            "escape",
+            None,
+            MutationOrigin::User
+        )
+        .is_err()
+    );
+    std::fs::remove_file(d.path().join(".items")).unwrap();
+    std::fs::create_dir_all(d.path().join("agent-projects")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), d.path().join("agent-projects/a")).unwrap();
+    let scope = Scope::AgentProject(AgentId("a".into()), ProjectId("p".into()));
+    assert!(s.list(&scope).is_err());
+    assert!(
+        s.create_item(&scope, ItemKind::Fact, "escape", None, MutationOrigin::User)
+            .is_err()
+    );
+    assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn proposals_persist_stale_updates_fail_and_changes_have_stable_keys() {
+    let d = tempfile::tempdir().unwrap();
+    let a = AgentId("a".into());
+    let c = ChannelId("source".into());
+    let scope = Scope::Agent(a.clone());
+    let item;
+    let proposal;
+    {
+        let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+        item = s
+            .create_item(
+                &scope,
+                ItemKind::Decision,
+                "decision one",
+                Some(&c),
+                MutationOrigin::User,
+            )
+            .unwrap();
+        proposal = s
+            .propose_update(&a, None, &c, &item.id, item.version, "decision two")
+            .unwrap();
+    }
+    let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+    assert_eq!(s.pending_proposals().unwrap(), vec![proposal.clone()]);
+    s.update_item(
+        &item.id,
+        item.version,
+        "user correction",
+        MutationOrigin::User,
+    )
+    .unwrap();
+    assert!(s.approve_proposal(&proposal.id).is_err());
+    assert_eq!(s.read_item(&item.id).unwrap().content, "user correction");
+    let changes = s.memory_changes(&c).unwrap();
+    assert_eq!(changes, s.memory_changes(&c).unwrap());
+    s.reject_proposal(&proposal.id).unwrap();
+    assert!(s.pending_proposals().unwrap().is_empty());
+}
+
+#[test]
+fn forget_proposals_need_approval_reject_cleanly_and_refuse_stale_delete() {
+    let d = tempfile::tempdir().unwrap();
+    let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+    let a = AgentId("a".into());
+    let c = ChannelId("original".into());
+    let current = ChannelId("current".into());
+    let scope = Scope::Agent(a.clone());
+    let i = s
+        .create_item(
+            &scope,
+            ItemKind::Fact,
+            "forget value",
+            Some(&c),
+            MutationOrigin::User,
+        )
+        .unwrap();
+    let p = s
+        .propose_forget(&a, None, &current, &i.id, i.version)
+        .unwrap();
+    s.reject_proposal(&p.id).unwrap();
+    assert!(!s.read_item(&i.id).unwrap().deleted);
+    assert!(s.approve_proposal(&p.id).is_err());
+    let p = s
+        .propose_forget(&a, None, &current, &i.id, i.version)
+        .unwrap();
+    let i = s
+        .update_item(&i.id, i.version, "new value", MutationOrigin::User)
+        .unwrap();
+    assert!(s.approve_proposal(&p.id).is_err());
+    assert!(!s.read_item(&i.id).unwrap().deleted);
+    let p = s
+        .propose_forget(&a, None, &current, &i.id, i.version)
+        .unwrap();
+    s.approve_proposal(&p.id).unwrap();
+    assert!(s.read_item(&i.id).unwrap().deleted);
+    assert!(
+        s.capture_item(&a, None, &current, &scope, ItemKind::Fact, " new value ")
+            .is_err()
+    );
+    assert!(
+        s.capture_item(&a, None, &c, &scope, ItemKind::Fact, "new value")
+            .is_err()
+    );
+}
+
+#[test]
+fn stale_index_after_authoritative_write_cannot_deliver_forgotten_or_old_content() {
+    let d = tempfile::tempdir().unwrap();
+    let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+    let i = s
+        .create_item(
+            &Scope::Global,
+            ItemKind::Fact,
+            "oldindexedword",
+            None,
+            MutationOrigin::User,
+        )
+        .unwrap();
+    let path = d.path().join(".items").join(format!("{}.md", i.id));
+    let original = std::fs::read_to_string(&path).unwrap();
+    // Simulate a committed markdown rename followed by a crash before FTS update.
+    let (metadata, _) = original.split_once("\n\n").unwrap();
+    std::fs::write(&path, format!("{metadata}\n\nnewbodyword")).unwrap();
+    assert!(
+        s.search(&[Scope::Global], "oldindexedword", 10)
+            .unwrap()
+            .is_empty()
+    );
+    s.reconcile().unwrap();
+    assert_eq!(
+        s.search(&[Scope::Global], "newbodyword", 10).unwrap().len(),
+        1
+    );
+    let document = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        document.replace("\"deleted\":false", "\"deleted\":true"),
+    )
+    .unwrap();
+    assert!(
+        s.search(&[Scope::Global], "newbodyword", 10)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn forget_pauses_all_automatic_capture_until_app_resume_and_preserves_old_hashes() {
+    use discard_core::memory::MemoryError;
+    let d = tempfile::tempdir().unwrap();
+    let a = AgentId("a".into());
+    let source = ChannelId("original".into());
+    let requester = ChannelId("requester".into());
+    let scope = Scope::Agent(a.clone());
+    {
+        let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+        let i = s
+            .create_item(
+                &scope,
+                ItemKind::Fact,
+                "old incorrect value",
+                Some(&source),
+                MutationOrigin::User,
+            )
+            .unwrap();
+        let i = s
+            .update_item(&i.id, i.version, "corrected value", MutationOrigin::User)
+            .unwrap();
+        let p = s
+            .propose_forget(&a, None, &requester, &i.id, i.version)
+            .unwrap();
+        s.approve_proposal(&p.id).unwrap();
+        assert!(s.capture_paused(&source).unwrap());
+        assert!(s.capture_paused(&requester).unwrap());
+        for conversation in [&source, &requester] {
+            for text in [
+                "corrected value",
+                "a paraphrase of corrected value",
+                "old incorrect value",
+                "unrelated new durable fact",
+            ] {
+                assert_eq!(
+                    s.capture_item(&a, None, conversation, &scope, ItemKind::Fact, text)
+                        .unwrap_err(),
+                    MemoryError::CapturePaused
+                );
+            }
+        }
+        assert!(
+            s.create_item(
+                &scope,
+                ItemKind::Fact,
+                "explicit user save",
+                Some(&requester),
+                MutationOrigin::User
+            )
+            .is_ok()
+        );
+        assert!(
+            s.create_item(
+                &scope,
+                ItemKind::Fact,
+                "approved save",
+                Some(&requester),
+                MutationOrigin::Approved
+            )
+            .is_ok()
+        );
+        assert!(s.capture_paused(&requester).unwrap());
+        let fresh = ChannelId("fresh".into());
+        assert!(
+            s.capture_item(&a, None, &fresh, &scope, ItemKind::Fact, "corrected value")
+                .is_ok()
+        );
+    }
+    let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+    assert!(s.capture_paused(&source).unwrap());
+    assert!(s.capture_paused(&requester).unwrap());
+    s.resume_capture(&requester).unwrap();
+    assert!(!s.capture_paused(&requester).unwrap());
+    assert!(s.capture_paused(&source).unwrap());
+    assert!(
+        s.capture_item(
+            &a,
+            None,
+            &requester,
+            &scope,
+            ItemKind::Fact,
+            "a paraphrase after explicit resume"
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        s.capture_item(
+            &a,
+            None,
+            &requester,
+            &scope,
+            ItemKind::Fact,
+            "old incorrect value"
+        )
+        .unwrap_err(),
+        MemoryError::Suppressed
+    );
+    assert_eq!(
+        s.capture_item(
+            &a,
+            None,
+            &requester,
+            &scope,
+            ItemKind::Fact,
+            "corrected value"
+        )
+        .unwrap_err(),
+        MemoryError::Suppressed
+    );
+    drop(s);
+    let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+    assert!(!s.capture_paused(&requester).unwrap());
+    assert!(s.capture_paused(&source).unwrap());
+}
+
+#[test]
+fn undo_creation_pauses_capture_and_approved_changes_follow_requesting_conversation() {
+    use discard_core::memory_items::MemoryChange;
+    let d = tempfile::tempdir().unwrap();
+    let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+    let a = AgentId("a".into());
+    let original = ChannelId("original".into());
+    let current = ChannelId("current".into());
+    let scope = Scope::Agent(a.clone());
+    let i = s
+        .create_item(
+            &scope,
+            ItemKind::Fact,
+            "first",
+            Some(&original),
+            MutationOrigin::Automatic,
+        )
+        .unwrap();
+    let p = s
+        .propose_update(&a, None, &current, &i.id, i.version, "second")
+        .unwrap();
+    let updated = s.approve_proposal(&p.id).unwrap();
+    let changes = s.memory_changes(&current).unwrap();
+    assert!(changes.iter().any(|c|matches!(c,MemoryChange::Saved{key,item} if key==&format!("{}:{}",i.id,updated.version) && item.content=="second")));
+    assert!(!s.memory_changes(&original).unwrap().iter().any(
+        |c| matches!(c,MemoryChange::Saved{key,..} if key==&format!("{}:{}",i.id,updated.version))
+    ));
+    let p = s
+        .propose_forget(&a, None, &current, &i.id, updated.version)
+        .unwrap();
+    let forgotten = s.approve_proposal(&p.id).unwrap();
+    assert!(s.memory_changes(&current).unwrap().iter().any(|c|matches!(c,MemoryChange::Saved{key,item} if key==&format!("{}:{}",i.id,forgotten.version) && item.deleted)));
+    let fresh = ChannelId("fresh".into());
+    let i = s
+        .create_item(
+            &scope,
+            ItemKind::Fact,
+            "undo creation",
+            Some(&fresh),
+            MutationOrigin::Automatic,
+        )
+        .unwrap();
+    s.undo_item(&i.id, i.version).unwrap();
+    assert!(s.capture_paused(&fresh).unwrap());
+    drop(s);
+    let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+    assert!(s.capture_paused(&fresh).unwrap());
+    assert!(s.memory_changes(&current).unwrap().iter().any(
+        |c| matches!(c,MemoryChange::Saved{item,..} if item.id==forgotten.id && item.deleted)
+    ));
+}
+
+fn externally_replace_item_body(root: &std::path::Path, id: &str, body: &str) {
+    let path = root.join(".items").join(format!("{id}.md"));
+    let document = std::fs::read_to_string(&path).unwrap();
+    let (metadata, _) = document.split_once("\n\n").unwrap();
+    std::fs::write(path, format!("{metadata}\n\n{body}")).unwrap();
+}
+
+#[test]
+fn external_body_edit_conflicts_with_every_stale_mutation_and_proposal_approval() {
+    use discard_core::memory::MemoryError;
+    for mutation in [
+        "update",
+        "move",
+        "forget",
+        "forget_in",
+        "undo",
+        "approve_update",
+        "approve_forget",
+    ] {
+        let d = tempfile::tempdir().unwrap();
+        let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+        let a = AgentId("a".into());
+        let c = ChannelId("c".into());
+        let i = s
+            .create_item(
+                &Scope::Agent(a.clone()),
+                ItemKind::Fact,
+                "A",
+                Some(&c),
+                MutationOrigin::User,
+            )
+            .unwrap();
+        let proposal = match mutation {
+            "approve_update" => Some(
+                s.propose_update(&a, None, &c, &i.id, i.version, "C")
+                    .unwrap(),
+            ),
+            "approve_forget" => Some(s.propose_forget(&a, None, &c, &i.id, i.version).unwrap()),
+            _ => None,
+        };
+        externally_replace_item_body(d.path(), &i.id, "B");
+        let attempt = || match mutation {
+            "update" => s.update_item(&i.id, i.version, "C", MutationOrigin::User),
+            "move" => s.move_item(&i.id, i.version, &Scope::Global),
+            "forget" => s.forget_item(&i.id, i.version),
+            "forget_in" => s.forget_item_in(&i.id, i.version, Some(&c)),
+            "undo" => s.undo_item(&i.id, i.version),
+            _ => s.approve_proposal(&proposal.as_ref().unwrap().id),
+        };
+        let result = attempt();
+        assert!(
+            matches!(result, Err(MemoryError::Conflict { .. })),
+            "{mutation}: {result:?}"
+        );
+        assert_eq!(s.read_item(&i.id).unwrap().content, "B");
+        s.reconcile().unwrap();
+        let imported = s.read_item(&i.id).unwrap();
+        assert_eq!(imported.version, i.version + 1);
+        assert_eq!(imported.content, "B");
+        assert_eq!(imported.history.last().unwrap().content, "A");
+        assert_ne!(imported.committed_body_hash, i.committed_body_hash);
+        let result = attempt();
+        assert!(
+            matches!(result, Err(MemoryError::Conflict { .. })),
+            "after import {mutation}: {result:?}"
+        );
+        s.reconcile().unwrap();
+        assert_eq!(s.read_item(&i.id).unwrap().version, imported.version);
+        assert!(matches!(
+            s.update_item(&i.id, i.version, "stale C", MutationOrigin::User),
+            Err(MemoryError::Conflict { .. })
+        ));
+        s.update_item(&i.id, imported.version, "C", MutationOrigin::User)
+            .unwrap();
+        drop(s);
+        let reopened = MemoryStore::open_in_memory_index(d.path()).unwrap();
+        assert_eq!(reopened.read_item(&i.id).unwrap().content, "C");
+    }
+}
+
+#[test]
+fn direct_app_forget_pauses_original_and_requesting_conversation_without_proposal() {
+    let d = tempfile::tempdir().unwrap();
+    let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
+    let original = ChannelId("original".into());
+    let requester = ChannelId("requester".into());
+    let i = s
+        .create_item(
+            &Scope::Global,
+            ItemKind::Fact,
+            "value",
+            Some(&original),
+            MutationOrigin::User,
+        )
+        .unwrap();
+    s.forget_item_in(&i.id, i.version, Some(&requester))
+        .unwrap();
+    assert!(s.capture_paused(&original).unwrap());
+    assert!(s.capture_paused(&requester).unwrap());
+    assert!(s.pending_proposals().unwrap().is_empty());
+    assert!(s.memory_changes(&requester).unwrap().iter().any(|change|matches!(change,discard_core::memory_items::MemoryChange::Saved{item,..} if item.id==i.id && item.deleted)));
+}
+
+#[test]
+fn approval_receipts_are_flat_immutable_metadata_and_do_not_enter_retrieval() {
+    let dir = tempfile::tempdir().unwrap();
+    let memory = MemoryStore::open_in_memory_index(dir.path()).unwrap();
+    let agent = AgentId::new();
+    let channel = ChannelId::new();
+    let SaveOutcome::Proposed(proposal) = memory
+        .capture_item(
+            &agent,
+            None,
+            &channel,
+            &Scope::Global,
+            ItemKind::Preference,
+            "historic approved pear",
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    let approved = memory.approve_proposal(&proposal.id).unwrap();
+    let original = memory.approved_changes(&channel).unwrap();
+    memory
+        .update_item(
+            &approved.id,
+            approved.version,
+            "current apricot",
+            MutationOrigin::User,
+        )
+        .unwrap();
+    assert_eq!(memory.approved_changes(&channel).unwrap(), original);
+    assert!(
+        memory
+            .search(&[Scope::Global], "pear", 10)
+            .unwrap()
+            .is_empty()
+    );
+    let blocks = memory.core_blocks(&[Scope::Global]).unwrap();
+    let prompt = discard_core::memory::compose_system_prompt(None, &blocks);
+    assert!(prompt.contains("current apricot"));
+    assert!(!prompt.contains("pear"));
+    assert_eq!(
+        memory.read(&Scope::Global, &approved.path()).unwrap().text,
+        "current apricot"
+    );
+    let raw = std::fs::read_to_string(
+        dir.path()
+            .join(".items")
+            .join(format!("{}.md", approved.id)),
+    )
+    .unwrap();
+    let meta = raw
+        .split_once("\n\n")
+        .unwrap()
+        .0
+        .strip_prefix("<!-- discard-memory ")
+        .unwrap()
+        .strip_suffix(" -->")
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_str(meta).unwrap();
+    let receipt = &json["approved_snapshots"][0];
+    assert!(receipt.get("approved_snapshots").is_none());
+    assert!(receipt.get("item").is_none());
+    assert!(receipt.get("history").is_none());
+    assert_eq!(receipt["revision"]["version"], 1);
+    assert_eq!(receipt["revision"]["content"], "historic approved pear");
+}
+
+#[test]
+fn plugin_aliases_reopen_as_single_versioned_items_and_reject_aba_stale_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let scope = Scope::AgentProject(AgentId("a".into()), ProjectId("p".into()));
+    let store = MemoryStore::open_in_memory_index(dir.path()).unwrap();
+    let original = store
+        .plugin_append(&scope, "core/rules.md", "alwaysincludeplugin")
+        .unwrap();
+    let appended = store
+        .plugin_append(&scope, "core/rules.md", "secondline")
+        .unwrap();
+    assert_ne!(original, appended);
+    assert_eq!(
+        store.plugin_read(&scope, "core/rules.md").unwrap().text,
+        "alwaysincludeplugin\nsecondline"
+    );
+    assert_eq!(store.plugin_list(&scope).unwrap()[0].version, appended);
+    let item = store.list_items(&[scope.clone()]).unwrap().remove(0);
+    assert_eq!(item.version, 2);
+    assert_eq!(item.history[0].content, "alwaysincludeplugin");
+    assert!(
+        !dir.path().join("agent-projects/a/p/core/rules.md").exists(),
+        "no parallel raw body"
+    );
+    store.undo_item(&item.id, 2).unwrap();
+    assert_eq!(
+        store.plugin_read(&scope, "core/rules.md").unwrap().text,
+        "alwaysincludeplugin"
+    );
+    assert!(
+        store
+            .plugin_edit(
+                &scope,
+                "core/rules.md",
+                "alwaysincludeplugin",
+                "stale",
+                &original
+            )
+            .is_err(),
+        "same text after Undo has a new version"
+    );
+    assert!(store.plugin_read(&Scope::Global, &item.path()).is_err());
+    assert!(
+        store
+            .plugin_append(&Scope::Global, &item.path(), "outside scope")
+            .is_err()
+    );
+    assert!(
+        store
+            .plugin_edit(
+                &Scope::Global,
+                &item.path(),
+                "alwaysincludeplugin",
+                "outside scope",
+                &original
+            )
+            .is_err()
+    );
+    let preference = store
+        .create_item(
+            &scope,
+            ItemKind::Preference,
+            "mandatorypreference",
+            None,
+            MutationOrigin::User,
+        )
+        .unwrap();
+    store
+        .plugin_append(&scope, "notes.md", "searchablepluginfact")
+        .unwrap();
+    let core = store.core_blocks(&[scope.clone()]).unwrap();
+    assert_eq!(core.len(), 2);
+    assert!(core.iter().any(|b| b.text == "alwaysincludeplugin"));
+    assert!(core.iter().any(|b| b.text == preference.content));
+    assert_eq!(
+        store
+            .plugin_search(&[scope.clone()], "searchablepluginfact", 5)
+            .unwrap()[0]
+            .path,
+        "notes.md"
+    );
+    let document = dir.path().join(".items").join(format!("{}.md", item.id));
+    let text = std::fs::read_to_string(&document).unwrap();
+    // Change only the authoritative body, not the committed metadata snapshot.
+    let (metadata, _) = text.split_once("\n\n").unwrap();
+    std::fs::write(&document, format!("{metadata}\n\nexternalpluginbody")).unwrap();
+    assert!(
+        store
+            .plugin_append(&scope, "core/rules.md", "blocked until import")
+            .is_err()
+    );
+    store.reconcile().unwrap();
+    assert_eq!(store.read_item(&item.id).unwrap().version, 4);
+    assert!(
+        store
+            .search(&[scope.clone()], "alwaysincludeplugin", 5)
+            .unwrap()
+            .is_empty()
+    );
+    store.move_item(&item.id, 4, &Scope::Global).unwrap();
+    drop(store);
+    let reopened = MemoryStore::open_in_memory_index(dir.path()).unwrap();
+    reopened.rebuild_index().unwrap();
+    assert!(
+        reopened
+            .plugin_append(&scope, "core/rules.md", "do not recreate")
+            .is_err()
+    );
+    let current = reopened.plugin_read(&Scope::Global, &item.path()).unwrap();
+    reopened
+        .plugin_edit(
+            &Scope::Global,
+            &item.path(),
+            "externalpluginbody",
+            "currentpluginbody",
+            &current.version,
+        )
+        .unwrap();
+    assert!(
+        reopened
+            .plugin_edit(
+                &Scope::Global,
+                &item.path(),
+                "currentpluginbody",
+                "stale",
+                &current.version
+            )
+            .is_err()
+    );
+    reopened.forget_item(&item.id, 6).unwrap();
+    drop(reopened);
+    let forgotten = MemoryStore::open_in_memory_index(dir.path()).unwrap();
+    forgotten.rebuild_index().unwrap();
+    assert!(
+        forgotten
+            .plugin_append(&scope, "core/rules.md", "alwaysincludeplugin")
+            .is_err()
+    );
+    assert!(forgotten.plugin_read(&Scope::Global, &item.path()).is_err());
+    assert!(
+        forgotten
+            .plugin_search(&[scope, Scope::Global], "currentpluginbody", 5)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(forgotten.core_blocks(&[Scope::Global]).unwrap().is_empty());
+}

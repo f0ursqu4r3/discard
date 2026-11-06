@@ -58,6 +58,7 @@ async fn wait_for_file(path: &Path) {
 
 fn spec() -> SessionSpec {
     SessionSpec {
+        mode: discard_core::provider::SessionMode::Coding,
         cwd: PathBuf::from("."),
         model: None,
         system_prompt: None,
@@ -221,4 +222,69 @@ async fn spawn_failure_is_reported_not_panicked() {
     let p = ClaudeProvider::new("/nonexistent/claude");
     let err = p.start_session(spec()).await.err().unwrap();
     assert!(matches!(err, ProviderError::Spawn(_)));
+}
+
+fn conversation_spec(rig: &Rig) -> SessionSpec {
+    let path = rig.dir.path().join("memory.json");
+    std::fs::write(&path, serde_json::json!({"mcpServers":{"discard-memory":{"url":"http://127.0.0.1:1/mcp","headers":{"Authorization":"Bearer synthetic"}}}}).to_string()).unwrap();
+    let mut s = spec();
+    s.mode = discard_core::provider::SessionMode::Conversation;
+    s.model = Some("selected-claude-model".into());
+    s.system_prompt = Some("Fresh synthetic memory".into());
+    s.mcp_config = Some(path);
+    s
+}
+
+#[tokio::test]
+async fn conversation_process_forces_memory_environment_and_empty_cwd() {
+    let rig = Rig::new();
+    let s = conversation_spec(&rig);
+    let mut session = rig
+        .provider("approval")
+        .with_env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "0")
+        .with_env("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "0")
+        .with_env("CLAUDE_CODE_PLUGIN_DIRS", "/unsafe")
+        .start_session(s)
+        .await
+        .unwrap();
+    // Wait for the fixture initialization so its argv/environment log is complete.
+    let _ = session.next_event().await;
+    let log = rig.log_text();
+    assert!(log.contains("MEMORY_ENV 1 1 "), "{log}");
+    assert!(log.contains("--model selected-claude-model"));
+    assert!(log.contains("--append-system-prompt Fresh synthetic memory"));
+    for flag in ["--tools", "--strict-mcp-config", "--restricted", "--disable-slash-commands", "--system-prompt-snapshot off"] {
+        assert!(log.contains(flag), "{flag}");
+    }
+    let cwd = PathBuf::from(log.lines().find_map(|l| l.strip_prefix("CWD ")).unwrap());
+    assert!(std::fs::read_dir(&cwd).unwrap().next().is_none());
+    drop(session);
+    assert!(!cwd.exists());
+}
+
+#[tokio::test]
+async fn conversation_missing_required_control_fails_before_session() {
+    let rig = Rig::new();
+    let s = conversation_spec(&rig);
+    let error = rig.provider("approval").with_env("FAKE_CLAUDE_HELP", "--tools").start_session(s).await.err().unwrap().to_string();
+    assert!(error.contains("required conversation control"), "{error}");
+    assert!(!rig.log_text().contains("STDIN"));
+}
+
+async fn check_conversation_setup_timeout_kills_child(argument: &str) {
+    let rig = Rig::new();
+    let s = conversation_spec(&rig);
+    let error = rig.provider("approval").with_env("FAKE_CLAUDE_HANG_SETUP", argument).start_session(s).await.err().unwrap().to_string();
+    assert!(error.contains("timed out"), "{error}");
+    assert_setup_process_terminated(&rig.pid_file()).await;
+}
+
+#[tokio::test]
+async fn conversation_version_timeout_kills_setup_process() {
+    check_conversation_setup_timeout_kills_child("--version").await;
+}
+
+#[tokio::test]
+async fn conversation_help_timeout_kills_setup_process() {
+    check_conversation_setup_timeout_kills_child("--help").await;
 }

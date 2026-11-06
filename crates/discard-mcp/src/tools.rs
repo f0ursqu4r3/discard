@@ -1,6 +1,7 @@
 //! MCP JSON-RPC handling and the memory tools. Pure: no network, no global state.
 
 use crate::identity::{Identity, ScopeKindOrd, Surface};
+use discard_core::memory_items::ItemKind;
 use discard_core::memory::{MemoryError, MemoryStore, Scope};
 use discard_lua::{PluginService, PluginState, ServiceError};
 use discard_lua::api_spec;
@@ -95,7 +96,7 @@ impl McpHandler {
         if !args.is_object() {
             return Err("arguments must be an object".to_string());
         }
-        let writes = matches!(name, "memory_append" | "memory_edit");
+        let writes = matches!(name, "memory_save" | "memory_edit" | "memory_forget");
         if writes && !identity.can_write {
             return Err("this session may not change memory".to_string());
         }
@@ -105,10 +106,10 @@ impl McpHandler {
                 let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(10).clamp(1, 25) as usize;
                 let scopes = match args.get("scope") {
                     None | Some(Value::Null) => {
-                        [ScopeKindOrd::Agent, ScopeKindOrd::Project, ScopeKindOrd::Global]
+                        [ScopeKindOrd::AgentProject, ScopeKindOrd::Project, ScopeKindOrd::Agent, ScopeKindOrd::Global]
                             .into_iter()
                             .filter(|k| identity.scopes.contains(k))
-                            .map(|k| scope_for(identity, k))
+                            .filter_map(|k| scope_for(identity, k).ok())
                             .collect()
                     }
                     Some(_) => vec![resolve_scope(identity, args)?],
@@ -133,23 +134,51 @@ impl McpHandler {
             }
             "memory_read" => {
                 let scope = resolve_scope(identity, args)?;
-                let content = self.store.read(&scope, str_arg(args, "path")?).map_err(describe)?;
+                let path = str_arg(args,"path")?;
+                if let Some(id) = path.strip_prefix("items/").and_then(|p|p.strip_suffix(".md")) {
+                    let item=self.store.read_item(id).map_err(describe)?;
+                    if item.scope!=scope || item.deleted { return Err("memory item is not in this scope".into()); }
+                    return Ok(format!("version: {}\n\n{}",item.version,item.content));
+                }
+                let content = self.store.read(&scope, path).map_err(describe)?;
                 Ok(format!("version: {}\n\n{}", content.version, content.text))
             }
-            "memory_append" => {
+            "memory_save" => {
                 let scope = resolve_scope(identity, args)?;
-                let path = str_arg(args, "path")?;
-                let version = self.store.append(&scope, path, str_arg(args, "text")?).map_err(describe)?;
-                Ok(format!("Saved {path} (version {version})"))
+                let shared = matches!(scope, Scope::Global | Scope::Project(_));
+                if !shared && !identity.write_scopes.contains(&scope.kind().into()) { return Err("write scope is not permitted".into()); }
+                let source = identity.source_conversation.as_ref().ok_or("source conversation is required")?;
+                let kind: ItemKind = serde_json::from_value(args.get("kind").cloned().unwrap_or(json!("fact"))).map_err(|_|"invalid memory kind")?;
+                let outcome = self.store.capture_item(&identity.agent, identity.project.as_ref(), source, &scope, kind, str_arg(args, "text")?).map_err(describe)?;
+                match outcome {
+                    discard_core::memory_items::SaveOutcome::Saved(item) => Ok(format!("Saved {} (version {})", item.path(), item.version)),
+                    discard_core::memory_items::SaveOutcome::Proposed(p) => Ok(format!("Proposed {}. User approval is required; memory has not changed.", p.id)),
+                }
+            }
+            "memory_forget" => {
+                let scope=resolve_scope(identity,args)?;
+                let path=str_arg(args,"path")?;
+                let item_id=path.strip_prefix("items/").and_then(|p|p.strip_suffix(".md")).ok_or("Only versioned memory items can be forgotten.")?;
+                let item=self.store.read_item(item_id).map_err(describe)?;
+                if item.scope!=scope || item.deleted {return Err("memory item is not in this scope".into());}
+                let expected=str_arg(args,"version")?.parse::<u64>().map_err(|_|"invalid item version")?;
+                let source=identity.source_conversation.as_ref().ok_or("source conversation is required")?;
+                let proposal=self.store.propose_forget(&identity.agent,identity.project.as_ref(),source,item_id,expected).map_err(describe)?;
+                Ok(format!("Proposed Forget {}. User approval is required; memory has not changed.",proposal.id))
             }
             "memory_edit" => {
                 let scope = resolve_scope(identity, args)?;
-                let path = str_arg(args, "path")?;
-                let version = self
-                    .store
-                    .edit(&scope, path, str_arg(args, "old")?, str_arg(args, "new")?, str_arg(args, "version")?)
-                    .map_err(describe)?;
-                Ok(format!("Edited {path} (version {version})"))
+                let path = str_arg(args,"path")?;
+                let item_id = path.strip_prefix("items/").and_then(|p|p.strip_suffix(".md")).ok_or("Only versioned memory items can be edited; ask the user to update legacy files.")?;
+                let item = self.store.read_item(item_id).map_err(describe)?;
+                if item.scope != scope || item.deleted { return Err("memory item is not in this scope".into()); }
+                let expected = str_arg(args,"version")?.parse::<u64>().map_err(|_|"invalid item version")?;
+                let old = str_arg(args,"old")?;
+                if old.is_empty() || item.content.matches(old).count()!=1 { return Err("old text must occur exactly once".into()); }
+                let content = item.content.replacen(old,str_arg(args,"new")?,1);
+                let source = identity.source_conversation.as_ref().ok_or("source conversation is required")?;
+                let proposal=self.store.propose_update(&identity.agent,identity.project.as_ref(),source,item_id,expected,&content).map_err(describe)?;
+                Ok(format!("Proposed correction {}. Ask the user to confirm; memory has not changed.",proposal.id))
             }
             _ => Err("unknown tool".to_string()),
         }
@@ -162,8 +191,8 @@ const PLUGIN_ALL_TOOLS: &[&str] = &["plugin_api_docs", "plugin_list", "ui_inspec
 
 const SUPPORTED: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
 const READ_TOOLS: &[&str] = &["memory_list", "memory_read", "memory_search"];
-const WRITE_TOOLS: &[&str] = &["memory_append", "memory_edit"];
-const ALL_TOOLS: &[&str] = &["memory_list", "memory_read", "memory_search", "memory_append", "memory_edit"];
+const WRITE_TOOLS: &[&str] = &["memory_save", "memory_edit", "memory_forget"];
+const ALL_TOOLS: &[&str] = &["memory_list", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_forget"];
 
 fn result(id: &Value, result: Value) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "result": result})
@@ -177,18 +206,20 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
     args.get(key).and_then(Value::as_str).ok_or_else(|| format!("`{key}` is required and must be a string"))
 }
 
-fn scope_for(identity: &Identity, kind: ScopeKindOrd) -> Scope {
-    match kind {
+fn scope_for(identity: &Identity, kind: ScopeKindOrd) -> Result<Scope, String> {
+    Ok(match kind {
+        ScopeKindOrd::AgentProject => Scope::AgentProject(identity.agent.clone(), identity.project.clone().ok_or("no project in this conversation")?),
         ScopeKindOrd::Agent => Scope::Agent(identity.agent.clone()),
-        ScopeKindOrd::Project => Scope::Project(identity.project.clone()),
+        ScopeKindOrd::Project => Scope::Project(identity.project.clone().ok_or("no project in this conversation")?),
         ScopeKindOrd::Global => Scope::Global,
-    }
+    })
 }
 
 /// The `scope` argument, checked against what this session may use.
 fn resolve_scope(identity: &Identity, args: &Value) -> Result<Scope, String> {
     let name = str_arg(args, "scope")?;
     let kind = match name {
+        "agent-project" => ScopeKindOrd::AgentProject,
         "agent" => ScopeKindOrd::Agent,
         "project" => ScopeKindOrd::Project,
         "global" => ScopeKindOrd::Global,
@@ -197,7 +228,7 @@ fn resolve_scope(identity: &Identity, args: &Value) -> Result<Scope, String> {
     if !identity.scopes.contains(&kind) {
         return Err(format!("scope `{name}` is not permitted for this session"));
     }
-    Ok(scope_for(identity, kind))
+    scope_for(identity, kind)
 }
 
 /// A message for the agent. Storage details such as absolute paths stay in the logs.
@@ -212,7 +243,7 @@ fn describe(e: MemoryError) -> String {
 }
 
 fn memory_tool_list(identity: &Identity) -> Vec<Value> {
-    let scope = json!({"type": "string", "enum": ["agent", "project", "global"], "description": "agent: private to you. project: shared in this project. global: shared by all agents."});
+    let scope = json!({"type": "string", "enum": ["agent-project", "agent", "project", "global"], "description": "agent: private to you. project: shared in this project. global: shared by all agents."});
     let defs = |name: &str| -> Value {
         match name {
             "memory_list" => json!({"name": name, "description": "List the memory files in a scope, with sizes and versions.",
@@ -221,9 +252,11 @@ fn memory_tool_list(identity: &Identity) -> Vec<Value> {
                 "inputSchema": {"type": "object", "properties": {"scope": scope, "path": {"type": "string", "description": "Relative path ending in .md, like core/persona.md"}}, "required": ["scope", "path"]}}),
             "memory_search" => json!({"name": name, "description": "Search memory files by words. Searches every scope you can use unless `scope` is given.",
                 "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "scope": scope, "limit": {"type": "integer", "minimum": 1, "maximum": 25}}, "required": ["query"]}}),
-            "memory_append" => json!({"name": name, "description": "Add a note at the end of a memory file. Creates the file if it does not exist. Files under core/ are shown to you at the start of every session.",
-                "inputSchema": {"type": "object", "properties": {"scope": scope, "path": {"type": "string"}, "text": {"type": "string"}}, "required": ["scope", "path", "text"]}}),
-            _ => json!({"name": name, "description": "Replace one piece of text in a memory file. `old` must appear exactly once. `version` comes from memory_read; a stale version is refused.",
+            "memory_save" => json!({"name": name, "description": "Save a durable memory item. Automatic saves use agent outside projects and agent-project inside projects. Shared saves require user approval. Exclude temporary facts, guesses, passwords and tokens.",
+                "inputSchema": {"type": "object", "properties": {"scope": scope, "kind": {"type":"string", "enum":["fact","preference","instruction","decision","commitment"]}, "text": {"type": "string"}}, "required": ["scope", "kind", "text"]}}),
+            "memory_forget" => json!({"name":name,"description":"Propose Forget for a saved item. The user must approve. The source conversation remains unchanged.",
+                "inputSchema":{"type":"object","properties":{"scope":scope,"path":{"type":"string"},"version":{"type":"string"}},"required":["scope","path","version"]}}),
+            _ => json!({"name": name, "description": "Propose a correction to a versioned memory item. The user must approve inferred changes. `old` must appear exactly once. `version` comes from memory_read; a stale version is refused.",
                 "inputSchema": {"type": "object", "properties": {"scope": scope, "path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}, "version": {"type": "string"}}, "required": ["scope", "path", "old", "new", "version"]}}),
         }
     };
@@ -432,7 +465,9 @@ mod tests {
     fn id(scopes: &[ScopeKindOrd], can_write: bool) -> Identity {
         Identity {
             agent: AgentId("a1".into()),
-            project: ProjectId("p1".into()),
+            project: None,
+            source_conversation: Some(discard_core::model::ChannelId("chat".into())),
+            write_scopes: [ScopeKindOrd::Agent].into(),
             surface: Surface::Memory,
             scopes: scopes.iter().copied().collect(),
             can_write,
@@ -485,12 +520,12 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_describes_the_five_memory_tools_with_schemas() {
+    fn tools_list_describes_the_six_memory_tools_with_schemas() {
         let r = rig();
         let reply = r.handler.handle(&full(), &rpc("tools/list", json!({}))).unwrap();
         let tools = reply["result"]["tools"].as_array().unwrap();
         let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["memory_list", "memory_read", "memory_search", "memory_append", "memory_edit"]);
+        assert_eq!(names, ["memory_list", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_forget"]);
         for t in tools {
             assert!(t["description"].as_str().is_some_and(|d| !d.is_empty()));
             assert_eq!(t["inputSchema"]["type"], "object");
@@ -518,25 +553,32 @@ mod tests {
     }
 
     #[test]
-    fn append_writes_into_the_callers_own_agent_scope() {
+    fn capture_uses_item_storage_and_bound_source() {
         let r = rig();
-        let reply = call(&r, &full(), "memory_append", json!({"scope": "agent", "path": "core/persona.md", "text": "I am Scout"}));
+        let reply = call(&r, &full(), "memory_save", json!({"scope":"agent", "text":"I am Scout", "kind":"fact", "source_conversation":"spoof"}));
         assert!(!is_error(&reply), "{reply}");
-        assert_eq!(r.store.read(&Scope::Agent(AgentId("a1".into())), "core/persona.md").unwrap().text, "I am Scout");
-        assert!(r.store.read(&Scope::Agent(AgentId("other".into())), "core/persona.md").is_err());
+        let items = r.store.list_items(&[Scope::Agent(AgentId("a1".into()))]).unwrap();
+        assert_eq!(items[0].content, "I am Scout");
+        assert_eq!(items[0].source_conversation, full().source_conversation);
+        assert!(r.store.list_items(&[Scope::Agent(AgentId("other".into()))]).unwrap().is_empty());
     }
 
     #[test]
-    fn project_scope_maps_to_the_callers_project() {
-        let r = rig();
-        call(&r, &full(), "memory_append", json!({"scope": "project", "path": "notes.md", "text": "shared"}));
-        assert_eq!(r.store.read(&Scope::Project(ProjectId("p1".into())), "notes.md").unwrap().text, "shared");
+    fn shared_save_requires_app_approval_and_json_cannot_grant_it() {
+        let r=rig(); let mut who=full(); who.project=Some(ProjectId("p1".into()));
+        let reply=call(&r,&who,"memory_save",json!({"scope":"project","kind":"fact","text":"shared","approved":true,"can_write":true}));
+        assert!(!is_error(&reply),"{reply}");
+        assert!(r.store.list(&Scope::Project(ProjectId("p1".into()))).unwrap().is_empty());
+        let proposals=r.store.pending_proposals().unwrap(); assert_eq!(proposals.len(),1);
+        r.store.approve_proposal(&proposals[0].id).unwrap();
+        assert_eq!(r.store.list_items(&[Scope::Project(ProjectId("p1".into()))]).unwrap()[0].content,"shared");
+        assert!(call(&r,&who,"memory_approve",json!({"id":proposals[0].id}))["error"].is_object());
     }
 
     #[test]
     fn a_scope_the_session_may_not_use_is_denied_and_nothing_is_written() {
         let r = rig();
-        let reply = call(&r, &full(), "memory_append", json!({"scope": "global", "path": "x.md", "text": "nope"}));
+        let reply = call(&r, &full(), "memory_save", json!({"scope": "global", "path": "x.md", "text": "nope"}));
         assert!(is_error(&reply));
         assert!(text(&reply).contains("not permitted"), "{}", text(&reply));
         assert!(r.store.read(&Scope::Global, "x.md").is_err());
@@ -547,53 +589,82 @@ mod tests {
     fn read_only_sessions_cannot_write() {
         let r = rig();
         let who = id(&[ScopeKindOrd::Agent], false);
-        let reply = call(&r, &who, "memory_append", json!({"scope": "agent", "path": "x.md", "text": "no"}));
+        let reply = call(&r, &who, "memory_save", json!({"scope": "agent", "path": "x.md", "text": "no"}));
         assert!(is_error(&reply));
         assert!(r.store.read(&Scope::Agent(AgentId("a1".into())), "x.md").is_err());
     }
 
     #[test]
-    fn read_returns_the_text_and_version_and_edit_uses_that_version() {
-        let r = rig();
-        call(&r, &full(), "memory_append", json!({"scope": "agent", "path": "x.md", "text": "alpha beta"}));
-        let read = text(&call(&r, &full(), "memory_read", json!({"scope": "agent", "path": "x.md"})));
-        let version = read.lines().next().unwrap().strip_prefix("version: ").unwrap().to_string();
-        assert!(read.ends_with("alpha beta"), "{read}");
-        let edit = call(&r, &full(), "memory_edit", json!({"scope": "agent", "path": "x.md", "old": "beta", "new": "gamma", "version": version}));
-        assert!(!is_error(&edit), "{edit}");
-        assert_eq!(r.store.read(&Scope::Agent(AgentId("a1".into())), "x.md").unwrap().text, "alpha gamma");
+    fn read_and_inferred_edit_use_item_versions_and_propose_corrections() {
+        let r=rig();
+        call(&r,&full(),"memory_save",json!({"scope":"agent","text":"alpha beta"}));
+        let item=r.store.list_items(&[Scope::Agent(AgentId("a1".into()))]).unwrap().remove(0);
+        let read=text(&call(&r,&full(),"memory_read",json!({"scope":"agent","path":item.path()})));
+        assert!(read.starts_with("version: 1")); assert!(read.ends_with("alpha beta"));
+        let edit=call(&r,&full(),"memory_edit",json!({"scope":"agent","path":item.path(),"old":"beta","new":"gamma","version":"1","approved":true}));
+        assert!(!is_error(&edit),"{edit}"); assert_eq!(r.store.read_item(&item.id).unwrap().content,"alpha beta");
+        let p=r.store.pending_proposals().unwrap().remove(0);
+        r.store.approve_proposal(&p.id).unwrap();
+        assert_eq!(r.store.read_item(&item.id).unwrap().content,"alpha gamma");
+        let stale=call(&r,&full(),"memory_edit",json!({"scope":"agent","path":item.path(),"old":"gamma","new":"delta","version":"1"}));
+        assert!(is_error(&stale)); assert!(text(&stale).contains("changed since"));
     }
 
     #[test]
-    fn a_stale_edit_is_an_error_that_tells_the_agent_to_read_again() {
-        let r = rig();
-        call(&r, &full(), "memory_append", json!({"scope": "agent", "path": "x.md", "text": "one"}));
-        let reply = call(&r, &full(), "memory_edit", json!({"scope": "agent", "path": "x.md", "old": "one", "new": "two", "version": "0000000000000000"}));
-        assert!(is_error(&reply));
-        assert!(text(&reply).contains("changed since"), "{}", text(&reply));
+    fn list_shows_item_paths_sizes_and_versions() {
+        let r=rig(); call(&r,&full(),"memory_save",json!({"scope":"agent","text":"12345"}));
+        let out=text(&call(&r,&full(),"memory_list",json!({"scope":"agent"})));
+        assert!(out.contains("items/") && out.contains("5 bytes") && out.contains("version 1"),"{out}");
     }
 
     #[test]
-    fn list_shows_files_with_sizes_and_versions() {
-        let r = rig();
-        call(&r, &full(), "memory_append", json!({"scope": "agent", "path": "a.md", "text": "12345"}));
-        let out = text(&call(&r, &full(), "memory_list", json!({"scope": "agent"})));
-        assert!(out.contains("a.md") && out.contains("5 bytes"), "{out}");
-        assert!(text(&call(&r, &full(), "memory_list", json!({"scope": "project"}))).contains("no files"));
+    fn search_covers_only_permitted_applicable_scopes() {
+        let r=rig(); let mut who=full(); who.project=Some(ProjectId("p1".into()));
+        r.store.create(&Scope::Agent(who.agent.clone()),"a.md","needle in agent").unwrap();
+        r.store.create(&Scope::Project(who.project.clone().unwrap()),"p.md","needle in project").unwrap();
+        r.store.create(&Scope::Global,"g.md","needle in global").unwrap();
+        let all=text(&call(&r,&who,"memory_search",json!({"query":"needle"})));
+        assert!(all.contains("a.md") && all.contains("p.md") && !all.contains("g.md"),"{all}");
+        let one=text(&call(&r,&who,"memory_search",json!({"query":"needle","scope":"project"})));
+        assert!(one.contains("p.md") && !one.contains("a.md"));
+        who.project=None;
+        assert!(is_error(&call(&r,&who,"memory_read",json!({"scope":"project","path":"p.md"}))));
+        assert!(!text(&call(&r,&who,"memory_search",json!({"query":"needle"}))).contains("p.md"));
     }
 
     #[test]
-    fn search_covers_permitted_scopes_by_default_and_one_scope_when_named() {
-        let r = rig();
-        call(&r, &full(), "memory_append", json!({"scope": "agent", "path": "a.md", "text": "needle in agent"}));
-        call(&r, &full(), "memory_append", json!({"scope": "project", "path": "p.md", "text": "needle in project"}));
-        r.store.create(&Scope::Global, "g.md", "needle in global").unwrap();
-        let all = text(&call(&r, &full(), "memory_search", json!({"query": "needle"})));
-        assert!(all.contains("a.md") && all.contains("p.md"), "{all}");
-        assert!(!all.contains("g.md"), "global is not permitted: {all}");
-        let one = text(&call(&r, &full(), "memory_search", json!({"query": "needle", "scope": "project"})));
-        assert!(one.contains("p.md") && !one.contains("a.md"), "{one}");
-        assert!(text(&call(&r, &full(), "memory_search", json!({"query": "zzzz"}))).contains("no matches"));
+    fn project_capture_uses_only_matching_private_domain_and_separate_write_grant() {
+        let r=rig(); let mut who=full(); who.project=Some(ProjectId("p1".into()));
+        who.scopes.insert(ScopeKindOrd::AgentProject); who.write_scopes=[ScopeKindOrd::AgentProject].into();
+        assert!(is_error(&call(&r,&who,"memory_save",json!({"scope":"agent","text":"wrong domain"}))));
+        let saved=call(&r,&who,"memory_save",json!({"scope":"agent-project","text":"correct domain","agent":"other","project":"other"}));
+        assert!(!is_error(&saved),"{saved}");
+        assert_eq!(r.store.list_items(&[Scope::AgentProject(who.agent.clone(),who.project.clone().unwrap())]).unwrap().len(),1);
+        who.write_scopes.clear();
+        assert!(is_error(&call(&r,&who,"memory_save",json!({"scope":"agent-project","text":"grant escalation","write_scopes":["agent-project"]}))));
+    }
+
+    #[test]
+    fn forget_tool_proposes_without_self_authorizing_and_app_approval_deletes() {
+        let r=rig();
+        call(&r,&full(),"memory_save",json!({"scope":"agent","text":"forget this"}));
+        let item=r.store.list_items(&[Scope::Agent(AgentId("a1".into()))]).unwrap().remove(0);
+        let reply=call(&r,&full(),"memory_forget",json!({"scope":"agent","path":item.path(),"version":"1","approved":true}));
+        assert!(!is_error(&reply),"{reply}");
+        assert!(!r.store.read_item(&item.id).unwrap().deleted);
+        let proposal=r.store.pending_proposals().unwrap().remove(0);
+        r.store.approve_proposal(&proposal.id).unwrap();
+        assert!(r.store.read_item(&item.id).unwrap().deleted);
+        assert!(is_error(&call(&r,&full(),"memory_read",json!({"scope":"agent","path":item.path()}))));
+        assert!(is_error(&call(&r,&full(),"memory_save",json!({"scope":"agent","text":"forget this"}))));
+        let source=full().source_conversation.unwrap();
+        assert!(r.store.capture_paused(&source).unwrap());
+        let denied=call(&r,&full(),"memory_save",json!({"scope":"agent","text":"a paraphrase","resume_capture":true,"approved":true}));
+        assert!(is_error(&denied)); assert!(text(&denied).contains("capture is paused"));
+        assert!(call(&r,&full(),"memory_resume_capture",json!({"conversation":source}))["error"].is_object());
+        assert!(r.store.capture_paused(&source).unwrap());
+        r.store.resume_capture(&source).unwrap();
+        assert!(!is_error(&call(&r,&full(),"memory_save",json!({"scope":"agent","text":"a paraphrase after user resume"}))));
     }
 
     #[test]

@@ -20,7 +20,21 @@ pub struct AgentConfig {
     pub plugin_write: bool,
 }
 
+/// Generate an editable human name without using a model as identity.
+pub fn generated_name() -> String {
+    const NAMES: &[&str] = &["Alex", "Casey", "Jordan", "Morgan", "Quinn", "Robin", "Sam", "Taylor"];
+    let id = uuid::Uuid::new_v4();
+    NAMES[(id.as_bytes()[0] as usize) % NAMES.len()].into()
+}
+
 impl AgentConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() { return Err("Enter an agent name.".into()); }
+        if self.provider.trim().is_empty() { return Err("Select a provider.".into()); }
+        if self.model.as_ref().is_some_and(|model| model.trim().is_empty()) { return Err("Select a model.".into()); }
+        Ok(())
+    }
+
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(s)
     }

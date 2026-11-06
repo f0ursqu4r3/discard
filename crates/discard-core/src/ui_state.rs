@@ -51,6 +51,11 @@ pub enum Update {
     Error(String),
     /// Something the user should know that does not stop the turn.
     Notice(String),
+    ConversationMarker(Message),
+    ResponseCompleted(Message),
+    /// The live reply remains available for copying; no saved response ID exists.
+    ResponseSaveFailed(String),
+    MemoryChanges { response: MessageId, changes: Vec<crate::memory_items::MemoryChange> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,15 +64,18 @@ pub struct UiState {
     history: Vec<Message>,
     live: Timeline,
     turn_running: bool,
+    response_save_failed: bool,
     notice: Option<String>,
 }
 
 impl UiState {
     pub fn new(channel_id: ChannelId, history: Vec<Message>) -> Self {
-        Self { channel_id, history, live: Timeline::new(), turn_running: false, notice: None }
+        Self { channel_id, history, live: Timeline::new(), turn_running: false, response_save_failed: false, notice: None }
     }
 
     /// The user pressed send.
+    pub fn channel_id(&self) -> &ChannelId { &self.channel_id }
+
     pub fn user_sent(&mut self, text: &str) {
         self.history.push(Message {
             id: MessageId::new(),
@@ -77,11 +85,16 @@ impl UiState {
         });
         self.live = Timeline::new();
         self.turn_running = true;
+        self.response_save_failed = false;
         self.notice = None;
     }
 
     pub fn apply(&mut self, update: Update) {
         match update {
+            Update::ResponseSaveFailed(message) => { self.response_save_failed = true; self.notice = Some(message); },
+            Update::ResponseCompleted(message) => { self.live = Timeline::new(); self.history.push(message); },
+            Update::ConversationMarker(message) => self.history.push(message),
+            Update::MemoryChanges { .. } => {},
             Update::Event(event) => self.live.apply(&event.kind),
             Update::ApprovalState { approval_id, state } => self.live.mark_approval(&approval_id, state),
             Update::TurnFinished(_) => self.finish_turn(),
@@ -105,6 +118,7 @@ impl UiState {
         for id in unanswered {
             self.live.mark_approval(&id, ApprovalState::Stale);
         }
+        if self.response_save_failed { self.turn_running = false; return; }
         let live = std::mem::take(&mut self.live);
         if !live.blocks().is_empty() {
             self.history.push(live.into_message(self.channel_id.clone()));
@@ -117,7 +131,7 @@ impl UiState {
         &self.history
     }
 
-    /// Blocks of the reply that is still streaming.
+    /// Current reply blocks, including an unsaved reply after a storage failure.
     pub fn live_blocks(&self) -> &[Block] {
         self.live.blocks()
     }

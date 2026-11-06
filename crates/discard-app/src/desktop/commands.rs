@@ -100,9 +100,11 @@ pub async fn create_channel(channels: State<'_, Arc<super::channels::Channels>>,
     tauri::async_runtime::spawn_blocking(move || channels.create(&name, &workspace_mode, &source_channel)).await.map_err(|e| e.to_string())?
 }
 #[tauri::command]
-pub async fn switch_channel(channels: State<'_, Arc<super::channels::Channels>>, channel_id: String) -> Result<(), String> {
+pub async fn switch_channel(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, channel_id: String) -> Result<(), String> {
     let channels = channels.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || channels.select(&channel_id)).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || channels.select(&channel_id)).await.map_err(|e| e.to_string())??;
+    super::windows::show_conversation(&app);
+    Ok(())
 }
 #[tauri::command]
 pub async fn open_branch_channel(channels: State<'_, Arc<super::channels::Channels>>, key: String) -> Result<String, String> {
@@ -130,7 +132,7 @@ pub async fn remove_project(channels: State<'_, Arc<super::channels::Channels>>,
         let id = discard_core::model::ProjectId(project_id);
         let next = channels.store.lock().unwrap_or_else(|e| e.into_inner()).visible_projects().map_err(|e| e.to_string())?.into_iter().find(|p| p.id != id);
         if channels.core.current_project().id == id {
-            if let Some(next) = next { channels.activate_project(&next.id)?; } else { channels.core.clear_project(); }
+            if let Some(next) = next { channels.activate_project(&next.id)?; } else { channels.core.select_sidebar_project(None); }
         }
         channels.store.lock().unwrap_or_else(|e| e.into_inner()).hide_project(&id).map_err(|e| e.to_string())
     }).await.map_err(|e| e.to_string()).and_then(|r| r);
@@ -153,12 +155,40 @@ pub async fn choose_project_folder(app: tauri::AppHandle, channels: State<'_, Ar
                 store.selected_project().map_err(|e| e.to_string())?.ok_or("Project unavailable")?
             } else { store.import_project_folder(&path).map_err(|e| e.to_string())? }
         };
-        if let Err(error) = channels.activate_project(&project.id) {
-            // The folder is already saved. Do not leave an engine using the old folder.
-            if change_current { channels.core.clear_project(); }
-            return Err(error);
-        }
+        channels.activate_project(&project.id)?;
+        if change_current { channels.reload_project(&project.id)?; }
         Ok(true)
     }).await.map_err(|e| e.to_string()).and_then(|r| r);
     core.end_project_change(); result
+}
+
+#[tauri::command]
+pub fn get_conversations(context: State<'_, super::settings::SettingsContext>) -> Result<Vec<serde_json::Value>, String> {
+    let store = context.store.lock().unwrap_or_else(|e| e.into_inner());
+    store.all_conversations().map_err(|e| e.to_string())?.into_iter().map(|channel| {
+        let agent = store.load_agent(&channel.agent_id).map_err(|e| e.to_string())?;
+        let archived = store.channel_archived(&channel.id).map_err(|e| e.to_string())?;
+        let agent_archived = store.agent_archived(&channel.agent_id).ok();
+        Ok(serde_json::json!({"id":channel.id.0,"name":channel.name,"agentId":channel.agent_id.0,"agent":agent.name,"provider":agent.provider,"model":agent.model,"projectId":channel.project_id.map(|p|p.0),"workspaceMode":channel.workspace_mode.as_str(),"archived":archived,"agentArchived":agent_archived == Some(true),"deleted":agent_archived.is_none()}))
+    }).collect()
+}
+#[tauri::command]
+pub async fn create_conversation(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, agent_id: String, project_id: Option<String>, name: String) -> Result<String, String> {
+    let channels = channels.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || channels.create_conversation(&discard_core::model::AgentId(agent_id), project_id.map(discard_core::model::ProjectId).as_ref(), &name)).await.map_err(|e| e.to_string())?;
+    // Creation can persist before runtime selection fails. Refresh every catalog in either case.
+    use tauri::Emitter;
+    let _ = app.emit("discard://conversations", ());
+    result
+}
+#[tauri::command]
+pub async fn open_agent_chat(channels: State<'_, Arc<super::channels::Channels>>, agent_id: String) -> Result<String, String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.open_agent(&discard_core::model::AgentId(agent_id))).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn restore_conversation(channels: State<'_, Arc<super::channels::Channels>>, channel_id: String) -> Result<(), String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.restore_conversation(&channel_id)).await.map_err(|e| e.to_string())?
 }

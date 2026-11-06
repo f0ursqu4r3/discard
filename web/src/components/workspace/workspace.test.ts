@@ -5,7 +5,11 @@ import ContextPanel from './ContextPanel.vue'
 import UserBar from './UserBar.vue'
 import snapshotFixture from '@/bridge/fixtures/snapshot.json'
 import type { MessageDto, SnapshotDto } from '@/bridge/types'
-vi.mock('@/bridge/api', () => ({ runAction: vi.fn(), contextMenu: vi.fn(() => []) }))
+vi.mock('@/bridge/api', () => ({
+  runAction: vi.fn(),
+  contextMenu: vi.fn(() => []),
+  getConversations: vi.fn(async () => []),
+}))
 const snapshot = snapshotFixture as SnapshotDto
 const messages: MessageDto[] = [
   {
@@ -20,9 +24,9 @@ test('DM view cannot display or send into the project conversation', async () =>
   const view = mount(WorkspacePage, { props: { page: 'direct-messages', snapshot, messages } })
   expect(view.text()).not.toContain('Private project conversation')
   expect(view.find('textarea').exists()).toBe(false)
-  expect(view.text()).toContain('Direct messages are not available yet')
+  expect(view.text()).toContain('Choose a direct conversation from the navigation')
   await view.get('button:not([role="tab"])').trigger('click')
-  expect(view.emitted('conversation')).toHaveLength(1)
+  expect(view.emitted('action')).toEqual([['open_agent_settings']])
 })
 
 test('DM profile hides project-specific branch and plugin content', () => {
@@ -31,6 +35,9 @@ test('DM profile hides project-specific branch and plugin content', () => {
   expect(view.find('[data-ui-id="context-plugin-slot"]').exists()).toBe(false)
   expect(view.text()).toContain(snapshot.agent)
   expect(view.text()).toContain('Profile')
+  const planned = view.findAll('[role="tab"]').find((tab) => tab.text().includes('Projects'))!
+  expect(planned.attributes('disabled')).toBeDefined()
+  expect(planned.text()).toContain('Soon')
 })
 
 test('shared user bar opens application settings when reviews are pending', async () => {

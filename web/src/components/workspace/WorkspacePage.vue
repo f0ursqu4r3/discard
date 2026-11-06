@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { Bot, FileText, FolderGit2, GitBranch, MessagesSquare, Settings, Cpu } from '@lucide/vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { getConversations, type ConversationEntry } from '@/bridge/api'
+import { Bot, FileText, FolderGit2, GitBranch, MessagesSquare, Settings } from '@lucide/vue'
 import type { MessageDto, SnapshotDto } from '@/bridge/types'
 import type { WorkspacePage } from './types'
 import {
@@ -14,7 +16,7 @@ import {
   DialogClose,
 } from '../ui/dialog'
 import BrandMark from './BrandMark.vue'
-import MemberList from '../MemberList.vue'
+import MemoryBrowser from '../memory/MemoryBrowser.vue'
 import { Button } from '../ui/button'
 import { Badge } from '../ui/badge'
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../ui/card'
@@ -28,11 +30,60 @@ import {
   EmptyContent,
 } from '../ui/empty'
 defineOptions({ name: 'WorkspacePageView' })
-const props = defineProps<{ page: WorkspacePage; snapshot: SnapshotDto; messages: MessageDto[] }>()
+const props = defineProps<{
+  page: WorkspacePage
+  snapshot: SnapshotDto
+  messages: MessageDto[]
+}>()
 const emit = defineEmits<{ action: [id: string]; conversation: [] }>()
+const conversations = ref<ConversationEntry[]>([])
+const error = ref('')
+const projectAgents = computed(() => [
+  ...new Map(conversations.value.map((c) => [c.agentId, c])).values(),
+])
+const currentProject = computed(
+  () => props.snapshot.activeProjectId === props.snapshot.projectId && !!props.snapshot.channelId,
+)
+const stops: UnlistenFn[] = []
+let disposed = false,
+  generation = 0
+async function reload() {
+  const current = ++generation,
+    id = props.snapshot.projectId
+  try {
+    const rows = await getConversations()
+    if (disposed || current !== generation) return
+    conversations.value = rows.filter((c) => c.projectId === id)
+    error.value = ''
+  } catch (cause) {
+    if (!disposed && current === generation) error.value = String(cause)
+  }
+}
+watch(() => props.snapshot.projectId, reload, { immediate: true })
+onMounted(async () => {
+  try {
+    for (const event of ['discard://agents', 'discard://conversations']) {
+      const unlisten = await listen(event, () => {
+        void reload()
+      })
+      if (disposed) {
+        unlisten()
+        return
+      }
+      stops.push(unlisten)
+    }
+  } catch (cause) {
+    if (!disposed) error.value = String(cause)
+  }
+})
+onUnmounted(() => {
+  disposed = true
+  stops.forEach((stop) => stop())
+})
+
 const dmTab = ref('conversation')
-const branchCount = computed(
-  () => props.snapshot.branches.filter((row) => row.kind === 'branch').length,
+const branchCount = computed(() =>
+  currentProject.value ? props.snapshot.branches.filter((row) => row.kind === 'branch').length : 0,
 )
 </script>
 <template>
@@ -57,14 +108,13 @@ const branchCount = computed(
             <EmptyMedia variant="icon"><MessagesSquare /></EmptyMedia>
             <EmptyTitle>Direct messages with {{ snapshot.agent }}</EmptyTitle>
             <EmptyDescription>
-              Direct messages are not available yet. Your project conversation stays in #{{
-                snapshot.channel
-              }}.
+              Choose a direct conversation from the navigation. Project history stays in its own
+              conversation.
             </EmptyDescription>
           </EmptyHeader>
           <EmptyContent>
-            <Button variant="outline" @click="emit('conversation')">
-              Open #{{ snapshot.channel }}
+            <Button variant="outline" @click="emit('action', 'open_agent_settings')">
+              Manage agents
             </Button>
           </EmptyContent>
         </Empty>
@@ -84,18 +134,15 @@ const branchCount = computed(
         </Card>
       </TabsContent>
       <TabsContent value="memory" class="m-0 overflow-auto overscroll-contain p-6">
-        <Empty>
-          <EmptyHeader>
-            <EmptyMedia variant="icon"><Cpu /></EmptyMedia>
-            <EmptyTitle>Agent memory</EmptyTitle>
-            <EmptyDescription>Review stored notes in Settings → Memory.</EmptyDescription>
-          </EmptyHeader>
-          <EmptyContent>
-            <Button variant="outline" @click="emit('action', 'open_settings')">
-              Open settings
-            </Button>
-          </EmptyContent>
-        </Empty>
+        <MemoryBrowser
+          v-if="snapshot.channelId && !snapshot.activeProjectId"
+          :channel-id="snapshot.channelId"
+          :agent-id="snapshot.agentId"
+          :project-id="null"
+          :revision="snapshot.memoryRev"
+          :running="snapshot.turnRunning"
+        />
+        <p v-else>Choose a direct conversation to see its memory.</p>
       </TabsContent>
       <TabsContent value="settings" class="m-0 overflow-auto overscroll-contain p-6">
         <Card size="sm">
@@ -176,7 +223,9 @@ const branchCount = computed(
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <DialogClose as-child><Button variant="ghost">Cancel</Button></DialogClose>
+            <DialogClose as-child>
+              <Button variant="ghost">Cancel</Button>
+            </DialogClose>
             <DialogClose as-child>
               <Button variant="destructive" @click="emit('action', 'remove_project')">
                 Remove project
@@ -192,7 +241,7 @@ const branchCount = computed(
         </CardHeader>
         <CardContent class="flex flex-col divide-y divide-border">
           <div
-            v-for="channel in snapshot.channels"
+            v-for="channel in conversations"
             :key="channel.id"
             class="flex min-w-0 flex-wrap items-center justify-between gap-2 py-3 first:pt-0 last:pb-0"
           >
@@ -214,16 +263,26 @@ const branchCount = computed(
         <BrandMark class="size-12" />
         <div class="min-w-0">
           <h2 class="text-xl font-semibold">{{ snapshot.project }}</h2>
-          <p class="truncate text-sm text-muted-foreground">{{ snapshot.projectPath }}</p>
+          <p class="truncate text-sm text-muted-foreground">
+            {{ snapshot.projectPath }}
+          </p>
         </div>
       </div>
       <div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Card
           v-for="stat in [
             { label: 'Branches', value: branchCount, icon: GitBranch },
-            { label: 'Channel', value: 1, icon: MessagesSquare },
-            { label: 'Agent', value: 1, icon: Bot },
-            { label: 'Messages', value: messages.length, icon: FileText },
+            {
+              label: 'Conversations',
+              value: conversations.length,
+              icon: MessagesSquare,
+            },
+            { label: 'Agents', value: projectAgents.length, icon: Bot },
+            {
+              label: 'Current messages',
+              value: currentProject ? messages.length : 0,
+              icon: FileText,
+            },
           ]"
           :key="stat.label"
           size="sm"
@@ -240,13 +299,19 @@ const branchCount = computed(
       <Card size="sm">
         <CardHeader><CardTitle>Current work</CardTitle></CardHeader>
         <CardContent>
-          <Button variant="ghost" class="w-full justify-start" @click="emit('conversation')">
+          <Button
+            v-if="currentProject"
+            variant="ghost"
+            class="w-full justify-start"
+            @click="emit('conversation')"
+          >
             <FolderGit2 data-icon="inline-start" />
             <span class="truncate">{{ snapshot.channel }}</span>
             <Badge variant="secondary" class="ml-auto">
               {{ snapshot.turnRunning ? 'Running' : 'Idle' }}
             </Badge>
           </Button>
+          <p v-else>Choose a conversation in this project from the navigation.</p>
         </CardContent>
       </Card>
     </div>
@@ -258,24 +323,33 @@ const branchCount = computed(
           Manage agents
         </Button>
       </div>
-      <MemberList
-        :agent="snapshot.agent"
-        :status="snapshot.agentStatus"
-        :provider="snapshot.provider"
-        :target="{ type: 'agent', id: snapshot.agentId, name: snapshot.agent }"
-        @settings="emit('action', 'open_agent_settings')"
-      />
+      <Card v-for="agent in projectAgents" :key="agent.agentId" size="sm">
+        <CardHeader>
+          <CardTitle>{{ agent.agent }}</CardTitle>
+          <CardDescription>
+            {{ agent.provider }} · {{ agent.model }}
+            <span v-if="agent.deleted">· Deleted</span>
+            <span v-else-if="agent.agentArchived">· Archived</span>
+          </CardDescription>
+        </CardHeader>
+      </Card>
+      <p v-if="!projectAgents.length">No agents have conversations in this project.</p>
+      <p v-if="error" role="alert">{{ error }}</p>
     </div>
-    <Empty v-else-if="page === 'memory'">
-      <EmptyHeader>
-        <EmptyMedia variant="icon"><Cpu /></EmptyMedia>
-        <EmptyTitle>Project memory</EmptyTitle>
-        <EmptyDescription>Review project and agent notes in Settings → Memory.</EmptyDescription>
-      </EmptyHeader>
-      <EmptyContent>
-        <Button variant="outline" @click="emit('action', 'open_settings')">Open settings</Button>
-      </EmptyContent>
-    </Empty>
+    <div v-else-if="page === 'memory'" class="overflow-auto p-3">
+      <MemoryBrowser
+        v-if="snapshot.channelId && snapshot.activeProjectId === snapshot.projectId"
+        :channel-id="snapshot.channelId"
+        :agent-id="snapshot.agentId"
+        :project-id="snapshot.activeProjectId"
+        :revision="snapshot.memoryRev"
+        :running="snapshot.turnRunning"
+      />
+      <p v-else>
+        Choose a conversation in this project to see its memory. Settings → Memory shows all
+        domains.
+      </p>
+    </div>
     <Empty v-else>
       <EmptyHeader>
         <EmptyMedia variant="icon"><FileText /></EmptyMedia>

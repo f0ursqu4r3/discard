@@ -31,8 +31,8 @@ async fn turn(commands: &mpsc::UnboundedSender<Command>, updates: &mut mpsc::Unb
                 kinds.push(e.kind);
             }
             Update::TurnFinished(outcome) => return (outcome, reply, kinds),
-            Update::Error(m) | Update::SetupNeeded(m) => panic!("engine problem: {m}"),
-            Update::ApprovalState { .. } | Update::Notice(_) => {}
+            Update::Error(m) | Update::ResponseSaveFailed(m) | Update::SetupNeeded(m) => panic!("engine problem: {m}"),
+            Update::ApprovalState { .. } | Update::Notice(_) | Update::ResponseCompleted(_) | Update::ConversationMarker(_) | Update::MemoryChanges { .. } => {}
         }
     }
 }
@@ -59,7 +59,7 @@ async fn save_and_recall(provider: Arc<dyn Provider>, model: Option<&str>) {
     db.insert_project(&project).unwrap();
     let agent_id = AgentId::new();
     db.insert_agent(&agent_id, &AgentConfig { name: "Scout".into(), avatar: None, provider: "any".into(), model: model.map(str::to_string), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
-    let channel = Channel { id: ChannelId::new(), project_id: project.id.clone(), name: "c".into(), agent_id: agent_id.clone(), workspace_mode: WorkspaceMode::MainCheckout };
+    let channel = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "c".into(), agent_id: agent_id.clone(), workspace_mode: WorkspaceMode::MainCheckout };
     db.insert_channel(&channel).unwrap();
     let session = SessionId::new();
     db.create_session(&session, &channel.id).unwrap();
@@ -69,9 +69,10 @@ async fn save_and_recall(provider: Arc<dyn Provider>, model: Option<&str>) {
     let memory: Arc<dyn MemoryService> = runtime.clone();
 
     let engine = Engine {
+        mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::new(Mutex::new(db)),
         agent_id: agent_id.clone(),
-        project_id: project.id.clone(),
+        project_id: Some(project.id.clone()),
         memory: Some(memory),
         plugin_write: false,
         workspace_mode: discard_core::model::WorkspaceMode::MainCheckout,

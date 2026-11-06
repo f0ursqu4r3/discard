@@ -66,3 +66,19 @@ Every emitted event keeps the original JSON line in `raw`.
 ## Codex
 
 See `docs/provider-codex.md`. The Codex matrix was verified against a live `codex app-server` in M4.
+
+## Conversation sessions
+
+`SessionMode::Conversation` requires Claude Code 2.1.318 and the documented conversation controls. It uses a fresh, empty Discard-owned working directory and rejects native resume handles. Discard supplies the selected model and refreshed system instructions for a new transcript replay.
+
+The adapter passes `--tools ""`, `--strict-mcp-config`, `--disable-slash-commands`, `--restricted` and `--system-prompt-snapshot off`. It accepts only the scoped Discard memory MCP configuration. It forces `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` in both process environment and explicit session settings. It disables hooks and removes inherited explicit plugin directories. Authentication uses the existing CLI login; Discard does not use `--bare`, copy credentials or change user settings.
+
+Conversation sessions pass `--allowedTools` with exactly the six scoped Discard memory tool names. This lets private saves, reads and shared proposals run even when the session has no permission prompt. It also avoids duplicate host prompts in HostPrompts mode. Built-in tools remain absent. Discard's memory service still controls scope access and shared-write approval; a shared save remains a pending proposal. Coding sessions receive no new tool grant.
+
+The adapter checks the CLI version and required help controls before sending instructions. It rejects detected local managed settings that conflict with memory, hooks or plugin restrictions. Managed policy remains authoritative. Claude can receive remote or MDM policy that the CLI does not expose through an effective-settings API. Discard cannot independently verify that opaque policy, and does not claim administrator or operating-system isolation.
+
+The opt-in synthetic probe at `crates/discard-providers/tests/probes/claude_conversation.py` checks the actual model-facing tools and executes a synthetic private save, read and shared proposal against local test endpoints. It verifies tool-call receipt, result delivery and a pending shared proposal with no shared write. The tested version exposed only the six Discard memory tools. The probe uses a temporary configuration directory and a synthetic API key. Process-fixture tests cover flags, environment overrides, fresh instructions and cleanup.
+
+Run the local probe with `python3 crates/discard-providers/tests/probes/claude_conversation.py`. The script works from any working directory when you give its full path. Use `--claude /path/to/claude` or `DISCARD_CLAUDE_BIN` to select the CLI executable.
+
+Normal app conversations replay the current conversation transcript with refreshed personality and applicable saved memory before every response. Memory edits apply to existing conversations without restarting. Native resume behavior described above applies to Coding sessions. See [Saved memory](memory.md) for the four domains, shared-write approval, Forget, and capture controls.

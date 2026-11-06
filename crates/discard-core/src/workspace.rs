@@ -139,7 +139,7 @@ mod tests {
         store.insert_project(&project).unwrap();
         let agent = AgentId::new();
         store.insert_agent(&agent, &AgentConfig { name: "A".into(), avatar: None, provider: "claude".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
-        let channel = Channel { id: ChannelId::new(), project_id: project.id, name: "general".into(), agent_id: agent, workspace_mode: WorkspaceMode::Worktree };
+        let channel = Channel { id: ChannelId::new(), project_id: Some(project.id), name: "general".into(), agent_id: agent, workspace_mode: WorkspaceMode::Worktree };
         store.insert_channel(&channel).unwrap();
         store.create_session(&SessionId::new(), &channel.id).unwrap();
         let store = Arc::new(Mutex::new(store));
@@ -201,7 +201,7 @@ mod tests {
         assert!(git(&r.repo, &["branch", "--list", &branch]).contains(&branch));
         let store = r.store.lock().unwrap();
         assert_eq!(store.worktree_for(&r.channel.id).unwrap(), None);
-        assert!(store.channels_for_project(&r.channel.project_id).unwrap().is_empty());
+        assert!(store.channels_for_project(r.channel.project_id.as_ref().unwrap()).unwrap().is_empty());
     }
 
     #[test]
@@ -215,7 +215,7 @@ mod tests {
         assert!(prepared.cwd.join("precious.txt").exists());
         let store = r.store.lock().unwrap();
         assert!(store.worktree_for(&r.channel.id).unwrap().is_some());
-        assert_eq!(store.channels_for_project(&r.channel.project_id).unwrap().len(), 1, "the channel is still there");
+        assert_eq!(store.channels_for_project(r.channel.project_id.as_ref().unwrap()).unwrap().len(), 1, "the channel is still there");
     }
 
     #[test]
@@ -231,7 +231,7 @@ mod tests {
     fn archiving_a_channel_without_a_worktree_just_hides_it() {
         let r = rig();
         assert_eq!(r.ws.archive(&r.channel.id, false).unwrap(), ArchiveOutcome::Archived { kept_branch: None });
-        assert!(r.store.lock().unwrap().channels_for_project(&r.channel.project_id).unwrap().is_empty());
+        assert!(r.store.lock().unwrap().channels_for_project(r.channel.project_id.as_ref().unwrap()).unwrap().is_empty());
     }
 
     #[test]
@@ -242,7 +242,7 @@ mod tests {
         let new = change_workspace_mode(&store, &r.channel.id, WorkspaceMode::MainCheckout).unwrap();
         assert_ne!(old, new, "the old provider session belonged to the old directory");
         assert_eq!(store.latest_session(&r.channel.id).unwrap(), Some(new));
-        assert_eq!(store.channels_for_project(&r.channel.project_id).unwrap()[0].workspace_mode, WorkspaceMode::MainCheckout);
+        assert_eq!(store.channels_for_project(r.channel.project_id.as_ref().unwrap()).unwrap()[0].workspace_mode, WorkspaceMode::MainCheckout);
     }
 
     #[test]

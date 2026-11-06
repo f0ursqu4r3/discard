@@ -1,6 +1,9 @@
 {
+  "activeProjectId": "project",
+  "composerDisabled": false,
   "rev": 1,
   "historyRev": 0,
+  "memoryRev": 0,
   "project": "Example",
   "projectId": "project",
   "projectPath": "/project",

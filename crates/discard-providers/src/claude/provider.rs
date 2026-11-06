@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use discard_core::approval::Decision;
 use discard_core::capability::{CapabilityMatrix, EnforcementMode};
 use discard_core::event::{ApprovalId, EventKind, RawEvent};
-use discard_core::provider::{Provider, ProviderError, ProviderSession, SessionSpec, SetupStatus};
+use discard_core::provider::{Provider, ProviderError, ProviderSession, SessionMode, SessionSpec, SetupStatus};
 use discard_core::redact::redact;
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
@@ -74,6 +74,27 @@ pub fn build_args(spec: &SessionSpec) -> Vec<String> {
             args.extend(["--permission-prompts", "none"].map(String::from));
         }
     }
+    if spec.mode == SessionMode::Conversation {
+        // These tools enforce scoped memory and shared-write approval in Discard.
+        // Permit only these exact names; native tools remain absent.
+        args.extend([
+            "--allowedTools".into(),
+            crate::conversation::MEMORY_TOOLS.iter().map(|name| format!("mcp__discard-memory__{name}")).collect::<Vec<_>>().join(","),
+        ]);
+        args.extend(
+            ["--tools", "", "--strict-mcp-config", "--disable-slash-commands", "--restricted", "--system-prompt-snapshot", "off"]
+                .map(String::from),
+        );
+        args.extend([
+            "--settings".into(),
+            json!({
+                "disableAllHooks":true, "autoMemoryEnabled":false,
+                "env":{"CLAUDE_CODE_DISABLE_AUTO_MEMORY":"1", "CLAUDE_CODE_DISABLE_CLAUDE_MDS":"1", "CLAUDE_CODE_PLUGIN_DIRS":""},
+                "pluginConfigs":{"cc-plugin-agents-md@builtin":{"options":{"instructionFiles":"managed-only"}}}
+            })
+            .to_string(),
+        ]);
+    }
     if let Some(model) = &spec.model {
         args.extend(["--model".into(), model.clone()]);
     }
@@ -110,14 +131,8 @@ impl Provider for ClaudeProvider {
     /// Checks that the CLI exists and reports a login. Reads only the `loggedIn` flag.
     /// Discard never reads, stores, or logs credentials.
     async fn check_setup(&self) -> SetupStatus {
-        let version = self
-            .command()
-            .arg("--version")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .status();
+        let version =
+            self.command().arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true).status();
         match tokio::time::timeout(SETUP_TIMEOUT, version).await {
             Ok(Ok(_)) => {}
             _ => {
@@ -126,32 +141,70 @@ impl Provider for ClaudeProvider {
                 };
             }
         }
-        let status = self
-            .command()
-            .args(["auth", "status"])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .output();
+        let status = self.command().args(["auth", "status"]).stdin(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true).output();
         let logged_in = match tokio::time::timeout(SETUP_TIMEOUT, status).await {
-            Ok(Ok(out)) => serde_json::from_slice::<Value>(&out.stdout)
-                .ok()
-                .and_then(|v| v.get("loggedIn").and_then(Value::as_bool))
-                .unwrap_or(false),
+            Ok(Ok(out)) => {
+                serde_json::from_slice::<Value>(&out.stdout).ok().and_then(|v| v.get("loggedIn").and_then(Value::as_bool)).unwrap_or(false)
+            }
             _ => false,
         };
-        if logged_in {
-            SetupStatus::Ready
-        } else {
-            SetupStatus::NotLoggedIn { login_command: "claude auth login".into() }
-        }
+        if logged_in { SetupStatus::Ready } else { SetupStatus::NotLoggedIn { login_command: "claude auth login".into() } }
     }
 
-    async fn start_session(&self, spec: SessionSpec) -> Result<Box<dyn ProviderSession>, ProviderError> {
+    async fn start_session(&self, mut spec: SessionSpec) -> Result<Box<dyn ProviderSession>, ProviderError> {
         // Fail closed before any process starts.
         self.matrix.supports(spec.enforcement)?;
-        let mut child = self
-            .command()
+        let files = if spec.mode == SessionMode::Conversation {
+            crate::conversation::read_memory_config(&spec)?;
+            if spec.model.as_deref().filter(|s| !s.is_empty()).is_none() {
+                return Err(crate::conversation::setup("select an exact Claude model"));
+            }
+            if spec.resume_handle.is_some() {
+                return Err(crate::conversation::setup("Claude conversation sessions require a fresh transcript replay"));
+            }
+            let version = tokio::time::timeout(SETUP_TIMEOUT, self.command().arg("--version").kill_on_drop(true).output())
+                .await
+                .map_err(|_| crate::conversation::setup("Claude version check timed out"))?
+                .map_err(|e| crate::conversation::setup(e.to_string()))?;
+            if !version.status.success() || !String::from_utf8_lossy(&version.stdout).starts_with("2.1.318 ") {
+                return Err(crate::conversation::setup("Claude Code 2.1.318 is required for the verified conversation controls"));
+            }
+            let help = tokio::time::timeout(SETUP_TIMEOUT, self.command().arg("--help").kill_on_drop(true).output())
+                .await
+                .map_err(|_| crate::conversation::setup("Claude control check timed out"))?
+                .map_err(|e| crate::conversation::setup(e.to_string()))?;
+            let help_text = String::from_utf8_lossy(&help.stdout);
+            if !help.status.success()
+                || [
+                    "--tools",
+                    "--allowedTools",
+                    "--strict-mcp-config",
+                    "--restricted",
+                    "--disable-slash-commands",
+                    "--system-prompt-snapshot",
+                    "--settings",
+                ]
+                .iter()
+                .any(|flag| !help_text.contains(flag))
+            {
+                return Err(crate::conversation::setup("Claude is missing a required conversation control"));
+            }
+            // Managed policy remains authoritative. Reject known local conflicts; never change policy.
+            crate::conversation::check_claude_managed_files()?;
+            let owned = crate::conversation::ConversationFiles::new()?;
+            spec.cwd = owned.cwd.clone();
+            Some(owned)
+        } else {
+            None
+        };
+        let mut command = self.command();
+        if spec.mode == SessionMode::Conversation {
+            command
+                .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
+                .env("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1")
+                .env_remove("CLAUDE_CODE_PLUGIN_DIRS");
+        }
+        let mut child = command
             .args(build_args(&spec))
             .current_dir(&spec.cwd)
             .stdin(Stdio::piped())
@@ -222,7 +275,7 @@ impl Provider for ClaudeProvider {
             });
         }
 
-        Ok(Box::new(ClaudeSession { child, pgid, stdin, events, shared }))
+        Ok(Box::new(ClaudeSession { child, pgid, stdin, events, shared, _conversation_files: files }))
     }
 }
 
@@ -233,6 +286,7 @@ struct Shared {
 }
 
 struct ClaudeSession {
+    _conversation_files: Option<crate::conversation::ConversationFiles>,
     child: Child,
     pgid: Option<i32>,
     stdin: Option<ChildStdin>,
@@ -251,7 +305,9 @@ impl ClaudeSession {
     /// Write one JSON line. A closed pipe means the process already exited: the event stream
     /// reports that, so it is not an error here.
     async fn write_line(&mut self, value: &Value) -> Result<(), ProviderError> {
-        let Some(stdin) = self.stdin.as_mut() else { return Ok(()) };
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Ok(());
+        };
         let mut line = serde_json::to_string(value).map_err(|e| ProviderError::Protocol(e.to_string()))?;
         line.push('\n');
         match stdin.write_all(line.as_bytes()).await {
@@ -306,7 +362,9 @@ impl ProviderSession for ClaudeSession {
                 "updatedInput": request.input,
                 "updatedPermissions": session_scoped_rules(&request.suggestions),
             }),
-            Decision::Deny => json!({"behavior": "deny", "message": "Denied by the user in Discard."}),
+            Decision::Deny => {
+                json!({"behavior": "deny", "message": "Denied by the user in Discard."})
+            }
         };
         self.write_line(&json!({
             "type": "control_response",
@@ -347,6 +405,7 @@ mod tests {
 
     fn spec(enforcement: EnforcementMode) -> SessionSpec {
         SessionSpec {
+            mode: discard_core::provider::SessionMode::Coding,
             cwd: PathBuf::from("."),
             model: None,
             system_prompt: None,
@@ -403,6 +462,34 @@ mod tests {
         for flag in ["--model", "--append-system-prompt", "--resume", "--mcp-config"] {
             assert!(!args.contains(&flag.to_string()), "{flag}");
         }
+    }
+
+    #[test]
+    fn conversation_memory_permissions_allow_only_the_exact_scoped_tools() {
+        for enforcement in [EnforcementMode::HostPrompts, EnforcementMode::ProviderDenies] {
+            let mut s = spec(enforcement);
+            assert!(!build_args(&s).iter().any(|arg| arg == "--allowedTools"));
+            s.mode = SessionMode::Conversation;
+            let args = build_args(&s);
+            let allowed = args.iter().position(|arg| arg == "--allowedTools").expect("scoped memory permission list");
+            assert_eq!(
+                args[allowed + 1],
+                "mcp__discard-memory__memory_search,mcp__discard-memory__memory_list,mcp__discard-memory__memory_read,mcp__discard-memory__memory_save,mcp__discard-memory__memory_edit,mcp__discard-memory__memory_forget"
+            );
+            assert!(args.windows(2).any(|pair| pair == ["--tools", ""]));
+        }
+    }
+
+    #[test]
+    fn conversation_mode_removes_native_tools_and_provider_context() {
+        let mut s = spec(EnforcementMode::HostPrompts);
+        s.mode = discard_core::provider::SessionMode::Conversation;
+        let args = build_args(&s);
+        for flag in ["--strict-mcp-config", "--restricted", "--disable-slash-commands"] {
+            assert!(args.iter().any(|arg| arg == flag), "{flag}");
+        }
+        assert!(args.windows(2).any(|w| w == ["--tools", ""]));
+        assert!(args.windows(2).any(|w| w == ["--system-prompt-snapshot", "off"]));
     }
 
     #[test]

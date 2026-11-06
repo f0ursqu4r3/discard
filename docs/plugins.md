@@ -66,7 +66,7 @@ paths = ["~/notes", "/tmp/scratch"]   # absolute, or start with ~/. No `..`.
 write = false                          # read-only unless true
 
 [capabilities.memory]
-scopes = ["project", "global"]         # any of agent, project, global
+scopes = ["project", "global"]         # agent, agent-project, project, global
 write = false                          # append and edit need true
 ```
 
@@ -74,8 +74,21 @@ write = false                          # append and edit need true
   and refuses any path that ends outside the listed folders. A read or write holds at most 1 MB of UTF-8 text. A
   write replaces the file in one step. `remove` deletes files only.
 - **Memory.** `list`, `read`, `search`, `append`, `edit`. A call for a scope the manifest does not name is refused
-  before it reaches memory. `edit` needs the version from `read`, as in the agent tools. Memory under `core/` is added
-  to the agent's instructions, so the review screen warns that a write can change agent behavior.
+  before it reaches memory. `edit` needs the opaque version returned by `read`. Agent and project scopes use the
+  callback's actual conversation context. Project scopes fail in a direct conversation.
+- Plugin `append` creates or updates a versioned memory item. The original path stays usable through `list`, `read`,
+  `search`, `append`, and `edit`. `core/` paths create instruction items that enter every applicable response prompt.
+  Other paths create fact items. Settings and applicable conversation memory views can inspect, edit, move, forget,
+  and undo these items with the same history and version checks as other memory.
+- Plugin writes use the approved plugin capability. They are explicit writes, not automatic assistant saves. They
+  have no inferred source conversation. Each item stores its original scope and path in its metadata; it has no
+  second raw file. The normal item UUID path remains valid in its current scope.
+- After a move, the old scope/path returns an error. `list` and `search` in the new scope return the item UUID path.
+  The plugin needs a grant for that scope to use it. Forget removes the item from reads and retrieval. Append cannot
+  recreate a moved or forgotten item through its old path. Edits made with an old version fail, including after Undo
+  restores the same text. Read the current item again before retrying.
+- Legacy raw files remain readable. New plugin writes use versioned items. This new application does not migrate
+  legacy raw files; plugin mutation of an existing legacy raw path returns an error.
 - A failed call raises a Lua error. Use `pcall` to handle it.
 - Each write, remove, append, and edit is logged with the plugin name and path.
 

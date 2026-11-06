@@ -8,6 +8,7 @@ import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
 import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from '../ui/empty'
 import MemberList from '../MemberList.vue'
+import MemoryBrowser from '../memory/MemoryBrowser.vue'
 import PluginElement from '@/plugin/PluginElement.vue'
 const props = defineProps<{ snapshot: SnapshotDto; directMessage?: boolean }>()
 const emit = defineEmits<{ action: [id: string]; approvals: [] }>()
@@ -22,8 +23,11 @@ const branch = computed(() => props.snapshot.branches.find((row) => row.current)
     >
       <TabsList class="w-full">
         <TabsTrigger value="context">{{ directMessage ? 'Profile' : 'Context' }}</TabsTrigger>
-        <TabsTrigger value="tasks">{{ directMessage ? 'Memory' : 'Tasks' }}</TabsTrigger>
-        <TabsTrigger value="artifacts">{{ directMessage ? 'Projects' : 'Artifacts' }}</TabsTrigger>
+        <TabsTrigger value="tasks">Memory</TabsTrigger>
+        <!-- TODO: Implement project memberships and saved artifacts. -->
+        <TabsTrigger value="artifacts" disabled>
+          {{ directMessage ? 'Projects' : 'Artifacts' }} · Soon
+        </TabsTrigger>
       </TabsList>
     </div>
     <TabsContent value="context" class="m-0 min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">
@@ -68,7 +72,9 @@ const branch = computed(() => props.snapshot.branches.find((row) => row.current)
                   <Activity class="size-3" />
                   Status
                 </dt>
-                <dd class="ml-auto">{{ snapshot.turnRunning ? 'Running' : 'Idle' }}</dd>
+                <dd class="ml-auto">
+                  {{ snapshot.turnRunning ? 'Running' : 'Idle' }}
+                </dd>
               </div>
             </dl>
           </CardContent>
@@ -78,7 +84,11 @@ const branch = computed(() => props.snapshot.branches.find((row) => row.current)
           :agent="snapshot.agent"
           :status="snapshot.agentStatus"
           :provider="snapshot.provider"
-          :target="{ type: 'agent', id: snapshot.agentId, name: snapshot.agent }"
+          :target="{
+            type: 'agent',
+            id: snapshot.agentId,
+            name: snapshot.agent,
+          }"
           @settings="emit('action', 'open_agent_settings')"
         />
         <div
@@ -127,18 +137,13 @@ const branch = computed(() => props.snapshot.branches.find((row) => row.current)
       </div>
     </TabsContent>
     <TabsContent value="tasks" class="m-0 overflow-y-auto">
-      <Empty>
-        <EmptyHeader>
-          <EmptyTitle>{{ directMessage ? 'Agent memory' : 'No task list' }}</EmptyTitle>
-          <EmptyDescription>
-            {{
-              directMessage
-                ? 'Review stored notes in Settings → Memory.'
-                : 'Task updates appear in the conversation.'
-            }}
-          </EmptyDescription>
-        </EmptyHeader>
-      </Empty>
+      <MemoryBrowser
+        :channel-id="snapshot.channelId"
+        :agent-id="snapshot.agentId"
+        :project-id="snapshot.activeProjectId"
+        :revision="snapshot.memoryRev"
+        :running="snapshot.turnRunning"
+      />
     </TabsContent>
     <TabsContent value="artifacts" class="m-0 overflow-y-auto">
       <Empty>

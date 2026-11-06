@@ -89,7 +89,7 @@ mod tests {
         store
             .insert_channel(&Channel {
                 id: id.clone(),
-                project_id: project.id,
+                project_id: Some(project.id),
                 name: "channel".into(),
                 agent_id: agent,
                 workspace_mode: WorkspaceMode::Worktree,
