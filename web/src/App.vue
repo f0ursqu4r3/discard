@@ -66,7 +66,6 @@ const store = useStore()
 const agentAvatar = useAgentAvatar(() => store.snapshot?.agentId)
 const projects = ref<ProjectEntry[]>([])
 const projectChannels = ref<ProjectChannelDto[]>([])
-const detailsChannelId = ref<string | null>(null)
 let projectChannelRequest = 0
 async function refreshProjectChannels(projectId: string | null) {
   const request = ++projectChannelRequest
@@ -515,18 +514,23 @@ async function selectChannel(id: string) {
   }
 }
 async function inspectChannel(id: string) {
-  detailsChannelId.value = id
-  sidebarMode.value = 'profile'
-  if (isWide.value) {
-    if (!store.snapshot?.memberListVisible) {
-      try {
-        await setMemberListVisible(true)
-      } catch (error) {
-        toast.error('Could not open channel details', { description: String(error) })
-      }
+  if (switching.value) return
+  switching.value = true
+  try {
+    await switchChannel(id)
+    await store.refresh()
+    if (disposed) return
+    sidebarMode.value = 'profile'
+    navigate('conversation')
+    if (isWide.value) {
+      if (!store.snapshot?.memberListVisible) await setMemberListVisible(true)
+    } else {
+      contextOpen.value = true
     }
-  } else {
-    contextOpen.value = true
+  } catch (error) {
+    toast.error('Could not open archived channel', { description: String(error) })
+  } finally {
+    switching.value = false
   }
 }
 async function openBranch(key: string) {
@@ -566,8 +570,7 @@ watch([isWide, isCompact], () => {
 })
 watch(
   () => store.snapshot?.channelId,
-  (channelId) => {
-    detailsChannelId.value = channelId ?? null
+  () => {
     conversationTab.value = 'conversation'
     messageJump.value = null
     if (searchAgent.value?.id !== store.snapshot?.agentId || store.snapshot?.activeProjectId)
@@ -956,7 +959,6 @@ watch(
                 "
                 :snapshot="store.snapshot"
                 :project-channels="projectChannels"
-                :details-channel-id="detailsChannelId"
                 @action="action"
                 @main-agent-changed="refreshProjectContext"
                 @canonical-changed="refreshProjectContext"
@@ -1028,7 +1030,6 @@ watch(
             "
             :snapshot="store.snapshot"
             :project-channels="projectChannels"
-            :details-channel-id="detailsChannelId"
             @action="action"
             @main-agent-changed="refreshProjectContext"
             @canonical-changed="refreshProjectContext"

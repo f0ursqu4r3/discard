@@ -106,6 +106,32 @@ test('shows stale topic feedback and keeps edits available after a version confl
   ).toBe('my edit')
 })
 
+test('topic conflict recovery cannot mark a different channel stale', async () => {
+  let resolveConflictReload!: (value: ReturnType<typeof details>) => void
+  api.getChannelDetails
+    .mockResolvedValueOnce(details('first-id'))
+    .mockImplementationOnce(() => new Promise((resolve) => (resolveConflictReload = resolve)))
+    .mockResolvedValueOnce(details('second-id', 'current second topic'))
+  api.updateChannelTopic.mockRejectedValueOnce(
+    new Error('Topic changed. Expected version 2, found 3.'),
+  )
+  const wrapper = mount(ProjectChannelDetails, {
+    props: { projectId: 'project', channelId: 'first-id', generalRunning: false },
+  })
+  await flushPromises()
+  await wrapper.get('textarea[aria-label="Channel topic"]').setValue('draft from first')
+  await wrapper.get('[data-ui-id="save-topic"]').trigger('click')
+  await flushPromises()
+  await wrapper.setProps({ channelId: 'second-id' })
+  await flushPromises()
+  resolveConflictReload(details('first-id', 'latest first topic', 3))
+  await flushPromises()
+
+  expect(wrapper.text()).toContain('current second topic')
+  expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+  expect(wrapper.find('[data-ui-id="reload-topic"]').exists()).toBe(false)
+})
+
 test('remote topic updates preserve an unsaved draft and block a stale save', async () => {
   api.getChannelDetails
     .mockResolvedValueOnce(details('general-id'))
@@ -188,6 +214,29 @@ test('reloads the main agent after a command error that may follow persistence',
   expect(wrapper.get('[role="alert"]').text()).toContain('Launcher failed after saving the agent')
 })
 
+test('main-agent error recovery cannot emit or show an error after switching channels', async () => {
+  let resolveRecovery!: (value: ReturnType<typeof details>) => void
+  api.getChannelDetails
+    .mockResolvedValueOnce(details('first-id'))
+    .mockImplementationOnce(() => new Promise((resolve) => (resolveRecovery = resolve)))
+    .mockResolvedValueOnce(details('second-id', 'second topic'))
+  api.setProjectMainAgent.mockRejectedValueOnce(new Error('Launcher failed after persistence'))
+  const wrapper = mount(ProjectChannelDetails, {
+    props: { projectId: 'project', channelId: 'first-id', generalRunning: false },
+  })
+  await flushPromises()
+  await wrapper.get('[data-ui-id="project-main-agent"]').setValue('agent-b')
+  await flushPromises()
+  await wrapper.setProps({ channelId: 'second-id' })
+  await flushPromises()
+  resolveRecovery(details('first-id', 'first topic', 2))
+  await flushPromises()
+
+  expect(wrapper.text()).toContain('second topic')
+  expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+  expect(wrapper.emitted('mainAgentChanged')).toBeUndefined()
+})
+
 test('main-agent refresh keeps a valid topic draft when its version is unchanged', async () => {
   api.getChannelDetails
     .mockResolvedValueOnce(details('general-id'))
@@ -256,6 +305,31 @@ test('offers canonical promotion for archived legacy history without a failing r
   expect(wrapper.text()).toContain('Active channel')
 })
 
+test('keeps unbound archived history readable without offering canonical promotion', async () => {
+  const archived = {
+    ...details('unbound-id'),
+    channel: {
+      ...details('unbound-id').channel,
+      name: 'Legacy planning',
+      kind: 'archived_legacy',
+      archived: true,
+      archivedInto: null,
+      branch: null,
+    },
+  }
+  api.getChannelDetails.mockResolvedValueOnce(archived)
+  const wrapper = mount(ProjectChannelDetails, {
+    props: { projectId: 'project', channelId: 'unbound-id', generalRunning: false },
+  })
+  await flushPromises()
+  expect(wrapper.text()).toContain('Archived history')
+  expect(wrapper.text()).toContain(
+    'This history has no supported branch or general channel to select.',
+  )
+  expect(wrapper.find('[data-ui-id="select-canonical-channel"]').exists()).toBe(false)
+  expect(wrapper.find('[data-ui-id="restore-archived-channel"]').exists()).toBe(false)
+})
+
 test('refreshes canonical state and reports an error after a partial promotion failure', async () => {
   const archived = {
     ...details('old-id'),
@@ -282,4 +356,37 @@ test('refreshes canonical state and reports an error after a partial promotion f
   expect(wrapper.get('[role="alert"]').text()).toContain('Launcher failed after promotion')
   expect(wrapper.text()).toContain('Active channel')
   expect(wrapper.emitted('canonicalChanged')).toHaveLength(1)
+})
+
+test('canonical error recovery cannot emit or show an error after switching channels', async () => {
+  const archived = {
+    ...details('first-id'),
+    channel: {
+      ...details('first-id').channel,
+      kind: 'archived_legacy',
+      archived: true,
+      archivedInto: 'new-id',
+      branch: 'feature/x',
+    },
+  }
+  let resolveRecovery!: (value: ReturnType<typeof details>) => void
+  api.getChannelDetails
+    .mockResolvedValueOnce(archived)
+    .mockImplementationOnce(() => new Promise((resolve) => (resolveRecovery = resolve)))
+    .mockResolvedValueOnce(details('second-id', 'second topic'))
+  api.selectCanonicalBranch.mockRejectedValueOnce(new Error('Launcher failed after promotion'))
+  const wrapper = mount(ProjectChannelDetails, {
+    props: { projectId: 'project', channelId: 'first-id', generalRunning: false },
+  })
+  await flushPromises()
+  await wrapper.get('[data-ui-id="select-canonical-channel"]').trigger('click')
+  await flushPromises()
+  await wrapper.setProps({ channelId: 'second-id' })
+  await flushPromises()
+  resolveRecovery(details('first-id'))
+  await flushPromises()
+
+  expect(wrapper.text()).toContain('second topic')
+  expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+  expect(wrapper.emitted('canonicalChanged')).toBeUndefined()
 })

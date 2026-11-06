@@ -34,8 +34,25 @@ const selectingCanonical = ref(false)
 const error = ref('')
 const staleTopic = ref(false)
 let requestId = 0
+let contextEpoch = 0
+let topicOperation = 0
+let mainAgentOperation = 0
+let canonicalOperation = 0
 let stopDetailsEvent: UnlistenFn | undefined
 let disposed = false
+
+type OperationContext = { projectId: string; channelId: string; epoch: number }
+function captureContext(): OperationContext {
+  return { projectId: props.projectId, channelId: props.channelId, epoch: contextEpoch }
+}
+function isCurrentContext(context: OperationContext) {
+  return (
+    !disposed &&
+    context.epoch === contextEpoch &&
+    context.projectId === props.projectId &&
+    context.channelId === props.channelId
+  )
+}
 
 async function load(options: { discardDraft?: boolean; forceStale?: boolean } = {}) {
   const currentRequest = ++requestId
@@ -90,32 +107,29 @@ async function load(options: { discardDraft?: boolean; forceStale?: boolean } = 
 
 watch(
   () => [props.projectId, props.channelId],
-  () => void load(),
-  { immediate: true },
+  () => {
+    contextEpoch++
+    topicOperation++
+    mainAgentOperation++
+    canonicalOperation++
+    savingTopic.value = false
+    savingMainAgent.value = false
+    selectingCanonical.value = false
+    void load()
+  },
+  { immediate: true, flush: 'sync' },
 )
 async function refreshFromEvent() {
-  const projectId = props.projectId
-  const channelId = props.channelId
+  const context = captureContext()
   await load()
-  if (
-    staleTopic.value &&
-    !disposed &&
-    projectId === props.projectId &&
-    channelId === props.channelId
-  ) {
+  if (staleTopic.value && isCurrentContext(context)) {
     error.value = 'The topic changed while you were editing. Reload the latest topic before saving.'
   }
 }
 async function refreshPreservingDraft() {
-  const projectId = props.projectId
-  const channelId = props.channelId
+  const context = captureContext()
   await load()
-  if (
-    staleTopic.value &&
-    !disposed &&
-    projectId === props.projectId &&
-    channelId === props.channelId
-  ) {
+  if (staleTopic.value && isCurrentContext(context)) {
     error.value = 'Details changed while you were editing. Reload the latest topic before saving.'
   }
 }
@@ -137,29 +151,32 @@ onUnmounted(() => {
 })
 
 async function saveTopic() {
+  const context = captureContext()
   const current = details.value
-  const projectId = props.projectId
-  const channelId = props.channelId
+  const projectId = context.projectId
+  const channelId = context.channelId
   if (current?.channel.projectId !== projectId || current.channel.id !== channelId) return
   if (!current || savingTopic.value || current.channel.archived || staleTopic.value) return
+  const operation = ++topicOperation
   savingTopic.value = true
   error.value = ''
   try {
     await updateChannelTopic(projectId, channelId, current.topic.version, topicDraft.value)
-    if (channelId !== props.channelId || projectId !== props.projectId) return
+    if (!isCurrentContext(context)) return
     await load({ discardDraft: true })
   } catch (cause) {
-    if (channelId !== props.channelId || projectId !== props.projectId) return
+    if (!isCurrentContext(context)) return
     const message = String(cause)
     if (message.includes('Topic changed.')) {
       await load({ forceStale: true })
+      if (!isCurrentContext(context)) return
       staleTopic.value = true
       error.value = 'The topic changed elsewhere. Reload the latest topic before saving again.'
     } else {
       error.value = message
     }
   } finally {
-    savingTopic.value = false
+    if (operation === topicOperation) savingTopic.value = false
   }
 }
 
@@ -171,8 +188,9 @@ function cancelTopic() {
 
 async function changeMainAgent(event: Event) {
   const agentId = (event.target as HTMLSelectElement).value
-  const currentChannelId = props.channelId
-  const currentProjectId = props.projectId
+  const context = captureContext()
+  const currentChannelId = context.channelId
+  const currentProjectId = context.projectId
   if (
     !details.value ||
     details.value.channel.id !== currentChannelId ||
@@ -180,6 +198,7 @@ async function changeMainAgent(event: Event) {
   )
     return
   if (!agentId || savingMainAgent.value || props.generalRunning) return
+  const operation = ++mainAgentOperation
   savingMainAgent.value = true
   error.value = ''
   let commandError = ''
@@ -188,18 +207,21 @@ async function changeMainAgent(event: Event) {
   } catch (cause) {
     commandError = String(cause)
   } finally {
-    if (currentChannelId === props.channelId && currentProjectId === props.projectId) {
+    if (isCurrentContext(context)) {
       await refreshPreservingDraft()
-      if (commandError) error.value = commandError
-      emit('mainAgentChanged')
+      if (isCurrentContext(context)) {
+        if (commandError) error.value = commandError
+        emit('mainAgentChanged')
+      }
     }
-    savingMainAgent.value = false
+    if (operation === mainAgentOperation) savingMainAgent.value = false
   }
 }
 
 async function makeCanonical() {
   const channel = details.value?.channel
-  const projectId = props.projectId
+  const context = captureContext()
+  const projectId = context.projectId
   if (
     !channel ||
     channel.projectId !== projectId ||
@@ -209,23 +231,27 @@ async function makeCanonical() {
     selectingCanonical.value
   )
     return
+  const operation = ++canonicalOperation
   selectingCanonical.value = true
   error.value = ''
   let commandError = ''
   try {
     if (channel.branch) await selectCanonicalBranch(projectId, channel.branch, channel.id)
     else await selectCanonicalProjectChannel(projectId, channel.id)
-    if (props.projectId !== projectId || props.channelId !== channel.id) return
+    if (!isCurrentContext(context)) return
     await switchChannel(channel.id)
+    if (!isCurrentContext(context)) return
   } catch (cause) {
     commandError = String(cause)
   } finally {
-    if (props.projectId === projectId && props.channelId === channel.id) {
+    if (isCurrentContext(context)) {
       await refreshPreservingDraft()
-      if (commandError) error.value = commandError
-      emit('canonicalChanged')
+      if (isCurrentContext(context)) {
+        if (commandError) error.value = commandError
+        emit('canonicalChanged')
+      }
     }
-    selectingCanonical.value = false
+    if (operation === canonicalOperation) selectingCanonical.value = false
   }
 }
 

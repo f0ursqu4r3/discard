@@ -22,3 +22,17 @@
 ## Formatting baseline
 
 The unchanged baseline failed `pnpm check` on nine existing files. The approved narrow formatting cleanup covers `components/ChannelList.vue`, `components/Composer.vue`, `components/MessageRow.vue`, `components/ui/button/Button.vue`, `components/ui/message-scroller/MessageScrollerContent.vue`, `components/ui/resizable/ResizableHandle.vue`, `components/workspace/AgentsNavigation.vue`, `components/workspace/TranscriptContent.vue`, and `components/workspace/WorkspacePage.vue`. No whole-tree formatting was run.
+
+## Review fix: archived transcript navigation and stale recovery guards
+
+- Archived history rows now call the existing `switch_channel` path. The App refreshes the active snapshot, opens the conversation view, and shows channel details for the opened archive. This works from a project conversation, a direct message, and project overview. Opening an archive does not promote or restore it.
+- The details target now follows the active channel. Canonical promotion remains a separate action. Unbound archived history remains readable and has no canonical action.
+- Channel context now has a synchronous epoch token. Topic conflict recovery, main-agent recovery, and canonical recovery recheck the captured project, channel, epoch, and component lifetime after each awaited refresh. A stale request cannot change the new channel's error or conflict state, or emit a completion event. Channel switches also release the old operation's busy state.
+- Added deferred-response tests for switching from channel A to B during topic conflict recovery, main-agent error recovery, and canonical error recovery. Added App archive-open coverage for project chat, direct message, and project overview, plus an unbound archive details test.
+
+The earlier 214-test result and its check/build results were recorded before this review-fix round. The following final evidence was collected after all review fixes:
+
+- From `web/`, `pnpm test` — 37 files and 221 tests passed.
+- From `web/`, `pnpm check` — passed. All 285 files were formatted; lint passed for 274 files; TypeScript passed.
+- From `web/`, `pnpm build` — passed. The bundler reported existing Lucide `INEFFECTIVE_DYNAMIC_IMPORT` warnings from `src/components/agents/agent-icon.ts`.
+- `git diff --check` — passed.

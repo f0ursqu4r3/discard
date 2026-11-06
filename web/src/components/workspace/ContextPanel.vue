@@ -15,7 +15,6 @@ import ProjectChannelDetails from './ProjectChannelDetails.vue'
 const props = defineProps<{
   snapshot: SnapshotDto
   projectChannels?: ProjectChannelDto[]
-  detailsChannelId?: string | null
   directMessage?: boolean
   profileRequest?: number
   agentAvatar?: string | null
@@ -39,7 +38,6 @@ const channelMetadata = computed(() =>
 const branch = computed(
   () => channelMetadata.value?.branch ?? props.snapshot.branches.find((row) => row.current)?.label,
 )
-const detailsChannelId = computed(() => props.detailsChannelId || props.snapshot.channelId)
 const generalRunning = computed(() => {
   const general = props.projectChannels?.find((channel) => channel.kind === 'general')
   return (
@@ -75,7 +73,7 @@ const generalRunning = computed(() => {
         <ProjectChannelDetails
           v-if="snapshot.activeProjectId && snapshot.channelId"
           :project-id="snapshot.activeProjectId"
-          :channel-id="detailsChannelId"
+          :channel-id="snapshot.channelId"
           :general-running="generalRunning"
           @main-agent-changed="emit('mainAgentChanged')"
           @canonical-changed="emit('canonicalChanged')"

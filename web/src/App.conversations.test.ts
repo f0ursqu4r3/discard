@@ -144,6 +144,53 @@ test('conversation-opened event returns to the restored project transcript', asy
   await flushPromises()
   expect(wrapper.getComponent(NavigationPanel).props('page')).toBe('conversation')
 })
+
+test.each(['project chat', 'direct message', 'project overview'] as const)(
+  'opens an archived project transcript from %s without changing its canonical state',
+  async (origin) => {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: query === '(min-width: 1280px)',
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    )
+    mocks.store.snapshot = {
+      ...mocks.store.snapshot!,
+      projectId: 'selected-project',
+      activeProjectId: origin === 'direct message' ? null : 'selected-project',
+      channelId: origin === 'direct message' ? 'dm-id' : 'current-channel',
+      memberListVisible: false,
+    }
+    if (origin === 'project overview')
+      mocks.store.snapshot = { ...mocks.store.snapshot!, projectId: 'selected-project' }
+    mocks.store.refresh.mockImplementationOnce(async () => {
+      mocks.store.snapshot = {
+        ...mocks.store.snapshot!,
+        activeProjectId: 'selected-project',
+        projectId: 'selected-project',
+        channelId: 'archived-id',
+        channel: 'Archived history',
+        memberListVisible: true,
+      }
+    })
+    vi.mocked(invoke).mockResolvedValue(undefined)
+    const wrapper = app()
+    if (origin === 'project overview')
+      wrapper.getComponent(NavigationPanel).vm.$emit('navigate', 'overview')
+    wrapper.getComponent(NavigationPanel).vm.$emit('inspect-channel', 'archived-id')
+    await flushPromises()
+
+    expect(invoke).toHaveBeenCalledWith('switch_channel', { channelId: 'archived-id' })
+    expect(mocks.store.snapshot?.channelId).toBe('archived-id')
+    if (origin === 'project overview')
+      expect(wrapper.getComponent(NavigationPanel).props('page')).toBe('conversation')
+    expect(invoke).not.toHaveBeenCalledWith('select_canonical_project_channel', expect.anything())
+    expect(invoke).not.toHaveBeenCalledWith('select_canonical_branch', expect.anything())
+  },
+)
+
 test('fresh startup has contact navigation and no active composer', () => {
   mocks.store.snapshot = {
     ...mocks.store.snapshot!,
