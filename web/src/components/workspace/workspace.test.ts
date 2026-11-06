@@ -6,6 +6,7 @@ import UserBar from './UserBar.vue'
 import NavigationPanel from './NavigationPanel.vue'
 import DirectMessageSidebar from './DirectMessageSidebar.vue'
 import AgentsNavigation from './AgentsNavigation.vue'
+import ServerRail from '../ServerRail.vue'
 import snapshotFixture from '@/bridge/fixtures/snapshot.json'
 import type { MessageDto, SnapshotDto } from '@/bridge/types'
 vi.mock('@/bridge/api', () => ({
@@ -25,6 +26,7 @@ test.each([null, 'another-project'])(
       channelId: '',
       projectPath: '/Users/example/git/discard',
       projectDisplayPath: '~/git/discard',
+      repositories: [{ id: '', label: 'discard', path: '/Users/example/git/discard' }],
       branches: [
         {
           key: 'main',
@@ -97,6 +99,69 @@ test.each([null, 'project'])(
     await view.setProps({ page: 'overview' })
     expect(view.findComponent(DirectMessageSidebar).exists()).toBe(false)
     expect(view.find('[data-ui-id="project-navigation"]').exists()).toBe(true)
+    view.unmount()
+  },
+)
+
+test.each([false, true])(
+  'background replies show a pill on their own project in compact layout %s',
+  async (compact) => {
+    const channel = {
+      id: 'background',
+      name: 'general',
+      agentId: 'agent',
+      agent: 'Quinn',
+      provider: 'codex',
+      workspaceMode: 'main_checkout',
+      projectId: 'away',
+      running: false,
+      unread: true,
+      pendingApprovals: 1,
+    }
+    const selected = { ...snapshot, projectId: 'current', channels: [channel] }
+    const view = mount(NavigationPanel, {
+      props: {
+        page: 'overview',
+        compact,
+        snapshot: selected,
+        projects: [
+          { id: 'away', name: 'Away', path: '/away' },
+          { id: 'current', name: 'Current', path: '/current' },
+          { id: 'quiet', name: 'Quiet', path: '/quiet' },
+        ],
+      },
+    })
+    const rail = view.getComponent(ServerRail)
+    expect(rail.get('[data-ui-id="project-selection-pill-away"]').attributes('style')).toContain(
+      '* 2)',
+    )
+    expect(rail.get('[data-ui-id="project-selection-pill-quiet"]').attributes('style')).toContain(
+      '* 0)',
+    )
+    expect(rail.get('[aria-label="Away"]').attributes('aria-description')).toBe('Unread messages')
+    expect(rail.get('[aria-label="Away"]').get('[data-testid="approval-badge"]').text()).toBe('1')
+    expect(rail.get('[aria-label="Current"]').find('[data-testid="approval-badge"]').exists()).toBe(
+      false,
+    )
+
+    await view.setProps({
+      snapshot: { ...selected, channels: [{ ...channel, unread: false, pendingApprovals: 0 }] },
+    })
+    expect(rail.get('[data-ui-id="project-selection-pill-away"]').attributes('style')).toContain(
+      '* 0)',
+    )
+    expect(rail.get('[aria-label="Away"]').attributes('aria-description')).toBeUndefined()
+
+    await view.setProps({
+      snapshot: { ...selected, channels: [{ ...channel, projectId: null, pendingApprovals: 0 }] },
+    })
+    expect(rail.get('[data-ui-id="dm-selection-pill"]').attributes('style')).toContain('* 2)')
+    expect(rail.get('[data-ui-id="project-selection-pill-away"]').attributes('style')).toContain(
+      '* 0)',
+    )
+    expect(rail.get('[aria-label="Direct messages"]').attributes('aria-description')).toBe(
+      'Unread messages',
+    )
     view.unmount()
   },
 )

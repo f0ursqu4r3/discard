@@ -8,15 +8,21 @@ Conversation mode builds fresh provider input from this conversation's messages,
 
 Memory instructions and preferences always enter the prompt in domain precedence order. Other live items use word overlap with the current request and the two latest messages in this conversation. Matching uses Unicode alphanumeric words of at least three bytes, normalized to lowercase. This is a simple lexical retrieval policy. The scoped memory search/read tools remain available for further retrieval. Current user instructions take precedence over memory. Capture guidance and the current capture-pause state enter each response prompt.
 
+## Codex model-cache recovery
+
+Conversation setup checks the installed Codex version before using model metadata. If the cache is missing, malformed, from another version, or missing the exact selected model, Discard makes one bounded `model/list` probe with the same executable and Codex home. The CLI refreshes its own cache. Discard then reloads and validates it before building the restricted conversation catalog.
+
+The probe starts no conversation thread and sends no user prompt. A valid cache skips recovery. Recovery never changes the selected model or relaxes conversation controls. If refresh fails or the refreshed cache is still invalid, setup reports an error and remains available for retry.
+
 ## Project channel context
 
-Selecting a project opens its saved active channel, or `general` on a first visit. The project main agent is saved. If a project has no main agent, first setup uses the first active agent with an explicit model in Store order. Direct conversations keep their own selection and do not change the saved project channel.
+Selecting a project opens its saved active channel, or `general` on a first visit. Channel and project navigation preserve in-flight responses and continue receiving their updates in the background. Folder changes and project removal still require agents to stop. The project main agent is saved. If a project has no main agent, first setup uses the first active agent with an explicit model in Store order. Direct conversations keep their own selection and do not change the saved project channel.
 
 Project channels have durable IDs and metadata. A branch resolves to its canonical channel, so reopening it reuses its transcript even when another direct conversation is active. Store branch-rename operations preserve channel identity, and Store retirement operations release a name for later reuse. App detection of Git branch renames and user-facing branch retirement are not implemented. Migration preserves old messages and sessions, chooses a canonical channel from each branch and `general` group that has an active candidate, and keeps duplicate histories as linked archives. If every candidate is archived, migration leaves no active canonical channel for that group.
 
 Each channel can have a versioned plain-text topic. Topic edits use an expected version and retain earlier revisions with the editor kind. Topics are metadata; they do not change transcript messages or task state. Before each Conversation-mode response, Engine reads the latest topic and adds it as labelled context data outside the transcript. The prompt states that a topic is not a tool request and that explicit system instructions and the user's message take precedence. Channel membership is saved, but membership does not dispatch mentions or start additional responses.
 
-Selecting a project or branch channel does not switch Git branches or create a worktree. Normal Conversation mode still uses the provider adapter's empty working directory. Project-channel membership and the saved main-agent setting do not provide per-message author attribution. Project replies use a neutral `Agent` label because historical messages do not record an author agent; replies without recorded authors may remain neutral. Direct-chat labels are unchanged.
+Selecting a project or branch channel does not switch Git branches or create a worktree. Normal Conversation mode still uses the provider adapter's empty working directory. Project-channel membership and the saved main-agent setting do not provide per-message author attribution. Project replies use the channel's assigned agent name, icon, and color. Historical messages do not record their own author agent, so this remains channel-level identity. Direct-chat labels are unchanged.
 
 ## Context budget
 

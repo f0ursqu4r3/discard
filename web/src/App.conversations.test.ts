@@ -35,6 +35,7 @@ vi.mock('./bridge/api', async (original) => ({
 }))
 vi.mock('vue-sonner', () => ({ toast: { error: vi.fn(), success: vi.fn() } }))
 import App from './App.vue'
+import { getProjectChannels } from './bridge/api'
 import ChannelHeader from './components/ChannelHeader.vue'
 import AgentHistorySearch from './components/agents/AgentHistorySearch.vue'
 import ContextPanel from './components/workspace/ContextPanel.vue'
@@ -124,18 +125,97 @@ test.each([false, true])(
   },
 )
 
-test('project transcript labels saved replies neutrally after the main agent changes', () => {
+test.each<WorkspacePage>(['overview', 'agents', 'memory', 'artifacts', 'project-settings'])(
+  '%s uses a page header without a conversation icon',
+  async (page) => {
+    const wrapper = app()
+    wrapper.getComponent(NavigationPanel).vm.$emit('navigate', page)
+    await flushPromises()
+    expect(wrapper.getComponent(ChannelHeader).props('conversation')).toBe(false)
+  },
+)
+
+test.each([false, true])(
+  'branch selection opens a conversation with an existing general channel: %s',
+  async (initialized) => {
+    mocks.store.snapshot = { ...mocks.store.snapshot!, projectId: 'project' }
+    vi.mocked(getProjectChannels).mockResolvedValueOnce(
+      initialized
+        ? [
+            {
+              id: 'general',
+              projectId: 'project',
+              name: 'general',
+              agentId: 'agent',
+              workspaceMode: 'main_checkout',
+              kind: 'general',
+              branch: null,
+              archived: false,
+              archivedInto: null,
+            },
+          ]
+        : [],
+    )
+    vi.mocked(invoke).mockImplementation(async (name) => {
+      if (name === 'select_project') return 'general'
+      if (name === 'open_branch_channel') {
+        mocks.store.snapshot = {
+          ...mocks.store.snapshot!,
+          activeProjectId: 'project',
+          channelId: 'branch-channel',
+        }
+        return 'branch-channel'
+      }
+    })
+    const wrapper = app()
+    await flushPromises()
+    wrapper.getComponent(NavigationPanel).vm.$emit('navigate', 'overview')
+    wrapper.getComponent(NavigationPanel).vm.$emit('openBranch', 'feature')
+    await flushPromises()
+    const calls = vi
+      .mocked(invoke)
+      .mock.calls.filter(([name]) => name === 'select_project' || name === 'open_branch_channel')
+    expect(calls).toEqual([
+      ...(!initialized ? [['select_project', { projectId: 'project' }]] : []),
+      ['open_branch_channel', { key: 'feature' }],
+    ])
+    expect(wrapper.getComponent(NavigationPanel).props('page')).toBe('conversation')
+    expect(wrapper.getComponent(ChannelHeader).props('conversation')).toBe(true)
+    expect(wrapper.findComponent(Composer).exists()).toBe(true)
+  },
+)
+
+test('failed project initialization leaves branch selection available for retry', async () => {
+  mocks.store.snapshot = { ...mocks.store.snapshot!, projectId: 'project' }
+  vi.mocked(invoke).mockImplementation(async (name) => {
+    if (name === 'select_project') throw new Error('No configured agent')
+  })
+  const wrapper = app()
+  await flushPromises()
+  wrapper.getComponent(NavigationPanel).vm.$emit('navigate', 'overview')
+  wrapper.getComponent(NavigationPanel).vm.$emit('openBranch', 'feature')
+  await flushPromises()
+  expect(invoke).not.toHaveBeenCalledWith('open_branch_channel', expect.anything())
+  expect(wrapper.getComponent(NavigationPanel).props('page')).toBe('overview')
+  expect(wrapper.getComponent(NavigationPanel).props('busy')).toBe(false)
+})
+
+test('project transcript uses its assigned agent name and avatar', async () => {
   mocks.store.snapshot = {
     ...mocks.store.snapshot!,
     activeProjectId: 'project',
-    agent: 'Previous main agent',
+    agentId: 'quinn',
+    agent: 'Quinn',
   }
-  const previous = app()
-  expect(previous.getComponent(MessageList).props('agent')).toBe('Agent')
-  previous.unmount()
-  mocks.store.snapshot = { ...mocks.store.snapshot!, agent: 'New main agent' }
-  const current = app()
-  expect(current.getComponent(MessageList).props('agent')).toBe('Agent')
+  vi.mocked(invoke).mockImplementation(async (name) =>
+    name === 'settings_agent_get'
+      ? [{ id: 'quinn', name: 'Quinn', avatar: 'lucide:bot:#a78bfa' }]
+      : undefined,
+  )
+  const wrapper = app()
+  await flushPromises()
+  expect(wrapper.getComponent(MessageList).props('agent')).toBe('Quinn')
+  expect(wrapper.getComponent(MessageList).props('agentAvatar')).toBe('lucide:bot:#a78bfa')
 })
 
 test('project selection opens the returned general channel', async () => {
@@ -450,6 +530,7 @@ test.each([true, false])(
         stubs: {
           WorkspacePageView: false,
           MemoryBrowser: false,
+          ProjectMemoryContent: false,
           Notices: false,
           NoticeList: false,
           ResizablePanelGroup: { template: '<div><slot /></div>' },

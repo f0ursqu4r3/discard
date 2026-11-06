@@ -280,10 +280,11 @@ mod tests {
             conn.execute("DELETE FROM project_channels WHERE channel_id=?1", [&channel_id.0]).unwrap();
             conn.execute("DELETE FROM channel_agents WHERE channel_id=?1", [&channel_id.0]).unwrap();
             conn.execute("DELETE FROM project_agents WHERE project_id=(SELECT project_id FROM channels WHERE id=?1)", [&channel_id.0]).unwrap();
+            conn.execute_batch("ALTER TABLE projects DROP COLUMN avatar;").unwrap();
             conn.pragma_update(None, "user_version", 4).unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 5);
+        assert_eq!(store.schema_version().unwrap(), 7);
         let metadata = store.project_channel_metadata(&channel_id).unwrap().unwrap();
         assert_eq!(metadata.kind, crate::model::ProjectChannelKind::Legacy);
         assert_eq!(store.load_channel(&channel_id).unwrap().workspace_mode, mode);

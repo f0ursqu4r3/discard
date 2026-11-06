@@ -159,6 +159,7 @@ pub mod providers;
 pub mod agents;
 
 pub mod memory;
+pub mod project_memory;
 
 pub mod workspaces;
 

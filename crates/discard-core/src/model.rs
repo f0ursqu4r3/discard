@@ -56,6 +56,7 @@ impl ProjectChannelKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectChannelMetadata {
+    pub repository: String,
     pub project_id: ProjectId,
     pub channel_id: ChannelId,
     pub kind: ProjectChannelKind,

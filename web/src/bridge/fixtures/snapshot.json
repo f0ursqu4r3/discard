@@ -34,6 +34,8 @@
     "memberList": 200.0
   },
   "branches": [],
+  "repositories": [],
+  "repositoriesLoading": false,
   "channels": [],
   "slots": {},
   "banners": {

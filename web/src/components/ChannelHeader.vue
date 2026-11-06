@@ -11,11 +11,12 @@ const props = withDefaults(
     subtitle?: string
     compact?: boolean
     directMessage?: boolean
+    conversation?: boolean
     agentName?: string
     agentId?: string
     sidebarAvailable?: boolean
   }>(),
-  { sidebarAvailable: true },
+  { sidebarAvailable: true, conversation: true },
 )
 const emit = defineEmits<{ toggleMembers: []; toggleNavigation: []; search: [query: string] }>()
 const query = ref('')
@@ -60,6 +61,7 @@ function search() {
       <slot>
         <div class="flex h-full items-center gap-3 px-3 sm:px-5">
           <component
+            v-if="conversation"
             :is="directMessage ? AtSign : Hash"
             class="size-5 shrink-0 text-muted-foreground"
           />

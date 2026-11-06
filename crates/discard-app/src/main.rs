@@ -194,6 +194,7 @@ fn run_app(
                 lock(&store).list_projects().map_err(|e| e.to_string())?.into_iter().find(|p| &p.id == id).ok_or_else(|| "Project unavailable".to_string())
             }).transpose()?;
             let project_dir = project.as_ref().map(|p| PathBuf::from(&p.path)).unwrap_or_else(|| conversation_dir.clone());
+            let project_dir = git_workspace.conversation_directory(&project_dir, &channel.id)?;
             let (agent, session_id, history) = {
                 let store = lock(&store);
                 (store.load_agent(&channel.agent_id).map_err(|e| e.to_string())?,

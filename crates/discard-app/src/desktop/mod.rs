@@ -225,7 +225,7 @@ pub fn run(
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::get_snapshot, commands::choose_project_folder, commands::get_projects, commands::select_project, commands::remove_project,
+            commands::get_snapshot, commands::choose_project_folder, commands::get_projects, commands::update_project_profile, commands::select_project, commands::remove_project,
             commands::get_project_channels, commands::get_project_members, commands::get_channel_details, commands::update_channel_topic, commands::set_project_main_agent,
             commands::invite_channel_member, commands::select_canonical_branch, commands::select_canonical_project_channel,
             commands::search_agent_history, commands::restore_conversation, commands::get_conversations, commands::create_conversation, commands::open_agent_chat,
@@ -259,7 +259,7 @@ pub fn run(
             settings::agents::settings_agent_review,
             settings::agents::settings_agent_save,
             settings::agents::settings_agent_defaults, settings::agents::settings_agent_create, settings::agents::settings_agent_archive, settings::agents::settings_agent_delete,
-            settings::memory::memory_fresh_conversation, settings::memory::memory_get, settings::memory::memory_mutate, settings::memory::memory_resolve, settings::memory::memory_resume, settings::memory::memory_reconcile, settings::memory::memory_reveal_item,
+            settings::memory::memory_fresh_conversation, settings::memory::memory_get, settings::memory::memory_create, settings::memory::memory_mutate, settings::memory::memory_resolve, settings::memory::memory_resume, settings::memory::memory_reconcile, settings::memory::memory_reveal_item,
             settings::workspaces::settings_workspaces,
             settings::workspaces::settings_reveal_workspace,
             settings::advanced::settings_advanced_actions,

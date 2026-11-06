@@ -35,6 +35,7 @@ const emit = defineEmits<{
     <div class="flex min-h-0 flex-1">
       <ServerRail
         :projects="projects"
+        :channels="snapshot.channels"
         :busy="busy || snapshot.archiveBusy || snapshot.channels.some((channel) => channel.running)"
         @project-action="(action, project) => emit('projectAction', action, project)"
         :project-id="snapshot.projectId"
@@ -71,6 +72,7 @@ const emit = defineEmits<{
         :project-channels="projectChannels"
         :channel-id="snapshot.channelId"
         :project="snapshot.project"
+        :project-avatar="projects?.find((entry) => entry.id === snapshot.projectId)?.avatar"
         :project-id="snapshot.projectId"
         :active-project-id="snapshot.activeProjectId"
         :project-path="snapshot.projectPath"
@@ -80,6 +82,8 @@ const emit = defineEmits<{
         :unread="snapshot.unread"
         :pending-approvals="snapshot.pendingApprovals"
         :branches="snapshot.branches"
+        :repositories="snapshot.repositories"
+        :repositories-loading="snapshot.repositoriesLoading"
         :target="{ type: 'channel', id: snapshot.channelId }"
         @navigate="emit('navigate', $event)"
         @action="emit('action', $event)"

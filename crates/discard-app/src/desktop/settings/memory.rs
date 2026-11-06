@@ -6,7 +6,7 @@ use discard_core::{
 };
 use serde_json::{Value, json};
 
-fn failure(error: impl std::fmt::Display) -> String {
+pub(super) fn failure(error: impl std::fmt::Display) -> String {
     format!(
         "{error}. Reload memory before trying again. Use Import file edits and reload if you edited the item file."
     )
@@ -19,7 +19,7 @@ fn conversation(store: &Store, id: &str) -> Result<discard_core::model::Channel,
         .load_channel(&ChannelId(id.into()))
         .map_err(|_| "Source conversation is unavailable".into())
 }
-fn domain_choices(
+pub(super) fn domain_choices(
     memory: &MemoryStore,
     store: &Store,
 ) -> Result<Vec<discard_core::memory_page::ScopeSummary>, String> {
@@ -34,15 +34,24 @@ fn domain_choices(
         &store.list_projects().map_err(failure)?,
     ))
 }
-fn item_dto(item: &MemoryItem, store: &Store) -> Value {
+pub(super) fn item_dto(item: &MemoryItem, store: &Store) -> Value {
+    let source = item
+        .source_conversation
+        .as_ref()
+        .and_then(|id| store.load_channel(id).ok());
+    let source_agent = source
+        .as_ref()
+        .and_then(|c| store.load_agent(&c.agent_id).ok());
     json!({ "id":item.id, "scope":item.scope.label(), "kind":item.kind, "content":item.content,
         "version":item.version, "createdAt":item.created_at, "updatedAt":item.updated_at, "deleted":item.deleted,
+        "origin": item.origin, "sourceAgentName": source_agent.map(|a| a.name),
         "sourceConversation":item.source_conversation.as_ref().map(|c| &c.0),
-        "sourceAvailable":item.source_conversation.as_ref().is_some_and(|c| store.load_channel(c).is_ok()),
-        "history":item.history.iter().map(|h| json!({"version":h.version,"scope":h.scope.label(),"content":h.content,"deleted":h.deleted,"updatedAt":h.updated_at,"origin":h.origin})).collect::<Vec<_>>() })
+        "sourceAvailable":source.is_some(),
+        "history":item.history.iter().map(|h| json!({"version":h.version,"scope":h.scope.label(),"content":h.content,"deleted":h.deleted,
+        "updatedAt":h.updated_at,"origin":h.origin})).collect::<Vec<_>>() })
 }
 /// Reconcile durable receipts, and render truthful cards even while SQL writes fail.
-fn response_records(
+pub(super) fn response_records(
     memory: &MemoryStore,
     store: &Store,
     channel: &ChannelId,
@@ -283,15 +292,43 @@ pub fn resume(memory: &MemoryStore, store: &Store, channel: &str) -> Result<(), 
     memory.resume_capture(&channel.id).map_err(failure)
 }
 #[tauri::command]
+pub fn memory_create(
+    app: tauri::AppHandle,
+    context: tauri::State<'_, super::SettingsContext>,
+    project_id: String,
+    item_id: String,
+    kind: discard_core::memory_items::ItemKind,
+    content: String,
+) -> Result<Value, String> {
+    use tauri::Emitter;
+    let (_, warning) = super::project_memory::create(
+        &context.memory,
+        &context.store.lock().unwrap_or_else(|e| e.into_inner()),
+        &project_id,
+        &item_id,
+        kind,
+        &content,
+    )?;
+    let _ = app.emit("discard://memory", ());
+    Ok(
+        json!({"warning": warning.map(|error| format!("Memory is saved, but its search index could not update: {error}. Use Import file edits and reload to retry the index update."))}),
+    )
+}
+
+#[tauri::command]
 pub fn memory_get(
     context: tauri::State<'_, super::SettingsContext>,
     channel_id: Option<String>,
+    project_id: Option<String>,
 ) -> Result<Value, String> {
-    memory_view(
-        &context.memory,
-        &context.store.lock().unwrap_or_else(|e| e.into_inner()),
-        channel_id.as_deref(),
-    )
+    let store = context.store.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(project) = project_id {
+        if channel_id.is_some() {
+            return Err("Choose a project or a conversation, not both.".into());
+        }
+        return super::project_memory::view(&context.memory, &store, &project);
+    }
+    memory_view(&context.memory, &store, channel_id.as_deref())
 }
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -304,18 +341,36 @@ pub fn memory_mutate(
     content: Option<String>,
     scope: Option<String>,
     channel_id: Option<String>,
+    project_id: Option<String>,
 ) -> Result<(), String> {
     use tauri::Emitter;
-    mutate(
-        &context.memory,
-        &context.store.lock().unwrap_or_else(|e| e.into_inner()),
-        &id,
-        expected_version,
-        &action,
-        content.as_deref(),
-        scope.as_deref(),
-        channel_id.as_deref(),
-    )?;
+    let store = context.store.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(project) = project_id {
+        if channel_id.is_some() {
+            return Err("Choose a project or a conversation, not both.".into());
+        }
+        super::project_memory::mutate(
+            &context.memory,
+            &store,
+            &project,
+            &id,
+            expected_version,
+            &action,
+            content.as_deref(),
+            scope.as_deref(),
+        )?;
+    } else {
+        mutate(
+            &context.memory,
+            &store,
+            &id,
+            expected_version,
+            &action,
+            content.as_deref(),
+            scope.as_deref(),
+            channel_id.as_deref(),
+        )?;
+    }
     let _ = app.emit("discard://memory", ());
     Ok(())
 }
@@ -326,15 +381,18 @@ pub fn memory_resolve(
     id: String,
     approve: bool,
     channel_id: Option<String>,
+    project_id: Option<String>,
 ) -> Result<MemoryResolution, String> {
     use tauri::Emitter;
-    let outcome = resolve_proposal(
-        &context.memory,
-        &context.store.lock().unwrap_or_else(|e| e.into_inner()),
-        &id,
-        approve,
-        channel_id.as_deref(),
-    )?;
+    let store = context.store.lock().unwrap_or_else(|e| e.into_inner());
+    let outcome = if let Some(project) = project_id {
+        if channel_id.is_some() {
+            return Err("Choose a project or a conversation, not both.".into());
+        }
+        super::project_memory::resolve(&context.memory, &store, &project, &id, approve)?
+    } else {
+        resolve_proposal(&context.memory, &store, &id, approve, channel_id.as_deref())?
+    };
     let _ = app.emit("discard://memory", ());
     Ok(outcome)
 }

@@ -83,6 +83,7 @@ async function refreshProjectChannels(projectId: string | null) {
 }
 async function refreshProjectContext() {
   await store.refresh()
+  await refreshProjects()
   await refreshProjectChannels(store.snapshot?.projectId || null)
 }
 async function refreshProjects() {
@@ -94,6 +95,7 @@ watch(
   { immediate: true },
 )
 let stopProjectCatalogue: UnlistenFn | undefined
+let stopProjectProfiles: UnlistenFn | undefined
 onMounted(async () => {
   try {
     const stop = await listen(
@@ -102,6 +104,11 @@ onMounted(async () => {
     )
     if (disposed) stop()
     else stopProjectCatalogue = stop
+    const stopProfiles = await listen('discard://projects', () => {
+      void refreshProjects().catch((error) => toast.error(String(error)))
+    })
+    if (disposed) stopProfiles()
+    else stopProjectProfiles = stopProfiles
   } catch (error) {
     toast.error(String(error))
   }
@@ -182,6 +189,7 @@ onUnmounted(() => {
   stopConversationOpened?.()
   stopAgentProfile?.()
   stopProjectCatalogue?.()
+  stopProjectProfiles?.()
 })
 const switching = ref(false),
   sending = ref(false)
@@ -324,10 +332,16 @@ async function action(id: string) {
       return
     }
     if (id.startsWith('select_project:')) {
-      const channelId = await selectProject(id.slice('select_project:'.length))
-      await store.refresh()
-      await refreshProjectChannels(store.snapshot?.projectId || null)
-      if (channelId) navigate('conversation')
+      if (switching.value) return
+      switching.value = true
+      try {
+        const channelId = await selectProject(id.slice('select_project:'.length))
+        await store.refresh()
+        await refreshProjectChannels(store.snapshot?.projectId || null)
+        if (channelId) navigate('conversation')
+      } finally {
+        switching.value = false
+      }
       return
     }
     if (id === 'remove_project' && store.snapshot) {
@@ -538,6 +552,13 @@ async function openBranch(key: string) {
   if (switching.value) return
   switching.value = true
   try {
+    const projectId = store.snapshot?.projectId
+    if (
+      projectId &&
+      !projectChannels.value.some((channel) => channel.kind === 'general' && !channel.archived)
+    ) {
+      await selectProject(projectId)
+    }
     await openBranchChannel(key)
     await store.refresh()
     await refreshProjectChannels(store.snapshot?.projectId || null)
@@ -681,6 +702,7 @@ watch(
             class="flex h-full min-w-0 flex-col overflow-hidden rounded-xl border border-border/60 bg-workspace"
           >
             <ChannelHeader
+              :conversation="page === 'conversation' && !!store.snapshot.channelId"
               :channel="heading || ''"
               :subtitle="
                 store.snapshot.activeProjectId && page !== 'direct-messages'
@@ -744,8 +766,8 @@ watch(
                 :live="store.snapshot.liveBlocks"
                 :running="store.snapshot.turnRunning"
                 :new-anchor-id="store.snapshot.newAnchorId"
-                :agent="store.snapshot.activeProjectId ? 'Agent' : store.snapshot.agent"
-                :agent-avatar="store.snapshot.activeProjectId ? null : agentAvatar"
+                :agent="store.snapshot.agent"
+                :agent-avatar="agentAvatar"
                 :prompts="store.snapshot.prompts"
               />
               <div
@@ -822,6 +844,8 @@ watch(
               :page="page"
               :snapshot="store.snapshot"
               :messages="store.history"
+              :project="projects.find((entry) => entry.id === store.snapshot?.projectId)"
+              @project-changed="refreshProjectContext"
               @action="action"
               @conversation="navigate('conversation')"
             />
@@ -996,9 +1020,14 @@ watch(
             :active-project-id="store.snapshot.activeProjectId"
             :project-path="store.snapshot.projectPath"
             :project-display-path="store.snapshot.projectDisplayPath"
+            :project-avatar="
+              projects.find((entry) => entry.id === store.snapshot?.projectId)?.avatar
+            "
             :agent="store.snapshot.agent"
             :channel="store.snapshot.channel"
             :branches="store.snapshot.branches"
+            :repositories="store.snapshot.repositories"
+            :repositories-loading="store.snapshot.repositoriesLoading"
             :unread="store.snapshot.unread"
             :pending-approvals="store.snapshot.pendingApprovals"
             :target="{ type: 'channel', id: store.snapshot.channelId }"

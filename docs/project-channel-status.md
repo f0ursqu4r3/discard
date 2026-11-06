@@ -6,6 +6,11 @@ The project-channel foundation is implemented. It adds durable project channel i
 
 ## Implemented behavior
 
+- The channel bar discovers repositories in the project folder and its descendants. Each repository has collapsible Branches and Worktrees lists. With multiple repositories, each has a collapsible heading. With one repository, the heading is hidden. Collapse state is saved per project and repository.
+- Discovery groups linked worktrees under one repository and includes registered worktrees outside the project folder. It does not follow directory symlinks. It skips Git metadata, dependency folders, and common build folders. Duplicate repository names use relative paths. The existing five-second Git refresh also refreshes discovery.
+- Schema version 7 scopes branch channel identity by repository. Repositories can have branches with the same name without sharing channels. Existing project-root branch channels retain their identity. Worktree preparation uses the channel's repository.
+
+- Schema version 6 adds an optional saved project icon and color. Project settings can edit the display name or alias without changing the project ID or folder. The rail, project header, and overview use the saved appearance.
 - Schema version 5 extends the project-channel metadata contract for retained bootstrap channels. Schema version 4 migrates existing project conversations. It preserves messages and sessions, selects an active canonical `general` channel and active channel per branch when an active candidate exists, and keeps duplicate or unbound histories as linked archives. If every candidate is archived, migration leaves the group without an active canonical channel.
 - Active workspace channels created by the retained Builder/bootstrap path use kind `legacy` when they have no general or branch identity. This kind preserves their channel ID, Coding mode, archive state, session, history, and agent membership. Bootstrap registers metadata and membership on creation and reuse. These channels remain listed and openable by saved channel ID. They do not become canonical `general` or branch channels implicitly.
 - Project selection restores the project's last active channel. A first visit opens `general`. Direct-chat selection does not change project navigation.
@@ -13,7 +18,8 @@ The project-channel foundation is implemented. It adds durable project channel i
 - The project main agent is stored per project. New project setup uses the first active configured agent with an explicit model in Store order if no main agent is saved. The general channel uses the project main agent. A branch channel uses its assigned channel agent.
 - Project and channel memberships persist. Membership alone does not dispatch a mention or start a response.
 - Topics use optimistic version checks and retain revision history. The latest topic enters each Conversation-mode prompt as labelled context outside the transcript. Topic text does not dispatch tools or mentions, and explicit system instructions and the user message take precedence.
-- Project channel replies use a neutral `Agent` label because messages do not store durable author identity. Replies without recorded authors may remain neutral. Direct-chat labels remain unchanged.
+- Channel replies use the channel's assigned agent name, icon, and color, as direct chats do. This is channel-level identity; durable per-message author attribution remains planned.
+- Project settings expose the Primary / Moderator agent selector. This uses the existing project main-agent setting. It updates the general channel responder and the default for new branch channels. Existing branch channels keep their assigned agents. The selector is disabled while the general channel is running.
 - Normal Conversation mode does not materialize branch worktrees. Worktree behavior remains separate from opening a project or branch conversation.
 
 ## Remaining approved design

@@ -70,6 +70,19 @@ init = read()
 send({"id": init["id"], "result": {"userAgent": "fake", "codexHome": "/tmp/fake-codex"}})
 read()  # the `initialized` notification
 thread = read()
+if thread["method"] == "model/list":
+    refresh = os.environ.get("FAKE_CODEX_REFRESH_CACHE")
+    if refresh == "fail":
+        send({"id": thread["id"], "error": {"code": -32603, "message": "Synthetic model refresh failure"}})
+    else:
+        if refresh:
+            with open(refresh) as source:
+                cache = json.load(source)
+            with open(os.path.join(os.environ["CODEX_HOME"], "models_cache.json"), "w") as destination:
+                json.dump(cache, destination)
+        send({"id": thread["id"], "result": {"data": [{"id": "exact-model", "model": "exact-model", "displayName": "Exact model"}], "nextCursor": None}})
+    while True:
+        read()
 while thread["method"] == "config/read":
     send({"id":thread["id"], "result":{"config":effective,"origins":{},"layers":[{"config":effective}]}})
     thread = read()

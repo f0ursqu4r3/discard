@@ -27,6 +27,7 @@ export interface ChannelDto {
   pendingApprovals: number
 }
 export interface ProjectChannelDto {
+  repository?: string
   id: string
   projectId: string
   name: string
@@ -68,7 +69,13 @@ export interface PromptDto {
   summary: string
   view: string
 }
+export interface RepositoryDto {
+  id: string
+  label: string
+  path: string
+}
 export interface BranchRowDto {
+  repository?: string
   key: string
   label: string
   kind: string
@@ -134,6 +141,8 @@ export interface SnapshotDto {
   memberListVisible: boolean
   panels: { channelList: number; memberList: number }
   branches: BranchRowDto[]
+  repositories?: RepositoryDto[]
+  repositoriesLoading?: boolean
   channels: ChannelDto[]
   slots: Record<string, SlotDto>
   banners: BannersDto

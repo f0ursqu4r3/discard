@@ -27,6 +27,12 @@ If memory approval succeeds but its response notice cannot be saved, Discard rep
 
 ## Controls
 
+Open a project's **Memory** tab to browse memory for the selected project. This view works without an active conversation. It groups shared project items, each agent's project-specific items, and inherited global items. Agent-wide private memory and other projects' memory are excluded. Retained items remain visible when their agent is unavailable. Global edits affect every project.
+
+Use **Search memory** and the scope, agent, and kind filters to find items. This search filters the displayed text and metadata; it does not use semantic retrieval. **Add memory** saves a fact, decision, instruction, preference, or commitment shared with all agents in the selected project. This is an explicit user save. It has no source conversation. Creation uses a stable request ID, so a retry cannot duplicate the item. If the item is saved but indexing fails, the form closes and shows a saved-with-warning notice. **Import file edits and reload** retries the index update.
+
+**Pending changes** shows proposals from this project's conversations whose target memory belongs to this project or the global domain. Approval still validates the proposing agent, source conversation, and item version. **Memory options** contains reload and file import. Capture pause and fresh-conversation controls remain in conversation views.
+
 Open the conversation's **Memory** panel to browse applicable items. Open **Settings → Memory** to browse all four domains, including retained items whose agents or projects are no longer present.
 
 **Inspect** shows the item's text, kind, domain, version, creation and update times, source link, and version history. **Save edit** changes the text. **Move** changes its domain; a move to global or project memory explicitly shares the item. **Open source conversation** loads the saved conversation, including retained archived or deleted-agent history. An unavailable source is marked and does not prevent inspection.

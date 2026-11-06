@@ -14,7 +14,7 @@ import {
   useMessageScrollerScrollable,
   useMessageScrollerVisibility,
 } from '../ui/message-scroller'
-import { Empty, EmptyHeader, EmptyMedia, EmptyTitle, EmptyDescription } from '../ui/empty'
+import { Empty, EmptyHeader, EmptyMedia, EmptyTitle } from '../ui/empty'
 import MessageRow from '../MessageRow.vue'
 import MemoryResponse from '../memory/MemoryResponse.vue'
 import MemoryCaptureStatus from '../memory/MemoryCaptureStatus.vue'
@@ -220,7 +220,6 @@ onUnmounted(() => window.removeEventListener('focus', read))
             <EmptyHeader>
               <EmptyMedia variant="icon"><MessageSquare /></EmptyMedia>
               <EmptyTitle>No messages yet</EmptyTitle>
-              <EmptyDescription>Send a message to {{ agent || 'your agent' }}.</EmptyDescription>
             </EmptyHeader>
           </Empty>
         </MessageScrollerContent>

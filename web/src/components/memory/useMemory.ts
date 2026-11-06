@@ -6,6 +6,7 @@ import type { MemoryView } from './types'
 export function useMemory(
   channel: MaybeRefOrGetter<string | null>,
   enabled: MaybeRefOrGetter<boolean> = true,
+  project: MaybeRefOrGetter<string | null> = null,
 ) {
   const data = ref<MemoryView>({
     items: [],
@@ -24,10 +25,16 @@ export function useMemory(
     data.value = toValue(enabled)
       ? data.value
       : { items: [], scopes: [], proposals: [], responses: [], paused: false }
-    if (!toValue(enabled)) return
+    if (!toValue(enabled)) {
+      loading.value = false
+      return
+    }
     loading.value = true
     try {
-      const next = await invoke<MemoryView>('memory_get', { channelId: toValue(channel) })
+      const next = await invoke<MemoryView>('memory_get', {
+        channelId: toValue(channel),
+        ...(toValue(project) !== null ? { projectId: toValue(project) } : {}),
+      })
       if (!disposed && ticket === request && next) {
         data.value = next
         error.value = ''
@@ -38,7 +45,8 @@ export function useMemory(
       if (ticket === request) loading.value = false
     }
   }
-  watch([() => toValue(channel), () => toValue(enabled)], () => {
+  watch([() => toValue(channel), () => toValue(enabled), () => toValue(project)], () => {
+    error.value = ''
     data.value = { items: [], scopes: [], proposals: [], responses: [], paused: false }
     void reload()
   })

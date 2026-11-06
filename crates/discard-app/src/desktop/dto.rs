@@ -18,6 +18,7 @@ pub struct ChannelDto {
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectChannelDto {
+    pub repository: String,
     pub id: String,
     pub project_id: String,
     pub name: String,
@@ -87,6 +88,7 @@ pub struct PromptDto {
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchRowDto {
+    pub repository: String,
     pub key: String,
     pub label: String,
     pub kind: String,
@@ -95,6 +97,13 @@ pub struct BranchRowDto {
     pub collapsed: bool,
     pub has_children: bool,
     pub detached: bool,
+}
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryDto {
+    pub id: String,
+    pub label: String,
+    pub path: String,
 }
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -173,6 +182,8 @@ pub struct SnapshotDto {
     pub member_list_visible: bool,
     pub panels: PanelsDto,
     pub branches: Vec<BranchRowDto>,
+    pub repositories: Vec<RepositoryDto>,
+    pub repositories_loading: bool,
     pub channels: Vec<ChannelDto>,
     pub slots: BTreeMap<String, SlotDto>,
     pub banners: BannersDto,
@@ -231,6 +242,8 @@ fn sample_snapshot() -> SnapshotDto {
             member_list: 200.0,
         },
         branches: vec![],
+        repositories: vec![],
+        repositories_loading: false,
         channels: vec![],
         slots: BTreeMap::new(),
         banners: BannersDto {

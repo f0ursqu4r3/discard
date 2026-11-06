@@ -17,9 +17,12 @@ export interface MemoryItem {
   deleted: boolean
   sourceConversation: string | null
   sourceAvailable: boolean
+  origin?: string
+  sourceAgentName?: string | null
   history: MemoryRevision[]
 }
 export interface MemoryProposal {
+  sourceAgentName?: string | null
   id: string
   action: string
   scope: string
@@ -45,7 +48,7 @@ export interface MemoryView {
   agentId?: string | null
   projectId?: string | null
   items: MemoryItem[]
-  scopes: { scope: string; title: string }[]
+  scopes: { scope: string; title: string; agentId?: string | null }[]
   proposals: MemoryProposal[]
   responses: MemoryRecord[]
   paused: boolean

@@ -89,6 +89,70 @@ pub fn list_branches(repo: &Path) -> Result<Vec<BranchEntry>> {
     Ok(parse_branches(&worktrees, &branches))
 }
 
+/// A repository discovered inside a project. Linked worktrees share one entry.
+#[derive(Debug, Clone)]
+pub struct DiscoveredRepository {
+    /// Empty for the project root, preserving existing branch channel bindings.
+    pub id: String,
+    pub path: PathBuf,
+    pub label: String,
+}
+
+/// Discover repositories without following directory symlinks or entering generated trees.
+pub fn discover_repositories(project: &Path) -> Result<Vec<DiscoveredRepository>> {
+    let project = project.canonicalize().map_err(io_err)?;
+    let mut pending = vec![project.clone()];
+    let mut found: std::collections::BTreeMap<PathBuf, Vec<PathBuf>> = std::collections::BTreeMap::new();
+    while let Some(path) = pending.pop() {
+        if path.join(".git").exists() {
+            if let Ok(common) = git(&path, &["rev-parse", "--path-format=absolute", "--git-common-dir"]) {
+                let common = PathBuf::from(common);
+                if let Ok(common) = common.canonicalize() {
+                    found.entry(common).or_default().push(path.clone());
+                }
+            }
+        }
+        let entries = match std::fs::read_dir(&path) {
+            Ok(entries) => entries,
+            Err(error) if path == project => return Err(io_err(error)),
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if matches!(name.to_str(), Some(".git" | "node_modules" | "target" | "vendor" | "dist" | "build" | ".next" | ".nuxt" | ".venv" | "venv" | "__pycache__")) {
+                continue;
+            }
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                pending.push(entry.path());
+            }
+        }
+    }
+    let mut repositories = Vec::new();
+    for (common, mut paths) in found {
+        // Prefer the project root, then the main checkout, then a stable path.
+        paths.sort_by_key(|path| (path != &project, path.join(".git") != common, path.clone()));
+        let path = paths.remove(0);
+        let id = if path == project { String::new() } else { path.to_string_lossy().into_owned() };
+        let label = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        repositories.push(DiscoveredRepository { id, path, label });
+    }
+    let labels: Vec<_> = repositories.iter().map(|repo| repo.label.clone()).collect();
+    for repo in &mut repositories {
+        if labels.iter().filter(|label| **label == repo.label).count() > 1 {
+            repo.label = repo.path.strip_prefix(&project).unwrap_or(&repo.path).to_string_lossy().into_owned();
+            if repo.label.is_empty() { repo.label = ".".into(); }
+        }
+    }
+    repositories.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(repositories)
+}
+
+/// Root repository keys retain their existing branch names. JSON cannot be a Git branch name.
+pub fn repository_branch_key(repository: &str, branch: &str) -> String {
+    if repository.is_empty() { branch.into() }
+    else { serde_json::to_string(&(repository, branch)).expect("string tuple serializes") }
+}
+
 /// Read branches and order them by their worktree ancestry.
 pub fn list_branch_tree(repo: &Path) -> Result<Vec<crate::branch_tree::TreeRow>> {
     let entries = list_branches(repo)?;

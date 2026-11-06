@@ -9,12 +9,14 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/t
 import ProjectContextMenu from './ProjectContextMenu.vue'
 import type { ProjectMenuAction } from './project-menu'
 import type { ProjectEntry } from '../bridge/api'
-import BrandMark from './workspace/BrandMark.vue'
+import type { ChannelDto } from '../bridge/types'
+import ProjectAvatar from './workspace/ProjectAvatar.vue'
 import { cn } from '@/lib/utils'
 const props = withDefaults(
   defineProps<{
     projects?: import('@/bridge/api').ProjectEntry[]
     projectId?: string
+    channels?: ChannelDto[]
     project: string
     unread: boolean
     pendingApprovals: number
@@ -29,6 +31,17 @@ const entries = computed(
   () => props.projects ?? [{ id: props.projectId ?? '', name: props.project, path: '' }],
 )
 const selected = (id: string) => id === (props.projectId ?? '') && !props.directMessages
+const projectUnread = (id: string) =>
+  props.channels?.some((channel) => channel.projectId === id && channel.unread) ??
+  (id === (props.projectId ?? '') && props.unread)
+const projectApprovals = (id: string) =>
+  props.channels?.reduce(
+    (total, channel) => total + (channel.projectId === id ? channel.pendingApprovals : 0),
+    0,
+  ) ?? (id === (props.projectId ?? '') ? props.pendingApprovals : 0)
+const directUnread = computed(
+  () => props.channels?.some((channel) => channel.projectId === null && channel.unread) ?? false,
+)
 const homeHovered = ref(false)
 const homeFocused = ref(false)
 const hovered = ref<string | null>(null)
@@ -64,7 +77,7 @@ const emit = defineEmits<{
           data-ui-id="dm-selection-pill"
           class="pointer-events-none absolute left-0 w-1 rounded-r-full bg-foreground transition-[height] duration-150 motion-reduce:transition-none"
           :style="{
-            height: `calc(var(--spacing) * ${serverPillHeight(directMessages, homeHovered || homeFocused, false, compact ? 10 : 12)})`,
+            height: `calc(var(--spacing) * ${serverPillHeight(directMessages, homeHovered || homeFocused, directUnread, compact ? 10 : 12)})`,
           }"
         />
         <Tooltip>
@@ -75,6 +88,7 @@ const emit = defineEmits<{
               :variant="directMessages ? 'default' : 'secondary'"
               :class="cn('rounded-xl', compact ? 'size-9' : 'size-12')"
               aria-label="Direct messages"
+              :aria-description="directUnread ? 'Unread messages' : undefined"
               :aria-current="directMessages ? 'page' : undefined"
             >
               <MessagesSquare />
@@ -113,34 +127,31 @@ const emit = defineEmits<{
                 "
                 class="pointer-events-none absolute left-0 w-1 rounded-r-full bg-foreground transition-[height] duration-150 motion-reduce:transition-none"
                 :style="{
-                  height: `calc(var(--spacing) * ${serverPillHeight(selected(entry.id), hovered === entry.id || focused === entry.id, entry.id === projectId && unread, compact ? 10 : 12)})`,
+                  height: `calc(var(--spacing) * ${serverPillHeight(selected(entry.id), hovered === entry.id || focused === entry.id, projectUnread(entry.id), compact ? 10 : 12)})`,
                 }"
               />
               <Tooltip>
                 <TooltipTrigger as-child>
                   <Button
                     :aria-label="entry.name"
+                    :aria-description="projectUnread(entry.id) ? 'Unread messages' : undefined"
                     :aria-current="selected(entry.id) ? 'page' : undefined"
-                    :variant="selected(entry.id) ? 'default' : 'secondary'"
-                    :class="cn('relative rounded-xl', compact ? 'size-9' : 'size-12')"
+                    variant="ghost"
+                    :class="
+                      cn(
+                        'relative rounded-[25%] border-0 p-0 hover:brightness-110',
+                        compact ? 'size-9' : 'size-12',
+                      )
+                    "
                     @click="emit('project', entry.id)"
                   >
-                    <BrandMark
-                      v-if="entry.id === projectId || entries.length === 1"
-                      :class="cn('text-current', compact ? 'size-6' : 'size-8')"
-                    />
-                    <span
-                      v-if="entry.id !== projectId && entries.length > 1"
-                      class="text-sm font-semibold"
-                    >
-                      {{ entry.name.slice(0, 2).toUpperCase() }}
-                    </span>
+                    <ProjectAvatar :name="entry.name" :avatar="entry.avatar" class="size-full" />
                     <Badge
-                      v-if="entry.id === (projectId ?? '') && pendingApprovals > 0"
+                      v-if="projectApprovals(entry.id) > 0"
                       data-testid="approval-badge"
                       class="absolute -right-1 -bottom-1 bg-warning text-background"
                     >
-                      {{ pendingApprovals }}
+                      {{ projectApprovals(entry.id) }}
                     </Badge>
                   </Button>
                 </TooltipTrigger>

@@ -352,6 +352,7 @@ async fn conversation_startup_disables_inherited_servers_before_prompt_and_clean
     assert_eq!(sanitized["models"][0]["tool_mode"], "direct");
     assert_eq!(std::fs::read(rig.dir.path().join("models_cache.json")).unwrap(), original);
     assert_eq!(provider.model_context_window("exact-model"), Some(200000));
+    assert!(!rig.received().iter().any(|v| v["method"] == "model/list"), "a valid cache needs no refresh");
     assert!(rig.log_text().contains("\"inherited\" = {\"enabled\" = false}"));
     drop(session);
     assert!(!catalog.exists());
@@ -380,8 +381,81 @@ async fn conversation_catalog_errors_never_start_a_thread_or_substitute_model() 
             _ => std::fs::write(path, json!({"client_version":"0.1.0","models":[]}).to_string()).unwrap(),
         }
         assert!(rig.provider("approval").with_env("CODEX_HOME", rig.dir.path()).start_session(s).await.is_err());
-        assert!(rig.received().is_empty());
+        let requests = rig.received();
+        assert_eq!(requests.iter().filter(|v| v["method"] == "model/list").count(), 1);
+        assert!(!requests.iter().any(|v| v["method"] == "thread/start" || v["method"] == "turn/start"));
     }
+}
+
+#[tokio::test]
+async fn conversation_repairs_missing_stale_and_malformed_catalogs_before_starting_once() {
+    for broken in ["missing", "malformed", "wrong-version", "missing-model"] {
+        let rig = Rig::new();
+        let s = conversation_spec(&rig);
+        let path = rig.dir.path().join("models_cache.json");
+        let refreshed = rig.dir.path().join("refreshed-cache.json");
+        std::fs::copy(&path, &refreshed).unwrap();
+        match broken {
+            "missing" => std::fs::remove_file(&path).unwrap(),
+            "malformed" => std::fs::write(&path, "not json").unwrap(),
+            "missing-model" => std::fs::write(&path, json!({"client_version":"0.166.0","models":[{"slug":"another-model"}]}).to_string()).unwrap(),
+            _ => std::fs::write(&path, json!({"client_version":"0.164.0","models":[]}).to_string()).unwrap(),
+        }
+        let provider = rig.provider("approval")
+            .with_env("CODEX_HOME", rig.dir.path())
+            .with_env("FAKE_CODEX_REFRESH_CACHE", &refreshed);
+        let session = provider.start_session(s).await.unwrap();
+        let requests = rig.received();
+        assert_eq!(requests.iter().filter(|v| v["method"] == "model/list").count(), 1, "{broken}");
+        assert_eq!(requests.iter().filter(|v| v["method"] == "thread/start").count(), 1, "{broken}");
+        assert!(!requests.iter().any(|v| v["method"] == "turn/start"), "setup must not send the user message");
+        let request = rig.request("thread/start");
+        assert_eq!(request["params"]["model"], "exact-model");
+        assert_eq!(request["params"]["allowProviderModelFallback"], false);
+        let cwd = PathBuf::from(request["params"]["cwd"].as_str().unwrap());
+        let catalog: Value = serde_json::from_slice(&std::fs::read(cwd.parent().unwrap().join("models.json")).unwrap()).unwrap();
+        assert_eq!(catalog["models"][0]["shell_type"], "disabled");
+        assert_eq!(catalog["models"][0]["apply_patch_tool_type"], Value::Null);
+        assert_eq!(catalog["models"][0]["unrelated"]["keep"], true);
+        drop(session);
+    }
+}
+
+#[tokio::test]
+async fn failed_automatic_catalog_refresh_is_bounded_and_can_be_retried() {
+    let rig = Rig::new();
+    let s = conversation_spec(&rig);
+    let path = rig.dir.path().join("models_cache.json");
+    let refreshed = rig.dir.path().join("refreshed-cache.json");
+    std::fs::copy(&path, &refreshed).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let error = rig.provider("approval")
+        .with_env("CODEX_HOME", rig.dir.path())
+        .with_env("FAKE_CODEX_REFRESH_CACHE", "fail")
+        .start_session(s.clone()).await.err().unwrap().to_string();
+    assert!(error.contains("Automatic Codex model refresh failed"), "{error}");
+    let requests = rig.received();
+    assert_eq!(requests.iter().filter(|v| v["method"] == "model/list").count(), 1);
+    assert!(!requests.iter().any(|v| v["method"] == "thread/start" || v["method"] == "turn/start"));
+    let session = rig.provider("approval")
+        .with_env("CODEX_HOME", rig.dir.path())
+        .with_env("FAKE_CODEX_REFRESH_CACHE", &refreshed)
+        .start_session(s).await.unwrap();
+    assert_eq!(rig.request("thread/start")["params"]["model"], "exact-model");
+    drop(session);
+}
+
+#[tokio::test]
+async fn unsupported_codex_version_never_attempts_catalog_recovery() {
+    let rig = Rig::new();
+    let s = conversation_spec(&rig);
+    std::fs::remove_file(rig.dir.path().join("models_cache.json")).unwrap();
+    let error = rig.provider("approval")
+        .with_env("CODEX_HOME", rig.dir.path())
+        .with_env("FAKE_CODEX_VERSION", "codex-cli 0.164.0")
+        .start_session(s).await.err().unwrap().to_string();
+    assert!(error.contains("Codex 0.166.0 is required"), "{error}");
+    assert!(rig.received().is_empty());
 }
 
 #[tokio::test]

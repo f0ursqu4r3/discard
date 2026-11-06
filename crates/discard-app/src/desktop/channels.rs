@@ -112,7 +112,7 @@ impl Channels {
                 id: channel.id.0, project_id: project.0.clone(), name: channel.name,
                 agent_id: channel.agent_id.0, workspace_mode: channel.workspace_mode.as_str().into(),
                 kind: match metadata.kind { discard_core::model::ProjectChannelKind::General => "general", discard_core::model::ProjectChannelKind::Branch => "branch", discard_core::model::ProjectChannelKind::ArchivedLegacy => "archived_legacy", discard_core::model::ProjectChannelKind::Legacy => "legacy" }.into(),
-                branch: metadata.branch, archived, archived_into: metadata.archived_into.map(|id| id.0),
+                repository: metadata.repository, branch: metadata.branch, archived, archived_into: metadata.archived_into.map(|id| id.0),
             })
         }).collect()
     }
@@ -130,9 +130,9 @@ impl Channels {
     }
     pub fn select_canonical_branch(&self, project: &ProjectId, branch: &str, channel_id: &ChannelId) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        let (target, _, _) = self.project_channel(project, channel_id, true)?;
+        let (target, metadata, _) = self.project_channel(project, channel_id, true)?;
         if target.project_id.as_ref() != Some(project) { return Err("Channel does not belong to this project.".into()); }
-        let previous = { self.store.lock().unwrap_or_else(|e| e.into_inner()).project_branch_channel(project, branch).map_err(|e| e.to_string())? };
+        let previous = { self.store.lock().unwrap_or_else(|e| e.into_inner()).project_repository_branch_channel(project, &metadata.repository, branch).map_err(|e| e.to_string())? };
         let mut guarded = vec![target.id.0.clone()];
         if let Some(previous) = previous.as_ref().filter(|previous| previous.id != target.id) { guarded.push(previous.id.0.clone()); }
         guarded.sort();
@@ -225,7 +225,7 @@ impl Channels {
                 id: channel.id.0.clone(), project_id: project.0.clone(), name: channel.name,
                 agent_id: channel.agent_id.0, workspace_mode: channel.workspace_mode.as_str().into(),
                 kind: match metadata.kind { discard_core::model::ProjectChannelKind::General => "general", discard_core::model::ProjectChannelKind::Branch => "branch", discard_core::model::ProjectChannelKind::ArchivedLegacy => "archived_legacy", discard_core::model::ProjectChannelKind::Legacy => "legacy" }.into(),
-                branch: metadata.branch, archived, archived_into: metadata.archived_into.map(|id| id.0),
+                repository: metadata.repository, branch: metadata.branch, archived, archived_into: metadata.archived_into.map(|id| id.0),
             },
             topic: super::dto::ChannelTopicDto { channel_id: topic.channel_id.0, text: topic.text, version: topic.version },
             topic_history, members, main_agent_id,
@@ -396,22 +396,22 @@ impl Channels {
         let _ = (name, mode);
         Err("Open a Git branch to start another project channel.".into())
     }
-    fn create_inner(&self, name: String, mode: WorkspaceMode, branch: Option<String>, worktree: Option<PathBuf>) -> Result<String, String> {
+    fn create_inner(&self, name: String, mode: WorkspaceMode, branch: Option<String>, worktree: Option<PathBuf>, repository: &str, repository_path: &std::path::Path) -> Result<String, String> {
         let project = self.core.current_project().id;
         let agent_id = self.store.lock().unwrap_or_else(|e| e.into_inner()).project_main_agent(&project).map_err(|e| e.to_string())?
             .ok_or("This project has no main agent. Open the project first.")?;
         let channel = Channel { id: ChannelId::new(), project_id: Some(project), name, agent_id, workspace_mode: mode };
         let record = worktree.map(|path| -> Result<WorktreeRecord, String> {
             let manager = WorktreeManager::new(&self.project_dir());
-            let prepared = manager.recorded(&self.project_dir(), &path, branch.as_deref().ok_or("Missing branch")?).map_err(|e| e.to_string())?;
+            let prepared = manager.recorded(repository_path, &path, branch.as_deref().ok_or("Missing branch")?).map_err(|e| e.to_string())?;
             Ok(WorktreeRecord { channel_id: channel.id.clone(), path: path.to_string_lossy().into_owned(), branch: prepared.worktree.branch,
-                base_commit: prepared.worktree.base_commit, repo: self.project_dir().to_string_lossy().into_owned(), owned: false })
+                base_commit: prepared.worktree.base_commit, repo: repository_path.to_string_lossy().into_owned(), owned: false })
         }).transpose()?;
         {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
             let existing = store.channels_for_project(&self.core.current_project().id).map_err(|e| e.to_string())?;
             if existing.iter().any(|c| c.name.eq_ignore_ascii_case(&channel.name)) { return Err("A channel with this name already exists.".into()); }
-            store.create_named_channel(&channel, branch.as_deref(), record.as_ref()).map_err(|e| e.to_string())?;
+            store.create_named_repository_channel(&channel, repository, branch.as_deref(), record.as_ref()).map_err(|e| e.to_string())?;
             if branch.is_some() {
                 let project = channel.project_id.as_ref().ok_or("Project channel is missing its project")?;
                 store.invite_agent_to_channel(project, &channel.id, &channel.agent_id).map_err(|e| e.to_string())?;
@@ -426,8 +426,14 @@ impl Channels {
         self.core.can_switch()?;
         let project_id = self.core.current_project().id;
         if project_id.0.is_empty() { return Err("Select a project first.".into()); }
-        let row = list_branch_tree(&self.project_dir()).map_err(|e| e.to_string())?.into_iter().find(|r| r.name == key).ok_or("This branch is no longer available.")?;
-        let canonical = { self.store.lock().unwrap_or_else(|e| e.into_inner()).project_branch_channel(&project_id, key).map_err(|e| e.to_string())? };
+        let (repository_id, branch) = if key.starts_with('[') {
+            serde_json::from_str::<(String, String)>(key).map_err(|_| "Invalid repository branch.")?
+        } else { (String::new(), key.to_string()) };
+        let repository = discard_core::worktree::discover_repositories(&self.project_dir()).map_err(|e| e.to_string())?
+            .into_iter().find(|repository| repository.id == repository_id).ok_or("This repository is no longer available.")?;
+        let row = list_branch_tree(&repository.path).map_err(|e| e.to_string())?.into_iter()
+            .find(|row| row.name == branch && !row.detached).ok_or("This branch is no longer available.")?;
+        let canonical = { self.store.lock().unwrap_or_else(|e| e.into_inner()).project_repository_branch_channel(&project_id, &repository_id, &branch).map_err(|e| e.to_string())? };
         if let Some(channel) = canonical {
             let main = self.store.lock().unwrap_or_else(|e| e.into_inner()).project_main_agent(&project_id).map_err(|e| e.to_string())?.ok_or("This project has no main agent. Open the project first.")?;
             self.store.lock().unwrap_or_else(|e| e.into_inner()).invite_agent_to_channel(&project_id, &channel.id, &main).map_err(|e| e.to_string())?;
@@ -438,11 +444,12 @@ impl Channels {
         let name = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
             let channels = store.channels_for_project(&project_id).map_err(|e| e.to_string())?;
-            let mut name = key.to_string(); let mut suffix = 2;
-            while channels.iter().any(|c| c.name.eq_ignore_ascii_case(&name)) { name = format!("{key}-{suffix}"); suffix += 1; }
+            let base = if repository_id.is_empty() { branch.clone() } else { format!("{}/{}", repository.label, branch) };
+            let mut name = base.clone(); let mut suffix = 2;
+            while channels.iter().any(|c| c.name.eq_ignore_ascii_case(&name)) { name = format!("{base}-{suffix}"); suffix += 1; }
             name
         };
-        self.create_inner(name, WorkspaceMode::Worktree, Some(key.into()), row.worktree)
+        self.create_inner(name, WorkspaceMode::Worktree, Some(branch), row.worktree, &repository.id, &repository.path)
     }
 }
 
@@ -518,6 +525,75 @@ mod tests {
         assert_eq!(store.visible_projects().unwrap().len(), 2);
         core.clear_project();
         assert!(core.current_project().id.0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn nested_repository_channels_keep_branch_identity_and_workspace_scope() {
+        use discard_core::{engine::WorkspaceService, workspace::GitWorkspace};
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["frontend", "backend"] {
+            let repo = dir.path().join(name);
+            std::fs::create_dir(&repo).unwrap();
+            for args in [vec!["init", "-q", "-b", "main"], vec!["commit", "--allow-empty", "-m", "initial"], vec!["branch", "feature"]] {
+                let output = std::process::Command::new("git")
+                    .args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
+                    .args(args).current_dir(&repo).output().unwrap();
+                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            }
+        }
+        let database = dir.path().join("channels.db");
+        let store = Store::open(&database).unwrap();
+        let project = store.import_project_folder(dir.path()).unwrap();
+        configured_agent(&store);
+        let (commands, _) = mpsc::unbounded_channel();
+        let core = Arc::new(AppCore::new(CoreInit {
+            state: UiState::new(ChannelId(String::new()), vec![]), commands,
+            project: String::new(), channel: String::new(), agent: String::new(), provider: String::new(),
+        }));
+        let store = Arc::new(Mutex::new(store));
+        let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
+        service.activate_project(&project.id).unwrap();
+        let snapshot = core.snapshot();
+        assert_eq!(snapshot.repositories.len(), 2);
+        let main_rows: Vec<_> = snapshot.branches.iter().filter(|row| row.label == "main").collect();
+        assert_eq!(main_rows.len(), 2);
+        let first = service.open_branch(&main_rows[0].key).unwrap();
+        let second = service.open_branch(&main_rows[1].key).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(service.open_branch(&main_rows[0].key).unwrap(), first);
+        assert_eq!(core.snapshot().branches.iter().filter(|row| row.current).count(), 1);
+        assert_eq!(core.snapshot().branches.iter().find(|row| row.current).unwrap().key, main_rows[0].key);
+        {
+            let store = store.lock().unwrap();
+            assert!(!store.channel_archived(&ChannelId(first.clone())).unwrap());
+            assert!(!store.channel_archived(&ChannelId(second.clone())).unwrap());
+            for (id, row) in [(&first, main_rows[0]), (&second, main_rows[1])] {
+                let record = store.worktree_for(&ChannelId(id.clone())).unwrap().unwrap();
+                assert_eq!(record.repo, row.repository);
+                assert_eq!(record.path, row.repository);
+            }
+        }
+        let workspace = GitWorkspace::new(&dir.path().join("worktrees"), store.clone());
+        assert_eq!(workspace.conversation_directory(dir.path(), &ChannelId(first.clone())).unwrap(), PathBuf::from(&main_rows[0].repository));
+        let borrowed = workspace.prepare(dir.path(), &ChannelId(first.clone()), "main").unwrap();
+        assert_eq!(borrowed.cwd, PathBuf::from(&main_rows[0].repository));
+        let feature = snapshot.branches.iter().find(|row| row.label == "feature" && row.repository == main_rows[1].repository).unwrap();
+        let feature_id = service.open_branch(&feature.key).unwrap();
+        assert!(store.lock().unwrap().worktree_for(&ChannelId(feature_id.clone())).unwrap().is_none(), "opening a branch does not create a worktree");
+        assert_eq!(workspace.conversation_directory(dir.path(), &ChannelId(feature_id.clone())).unwrap(), PathBuf::from(&feature.repository));
+        let prepared = workspace.prepare(dir.path(), &ChannelId(feature_id.clone()), "feature").unwrap();
+        assert_eq!(workspace.conversation_directory(dir.path(), &ChannelId(feature_id.clone())).unwrap(), prepared.cwd);
+        assert!(prepared.cwd.exists());
+        let record = store.lock().unwrap().worktree_for(&ChannelId(feature_id.clone())).unwrap().unwrap();
+        assert_eq!(record.repo, feature.repository);
+        assert_eq!(record.branch, "feature");
+        // Persisted bindings must remain distinct after reopening the database.
+        let reopened = Store::open(&database).unwrap();
+        assert_eq!(reopened.project_repository_branch_channel(&project.id, &main_rows[0].repository, "main").unwrap().unwrap().id.0, first);
+        assert_eq!(reopened.project_repository_branch_channel(&project.id, &main_rows[1].repository, "main").unwrap().unwrap().id.0, second);
+        assert!(reopened.project_branch_channel(&project.id, "main").unwrap().is_none());
+        let unknown = discard_core::worktree::repository_branch_key("/outside-project", "main");
+        assert!(service.open_branch(&unknown).is_err());
     }
 
     #[tokio::test]
@@ -687,6 +763,7 @@ mod tests {
                 DROP TABLE channel_branches;
                 CREATE TABLE channel_branches (channel_id TEXT PRIMARY KEY REFERENCES channels(id), branch TEXT NOT NULL);").unwrap();
             connection.execute("INSERT INTO channel_branches(channel_id,branch) VALUES(?1,'feature/persisted')", [&branch_id.0]).unwrap();
+            connection.execute_batch("ALTER TABLE projects DROP COLUMN avatar;").unwrap();
             connection.pragma_update(None, "user_version", 3).unwrap();
         }
 
@@ -786,6 +863,7 @@ mod tests {
         drop(store);
         {
             let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch("ALTER TABLE projects DROP COLUMN avatar;").unwrap();
             conn.pragma_update(None, "user_version", 4).unwrap();
         }
         let store = Arc::new(Mutex::new(Store::open(&db).unwrap()));

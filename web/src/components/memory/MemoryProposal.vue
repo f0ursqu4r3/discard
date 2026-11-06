@@ -6,6 +6,7 @@ import { Button } from '../ui/button'
 const props = defineProps<{
   proposal: MemoryProposal
   channelId?: string | null
+  projectId?: string
 }>()
 const emit = defineEmits<{ changed: [] }>()
 const error = ref('')
@@ -21,6 +22,7 @@ async function resolve(approve: boolean) {
       id: props.proposal.id,
       approve,
       channelId: props.channelId ?? null,
+      ...(props.projectId !== undefined ? { projectId: props.projectId } : {}),
     })
     settled.value = true
     notice.value =
@@ -36,6 +38,9 @@ async function resolve(approve: boolean) {
 <template>
   <section class="space-y-2 rounded border border-border p-3 text-sm" data-protected="true">
     <p class="font-medium">Memory proposal · {{ proposal.action }} · {{ proposal.scope }}</p>
+    <p v-if="proposal.sourceAgentName" class="text-xs text-muted-foreground">
+      Proposed by {{ proposal.sourceAgentName }}
+    </p>
     <p class="whitespace-pre-wrap wrap-break-word">{{ proposal.content }}</p>
     <p class="text-xs text-muted-foreground">Approve only if this saved information is correct.</p>
     <div class="flex gap-2">

@@ -387,6 +387,20 @@ impl Store {
             tx.pragma_update(None, "user_version", 5)?;
             tx.commit()?;
         }
+        if self.schema_version()? < 6 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch("ALTER TABLE projects ADD COLUMN avatar TEXT;")?;
+            tx.pragma_update(None, "user_version", 6)?;
+            tx.commit()?;
+        }
+        if self.schema_version()? < 7 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch("ALTER TABLE project_channels ADD COLUMN repository TEXT NOT NULL DEFAULT '';
+                DROP INDEX one_project_active_branch;
+                CREATE UNIQUE INDEX one_project_active_branch ON project_channels(project_id,repository,branch_name) WHERE kind='branch' AND branch_name IS NOT NULL;")?;
+            tx.pragma_update(None, "user_version", 7)?;
+            tx.commit()?;
+        }
         self.conn.execute_batch("CREATE TABLE IF NOT EXISTS direct_message_list (agent_id TEXT PRIMARY KEY REFERENCES agents(id));")?;
         Ok(())
     }
@@ -450,15 +464,16 @@ impl Store {
         &self,
         channel: &ChannelId,
     ) -> Result<Option<ProjectChannelMetadata>> {
-        let row = self.conn.query_row("SELECT project_id,kind,branch_name,archived_into FROM project_channels WHERE channel_id=?1", params![channel.0], |r| {
-            Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?))
+        let row = self.conn.query_row("SELECT project_id,kind,branch_name,archived_into,repository FROM project_channels WHERE channel_id=?1", params![channel.0], |r| {
+            Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,String>(4)?))
         }).optional()?;
-        let Some((project, kind, branch, archived_into)) = row else {
+        let Some((project, kind, branch, archived_into, repository)) = row else {
             return Ok(None);
         };
         let kind = ProjectChannelKind::parse(&kind)
             .ok_or_else(|| StoreError::Corrupt(format!("project channel kind {kind}")))?;
         Ok(Some(ProjectChannelMetadata {
+            repository,
             project_id: ProjectId(project),
             channel_id: channel.clone(),
             kind,
@@ -467,12 +482,16 @@ impl Store {
         }))
     }
 
-    /// Find the active canonical channel for a project branch.
+    /// Find the active canonical channel for a branch in the project root repository.
     pub fn project_branch_channel(&self, project: &ProjectId, branch: &str) -> Result<Option<Channel>> {
+        self.project_repository_branch_channel(project, "", branch)
+    }
+
+    pub fn project_repository_branch_channel(&self, project: &ProjectId, repository: &str, branch: &str) -> Result<Option<Channel>> {
         let id: Option<String> = self.conn.query_row(
             "SELECT pc.channel_id FROM project_channels pc JOIN channels c ON c.id=pc.channel_id
-             WHERE pc.project_id=?1 AND pc.kind='branch' AND pc.branch_name=?2 AND c.archived=0",
-            params![project.0, branch],
+             WHERE pc.project_id=?1 AND pc.repository=?2 AND pc.kind='branch' AND pc.branch_name=?3 AND c.archived=0",
+            params![project.0, repository, branch],
             |r| r.get(0),
         ).optional()?;
         id.map(|id| self.load_channel(&ChannelId(id))).transpose()
@@ -763,6 +782,7 @@ impl Store {
             ));
         }
         let tx = self.conn.unchecked_transaction()?;
+        let repository = self.project_channel_metadata(channel)?.map(|metadata| metadata.repository).unwrap_or_default();
         let valid: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM channels c LEFT JOIN project_channels pc ON pc.channel_id=c.id
             WHERE c.id=?1 AND c.project_id=?2 AND (pc.channel_id IS NULL OR (pc.kind='archived_legacy' AND pc.branch_name=?3) OR (pc.kind='branch' AND pc.branch_name=?3)))",params![channel.0,project.0,branch],|r|r.get(0))?;
         if !valid {
@@ -770,10 +790,10 @@ impl Store {
                 "Select a channel from this project that belongs to this branch.".into(),
             ));
         }
-        tx.execute("UPDATE project_channels SET kind='archived_legacy',archived_into=?3 WHERE project_id=?1 AND kind='branch' AND branch_name=?2 AND channel_id!=?3",params![project.0,branch,channel.0])?;
-        tx.execute("UPDATE channels SET archived=1 WHERE id IN (SELECT channel_id FROM project_channels WHERE project_id=?1 AND kind='archived_legacy' AND branch_name=?2 AND archived_into=?3)",params![project.0,branch,channel.0])?;
-        tx.execute("INSERT INTO project_channels(channel_id,project_id,kind,branch_name) VALUES(?1,?2,'branch',?3)
-            ON CONFLICT(channel_id) DO UPDATE SET project_id=excluded.project_id,kind='branch',branch_name=excluded.branch_name,archived_into=NULL",params![channel.0,project.0,branch])?;
+        tx.execute("UPDATE project_channels SET kind='archived_legacy',archived_into=?3 WHERE project_id=?1 AND kind='branch' AND branch_name=?2 AND channel_id!=?3 AND repository=?4",params![project.0,branch,channel.0,repository])?;
+        tx.execute("UPDATE channels SET archived=1 WHERE id IN (SELECT channel_id FROM project_channels WHERE project_id=?1 AND kind='archived_legacy' AND branch_name=?2 AND archived_into=?3 AND repository=?4)",params![project.0,branch,channel.0,repository])?;
+        tx.execute("INSERT INTO project_channels(channel_id,project_id,kind,branch_name,repository) VALUES(?1,?2,'branch',?3,?4)
+            ON CONFLICT(channel_id) DO UPDATE SET project_id=excluded.project_id,kind='branch',branch_name=excluded.branch_name,repository=excluded.repository,archived_into=NULL",params![channel.0,project.0,branch,repository])?;
         tx.execute(
             "UPDATE channels SET archived=0 WHERE id=?1",
             params![channel.0],
@@ -949,6 +969,10 @@ impl Store {
     }
 
     pub fn bind_branch(&self, channel: &ChannelId, branch: &str) -> Result<()> {
+        self.bind_repository_branch(channel, "", branch)
+    }
+
+    pub fn bind_repository_branch(&self, channel: &ChannelId, repository: &str, branch: &str) -> Result<()> {
         self.conn.execute_batch("SAVEPOINT bind_branch")?;
         let result = (|| {
             self.conn.execute(
@@ -963,18 +987,18 @@ impl Store {
             if let Some(project) = project {
                 self.conn.execute(
                     "UPDATE project_channels SET kind='archived_legacy',archived_into=?3
-                     WHERE project_id=?1 AND kind='branch' AND branch_name=?2 AND channel_id!=?3",
-                    params![project, branch, channel.0],
+                     WHERE project_id=?1 AND kind='branch' AND branch_name=?2 AND channel_id!=?3 AND repository=?4",
+                    params![project, branch, channel.0, repository],
                 )?;
                 self.conn.execute(
                     "UPDATE channels SET archived=1 WHERE id IN (
                         SELECT channel_id FROM project_channels
-                        WHERE project_id=?1 AND kind='archived_legacy' AND branch_name=?2 AND archived_into=?3
+                        WHERE project_id=?1 AND kind='archived_legacy' AND branch_name=?2 AND archived_into=?3 AND repository=?4
                     )",
-                    params![project, branch, channel.0],
+                    params![project, branch, channel.0, repository],
                 )?;
-                self.conn.execute("INSERT INTO project_channels(channel_id,project_id,kind,branch_name) VALUES(?1,?2,'branch',?3)
-                    ON CONFLICT(channel_id) DO UPDATE SET project_id=excluded.project_id,kind='branch',branch_name=excluded.branch_name,archived_into=NULL",params![channel.0,project,branch])?;
+                self.conn.execute("INSERT INTO project_channels(channel_id,project_id,kind,branch_name,repository) VALUES(?1,?2,'branch',?3,?4)
+                    ON CONFLICT(channel_id) DO UPDATE SET project_id=excluded.project_id,kind='branch',branch_name=excluded.branch_name,repository=excluded.repository,archived_into=NULL",params![channel.0,project,branch,repository])?;
                 self.conn.execute("UPDATE channels SET archived=0 WHERE id=?1",params![channel.0])?;
             }
             Ok(())
@@ -1125,6 +1149,31 @@ impl Store {
             "INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)",
             params![p.id.0, p.name, p.path],
         )?;
+        Ok(())
+    }
+
+    pub fn project_avatar(&self, id: &ProjectId) -> Result<Option<String>> {
+        self.conn.query_row("SELECT avatar FROM projects WHERE id=?1", params![id.0], |r| r.get(0))
+            .optional()?.ok_or_else(|| StoreError::NotFound(id.0.clone()))
+    }
+
+    pub fn update_project_profile(&self, id: &ProjectId, name: &str, avatar: Option<&str>) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 100 {
+            return Err(StoreError::Invalid("Use a project name between 1 and 100 characters.".into()));
+        }
+        if let Some(value) = avatar {
+            let parts: Vec<_> = value.split(':').collect();
+            if parts.len() != 3 || parts[0] != "lucide"
+                || !parts[1].chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                || parts[2].len() != 7 || !parts[2].starts_with('#')
+                || !parts[2][1..].chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(StoreError::Invalid("Choose a valid project icon and color.".into()));
+            }
+        }
+        if self.conn.execute("UPDATE projects SET name=?2,avatar=?3 WHERE id=?1", params![id.0, name, avatar])? == 0 {
+            return Err(StoreError::NotFound(id.0.clone()));
+        }
         Ok(())
     }
 
@@ -1571,11 +1620,21 @@ impl Store {
         branch: Option<&str>,
         worktree: Option<&WorktreeRecord>,
     ) -> Result<()> {
+        self.create_named_repository_channel(channel, "", branch, worktree)
+    }
+
+    pub fn create_named_repository_channel(
+        &self,
+        channel: &Channel,
+        repository: &str,
+        branch: Option<&str>,
+        worktree: Option<&WorktreeRecord>,
+    ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         self.insert_channel(channel)?;
         self.create_session(&SessionId::new(), &channel.id)?;
         if let Some(branch) = branch {
-            self.bind_branch(&channel.id, branch)?;
+            self.bind_repository_branch(&channel.id, repository, branch)?;
         }
         if let Some(worktree) = worktree {
             self.save_worktree(worktree)?;
@@ -2342,7 +2401,7 @@ mod tests {
         let v1 = Store::open(&path).unwrap().schema_version().unwrap();
         let v2 = Store::open(&path).unwrap().schema_version().unwrap();
         assert!(v1 >= 2);
-        assert_eq!(v1, 5);
+        assert_eq!(v1, 7);
         assert_eq!(v1, v2);
     }
 
@@ -2386,7 +2445,7 @@ mod tests {
             conn.execute("INSERT INTO channels (id, project_id, name, agent_id, workspace_mode) VALUES ('c', 'p', 'general', 'a', 'main_checkout')", []).unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 5);
+        assert_eq!(store.schema_version().unwrap(), 7);
         let channels = store.channels_for_project(&ProjectId("p".into())).unwrap();
         assert_eq!(channels.len(), 1);
         assert_eq!(

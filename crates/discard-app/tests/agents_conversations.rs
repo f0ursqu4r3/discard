@@ -127,6 +127,52 @@ async fn fresh_navigation_direct_chats_fixed_projects_and_saved_selection_are_in
         1
     );
 }
+
+#[tokio::test]
+async fn project_navigation_keeps_active_and_background_responses_running() {
+    use discard_core::{driver::TurnOutcome, ui_state::Update};
+    let dir = tempfile::tempdir().unwrap();
+    let first_dir = tempfile::tempdir().unwrap();
+    let second_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    store.lock().unwrap().create_agent(&config()).unwrap();
+    let first = store.lock().unwrap().import_project_folder(first_dir.path()).unwrap();
+    let second = store.lock().unwrap().import_project_folder(second_dir.path()).unwrap();
+    let core = empty_core(dir.path());
+    let channels = service(core.clone(), store.clone());
+    let first_channel = channels.activate_project(&first.id).unwrap();
+    core.send_to(Some(&first_channel), "First response".into()).unwrap();
+    let first_generation = core.channel_runtime_generation(&first_channel).unwrap();
+
+    assert!(core.begin_project_change().is_err(), "folder changes remain blocked");
+    core.begin_project_navigation().unwrap();
+    assert!(core.begin_project_navigation().is_err(), "navigation remains serialized");
+    let second_channel = channels.activate_project(&second.id).unwrap();
+    core.end_project_change();
+    assert_eq!(core.current_project().id, second.id);
+    assert_eq!(core.channel_runtime_generation(&first_channel), Some(first_generation));
+    assert!(!core.channel_session_closed(&first_channel));
+    assert!(core.snapshot().channels.iter().find(|c| c.id == first_channel).unwrap().running);
+    core.send_to(Some(&second_channel), "Second response".into()).unwrap();
+
+    let reply = Message {
+        id: MessageId::new(), channel_id: ChannelId(first_channel.clone()),
+        role: Role::Agent, blocks: vec![Block::Markdown { text: "Completed in the background".into() }],
+    };
+    store.lock().unwrap().insert_message(&reply).unwrap();
+    core.apply_runtime(&first_channel, Some(first_generation), Update::ResponseCompleted(reply.clone()));
+    core.apply_runtime(&first_channel, Some(first_generation), Update::TurnFinished(TurnOutcome::Completed));
+    assert!(core.snapshot().turn_running, "background completion must not finish the current response");
+    assert!(!core.history().iter().any(|message| message.id == reply.id.0));
+
+    core.begin_project_navigation().unwrap();
+    assert_eq!(channels.activate_project(&first.id).unwrap(), first_channel);
+    core.end_project_change();
+    assert!(core.history().iter().any(|message| message.id == reply.id.0));
+    assert!(core.snapshot().channels.iter().find(|c| c.id == second_channel).unwrap().running);
+    assert!(!core.channel_session_closed(&second_channel));
+    assert!(core.begin_project_change().is_err(), "a parked response still blocks destructive changes");
+}
 #[tokio::test]
 async fn labels_refresh_running_guards_archive_restore_and_deleted_history_are_enforced() {
     let dir = tempfile::tempdir().unwrap();

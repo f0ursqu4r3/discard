@@ -73,7 +73,11 @@ export interface ProjectEntry {
   id: string
   name: string
   path: string
+  avatar?: string | null
+  mainAgentId?: string | null
 }
+export const updateProjectProfile = (projectId: string, name: string, avatar: string | null) =>
+  invoke<void>('update_project_profile', { projectId, name, avatar })
 export const getProjects = () => invoke<ProjectEntry[]>('get_projects')
 export const selectProject = (projectId: string) => invoke<string>('select_project', { projectId })
 export const removeProject = (projectId: string) => invoke<void>('remove_project', { projectId })

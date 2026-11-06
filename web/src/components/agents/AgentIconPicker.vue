@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/input'
 import { Field, FieldLabel, FieldSet, FieldLegend } from '@/components/ui/field'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import AgentAvatar from './AgentAvatar.vue'
+import ProjectAvatar from '../workspace/ProjectAvatar.vue'
 import {
   defaultIconColor,
   formatAgentIcon,
@@ -17,7 +18,9 @@ import {
 } from './agent-icon'
 
 const avatar = defineModel<string | null>({ required: true })
-defineProps<{ name: string; disabled?: boolean }>()
+withDefaults(defineProps<{ name: string; disabled?: boolean; entity?: 'Agent' | 'Project' }>(), {
+  entity: 'Agent',
+})
 const appearance = computed(() => parseAgentIcon(avatar.value))
 const color = computed(() => appearance.value?.color ?? defaultIconColor)
 const open = ref(false),
@@ -62,10 +65,15 @@ function selectColor(value: string | number) {
 </script>
 <template>
   <FieldSet data-ui-id="agent-icon-picker" class="min-w-0 w-full" :disabled="disabled">
-    <FieldLegend>Agent icon</FieldLegend>
+    <FieldLegend>{{ entity }} icon</FieldLegend>
     <Popover v-model:open="open">
       <div class="flex min-w-0 items-center gap-4">
-        <AgentAvatar :name="name" :avatar="avatar" class="size-14" />
+        <component
+          :is="entity === 'Project' ? ProjectAvatar : AgentAvatar"
+          :name="name"
+          :avatar="avatar"
+          class="size-14"
+        />
         <PopoverTrigger as-child>
           <Button
             :id="`${id}-trigger`"
@@ -73,7 +81,7 @@ function selectColor(value: string | number) {
             variant="outline"
             :disabled="disabled"
             class="min-w-0 flex-1 justify-between"
-            aria-label="Choose agent icon"
+            :aria-label="`Choose ${entity.toLowerCase()} icon`"
           >
             <span class="truncate">
               {{ appearance?.icon ? iconLabel(appearance.icon) : 'Choose an icon' }}
@@ -148,7 +156,7 @@ function selectColor(value: string | number) {
       </PopoverContent>
     </Popover>
     <Field>
-      <FieldLabel :for="`${id}-color`">Agent color</FieldLabel>
+      <FieldLabel :for="`${id}-color`">{{ entity }} color</FieldLabel>
       <div class="flex flex-wrap items-center gap-2">
         <Button
           v-for="[label, value] in presets"
@@ -168,7 +176,7 @@ function selectColor(value: string | number) {
           type="color"
           :model-value="color"
           :disabled="disabled"
-          aria-label="Custom agent color"
+          :aria-label="`Custom ${entity.toLowerCase()} color`"
           class="w-12 p-1"
           @update:model-value="selectColor"
         />

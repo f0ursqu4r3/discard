@@ -351,6 +351,7 @@ impl MemoryStore {
     }
     fn create_item_locked(
         &self,
+        id: Option<&str>,
         scope: &Scope,
         kind: ItemKind,
         content: &str,
@@ -384,7 +385,9 @@ impl MemoryStore {
         let at = now();
         let mut item = MemoryItem {
             plugin_source,
-            id: uuid::Uuid::new_v4().to_string(),
+            id: id
+                .map(str::to_owned)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             scope: scope.clone(),
             kind,
             content: content.into(),
@@ -415,7 +418,62 @@ impl MemoryStore {
         origin: MutationOrigin,
     ) -> Result<MemoryItem> {
         let _guard = lock(&self.write_lock);
-        self.create_item_locked(scope, kind, content, source, origin, None, None)
+        self.create_item_locked(None, scope, kind, content, source, origin, None, None)
+    }
+
+    /// App-only, idempotent creation. The caller keeps the UUID until the save is acknowledged.
+    /// A warning means the authoritative item is saved but its search index needs repair.
+    pub fn create_user_item(
+        &self,
+        id: &str,
+        scope: &Scope,
+        kind: ItemKind,
+        content: &str,
+    ) -> Result<(MemoryItem, Option<String>)> {
+        let _guard = lock(&self.write_lock);
+        self.item_document_path(".items", id)?;
+        match self.read_item(id) {
+            Ok(mut item) => {
+                if item.deleted
+                    || item.scope != *scope
+                    || item.kind != kind
+                    || item.content != content
+                    || item.origin != MutationOrigin::User
+                    || item.source_conversation.is_some()
+                    || item.plugin_source.is_some()
+                {
+                    return Err(MemoryError::AlreadyExists(id.into()));
+                }
+                Self::check_committed_body(&item)?;
+                let warning = self.persist_item(&mut item).err().map(|e| e.to_string());
+                Ok((item, warning))
+            }
+            Err(MemoryError::NotFound(_)) => {
+                match self.create_item_locked(
+                    Some(id),
+                    scope,
+                    kind,
+                    content,
+                    None,
+                    MutationOrigin::User,
+                    None,
+                    None,
+                ) {
+                    Ok(item) => Ok((item, None)),
+                    Err(error) => match self.read_item(id) {
+                        Ok(item)
+                            if item.scope == *scope
+                                && item.kind == kind
+                                && item.content == content =>
+                        {
+                            Ok((item, Some(error.to_string())))
+                        }
+                        _ => Err(error),
+                    },
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
     /// Resolve plugin aliases and canonical paths, including reserved moved/deleted aliases.
     /// Callers must validate the current scope and deletion state before using the result.
@@ -518,6 +576,7 @@ impl MemoryStore {
                     return Err(MemoryError::Forbidden);
                 }
                 self.create_item_locked(
+                    None,
                     scope,
                     if path.starts_with("core/") {
                         ItemKind::Instruction
@@ -776,6 +835,7 @@ impl MemoryStore {
         if *scope == private {
             return self
                 .create_item_locked(
+                    None,
                     scope,
                     kind,
                     content,
@@ -927,6 +987,7 @@ impl MemoryStore {
                 kind,
                 content,
             } => self.create_item_locked(
+                None,
                 scope,
                 *kind,
                 content,

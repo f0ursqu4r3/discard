@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { getConversations, type ConversationEntry } from '@/bridge/api'
+import { getConversations, type ConversationEntry, type ProjectEntry } from '@/bridge/api'
 import { Bot, FileText, FolderGit2, GitBranch, MessagesSquare, Users } from '@lucide/vue'
 import type { MessageDto, SnapshotDto } from '@/bridge/types'
 import type { WorkspacePage } from './types'
@@ -15,7 +15,8 @@ import {
   DialogFooter,
   DialogClose,
 } from '../ui/dialog'
-import BrandMark from './BrandMark.vue'
+import ProjectAvatar from './ProjectAvatar.vue'
+import ProjectIdentitySettings from './ProjectIdentitySettings.vue'
 import MemoryBrowser from '../memory/MemoryBrowser.vue'
 import FriendsList from '../agents/FriendsList.vue'
 import { Button } from '../ui/button'
@@ -31,11 +32,12 @@ import {
 } from '../ui/empty'
 defineOptions({ name: 'WorkspacePageView' })
 const props = defineProps<{
+  project?: ProjectEntry
   page: WorkspacePage
   snapshot: SnapshotDto
   messages: MessageDto[]
 }>()
-const emit = defineEmits<{ action: [id: string]; conversation: [] }>()
+const emit = defineEmits<{ action: [id: string]; conversation: []; projectChanged: [] }>()
 const conversations = ref<ConversationEntry[]>([])
 const error = ref('')
 const projectAgents = computed(() => [
@@ -99,14 +101,25 @@ const branchCount = computed(() => props.snapshot.branches.filter((row) => !row.
         <h2 class="text-xl font-semibold">{{ snapshot.project }}</h2>
         <p class="mt-1 text-sm text-muted-foreground">Project settings</p>
       </div>
+      <ProjectIdentitySettings
+        v-if="project"
+        :key="project.id"
+        :project="project"
+        :busy="snapshot.archiveBusy"
+        :general-running="
+          snapshot.channels.some(
+            (channel) =>
+              channel.projectId === snapshot.projectId &&
+              channel.name === 'general' &&
+              channel.running,
+          )
+        "
+        @changed="emit('projectChanged')"
+      />
       <Card>
-        <CardHeader><CardTitle>Project</CardTitle></CardHeader>
+        <CardHeader><CardTitle>Folder</CardTitle></CardHeader>
         <CardContent>
           <dl class="flex flex-col gap-4 text-sm">
-            <div>
-              <dt class="text-muted-foreground">Name</dt>
-              <dd class="mt-1">{{ snapshot.project }}</dd>
-            </div>
             <div>
               <dt class="text-muted-foreground">Folder</dt>
               <dd class="mt-1 break-all">{{ snapshot.projectDisplayPath }}</dd>
@@ -185,7 +198,7 @@ const branchCount = computed(() => props.snapshot.branches.filter((row) => !row.
     </div>
     <div v-else-if="page === 'overview'" class="mx-auto flex max-w-4xl flex-col gap-6">
       <div class="flex items-center gap-4">
-        <BrandMark class="size-12" />
+        <ProjectAvatar :name="snapshot.project" :avatar="project?.avatar" class="size-12" />
         <div class="min-w-0">
           <h2 class="text-xl font-semibold">{{ snapshot.project }}</h2>
           <p class="truncate text-sm text-muted-foreground">
@@ -236,7 +249,7 @@ const branchCount = computed(() => props.snapshot.branches.filter((row) => !row.
               {{ snapshot.turnRunning ? 'Running' : 'Idle' }}
             </Badge>
           </Button>
-          <p v-else>Open a branch or create a conversation from the project menu.</p>
+          <p v-else>Select general or a branch to start a conversation.</p>
         </CardContent>
       </Card>
     </div>
@@ -273,17 +286,11 @@ const branchCount = computed(() => props.snapshot.branches.filter((row) => !row.
     </div>
     <div v-else-if="page === 'memory'" class="overflow-auto p-3">
       <MemoryBrowser
-        v-if="snapshot.channelId && snapshot.activeProjectId === snapshot.projectId"
-        :channel-id="snapshot.channelId"
-        :agent-id="snapshot.agentId"
-        :project-id="snapshot.activeProjectId"
+        :key="snapshot.projectId"
+        mode="project"
+        :project-id="snapshot.projectId"
         :revision="snapshot.memoryRev"
-        :running="snapshot.turnRunning"
       />
-      <p v-else>
-        Choose a conversation in this project to see its memory. Settings → Memory shows all
-        domains.
-      </p>
     </div>
     <Empty v-else>
       <EmptyHeader>

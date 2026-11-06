@@ -75,6 +75,9 @@ struct State {
     theme: ThemeDto,
     window: StateStore,
     branches: Vec<TreeRow>,
+    branch_repositories: Vec<String>,
+    repositories: Vec<RepositoryDto>,
+    repositories_loading: bool,
     current_branch: Option<usize>,
     collapsed: HashSet<String>,
     project_id: String,
@@ -111,6 +114,9 @@ impl AppCore {
                 parked: BTreeMap::new(),
                 window: StateStore::open(Path::new("")),
                 branches: vec![],
+                branch_repositories: vec![],
+                repositories: vec![],
+                repositories_loading: true,
                 current_branch: None,
                 collapsed: HashSet::new(),
                 project_id: String::new(),
@@ -155,12 +161,21 @@ impl AppCore {
         s.project = project.map(|p| p.name.clone()).unwrap_or_default();
         s.project_id = project.map(|p| p.id.0.clone()).unwrap_or_default();
         s.project_path = project.map(|p| p.path.clone()).unwrap_or_default();
-        s.branches.clear();
+        s.branches.clear(); s.branch_repositories.clear(); s.repositories.clear(); s.repositories_loading = project.is_some();
         s.current_branch = None;
         s.collapsed.clear();
         self.branch_generation.fetch_add(1, Ordering::SeqCst);
         s.rev += 1;
         self.changed.notify_one();
+    }
+
+    pub fn update_project_name(&self, project_id: &str, name: &str) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.project_id == project_id {
+            s.project = name.to_owned();
+            s.rev += 1;
+            self.changed.notify_one();
+        }
     }
     pub fn saved_conversation(&self) -> Option<String> { self.state.lock().unwrap_or_else(|e| e.into_inner()).window.state().selected_conversation }
     pub fn has_channel(&self, id: &str) -> bool { let s = self.state.lock().unwrap_or_else(|e| e.into_inner()); s.active.channel_id == id || s.parked.contains_key(id) }
@@ -288,7 +303,7 @@ impl AppCore {
         s.active.runtime_generation = s.runtime_generation;
         s.active.channel_id = channel.id.0.clone(); s.active.agent_id = channel.agent_id.0.clone(); s.active.mode = channel.workspace_mode; s.active.project_id = channel.project_id.clone();
         s.project = project.name.clone(); s.project_id = project.id.0.clone(); s.project_path = project.path.clone();
-        s.parked.clear(); s.branches.clear(); s.collapsed.clear(); s.current_branch = None;
+        s.parked.clear(); s.branches.clear(); s.branch_repositories.clear(); s.repositories.clear(); s.repositories_loading = false; s.collapsed.clear(); s.current_branch = None;
         if let Some(marker) = startup_marker(s.active.ui.history(), s.window.last_read(&channel.id.0)) { let _ = s.window.set_last_read(&channel.id.0, &marker); }
         s.active.new_anchor = new_divider_anchor(s.active.ui.history(), s.window.last_read(&channel.id.0), None, false);
         s.rev += 1; s.history_rev += 1;
@@ -299,6 +314,18 @@ impl AppCore {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if s.project_busy || s.active.archive_busy || s.active.archive.is_some() || s.confirm.is_some() || s.active.ui.turn_running() || s.parked.values().any(|c| c.ui.turn_running()) { return Err("Stop all agents and finish pending confirmations before changing projects.".into()); }
         s.project_busy = true; s.rev += 1; self.changed.notify_one(); Ok(())
+    }
+
+    /// Project selection preserves active and parked transports, including running turns.
+    pub fn begin_project_navigation(&self) -> Result<(), String> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.project_busy || s.active.archive_busy || s.active.archive.is_some() || s.confirm.is_some() {
+            return Err("Finish the open confirmation before switching projects.".into());
+        }
+        s.project_busy = true;
+        s.rev += 1;
+        self.changed.notify_one();
+        Ok(())
     }
     pub fn end_project_change(&self) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -373,13 +400,15 @@ impl AppCore {
             };
             let slot_state = ui.slot_state(&labels);
             let window = state.window.state();
-            let branches = state.branches.iter().map(|row| BranchRowDto {
-                key: row.name.clone(), label: row.name.clone(),
+            let branches = state.branches.iter().enumerate().map(|(index, row)| BranchRowDto {
+                repository: state.branch_repositories.get(index).cloned().unwrap_or_default(),
+                key: discard_core::worktree::repository_branch_key(state.branch_repositories.get(index).map(String::as_str).unwrap_or(""), &row.name),
+                label: row.name.clone(),
                 kind: match row.kind { RowKind::Main => "main", RowKind::Worktree => "worktree", RowKind::Branch => "branch" }.into(),
                 depth: row.depth(), current: state.current_branch.is_some_and(|i| std::ptr::eq(&state.branches[i], row)),
                 collapsed: state.collapsed.contains(&row.name),
                 detached: row.detached,
-                has_children: state.branches.iter().any(|child| child.parent.as_ref() == Some(&row.name)),
+                has_children: state.branches.iter().enumerate().any(|(child_index, child)| state.branch_repositories.get(child_index) == state.branch_repositories.get(index) && child.parent.as_ref() == Some(&row.name)),
             }).collect();
             let mut channels: Vec<_> = std::iter::once(&state.active).chain(state.parked.values())
                     .filter(|channel| !channel.channel_id.is_empty()).map(|channel| ChannelDto {
@@ -443,6 +472,8 @@ impl AppCore {
                 },
                 channels,
                 branches,
+                repositories: state.repositories.clone(),
+                repositories_loading: state.repositories_loading,
                 slots: BTreeMap::new(),
                 banners: BannersDto {
                     review_count: 0,
@@ -488,6 +519,9 @@ impl AppCore {
             current_row(&rows, &path)
         });
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.branch_repositories = vec![String::new(); rows.len()];
+        state.repositories.clear();
+        state.repositories_loading = false;
         state.branches = rows;
         state.current_branch = current;
         state.rev += 1;
@@ -500,7 +534,7 @@ impl AppCore {
         state.active.mode = mode;
     }
     pub fn request_branch_refresh(&self) -> u64 { self.branch_generation.fetch_add(1, Ordering::SeqCst) + 1 }
-    /// Reload the selected project's tree, even without an active conversation.
+    /// Reload repositories for the selected project, even without an active conversation.
     pub fn refresh_branches(&self, generation: u64) {
         let source = self.branch_source.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let (project, channel, mode, active_project) = {
@@ -512,18 +546,38 @@ impl AppCore {
         let (canonical_branch, current) = source.filter(|source| active_project && source.project == project).map(|source| {
             let store = source.store.lock().unwrap_or_else(|e| e.into_inner());
             let metadata = store.project_channel_metadata(&channel).ok().flatten();
-            let canonical_branch = metadata.as_ref().and_then(|m| (m.kind == discard_core::model::ProjectChannelKind::Branch).then(|| m.branch.clone()).flatten());
+            let canonical_branch = metadata.as_ref().and_then(|m| {
+                (m.kind == discard_core::model::ProjectChannelKind::Branch)
+                    .then(|| m.branch.as_ref().map(|branch| (m.repository.clone(), branch.clone()))).flatten()
+            });
             let legacy = metadata.is_none();
             let worktree = legacy.then(|| store.worktree_for(&channel).ok().flatten().map(|record| PathBuf::from(record.path))).flatten();
             let current = legacy.then(|| super::windows::branch_current_directory(Some(mode), &project, worktree.as_deref())).flatten();
             (canonical_branch, current)
         }).unwrap_or((None, None));
-        let rows = discard_core::worktree::list_branch_tree(&project).unwrap_or_default();
-        let selected = canonical_branch.and_then(|branch| rows.iter().position(|row| row.name == branch))
-            .or_else(|| current.and_then(|path| current_row(&rows, &path.canonicalize().unwrap_or(path))));
+        let discovered = discard_core::worktree::discover_repositories(&project).unwrap_or_default();
+        let mut rows = Vec::new();
+        let mut branch_repositories = Vec::new();
+        let mut repositories = Vec::new();
+        for repository in discovered {
+            let repo_rows = discard_core::worktree::list_branch_tree(&repository.path).unwrap_or_default();
+            branch_repositories.extend(std::iter::repeat_n(repository.id.clone(), repo_rows.len()));
+            rows.extend(repo_rows);
+            repositories.push(RepositoryDto {
+                id: repository.id,
+                label: repository.label,
+                path: repository.path.to_string_lossy().into_owned(),
+            });
+        }
+        let selected = canonical_branch.and_then(|(repository, branch)| {
+            rows.iter().enumerate().position(|(index, row)| branch_repositories[index] == repository && row.name == branch)
+        }).or_else(|| current.and_then(|path| current_row(&rows, &path.canonicalize().unwrap_or(path))));
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if self.branch_generation.load(Ordering::SeqCst) == generation {
             state.branches = rows;
+            state.branch_repositories = branch_repositories;
+            state.repositories = repositories;
+            state.repositories_loading = false;
             state.current_branch = selected;
             state.rev += 1;
             self.changed.notify_one();

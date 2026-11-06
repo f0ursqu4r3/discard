@@ -70,6 +70,22 @@ impl CodexProvider {
         Ok(home)
     }
 
+    async fn conversation_catalog(&self, home: &Path, model: &str) -> Result<(Value, Option<u64>), ProviderError> {
+        use crate::conversation::{load_catalog, setup};
+        if let Ok(catalog) = load_catalog(home, model) {
+            return Ok(catalog);
+        }
+        // A model-list probe starts no thread and sends no user message. Let the
+        // verified CLI rebuild its own cache, then validate the full records again.
+        debug!("refreshing Codex model cache before conversation setup");
+        let mut command = self.command();
+        command.env("CODEX_HOME", home);
+        crate::models::codex(command).await
+            .map_err(|error| setup(format!("Automatic Codex model refresh failed: {error}")))?;
+        load_catalog(home, model)
+            .map_err(|error| setup(format!("Codex model cache is still unavailable after one automatic refresh: {error}")))
+    }
+
     async fn read_effective_config(&self, cwd: &Path, args: &[String]) -> Result<Value, ProviderError> {
         let mut child = self
             .command()
@@ -221,7 +237,7 @@ impl Provider for CodexProvider {
             }
             let owned = ConversationFiles::new()?;
             spec.cwd = owned.cwd.clone();
-            let (catalog, _) = load_catalog(&self.codex_home()?, model)?;
+            let (catalog, _) = self.conversation_catalog(&self.codex_home()?, model).await?;
             let catalog_path = owned.root.path().join("models.json");
             std::fs::write(&catalog_path, catalog.to_string()).map_err(|e| setup(e.to_string()))?;
             startup_args.extend(["-c".into(), format!("model_catalog_json={}", json!(catalog_path))]);

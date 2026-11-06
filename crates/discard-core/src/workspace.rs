@@ -30,6 +30,19 @@ impl GitWorkspace {
         self.store.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Select an existing checkout for conversation context without creating a worktree.
+    pub fn conversation_directory(&self, project_dir: &Path, channel: &ChannelId) -> Result<PathBuf, String> {
+        let store = self.store();
+        let metadata = store.project_channel_metadata(channel).map_err(|e| e.to_string())?;
+        let Some(metadata) = metadata.filter(|metadata| metadata.kind == crate::model::ProjectChannelKind::Branch) else {
+            return Ok(project_dir.to_path_buf());
+        };
+        if let Some(record) = store.worktree_for(channel).map_err(|e| e.to_string())? {
+            return Ok(PathBuf::from(record.path));
+        }
+        Ok(if metadata.repository.is_empty() { project_dir.to_path_buf() } else { PathBuf::from(metadata.repository) })
+    }
+
     pub fn archive(&self, channel: &ChannelId, force: bool) -> Result<ArchiveOutcome, String> {
         let record = self.store().worktree_for(channel).map_err(|e| e.to_string())?;
         let Some(record) = record else {
@@ -67,10 +80,14 @@ impl GitWorkspace {
 
 impl WorkspaceService for GitWorkspace {
     fn prepare(&self, project_dir: &Path, channel: &ChannelId, channel_name: &str) -> Result<PreparedWorkspace, String> {
-        let (record, branch) = { let store = self.store();
-            (store.worktree_for(channel).map_err(|e| e.to_string())?, store.channel_branch(channel).map_err(|e| e.to_string())?) };
+        let (record, branch, metadata) = { let store = self.store();
+            (store.worktree_for(channel).map_err(|e| e.to_string())?,
+             store.channel_branch(channel).map_err(|e| e.to_string())?,
+             store.project_channel_metadata(channel).map_err(|e| e.to_string())?) };
+        let repository = metadata.map(|metadata| metadata.repository).unwrap_or_default();
+        let project_dir = if repository.is_empty() { project_dir } else { Path::new(&repository) };
         if let Some(record) = record {
-            let prepared = self.manager.recorded(project_dir, Path::new(&record.path), &record.branch).map_err(|e| e.to_string())?;
+            let prepared = self.manager.recorded(Path::new(&record.repo), Path::new(&record.path), &record.branch).map_err(|e| e.to_string())?;
             return Ok(PreparedWorkspace { cwd: prepared.cwd, notes: prepared.notes });
         }
         let prepared = match branch {

@@ -116,12 +116,28 @@ pub async fn open_branch_channel(channels: State<'_, Arc<super::channels::Channe
 
 #[tauri::command]
 pub fn get_projects(context: State<'_, super::settings::SettingsContext>) -> Result<Vec<serde_json::Value>, String> {
-    Ok(context.store.lock().unwrap_or_else(|e| e.into_inner()).visible_projects().map_err(|e| e.to_string())?.into_iter().map(|p| serde_json::json!({"id":p.id.0,"name":p.name,"path":p.path})).collect())
+    let store = context.store.lock().unwrap_or_else(|e| e.into_inner());
+    store.visible_projects().map_err(|e| e.to_string())?.into_iter().map(|p| {
+        let avatar = store.project_avatar(&p.id).map_err(|e| e.to_string())?;
+        let main = store.project_main_agent(&p.id).map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({"id":p.id.0,"name":p.name,"path":p.path,"avatar":avatar,"mainAgentId":main.map(|id| id.0)}))
+    }).collect()
+}
+
+#[tauri::command]
+pub fn update_project_profile(app: tauri::AppHandle, core: State<'_, Arc<AppCore>>, context: State<'_, super::settings::SettingsContext>, project_id: String, name: String, avatar: Option<String>) -> Result<(), String> {
+    let id = discard_core::model::ProjectId(project_id);
+    context.store.lock().unwrap_or_else(|e| e.into_inner())
+        .update_project_profile(&id, &name, avatar.as_deref()).map_err(|e| e.to_string())?;
+    core.update_project_name(&id.0, name.trim());
+    use tauri::Emitter;
+    let _ = app.emit("discard://projects", ());
+    Ok(())
 }
 #[tauri::command]
 pub async fn select_project(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String) -> Result<String, String> {
     let channels = channels.inner().clone();
-    channels.core.begin_project_change()?;
+    channels.core.begin_project_navigation()?;
     let core = channels.core.clone();
     let result = tauri::async_runtime::spawn_blocking(move || channels.activate_project(&discard_core::model::ProjectId(project_id))).await.map_err(|e| e.to_string()).and_then(|r| r);
     core.end_project_change();

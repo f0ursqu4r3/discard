@@ -161,6 +161,36 @@ test('bundled chrome icons render for settings and the member list', async () =>
   expect(header.find('svg.lucide-panel-right').exists()).toBe(true)
 })
 
+test('page headers omit conversation icons while channel and DM headers retain them', async () => {
+  const { default: ChannelHeader } = await import('./ChannelHeader.vue')
+  const header = mount(ChannelHeader, {
+    props: { channel: 'Project overview', memberListVisible: false, conversation: false },
+  })
+  expect(header.find('svg.lucide-hash').exists()).toBe(false)
+  expect(header.find('svg.lucide-at-sign').exists()).toBe(false)
+  await header.setProps({ channel: 'general', conversation: true })
+  expect(header.find('svg.lucide-hash').exists()).toBe(true)
+  await header.setProps({ directMessage: true })
+  expect(header.find('svg.lucide-at-sign').exists()).toBe(true)
+  header.unmount()
+})
+
+test('general initializes a project without a channel and is disabled only while busy', async () => {
+  const list = mount(ChannelList, {
+    props: { projectId: 'project', branches: [], projectChannels: [], page: 'overview' },
+  })
+  const general = list.get('[data-ui-id="project-general-channel"]')
+  expect(general.attributes('disabled')).toBeUndefined()
+  await general.trigger('click')
+  expect(list.emitted('action')).toEqual([['select_project:project']])
+  expect(list.emitted('selectChannel')).toBeUndefined()
+  await list.setProps({ busy: true })
+  expect(general.attributes('disabled')).toBeDefined()
+  await general.trigger('click')
+  expect(list.emitted('action')).toHaveLength(1)
+  list.unmount()
+})
+
 test('saved widths exclude the project rail', async () => {
   const { panelWidths } = await import('./layout')
   expect(panelWidths([312, 600, 366])).toEqual([240, 366])
@@ -297,6 +327,91 @@ test('branch rows can open selected-project channels when the active conversatio
   })
   await list.get('[data-ui-id="branches-row-feature/x"]').trigger('click')
   expect(list.emitted('openBranch')).toEqual([['feature/x']])
+})
+
+test('channel unread pips track general, branch, worktree, and saved channel IDs', async () => {
+  const projectChannels: ProjectChannelDto[] = [
+    { id: 'general-id', kind: 'general', branch: null },
+    { id: 'branch-id', kind: 'branch', branch: 'feature/x' },
+    { id: 'history-id', kind: 'branch', branch: 'feature/x', archived: true },
+    { id: 'quiet-id', kind: 'branch', branch: 'quiet' },
+  ].map((channel) => ({
+    projectId: 'project',
+    name: 'Same name',
+    agentId: 'agent',
+    workspaceMode: 'main_checkout',
+    archived: false,
+    archivedInto: null,
+    ...channel,
+  })) as ProjectChannelDto[]
+  const channels = projectChannels.map((channel) => ({
+    ...channel,
+    agent: 'Agent',
+    provider: 'codex',
+    running: false,
+    unread: false,
+    pendingApprovals: 0,
+  }))
+  const list = mount(ChannelList, {
+    props: {
+      projectId: 'project',
+      projectPath: '/test/channel-unread',
+      channelId: 'general-id',
+      branches: ['feature/x', 'quiet'].map((key) => ({
+        key,
+        label: key,
+        kind: 'worktree',
+        depth: 0,
+        current: false,
+        collapsed: false,
+        hasChildren: false,
+      })),
+      projectChannels,
+      channels,
+    },
+  })
+  await list.get('[data-ui-id="saved-channel-toggle"]').trigger('click')
+  const pip = '[data-ui-id="channel-unread-pip"]'
+  const hasPip = (row: string) => list.get(`[data-ui-id="${row}"]`).find(pip).exists()
+  expect(list.findAll(pip)).toHaveLength(0)
+
+  // A reply in another project with the same branch must not mark this branch.
+  await list.setProps({
+    channels: [...channels, { ...channels[1]!, id: 'other-id', projectId: 'other', unread: true }],
+  })
+  expect(list.findAll(pip)).toHaveLength(0)
+
+  await list.setProps({
+    channels: channels.map((channel) => ({
+      ...channel,
+      unread: ['general-id', 'branch-id', 'history-id'].includes(channel.id),
+    })),
+  })
+  for (const row of [
+    'project-general-channel',
+    'branches-row-feature/x',
+    'worktrees-row-feature/x',
+    'saved-channel-history-id',
+  ]) {
+    expect(hasPip(row)).toBe(true)
+    expect(list.get(`[data-ui-id="${row}"]`).get(pip).attributes('aria-label')).toBe(
+      'Unread messages',
+    )
+  }
+  expect(hasPip('branches-row-quiet')).toBe(false)
+  expect(hasPip('worktrees-row-quiet')).toBe(false)
+
+  // Reading the live channel leaves its separately stored history unread.
+  await list.setProps({
+    channels: channels.map((channel) => ({ ...channel, unread: channel.id === 'history-id' })),
+  })
+  expect(hasPip('project-general-channel')).toBe(false)
+  expect(hasPip('branches-row-feature/x')).toBe(false)
+  expect(hasPip('worktrees-row-feature/x')).toBe(false)
+  expect(hasPip('saved-channel-history-id')).toBe(true)
+  await list.setProps({ channels })
+  expect(list.findAll(pip)).toHaveLength(0)
+  list.unmount()
 })
 
 test('saved channel history opens by its durable channel id', async () => {

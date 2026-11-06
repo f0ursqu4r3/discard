@@ -48,9 +48,6 @@ function keydown(event: KeyboardEvent) {
     aria-label="Message composer"
     class="mt-auto shrink-0 px-3 pt-2 pb-3"
   >
-    <p v-if="agent && !directMessage" class="mb-1.5 truncate text-xs text-muted-foreground">
-      Message {{ agent }} in #{{ channel }}
-    </p>
     <InputGroup class="rounded-lg">
       <InputGroupTextarea
         v-model="text"
@@ -87,12 +84,8 @@ function keydown(event: KeyboardEvent) {
         </Button>
       </InputGroupAddon>
     </InputGroup>
-    <div
-      v-if="!directMessage"
-      class="mt-2 flex min-w-0 items-center justify-between gap-3 text-xs text-muted-foreground"
-    >
-      <span class="truncate">{{ archived ? 'Channel archived' : `#${channel}` }}</span>
-      <span class="hidden shrink-0 sm:inline">Enter to send · Shift + Enter for new line</span>
-    </div>
+    <p v-if="archived && !directMessage" class="mt-2 text-xs text-muted-foreground">
+      Channel archived
+    </p>
   </section>
 </template>
