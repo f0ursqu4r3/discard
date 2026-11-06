@@ -45,6 +45,9 @@ pub struct RecaptureSuppression {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryItem {
+    /// Original plugin path reservation. Moves and Forget retain it to prevent recreation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_source: Option<PluginSource>,
     pub id: String,
     pub scope: Scope,
     pub kind: ItemKind,
@@ -71,6 +74,12 @@ pub struct MemoryItem {
     /// Immutable, nonrecursive approval receipts, committed with the item.
     #[serde(default)]
     pub approved_snapshots: Vec<ApprovedSnapshot>,
+}
+/// A path alias is metadata in the item, not a second memory file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSource {
+    pub scope: Scope,
+    pub path: String,
 }
 /// A flat receipt keeps the exact approved version without nesting MemoryItem.
 /// Stored only in hidden metadata; never indexed or composed into prompts.
@@ -104,6 +113,7 @@ impl ApprovedSnapshot {
     }
     fn into_item(self) -> MemoryItem {
         MemoryItem {
+            plugin_source: None,
             id: self.item_id,
             scope: self.revision.scope,
             kind: self.kind,
@@ -347,6 +357,7 @@ impl MemoryStore {
         source: Option<&ChannelId>,
         origin: MutationOrigin,
         proposal_id: Option<String>,
+        plugin_source: Option<PluginSource>,
     ) -> Result<MemoryItem> {
         self.resolve(scope, "check.md")?;
         if origin == MutationOrigin::Automatic {
@@ -372,6 +383,7 @@ impl MemoryStore {
         }
         let at = now();
         let mut item = MemoryItem {
+            plugin_source,
             id: uuid::Uuid::new_v4().to_string(),
             scope: scope.clone(),
             kind,
@@ -403,7 +415,162 @@ impl MemoryStore {
         origin: MutationOrigin,
     ) -> Result<MemoryItem> {
         let _guard = lock(&self.write_lock);
-        self.create_item_locked(scope, kind, content, source, origin, None)
+        self.create_item_locked(scope, kind, content, source, origin, None, None)
+    }
+    /// Resolve plugin aliases and canonical paths, including reserved moved/deleted aliases.
+    /// Callers must validate the current scope and deletion state before using the result.
+    fn plugin_item(&self, scope: &Scope, path: &str) -> Result<Option<MemoryItem>> {
+        self.resolve(scope, path)?;
+        if let Some(id) = path
+            .strip_prefix("items/")
+            .and_then(|p| p.strip_suffix(".md"))
+        {
+            return self.read_item(id).map(Some);
+        }
+        Ok(self.all_items()?.into_iter().find(|item| {
+            item.plugin_source
+                .as_ref()
+                .is_some_and(|source| source.scope == *scope && source.path == path)
+        }))
+    }
+    fn plugin_path(item: &MemoryItem) -> String {
+        item.plugin_source
+            .as_ref()
+            .filter(|source| source.scope == item.scope)
+            .map_or_else(|| item.path(), |source| source.path.clone())
+    }
+    fn plugin_version(item: &MemoryItem) -> String {
+        format!("{}:{}:{}", item.id, item.version, version_of(&item.content))
+    }
+    fn live_plugin_item(item: &MemoryItem, scope: &Scope, path: &str) -> Result<()> {
+        if item.deleted || item.scope != *scope {
+            return Err(MemoryError::NotFound(format!(
+                "{path} (item moved or forgotten)"
+            )));
+        }
+        Ok(())
+    }
+    /// Path-based plugin compatibility view over the same authoritative items as Settings.
+    pub fn plugin_list(&self, scope: &Scope) -> Result<Vec<crate::memory::FileInfo>> {
+        let mut files = self.list(scope)?;
+        for file in &mut files {
+            if let Some(id) = file
+                .path
+                .strip_prefix("items/")
+                .and_then(|p| p.strip_suffix(".md"))
+            {
+                let item = self.read_item(id)?;
+                file.path = Self::plugin_path(&item);
+                file.version = Self::plugin_version(&item);
+            }
+        }
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(files)
+    }
+    pub fn plugin_read(&self, scope: &Scope, path: &str) -> Result<crate::memory::Content> {
+        let Some(item) = self.plugin_item(scope, path)? else {
+            return self.read(scope, path);
+        };
+        Self::live_plugin_item(&item, scope, path)?;
+        Ok(crate::memory::Content {
+            text: item.content.clone(),
+            version: Self::plugin_version(&item),
+        })
+    }
+    pub fn plugin_search(
+        &self,
+        scopes: &[Scope],
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::memory::Hit>> {
+        let mut hits = self.search(scopes, query, limit)?;
+        for hit in &mut hits {
+            if let Some(id) = hit
+                .path
+                .strip_prefix("items/")
+                .and_then(|p| p.strip_suffix(".md"))
+            {
+                hit.path = Self::plugin_path(&self.read_item(id)?);
+            }
+        }
+        Ok(hits)
+    }
+    /// App-host API for an explicitly granted plugin write; never exposed as an agent tool.
+    /// Append reads the latest committed body and writes one revision under the same lock.
+    pub fn plugin_append(&self, scope: &Scope, path: &str, text: &str) -> Result<String> {
+        let _guard = lock(&self.write_lock);
+        let item = match self.plugin_item(scope, path)? {
+            Some(mut item) => {
+                Self::live_plugin_item(&item, scope, path)?;
+                Self::check_committed_body(&item)?;
+                Self::revise(&mut item, MutationOrigin::User);
+                item.content = if item.content.is_empty() {
+                    text.into()
+                } else {
+                    format!("{}\n{text}", item.content)
+                };
+                self.persist_item(&mut item)?;
+                item
+            }
+            None => {
+                // Raw legacy files remain readable. New plugin writes have only one item body.
+                if self.resolve(scope, path)?.exists() {
+                    return Err(MemoryError::Forbidden);
+                }
+                self.create_item_locked(
+                    scope,
+                    if path.starts_with("core/") {
+                        ItemKind::Instruction
+                    } else {
+                        ItemKind::Fact
+                    },
+                    text,
+                    None,
+                    MutationOrigin::User,
+                    None,
+                    Some(PluginSource {
+                        scope: scope.clone(),
+                        path: path.into(),
+                    }),
+                )?
+            }
+        };
+        Ok(Self::plugin_version(&item))
+    }
+    pub fn plugin_edit(
+        &self,
+        scope: &Scope,
+        path: &str,
+        old: &str,
+        new: &str,
+        expected: &str,
+    ) -> Result<String> {
+        let _guard = lock(&self.write_lock);
+        let mut item = self
+            .plugin_item(scope, path)?
+            .ok_or_else(|| MemoryError::NotFound(path.into()))?;
+        Self::live_plugin_item(&item, scope, path)?;
+        Self::check_committed_body(&item)?;
+        let current = Self::plugin_version(&item);
+        if current != expected {
+            return Err(MemoryError::Conflict {
+                path: path.into(),
+                current,
+            });
+        }
+        match if old.is_empty() {
+            0
+        } else {
+            item.content.matches(old).count()
+        } {
+            0 => return Err(MemoryError::TextNotFound(path.into())),
+            1 => {}
+            n => return Err(MemoryError::Ambiguous(n)),
+        }
+        Self::revise(&mut item, MutationOrigin::User);
+        item.content = item.content.replacen(old, new, 1);
+        self.persist_item(&mut item)?;
+        Ok(Self::plugin_version(&item))
     }
     fn versioned_item(&self, id: &str, expected: u64) -> Result<MemoryItem> {
         let item = self.read_item(id)?;
@@ -615,6 +782,7 @@ impl MemoryStore {
                     Some(source),
                     MutationOrigin::Automatic,
                     None,
+                    None,
                 )
                 .map(SaveOutcome::Saved);
         }
@@ -765,6 +933,7 @@ impl MemoryStore {
                 Some(&p.source_conversation),
                 MutationOrigin::Approved,
                 Some(p.id.clone()),
+                None,
             )?,
             ProposalAction::Update {
                 item_id,

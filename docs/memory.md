@@ -31,6 +31,8 @@ Open the conversation's **Memory** panel to browse applicable items. Open **Sett
 
 **Inspect** shows the item's text, kind, domain, version, creation and update times, source link, and version history. **Save edit** changes the text. **Move** changes its domain; a move to global or project memory explicitly shares the item. **Open source conversation** loads the saved conversation, including retained archived or deleted-agent history. An unavailable source is marked and does not prevent inspection.
 
+Approved plugin writes also create versioned items. They appear in Settings and each applicable conversation view. Plugin `core/` paths create instruction items; other paths create fact items. These items support the same edit, history, Move, Forget, and Undo controls. Their metadata retains the original plugin scope and path. They have no inferred source conversation and do not appear as automatic assistant saves. After Move or Forget, a plugin cannot recreate the item through its old path. See [plugin memory](plugins.md#files-and-memory) for the path and grant rules.
+
 **Reveal item file** selects the actual `.items/<UUID>.md` file. If you edit that file outside Discard, versioned changes fail until **Import file edits and reload** imports the readable body as a new user revision. Copy an unsaved editor draft before reload if you want to keep it. A normal reload does not import external file edits.
 
 ## Forget and automatic capture
@@ -49,7 +51,7 @@ Under `$DISCARD_HOME` (default `~/.discard`):
 | --- | --- |
 | `memory/.items/<UUID>.md` | Authoritative readable item body and metadata, including domain and history |
 | `memory/.proposals/<UUID>.md` | Pending or resolved proposal |
-| `memory/agents/`, `memory/projects/`, `memory/agent-projects/`, `memory/global/` | Legacy raw files for explicitly granted plugin use |
+| `memory/agents/`, `memory/projects/`, `memory/agent-projects/`, `memory/global/` | Legacy raw read compatibility; new plugin writes use versioned items |
 | `memory-index.db` | Rebuildable FTS5 index of live memory |
 | `run/` | Temporary scoped MCP configuration files, removed after the turn |
 

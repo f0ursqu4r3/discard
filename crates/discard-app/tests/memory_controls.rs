@@ -657,3 +657,151 @@ fn approval_observed_by_a_later_response_keeps_its_original_response_id() {
             .all(|(id, _)| id == &original)
     );
 }
+
+#[test]
+fn fresh_plugin_memory_has_versioned_controls_in_settings_and_conversation() {
+    use discard_app::plugin_memory::PluginMemory;
+    use discard_lua::MemoryHost;
+    use std::sync::Arc;
+    let (_dir, memory, store, agent, conversation) = setup();
+    let memory = Arc::new(memory);
+    let host = PluginMemory::new(memory.clone(), agent.clone(), None);
+    let original = host
+        .append("agent", "core/plugin.md", "mandatorypluginoriginal")
+        .unwrap();
+    let settings = memory_view(&memory, &store, None).unwrap();
+    let contextual = memory_view(&memory, &store, Some(&conversation.0)).unwrap();
+    assert_eq!(
+        settings["items"].as_array().unwrap().len(),
+        1,
+        "fresh plugin write must be manageable"
+    );
+    assert_eq!(settings["items"], contextual["items"]);
+    let id = settings["items"][0]["id"].as_str().unwrap();
+    assert_eq!(settings["items"][0]["kind"], "instruction");
+    assert_eq!(host.list("agent").unwrap()[0].path, "core/plugin.md");
+    assert_eq!(
+        host.read("agent", "core/plugin.md").unwrap().version,
+        original
+    );
+    assert_eq!(
+        host.search(&["agent".into()], "mandatorypluginoriginal", 5)
+            .unwrap()[0]
+            .path,
+        "core/plugin.md"
+    );
+    assert!(
+        memory
+            .core_blocks(&Scope::applicable(&agent, None))
+            .unwrap()
+            .iter()
+            .any(|b| b.text == "mandatorypluginoriginal")
+    );
+    mutate(
+        &memory,
+        &store,
+        id,
+        1,
+        "edit",
+        Some("mandatorypluginedited"),
+        None,
+        Some(&conversation.0),
+    )
+    .unwrap();
+    assert!(
+        host.edit(
+            "agent",
+            "core/plugin.md",
+            "mandatorypluginedited",
+            "bad",
+            &original
+        )
+        .is_err()
+    );
+    let current = host.read("agent", "core/plugin.md").unwrap();
+    host.edit(
+        "agent",
+        "core/plugin.md",
+        "mandatorypluginedited",
+        "mandatorypluginfinal",
+        &current.version,
+    )
+    .unwrap();
+    assert!(mutate(&memory, &store, id, 2, "edit", Some("stale"), None, None).is_err());
+    mutate(
+        &memory,
+        &store,
+        id,
+        3,
+        "move",
+        None,
+        Some("global"),
+        Some(&conversation.0),
+    )
+    .unwrap();
+    assert!(host.read("agent", "core/plugin.md").is_err());
+    assert!(
+        host.append("agent", "core/plugin.md", "do not recreate moved item")
+            .is_err()
+    );
+    let moved = host.list("global").unwrap();
+    assert_eq!(moved.len(), 1);
+    assert_eq!(
+        host.read("global", &moved[0].path).unwrap().text,
+        "mandatorypluginfinal"
+    );
+    assert_eq!(memory.read_item(id).unwrap().history.len(), 3);
+    assert!(
+        memory
+            .search(
+                &[Scope::Global, Scope::Agent(agent.clone())],
+                "mandatorypluginoriginal",
+                5
+            )
+            .unwrap()
+            .is_empty()
+    );
+    mutate(
+        &memory,
+        &store,
+        id,
+        4,
+        "forget",
+        None,
+        None,
+        Some(&conversation.0),
+    )
+    .unwrap();
+    assert!(host.list("global").unwrap().is_empty());
+    assert!(
+        host.append("agent", "core/plugin.md", "mandatorypluginoriginal")
+            .is_err()
+    );
+    assert!(
+        host.append("global", &moved[0].path, "mandatorypluginfinal")
+            .is_err()
+    );
+    assert!(
+        memory_view(&memory, &store, None).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        memory_view(&memory, &store, Some(&conversation.0)).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        memory
+            .core_blocks(&Scope::applicable(&agent, None))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        host.search(&["global".into()], "mandatorypluginfinal", 5)
+            .unwrap()
+            .is_empty()
+    );
+}

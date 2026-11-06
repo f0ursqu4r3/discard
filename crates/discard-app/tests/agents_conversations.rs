@@ -489,3 +489,218 @@ async fn restoring_agent_rebuilds_only_closed_history_and_keeps_usable_unsaved_r
     assert_eq!(core.snapshot().live_blocks, before.live_blocks);
     assert_eq!(core.snapshot().notice, before.notice);
 }
+
+#[tokio::test]
+async fn folder_reload_preserves_unsaved_replies_and_only_restarts_affected_transports() {
+    use discard_core::{
+        driver::TurnOutcome,
+        event::{Event, EventId, EventKind, SessionId},
+        ui_state::Update,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let replacement = tempfile::tempdir().unwrap();
+    let other_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let agent = store.lock().unwrap().create_agent(&config()).unwrap();
+    let project = store
+        .lock()
+        .unwrap()
+        .import_project_folder(dir.path())
+        .unwrap();
+    let other = store
+        .lock()
+        .unwrap()
+        .import_project_folder(other_dir.path())
+        .unwrap();
+    let direct = store.lock().unwrap().default_conversation(&agent).unwrap();
+    let affected = store
+        .lock()
+        .unwrap()
+        .create_conversation(&agent, Some(&project.id), "Affected")
+        .unwrap();
+    let parked = store
+        .lock()
+        .unwrap()
+        .create_conversation(&agent, Some(&project.id), "Parked affected")
+        .unwrap();
+    let unrelated = store
+        .lock()
+        .unwrap()
+        .create_conversation(&agent, Some(&other.id), "Other project")
+        .unwrap();
+    let fail_launch = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let launches = Arc::new(Mutex::new(Vec::new()));
+    let receivers = Arc::new(Mutex::new(Vec::new()));
+    let core = empty_core(dir.path());
+    let launch: Launcher = {
+        let fail_launch = fail_launch.clone();
+        let launches = launches.clone();
+        let store = store.clone();
+        let receivers = receivers.clone();
+        Arc::new(move |channel| {
+            if fail_launch.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("test replacement launch failure".into());
+            }
+            let store = store.lock().unwrap();
+            let folder = channel.project_id.as_ref().map(|id| {
+                store
+                    .list_projects()
+                    .unwrap()
+                    .into_iter()
+                    .find(|p| p.id == *id)
+                    .unwrap()
+                    .path
+            });
+            launches.lock().unwrap().push((channel.id.clone(), folder));
+            let (commands, receiver) = mpsc::unbounded_channel();
+            receivers.lock().unwrap().push(receiver);
+            let (_, updates) = mpsc::unbounded_channel();
+            Ok((
+                CoreInit {
+                    state: UiState::new(
+                        channel.id.clone(),
+                        store.messages_for_channel(&channel.id).unwrap(),
+                    ),
+                    commands,
+                    project: String::new(),
+                    channel: channel.name.clone(),
+                    agent: "Agent".into(),
+                    provider: "codex".into(),
+                },
+                updates,
+            ))
+        })
+    };
+    let channels = Channels::new(
+        core.clone(),
+        store.clone(),
+        tokio::runtime::Handle::current(),
+        launch,
+    );
+    let mut retained = Vec::new();
+    for channel in [&direct, &unrelated, &parked, &affected] {
+        store
+            .lock()
+            .unwrap()
+            .insert_message(&Message {
+                id: MessageId::new(),
+                channel_id: channel.id.clone(),
+                role: Role::Agent,
+                blocks: vec![Block::Markdown {
+                    text: format!("Saved {}", channel.name),
+                }],
+            })
+            .unwrap();
+        channels.select(&channel.id.0).unwrap();
+        core.send_to(Some(&channel.id.0), "Question".into())
+            .unwrap();
+        assert!(core.begin_project_change().is_err());
+        core.apply(Update::Event(Box::new(Event {
+            id: EventId::new(),
+            session_id: SessionId::new(),
+            seq: 1,
+            kind: EventKind::TextDelta {
+                text: format!("Unsaved {}", channel.name),
+            },
+            raw: None,
+        })));
+        core.apply(Update::ResponseSaveFailed(
+            "Copy the reply before sending again.".into(),
+        ));
+        core.apply(Update::TurnFinished(TurnOutcome::Failed));
+        retained.push((
+            channel.id.0.clone(),
+            core.snapshot(),
+            core.history_snapshot(),
+            core.runtime_generation(),
+        ));
+    }
+    assert!(
+        channels.reload_project(&project.id).is_err(),
+        "reload needs the lifecycle guard"
+    );
+    core.begin_project_change().unwrap();
+    assert!(
+        core.send_to(Some(&affected.id.0), "Blocked".into())
+            .is_err()
+    );
+    store
+        .lock()
+        .unwrap()
+        .change_project_folder(&project.id, replacement.path())
+        .unwrap();
+    channels.activate_project(&project.id).unwrap();
+    channels.reload_project(&project.id).unwrap();
+    assert_eq!(core.active_channel_id(), affected.id.0);
+    core.end_project_change();
+    for (id, before, history, old_generation) in retained {
+        channels.select(&id).unwrap();
+        assert_eq!(
+            core.snapshot().live_blocks,
+            before.live_blocks,
+            "retained reply for {id}"
+        );
+        assert_eq!(core.snapshot().notice, before.notice);
+        assert_eq!(core.history_snapshot().messages, history.messages);
+        let is_affected = id == affected.id.0 || id == parked.id.0;
+        assert_eq!(core.runtime_generation() == old_generation, !is_affected);
+        core.apply_runtime(
+            &id,
+            Some(old_generation),
+            Update::ResponseSaveFailed("late old transport".into()),
+        );
+        assert_eq!(
+            core.snapshot().notice.as_deref() == Some("late old transport"),
+            !is_affected
+        );
+    }
+    let launches = launches.lock().unwrap();
+    assert_eq!(launches.len(), 6, "only two affected transports restart");
+    for (id, path) in &launches[4..] {
+        assert!(id == &affected.id || id == &parked.id);
+        assert_eq!(
+            std::path::Path::new(path.as_ref().unwrap())
+                .canonicalize()
+                .unwrap(),
+            replacement.path().canonicalize().unwrap()
+        );
+    }
+    drop(launches);
+    // A launch failure closes only affected transports and leaves their cached replies reachable.
+    channels.select(&direct.id.0).unwrap();
+    fail_launch.store(true, std::sync::atomic::Ordering::SeqCst);
+    core.begin_project_change().unwrap();
+    assert!(
+        channels
+            .reload_project(&project.id)
+            .unwrap_err()
+            .contains("test replacement")
+    );
+    core.end_project_change();
+    assert_eq!(core.active_channel_id(), direct.id.0);
+    assert!(!core.channel_session_closed(&direct.id.0));
+    assert!(core.channel_session_closed(&parked.id.0));
+    assert!(
+        channels
+            .select(&parked.id.0)
+            .unwrap_err()
+            .contains("test replacement")
+    );
+    assert_eq!(
+        core.active_channel_id(),
+        parked.id.0,
+        "failed retry must still open retained history"
+    );
+    assert!(!core.snapshot().live_blocks.is_empty());
+    assert_eq!(
+        core.history_snapshot().messages.len(),
+        2,
+        "saved reply and current question stay visible"
+    );
+    let retained = core.snapshot();
+    fail_launch.store(false, std::sync::atomic::Ordering::SeqCst);
+    channels.select(&parked.id.0).unwrap();
+    assert!(!core.channel_session_closed(&parked.id.0));
+    assert_eq!(core.snapshot().live_blocks, retained.live_blocks);
+    assert_eq!(core.snapshot().notice, retained.notice);
+}

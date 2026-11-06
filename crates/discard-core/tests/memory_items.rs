@@ -803,3 +803,151 @@ fn approval_receipts_are_flat_immutable_metadata_and_do_not_enter_retrieval() {
     assert_eq!(receipt["revision"]["version"], 1);
     assert_eq!(receipt["revision"]["content"], "historic approved pear");
 }
+
+#[test]
+fn plugin_aliases_reopen_as_single_versioned_items_and_reject_aba_stale_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let scope = Scope::AgentProject(AgentId("a".into()), ProjectId("p".into()));
+    let store = MemoryStore::open_in_memory_index(dir.path()).unwrap();
+    let original = store
+        .plugin_append(&scope, "core/rules.md", "alwaysincludeplugin")
+        .unwrap();
+    let appended = store
+        .plugin_append(&scope, "core/rules.md", "secondline")
+        .unwrap();
+    assert_ne!(original, appended);
+    assert_eq!(
+        store.plugin_read(&scope, "core/rules.md").unwrap().text,
+        "alwaysincludeplugin\nsecondline"
+    );
+    assert_eq!(store.plugin_list(&scope).unwrap()[0].version, appended);
+    let item = store.list_items(&[scope.clone()]).unwrap().remove(0);
+    assert_eq!(item.version, 2);
+    assert_eq!(item.history[0].content, "alwaysincludeplugin");
+    assert!(
+        !dir.path().join("agent-projects/a/p/core/rules.md").exists(),
+        "no parallel raw body"
+    );
+    store.undo_item(&item.id, 2).unwrap();
+    assert_eq!(
+        store.plugin_read(&scope, "core/rules.md").unwrap().text,
+        "alwaysincludeplugin"
+    );
+    assert!(
+        store
+            .plugin_edit(
+                &scope,
+                "core/rules.md",
+                "alwaysincludeplugin",
+                "stale",
+                &original
+            )
+            .is_err(),
+        "same text after Undo has a new version"
+    );
+    assert!(store.plugin_read(&Scope::Global, &item.path()).is_err());
+    assert!(
+        store
+            .plugin_append(&Scope::Global, &item.path(), "outside scope")
+            .is_err()
+    );
+    assert!(
+        store
+            .plugin_edit(
+                &Scope::Global,
+                &item.path(),
+                "alwaysincludeplugin",
+                "outside scope",
+                &original
+            )
+            .is_err()
+    );
+    let preference = store
+        .create_item(
+            &scope,
+            ItemKind::Preference,
+            "mandatorypreference",
+            None,
+            MutationOrigin::User,
+        )
+        .unwrap();
+    store
+        .plugin_append(&scope, "notes.md", "searchablepluginfact")
+        .unwrap();
+    let core = store.core_blocks(&[scope.clone()]).unwrap();
+    assert_eq!(core.len(), 2);
+    assert!(core.iter().any(|b| b.text == "alwaysincludeplugin"));
+    assert!(core.iter().any(|b| b.text == preference.content));
+    assert_eq!(
+        store
+            .plugin_search(&[scope.clone()], "searchablepluginfact", 5)
+            .unwrap()[0]
+            .path,
+        "notes.md"
+    );
+    let document = dir.path().join(".items").join(format!("{}.md", item.id));
+    let text = std::fs::read_to_string(&document).unwrap();
+    // Change only the authoritative body, not the committed metadata snapshot.
+    let (metadata, _) = text.split_once("\n\n").unwrap();
+    std::fs::write(&document, format!("{metadata}\n\nexternalpluginbody")).unwrap();
+    assert!(
+        store
+            .plugin_append(&scope, "core/rules.md", "blocked until import")
+            .is_err()
+    );
+    store.reconcile().unwrap();
+    assert_eq!(store.read_item(&item.id).unwrap().version, 4);
+    assert!(
+        store
+            .search(&[scope.clone()], "alwaysincludeplugin", 5)
+            .unwrap()
+            .is_empty()
+    );
+    store.move_item(&item.id, 4, &Scope::Global).unwrap();
+    drop(store);
+    let reopened = MemoryStore::open_in_memory_index(dir.path()).unwrap();
+    reopened.rebuild_index().unwrap();
+    assert!(
+        reopened
+            .plugin_append(&scope, "core/rules.md", "do not recreate")
+            .is_err()
+    );
+    let current = reopened.plugin_read(&Scope::Global, &item.path()).unwrap();
+    reopened
+        .plugin_edit(
+            &Scope::Global,
+            &item.path(),
+            "externalpluginbody",
+            "currentpluginbody",
+            &current.version,
+        )
+        .unwrap();
+    assert!(
+        reopened
+            .plugin_edit(
+                &Scope::Global,
+                &item.path(),
+                "currentpluginbody",
+                "stale",
+                &current.version
+            )
+            .is_err()
+    );
+    reopened.forget_item(&item.id, 6).unwrap();
+    drop(reopened);
+    let forgotten = MemoryStore::open_in_memory_index(dir.path()).unwrap();
+    forgotten.rebuild_index().unwrap();
+    assert!(
+        forgotten
+            .plugin_append(&scope, "core/rules.md", "alwaysincludeplugin")
+            .is_err()
+    );
+    assert!(forgotten.plugin_read(&Scope::Global, &item.path()).is_err());
+    assert!(
+        forgotten
+            .plugin_search(&[scope, Scope::Global], "currentpluginbody", 5)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(forgotten.core_blocks(&[Scope::Global]).unwrap().is_empty());
+}

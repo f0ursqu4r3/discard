@@ -63,27 +63,27 @@ impl PluginMemory {
 
 impl MemoryHost for PluginMemory {
     fn list(&self, scope: &str) -> Result<Vec<MemoryFile>, String> {
-        let files = self.store.list(&self.scope(scope)?).map_err(|e| e.to_string())?;
+        let files = self.store.plugin_list(&self.scope(scope)?).map_err(|e| e.to_string())?;
         Ok(files.into_iter().map(|f| MemoryFile { path: f.path, version: f.version, bytes: f.bytes }).collect())
     }
 
     fn read(&self, scope: &str, path: &str) -> Result<MemoryText, String> {
-        let c = self.store.read(&self.scope(scope)?, path).map_err(|e| e.to_string())?;
+        let c = self.store.plugin_read(&self.scope(scope)?, path).map_err(|e| e.to_string())?;
         Ok(MemoryText { text: c.text, version: c.version })
     }
 
     fn search(&self, scopes: &[String], query: &str, limit: usize) -> Result<Vec<MemoryHit>, String> {
         let scopes = scopes.iter().map(|s| self.scope(s)).collect::<Result<Vec<_>, _>>()?;
-        let hits = self.store.search(&scopes, query, limit).map_err(|e| e.to_string())?;
+        let hits = self.store.plugin_search(&scopes, query, limit).map_err(|e| e.to_string())?;
         Ok(hits.into_iter().map(|h| MemoryHit { scope: h.scope, path: h.path, snippet: h.snippet }).collect())
     }
 
     fn append(&self, scope: &str, path: &str, text: &str) -> Result<String, String> {
-        self.store.append(&self.scope(scope)?, path, text).map_err(|e| e.to_string())
+        self.store.plugin_append(&self.scope(scope)?, path, text).map_err(|e| e.to_string())
     }
 
     fn edit(&self, scope: &str, path: &str, old: &str, new: &str, expected_version: &str) -> Result<String, String> {
-        self.store.edit(&self.scope(scope)?, path, old, new, expected_version).map_err(|e| e.to_string())
+        self.store.plugin_edit(&self.scope(scope)?, path, old, new, expected_version).map_err(|e| e.to_string())
     }
 }
 
@@ -114,7 +114,7 @@ mod tests {
         PluginMemory::for_context(AgentId("agent".into()), ProjectId("origin".into()), || h.append("project", "notes.md", "origin").unwrap());
         assert!(h.list("project").unwrap().is_empty());
         h.append("project", "notes.md", "selected").unwrap();
-        assert_eq!(r.store.read(&Scope::Project(ProjectId("origin".into())), "notes.md").unwrap().text, "origin");
+        assert_eq!(r.store.plugin_read(&Scope::Project(ProjectId("origin".into())), "notes.md").unwrap().text, "origin");
         assert_eq!(h.read("project", "notes.md").unwrap().text, "selected");
     }
     #[test]
@@ -124,9 +124,9 @@ mod tests {
         h.append("agent", "n.md", "mine").unwrap();
         h.append("project", "n.md", "ours").unwrap();
         h.append("global", "n.md", "everyone").unwrap();
-        assert_eq!(r.store.read(&Scope::Agent(AgentId("a1".into())), "n.md").unwrap().text, "mine");
-        assert_eq!(r.store.read(&Scope::Project(ProjectId("p1".into())), "n.md").unwrap().text, "ours");
-        assert_eq!(r.store.read(&Scope::Global, "n.md").unwrap().text, "everyone");
+        assert_eq!(r.store.plugin_read(&Scope::Agent(AgentId("a1".into())), "n.md").unwrap().text, "mine");
+        assert_eq!(r.store.plugin_read(&Scope::Project(ProjectId("p1".into())), "n.md").unwrap().text, "ours");
+        assert_eq!(r.store.plugin_read(&Scope::Global, "n.md").unwrap().text, "everyone");
     }
 
     #[test]
@@ -166,8 +166,8 @@ mod tests {
         h.set_active_source(Arc::new(|| AgentId("active".into())));
         PluginMemory::for_agent(AgentId("background".into()), || h.append("agent", "notes.md", "background").unwrap());
         h.append("agent", "notes.md", "active").unwrap();
-        assert_eq!(r.store.read(&Scope::Agent(AgentId("background".into())), "notes.md").unwrap().text, "background");
-        assert_eq!(r.store.read(&Scope::Agent(AgentId("active".into())), "notes.md").unwrap().text, "active");
+        assert_eq!(r.store.plugin_read(&Scope::Agent(AgentId("background".into())), "notes.md").unwrap().text, "background");
+        assert_eq!(r.store.plugin_read(&Scope::Agent(AgentId("active".into())), "notes.md").unwrap().text, "active");
         assert!(r.store.list(&Scope::Agent(AgentId("initial".into()))).unwrap().is_empty());
     }
 
@@ -184,7 +184,7 @@ mod tests {
             h.append("agent", "notes.md", "after").unwrap();
             assert!(h.read("agent", "notes.md").unwrap().text.contains("before"));
         });
-        assert!(r.store.read(&Scope::Agent(AgentId("first".into())), "notes.md").unwrap().text.contains("after"));
+        assert!(r.store.plugin_read(&Scope::Agent(AgentId("first".into())), "notes.md").unwrap().text.contains("after"));
         assert!(h.list("agent").unwrap().is_empty(), "next callback sees the newly selected agent");
     }
 }

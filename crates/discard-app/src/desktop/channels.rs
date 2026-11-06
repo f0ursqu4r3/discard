@@ -51,7 +51,7 @@ impl Channels {
         self.core.channel_read_only(&channel.id.0, unavailable || archived, archived);
         let core = self.core.clone();
         let id = channel.id.0.clone();
-        let generation = core.runtime_generation();
+        let generation = core.channel_runtime_generation(&id).ok_or("Conversation unavailable")?;
         self.runtime.spawn(async move {
             while let Some(update) = updates.recv().await {
                 if core.apply_runtime(&id, Some(generation), update) {
@@ -76,21 +76,24 @@ impl Channels {
             let project = channel.project_id.as_ref().and_then(|id| store.list_projects().ok()?.into_iter().find(|p| p.id == *id));
             (channel, project)
         };
+        let restart = self.core.has_channel(id) && self.core.channel_session_closed(id);
         if !self.core.has_channel(id) { self.start(&channel)?; }
         if project_change { self.core.switch_channel_for_project(id)?; } else { self.core.switch_channel(id)?; }
         if let Some(project) = project { self.core.configure_branch_source(self.store.clone(), channel.id.clone(), channel.workspace_mode, project.path.into()); }
         else { self.core.clear_branch_source(); }
         self.core.clear_slots();
         self.core.refresh_branches(self.core.request_branch_refresh());
+        // Cached history stays selectable even if its replacement runtime fails to launch.
+        if restart { self.start_mode(&channel, true)?; }
         Ok(())
     }
     pub fn reload_project(&self, id: &ProjectId) -> Result<(), String> {
-        let agents: std::collections::HashSet<_> = self.store.lock().unwrap_or_else(|e| e.into_inner()).all_conversations().map_err(|e| e.to_string())?.into_iter().filter(|c| c.project_id.as_ref() == Some(id)).map(|c| c.agent_id.0).collect();
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        for agent in agents {
-            let selected = (self.core.active_agent_id() == agent).then(|| self.core.active_channel_id());
-            self.core.remove_agent_channels(&agent);
-            if let Some(selected) = selected { self.select_inner_mode(&selected, true)?; }
+        let channels: Vec<_> = self.store.lock().unwrap_or_else(|e| e.into_inner()).all_conversations().map_err(|e| e.to_string())?.into_iter().filter(|c| c.project_id.as_ref() == Some(id) && self.core.has_channel(&c.id.0)).collect();
+        self.core.invalidate_project_channels(id)?;
+        for channel in channels { self.start_mode(&channel, true)?; }
+        if self.core.active_context().1.as_ref() == Some(id) {
+            self.select_inner_mode(&self.core.active_channel_id(), true)?;
         }
         Ok(())
     }

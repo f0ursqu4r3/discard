@@ -26,6 +26,7 @@ pub struct CoreInit {
 }
 struct ChannelState {
     ui: UiState,
+    runtime_generation: u64,
     commands: UnboundedSender<Command>,
     channel: String,
     project_name: String,
@@ -44,7 +45,7 @@ struct ChannelState {
 impl ChannelState {
     fn new(init: CoreInit) -> Self {
         let channel_id = init.state.channel_id().0.clone();
-        Self { ui: init.state, commands: init.commands, channel: init.channel, project_name: init.project, agent: init.agent,
+        Self { ui: init.state, runtime_generation: 0, commands: init.commands, channel: init.channel, project_name: init.project, agent: init.agent,
             provider: init.provider, channel_id, agent_id: String::new(), project_id: None,
             mode: discard_core::model::WorkspaceMode::MainCheckout, new_anchor: None,
             archive: None, archived: false, archive_busy: false, read_only: false }
@@ -158,13 +159,33 @@ impl AppCore {
     /// Replace only a closed transport. Preserve transcript, notices and unsaved reply blocks.
     pub fn restart_closed_channel(&self, init: CoreInit, channel: &discard_core::model::Channel) -> Result<bool, String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let next_generation = s.runtime_generation + 1;
         let target = if s.active.channel_id == channel.id.0 { Some(&mut s.active) } else { s.parked.get_mut(&channel.id.0) };
         let Some(target) = target else { return Ok(false) };
         if !target.commands.is_closed() { return Ok(false); }
         if target.ui.turn_running() { return Err("Stop this conversation before restarting its session.".into()); }
+        target.runtime_generation = next_generation;
         target.commands = init.commands; target.agent = init.agent; target.provider = init.provider;
         target.project_name = init.project; target.channel = init.channel;
+        s.runtime_generation = next_generation;
         s.rev += 1; self.changed.notify_one(); Ok(true)
+    }
+    /// Invalidate only this project's idle transports. Retain all conversation UI state.
+    /// The project-change guard blocks sends until fresh folder-bound runtimes are installed.
+    pub fn invalidate_project_channels(&self, id: &discard_core::model::ProjectId) -> Result<(), String> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !s.project_busy { return Err("Begin the project change before reloading its sessions.".into()); }
+        if std::iter::once(&s.active).chain(s.parked.values()).any(|c| c.project_id.as_ref() == Some(id) && (c.ui.turn_running() || c.archive_busy)) {
+            return Err("Stop this project's responses before restarting its sessions.".into());
+        }
+        let State { active, parked, runtime_generation, .. } = &mut *s;
+        for channel in std::iter::once(active).chain(parked.values_mut()).filter(|c| c.project_id.as_ref() == Some(id)) {
+            *runtime_generation += 1;
+            channel.runtime_generation = *runtime_generation;
+            let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+            channel.commands = commands;
+        }
+        s.rev += 1; self.changed.notify_one(); Ok(())
     }
     pub fn agent_sessions_closed(&self, id: &str) -> bool {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -219,6 +240,7 @@ impl AppCore {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.runtime_generation += 1;
         s.active = ChannelState::new(init);
+        s.active.runtime_generation = s.runtime_generation;
         s.active.channel_id = channel.id.0.clone(); s.active.agent_id = channel.agent_id.0.clone(); s.active.mode = channel.workspace_mode; s.active.project_id = channel.project_id.clone();
         s.project = project.name.clone(); s.project_id = project.id.0.clone(); s.project_path = project.path.clone();
         s.parked.clear(); s.branches.clear(); s.collapsed.clear(); s.current_branch = None;
@@ -254,7 +276,9 @@ impl AppCore {
     pub fn add_channel(&self, init: CoreInit, channel: &discard_core::model::Channel) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if s.active.channel_id == channel.id.0 || s.parked.contains_key(&channel.id.0) { return; }
+        s.runtime_generation += 1;
         let mut runtime = ChannelState::new(init);
+        runtime.runtime_generation = s.runtime_generation;
         runtime.channel_id = channel.id.0.clone(); runtime.agent_id = channel.agent_id.0.clone(); runtime.mode = channel.workspace_mode; runtime.project_id = channel.project_id.clone();
         if let Some(marker) = startup_marker(runtime.ui.history(), s.window.last_read(&channel.id.0)) { let _ = s.window.set_last_read(&channel.id.0, &marker); }
         runtime.new_anchor = new_divider_anchor(runtime.ui.history(), s.window.last_read(&channel.id.0), None, false);
@@ -689,11 +713,16 @@ impl AppCore {
         let _ = s.active.commands.send(Command::Cancel);
     }
     pub fn apply(&self, update: Update) -> bool { self.apply_channel(&self.active_channel_id(), update) }
-    pub fn runtime_generation(&self) -> u64 { self.state.lock().unwrap_or_else(|e| e.into_inner()).runtime_generation }
+    pub fn runtime_generation(&self) -> u64 { self.state.lock().unwrap_or_else(|e| e.into_inner()).active.runtime_generation }
+    pub fn channel_runtime_generation(&self, id: &str) -> Option<u64> {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        std::iter::once(&s.active).chain(s.parked.values()).find(|c| c.channel_id == id).map(|c| c.runtime_generation)
+    }
     pub fn apply_channel(&self, channel: &str, update: Update) -> bool { self.apply_runtime(channel, None, update) }
     pub fn apply_runtime(&self, channel: &str, generation: Option<u64>, update: Update) -> bool {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if generation.is_some_and(|generation| generation != s.runtime_generation) { return false; }
+        let current = std::iter::once(&s.active).chain(s.parked.values()).find(|c| c.channel_id == channel).map(|c| c.runtime_generation);
+        if generation.is_some_and(|generation| Some(generation) != current) { return false; }
         let memory_changed = matches!(&update, Update::MemoryChanges { .. });
         if s.active.channel_id != channel {
             let marker = s.window.last_read(channel).map(str::to_owned);
