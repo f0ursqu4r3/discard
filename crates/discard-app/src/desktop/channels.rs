@@ -111,7 +111,7 @@ impl Channels {
             Ok(super::dto::ProjectChannelDto {
                 id: channel.id.0, project_id: project.0.clone(), name: channel.name,
                 agent_id: channel.agent_id.0, workspace_mode: channel.workspace_mode.as_str().into(),
-                kind: match metadata.kind { discard_core::model::ProjectChannelKind::General => "general", discard_core::model::ProjectChannelKind::Branch => "branch", discard_core::model::ProjectChannelKind::ArchivedLegacy => "archived_legacy" }.into(),
+                kind: match metadata.kind { discard_core::model::ProjectChannelKind::General => "general", discard_core::model::ProjectChannelKind::Branch => "branch", discard_core::model::ProjectChannelKind::ArchivedLegacy => "archived_legacy", discard_core::model::ProjectChannelKind::Legacy => "legacy" }.into(),
                 branch: metadata.branch, archived, archived_into: metadata.archived_into.map(|id| id.0),
             })
         }).collect()
@@ -165,7 +165,7 @@ impl Channels {
     pub fn select_canonical_general(&self, project: &ProjectId, channel_id: &ChannelId) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let (target, metadata, _) = self.project_channel(project, channel_id, true)?;
-        if !target.name.eq_ignore_ascii_case("general") || metadata.kind == discard_core::model::ProjectChannelKind::Branch {
+        if !target.name.eq_ignore_ascii_case("general") || metadata.kind != discard_core::model::ProjectChannelKind::ArchivedLegacy {
             return Err("Select a general channel from this project.".into());
         }
         let previous = {
@@ -224,7 +224,7 @@ impl Channels {
             channel: super::dto::ProjectChannelDto {
                 id: channel.id.0.clone(), project_id: project.0.clone(), name: channel.name,
                 agent_id: channel.agent_id.0, workspace_mode: channel.workspace_mode.as_str().into(),
-                kind: match metadata.kind { discard_core::model::ProjectChannelKind::General => "general", discard_core::model::ProjectChannelKind::Branch => "branch", discard_core::model::ProjectChannelKind::ArchivedLegacy => "archived_legacy" }.into(),
+                kind: match metadata.kind { discard_core::model::ProjectChannelKind::General => "general", discard_core::model::ProjectChannelKind::Branch => "branch", discard_core::model::ProjectChannelKind::ArchivedLegacy => "archived_legacy", discard_core::model::ProjectChannelKind::Legacy => "legacy" }.into(),
                 branch: metadata.branch, archived, archived_into: metadata.archived_into.map(|id| id.0),
             },
             topic: super::dto::ChannelTopicDto { channel_id: topic.channel_id.0, text: topic.text, version: topic.version },
@@ -307,6 +307,31 @@ impl Channels {
             self.select_inner_mode(&self.core.active_channel_id(), true)?;
         }
         Ok(())
+    }
+    /// Restart loaded project channels that Store reassigned after an agent was deleted.
+    pub fn reconcile_deleted_agent(&self, deleted_agent_id: &str) -> Result<(), String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let ids = self.core.agent_channel_ids(deleted_agent_id);
+        let mut failures = Vec::new();
+        for id in ids {
+            let channel = {
+                let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+                match store.load_channel(&ChannelId(id.clone())) {
+                    Ok(channel) if channel.agent_id.0 != deleted_agent_id => channel,
+                    _ => continue,
+                }
+            };
+            if let Err(error) = self.core.invalidate_idle_channel(&channel) {
+                failures.push(format!("{id}: {error}"));
+                continue;
+            }
+            if let Err(error) = self.start_mode(&channel, true) {
+                self.core.append_channel_notice(&id, format!("This channel now uses its saved replacement agent, but its session could not restart: {error}. Select this channel again to retry."));
+                failures.push(format!("{id}: {error}"));
+            }
+        }
+        self.core.refresh_branches(self.core.request_branch_refresh());
+        if failures.is_empty() { Ok(()) } else { Err(failures.join("; ")) }
     }
     pub fn restore_conversation(&self, id: &str) -> Result<(), String> {
         let channel = self.store.lock().unwrap_or_else(|e| e.into_inner()).load_channel(&ChannelId(id.to_owned())).map_err(|e| e.to_string())?;
@@ -729,6 +754,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn saved_branch_channel_opens_by_id_when_git_listing_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let (project, agent, branch) = {
+            let store = store.lock().unwrap();
+            let project = store.import_project_folder(dir.path()).unwrap();
+            let agent = configured_agent(&store);
+            store.set_project_main_agent(&project.id, &agent).unwrap();
+            let branch = store.create_conversation(&agent, Some(&project.id), "feature/x").unwrap();
+            store.bind_branch(&branch.id, "feature/x").unwrap();
+            (project, agent, branch)
+        };
+        let core = core(&branch, dir.path());
+        let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
+        assert!(list_branch_tree(dir.path()).is_err(), "test project has no Git metadata");
+        assert_eq!(service.select(&branch.id.0).unwrap(), ());
+        assert_eq!(core.active_channel_id(), branch.id.0);
+        assert_eq!(core.active_context().0, agent);
+        assert_eq!(store.lock().unwrap().project_channel_metadata(&branch.id).unwrap().unwrap().branch.as_deref(), Some("feature/x"));
+        assert_eq!(store.lock().unwrap().load_channel(&branch.id).unwrap().project_id, Some(project.id));
+    }
+
+    #[tokio::test]
+    async fn builder_bootstrap_on_v4_database_is_listed_and_keeps_its_coding_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("builder.db");
+        let project_dir = dir.path().join("workspace");
+        std::fs::create_dir(&project_dir).unwrap();
+        let store = Store::open(&db).unwrap();
+        drop(store);
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.pragma_update(None, "user_version", 4).unwrap();
+        }
+        let store = Arc::new(Mutex::new(Store::open(&db).unwrap()));
+        let builder = discard_core::bootstrap::ensure_workspace(
+            &store.lock().unwrap(), &project_dir, "codex", discard_core::bootstrap::Role::Builder,
+            discard_core::bootstrap::WorkspaceChoice::Main,
+        ).unwrap();
+        let app_core = core(&builder.channel, &project_dir);
+        let service = Channels::new(app_core, store.clone(), Handle::current(), launcher());
+        let listed = service.list_project_channels(&builder.project.id).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, builder.channel.id.0);
+        assert_eq!(listed[0].kind, "legacy");
+        assert_eq!(listed[0].workspace_mode, "main_checkout");
+        let details = service.channel_details(&builder.project.id, &builder.channel.id).unwrap();
+        assert_eq!(details.channel.kind, "legacy");
+        assert!(!details.channel.archived);
+        assert_eq!(details.channel.agent_id, builder.channel.agent_id.0);
+        drop(service);
+        drop(store);
+
+        let reopened = Arc::new(Mutex::new(Store::open(&db).unwrap()));
+        let next = discard_core::bootstrap::ensure_workspace(
+            &reopened.lock().unwrap(), &project_dir, "codex", discard_core::bootstrap::Role::Builder,
+            discard_core::bootstrap::WorkspaceChoice::Main,
+        ).unwrap();
+        assert_eq!(next.channel.id, builder.channel.id);
+        assert_eq!(next.session_id, builder.session_id);
+        let reopened_service = Channels::new(core(&next.channel, &project_dir), reopened, Handle::current(), launcher());
+        assert_eq!(reopened_service.list_project_channels(&next.project.id).unwrap()[0].id, builder.channel.id.0);
+    }
+
+    #[tokio::test]
     async fn topic_api_binds_project_and_channel_and_rejects_stale_user_edits() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in_memory().unwrap();
@@ -831,6 +921,73 @@ mod tests {
         service.select(&general.id.0).unwrap();
         assert_eq!(core.active_context().0, new_agent);
         assert!(!core.send_to(Some(&general.id.0), "new agent is ready".into()).is_err());
+    }
+
+    #[tokio::test]
+    async fn deleting_main_agent_restarts_loaded_active_and_parked_general_channels() {
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let (first, _second, old, first_replacement, second_replacement, first_general, second_general) = {
+            let store = store.lock().unwrap();
+            let first = store.import_project_folder(first_dir.path()).unwrap();
+            let second = store.import_project_folder(second_dir.path()).unwrap();
+            let old = configured_agent(&store);
+            let first_replacement = store.create_agent(&AgentConfig { reasoning_effort: None, name: "Replacement one".into(), provider: "codex".into(), model: Some("one".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+            let second_replacement = store.create_agent(&AgentConfig { reasoning_effort: None, name: "Replacement two".into(), provider: "codex".into(), model: Some("two".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+            store.set_project_main_agent(&first.id, &old).unwrap();
+            store.set_project_main_agent(&second.id, &old).unwrap();
+            let first_general = store.ensure_project_general_channel(&first.id, &old).unwrap();
+            let second_general = store.ensure_project_general_channel(&second.id, &old).unwrap();
+            store.insert_message(&discard_core::model::Message {
+                id: discard_core::model::MessageId::new(), channel_id: first_general.id.clone(),
+                role: discard_core::model::Role::Agent,
+                blocks: vec![discard_core::model::Block::Markdown { text: "retained general history".into() }],
+            }).unwrap();
+            store.invite_agent_to_channel(&first.id, &first_general.id, &first_replacement).unwrap();
+            store.invite_agent_to_channel(&second.id, &second_general.id, &second_replacement).unwrap();
+            (first, second, old, first_replacement, second_replacement, first_general, second_general)
+        };
+        let receivers = Arc::new(Mutex::new(Vec::new()));
+        let fail_second_replacement = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let launch_store = store.clone();
+        let launch_receivers = receivers.clone();
+        let fail_flag = fail_second_replacement.clone();
+        let failed_channel_id = second_general.id.clone();
+        let launch: Launcher = Arc::new(move |channel| {
+            if fail_flag.load(std::sync::atomic::Ordering::SeqCst) && channel.id == failed_channel_id {
+                fail_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                return Err("simulated replacement launch failure".into());
+            }
+            let cfg = launch_store.lock().unwrap().load_agent(&channel.agent_id).unwrap();
+            let (commands, receiver) = mpsc::unbounded_channel();
+            launch_receivers.lock().unwrap().push(receiver);
+            let (_, updates) = mpsc::unbounded_channel();
+            Ok((CoreInit { state: UiState::new(channel.id.clone(), vec![]), commands, project: "Project".into(), channel: channel.name.clone(), agent: cfg.name, provider: cfg.provider }, updates))
+        });
+        let initial = launch(&first_general).unwrap().0;
+        let core = Arc::new(AppCore::new(initial));
+        core.configure_targets(first.id.0.clone(), first_dir.path(), old.0.clone());
+        let service = Channels::new(core.clone(), store.clone(), Handle::current(), launch);
+        service.select(&second_general.id.0).unwrap();
+        assert_eq!(core.active_channel_id(), second_general.id.0);
+        assert!(core.has_channel(&first_general.id.0), "the first general remains parked");
+        core.begin_agent_change(&old.0).unwrap();
+        store.lock().unwrap().delete_agent(&old, discard_core::store::DeleteAgentOptions { delete_conversations: false, delete_private_memory: false }).unwrap();
+        fail_second_replacement.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(service.reconcile_deleted_agent(&old.0).unwrap_err().contains("simulated replacement launch failure"));
+        core.end_agent_change(&old.0);
+
+        assert_eq!(store.lock().unwrap().load_channel(&first_general.id).unwrap().agent_id, first_replacement);
+        assert_eq!(store.lock().unwrap().load_channel(&second_general.id).unwrap().agent_id, second_replacement);
+        assert!(store.lock().unwrap().messages_for_channel(&first_general.id).unwrap().iter().any(|message| matches!(message.blocks.as_slice(), [discard_core::model::Block::Markdown { text }] if text == "retained general history")));
+        assert_eq!(core.active_context().0, second_replacement);
+        assert!(!core.channel_session_closed(&first_general.id.0));
+        assert!(core.channel_session_closed(&second_general.id.0), "failed replacement stays closed and retryable");
+        assert_eq!(receivers.lock().unwrap().len(), 3, "the failed channel has no live replacement receiver");
+        service.select(&second_general.id.0).unwrap();
+        assert!(!core.channel_session_closed(&second_general.id.0));
+        assert!(core.send_to(Some(&second_general.id.0), "replacement is ready".into()).is_ok());
     }
 
     #[tokio::test]

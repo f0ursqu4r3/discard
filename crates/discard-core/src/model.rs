@@ -30,6 +30,8 @@ pub enum ProjectChannelKind {
     General,
     Branch,
     ArchivedLegacy,
+    /// Active project channel created by the retained workspace bootstrap path.
+    Legacy,
 }
 
 impl ProjectChannelKind {
@@ -38,6 +40,7 @@ impl ProjectChannelKind {
             Self::General => "general",
             Self::Branch => "branch",
             Self::ArchivedLegacy => "archived_legacy",
+            Self::Legacy => "legacy",
         }
     }
     pub fn parse(value: &str) -> Option<Self> {
@@ -45,6 +48,7 @@ impl ProjectChannelKind {
             "general" => Some(Self::General),
             "branch" => Some(Self::Branch),
             "archived_legacy" => Some(Self::ArchivedLegacy),
+            "legacy" => Some(Self::Legacy),
             _ => None,
         }
     }

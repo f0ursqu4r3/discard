@@ -76,6 +76,19 @@ const sections = reactive({
 })
 const gitBranches = computed(() => props.branches.filter((row) => !row.detached))
 const worktrees = computed(() => props.branches.filter((row) => row.kind !== 'branch'))
+const savedChannels = computed(() =>
+  props.projectChannels.filter((channel) => {
+    if (channel.kind === 'general') return false
+    if (
+      !channel.archived &&
+      channel.kind === 'branch' &&
+      channel.branch &&
+      gitBranches.value.some((row) => row.key === channel.branch)
+    )
+      return false
+    return true
+  }),
+)
 watch(
   () => props.projectPath,
   (path) => {
@@ -281,33 +294,35 @@ const approvals = computed(
           </CollapsibleContent>
         </Collapsible>
         <Collapsible
-          v-if="projectChannels.some((channel) => channel.kind === 'archived_legacy')"
+          v-if="savedChannels.length"
           v-model:open="sections.archived"
-          data-ui-id="archived-history-navigation"
+          data-ui-id="saved-channel-navigation"
           class="mt-3"
         >
           <CollapsibleTrigger as-child>
             <button
-              data-ui-id="archived-history-toggle"
+              data-ui-id="saved-channel-toggle"
               class="flex h-7 w-full items-center gap-1 px-1 text-xs font-semibold text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
               <component :is="sections.archived ? ChevronDown : ChevronRight" class="size-3" />
-              Archived histories
+              Saved channels
             </button>
           </CollapsibleTrigger>
           <CollapsibleContent class="flex flex-col gap-0.5">
             <button
-              v-for="channel in projectChannels.filter((row) => row.kind === 'archived_legacy')"
+              v-for="channel in savedChannels"
               :key="channel.id"
               type="button"
-              :data-ui-id="`archived-history-${channel.id}`"
+              :data-ui-id="`saved-channel-${channel.id}`"
               :disabled="busy"
               class="flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-xs text-muted-foreground outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"
-              @click="emit('inspectChannel', channel.id)"
+              @click="emit('selectChannel', channel.id)"
             >
               <Hash class="size-4 shrink-0" />
               <span class="min-w-0 flex-1 truncate">{{ channel.branch ?? channel.name }}</span>
-              <span class="shrink-0">History</span>
+              <span class="shrink-0">
+                {{ channel.archived ? 'History' : channel.kind === 'legacy' ? 'Saved' : 'Channel' }}
+              </span>
             </button>
           </CollapsibleContent>
         </Collapsible>

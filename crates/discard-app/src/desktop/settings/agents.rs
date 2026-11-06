@@ -192,8 +192,8 @@ pub fn delete_agent_data(store: &Store, memory: &discard_core::memory::MemorySto
     Ok(())
 }
 #[tauri::command]
-pub async fn settings_agent_delete(app: tauri::AppHandle, context: tauri::State<'_, super::SettingsContext>, id: String, delete_conversations: bool, delete_private_memory: bool) -> Result<(), String> {
-    let core = context.core.clone(); let store = context.store.clone(); let memory = context.memory.clone();
+pub async fn settings_agent_delete(app: tauri::AppHandle, channels: tauri::State<'_, std::sync::Arc<crate::desktop::channels::Channels>>, context: tauri::State<'_, super::SettingsContext>, id: String, delete_conversations: bool, delete_private_memory: bool) -> Result<(), String> {
+    let core = context.core.clone(); let store = context.store.clone(); let memory = context.memory.clone(); let channels = channels.inner().clone();
     core.begin_agent_change(&id)?;
     let guard_core = core.clone(); let guard_id = id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -206,7 +206,12 @@ pub async fn settings_agent_delete(app: tauri::AppHandle, context: tauri::State<
         };
         if delete_conversations { core.remove_agent_channels(&id); }
         else { core.refresh_agent(&id, &cfg, true); }
-        agents_changed(&app); Ok(())
+        let reconcile = if !delete_conversations { channels.reconcile_deleted_agent(&id) } else { Ok(()) };
+        agents_changed(&app);
+        use tauri::Emitter;
+        let _ = app.emit("discard://conversations", ());
+        let _ = app.emit("discard://channel-details", core.active_channel_id());
+        reconcile
     }).await.map_err(|e| e.to_string()).and_then(|result| result);
     guard_core.end_agent_change(&guard_id); result
 }

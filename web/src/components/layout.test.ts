@@ -316,7 +316,7 @@ test('branch rows can open selected-project channels from a direct chat context'
   expect(list.emitted('openBranch')).toEqual([['feature/x']])
 })
 
-test('archived legacy history opens details instead of attempting a restore', async () => {
+test('saved channel history opens by its durable channel id', async () => {
   const list = mount(ChannelList, {
     global: { stubs: { AgentsNavigation: true } },
     props: {
@@ -326,11 +326,77 @@ test('archived legacy history opens details instead of attempting a restore', as
       projectChannels: archivedChannelsFixture as ProjectChannelDto[],
     },
   })
-  expect(list.text()).toContain('Archived histories')
-  await list.get('[data-ui-id="archived-history-toggle"]').trigger('click')
-  await list.get('[data-ui-id="archived-history-legacy-id"]').trigger('click')
-  expect(list.emitted('inspectChannel')).toEqual([['legacy-id']])
-  expect(list.emitted('selectChannel')).toBeUndefined()
+  expect(list.text()).toContain('Saved channels')
+  await list.get('[data-ui-id="saved-channel-toggle"]').trigger('click')
+  await list.get('[data-ui-id="saved-channel-legacy-id"]').trigger('click')
+  expect(list.emitted('selectChannel')).toEqual([['legacy-id']])
+})
+
+test('saved branch opens by id when live Git rows omit it', async () => {
+  const list = mount(ChannelList, {
+    global: { stubs: { AgentsNavigation: true } },
+    props: {
+      projectId: 'project',
+      activeProjectId: 'project',
+      projectPath: '/test/saved-branch-missing-git',
+      branches: [],
+      projectChannels: [
+        {
+          id: 'saved-branch-id',
+          projectId: 'project',
+          name: 'Feature x',
+          agentId: 'agent',
+          workspaceMode: 'main_checkout',
+          kind: 'branch',
+          branch: 'feature/x',
+          archived: false,
+          archivedInto: null,
+        },
+      ],
+    },
+  })
+  await list.get('[data-ui-id="saved-channel-toggle"]').trigger('click')
+  await list.get('[data-ui-id="saved-channel-saved-branch-id"]').trigger('click')
+  expect(list.emitted('selectChannel')).toEqual([['saved-branch-id']])
+  expect(list.emitted('openBranch')).toBeUndefined()
+})
+
+test('archived branch history stays reachable when Git still lists the branch', async () => {
+  const list = mount(ChannelList, {
+    global: { stubs: { AgentsNavigation: true } },
+    props: {
+      projectId: 'project',
+      activeProjectId: 'project',
+      projectPath: '/test/saved-branch-still-listed',
+      branches: [
+        {
+          key: 'feature/x',
+          label: 'feature/x',
+          kind: 'branch',
+          depth: 0,
+          current: false,
+          collapsed: false,
+          hasChildren: false,
+        },
+      ],
+      projectChannels: [
+        {
+          id: 'archived-branch-id',
+          projectId: 'project',
+          name: 'Feature x',
+          agentId: 'agent',
+          workspaceMode: 'main_checkout',
+          kind: 'branch',
+          branch: 'feature/x',
+          archived: true,
+          archivedInto: null,
+        },
+      ],
+    },
+  })
+  await list.get('[data-ui-id="saved-channel-toggle"]').trigger('click')
+  await list.get('[data-ui-id="saved-channel-archived-branch-id"]').trigger('click')
+  expect(list.emitted('selectChannel')).toEqual([['archived-branch-id']])
 })
 
 test('project conversation creation stays visible, disabled, and marked Soon', async () => {

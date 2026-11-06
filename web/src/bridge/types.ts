@@ -32,7 +32,7 @@ export interface ProjectChannelDto {
   name: string
   agentId: string
   workspaceMode: string
-  kind: 'general' | 'branch' | 'archived_legacy'
+  kind: 'general' | 'branch' | 'archived_legacy' | 'legacy'
   branch: string | null
   archived: boolean
   archivedInto: string | null

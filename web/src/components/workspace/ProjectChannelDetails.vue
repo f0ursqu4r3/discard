@@ -276,6 +276,9 @@ function authorName(authorKind: string, authorId: string | null) {
         <p v-else-if="details.channel.kind === 'general'" class="text-muted-foreground">
           Project-wide channel
         </p>
+        <p v-else-if="details.channel.kind === 'legacy'" class="text-muted-foreground">
+          Saved workspace channel
+        </p>
         <p class="text-muted-foreground">
           {{
             details.channel.archived

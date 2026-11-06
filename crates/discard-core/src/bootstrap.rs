@@ -115,6 +115,8 @@ pub fn ensure_workspace(store: &Store, project_dir: &Path, provider: &str, role:
         }
     };
 
+    store.register_bootstrap_project_channel(&channel.id)?;
+
     // An explicit choice that differs from the channel's mode moves it, with a new session.
     let wanted = match choice {
         WorkspaceChoice::Worktree => Some(WorkspaceMode::Worktree),
@@ -260,6 +262,38 @@ mod tests {
         assert_eq!(ensure_workspace(&store, &dir, "codex", Role::Builder, WorkspaceChoice::Auto).unwrap(), first);
         let claude = ensure_workspace(&store, &dir, "claude", Role::Builder, WorkspaceChoice::Auto).unwrap();
         assert_ne!(claude.channel.id, first.channel.id);
+    }
+
+    #[test]
+    fn builder_bootstrap_survives_v4_backfill_without_changing_channel_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("builder.db");
+        let project_dir = PathBuf::from("/work/builder-compat");
+        let (channel_id, session_id, mode) = {
+            let store = Store::open(&path).unwrap();
+            let builder = ensure_workspace(&store, &project_dir, "claude", Role::Builder, WorkspaceChoice::Main).unwrap();
+            assert_eq!(store.project_channel_metadata(&builder.channel.id).unwrap().unwrap().kind, crate::model::ProjectChannelKind::Legacy);
+            (builder.channel.id, builder.session_id, builder.channel.workspace_mode)
+        };
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute("DELETE FROM project_channels WHERE channel_id=?1", [&channel_id.0]).unwrap();
+            conn.execute("DELETE FROM channel_agents WHERE channel_id=?1", [&channel_id.0]).unwrap();
+            conn.execute("DELETE FROM project_agents WHERE project_id=(SELECT project_id FROM channels WHERE id=?1)", [&channel_id.0]).unwrap();
+            conn.pragma_update(None, "user_version", 4).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 5);
+        let metadata = store.project_channel_metadata(&channel_id).unwrap().unwrap();
+        assert_eq!(metadata.kind, crate::model::ProjectChannelKind::Legacy);
+        assert_eq!(store.load_channel(&channel_id).unwrap().workspace_mode, mode);
+        assert_eq!(store.latest_session(&channel_id).unwrap(), Some(session_id.clone()));
+        let builder = ensure_workspace(&store, &project_dir, "claude", Role::Builder, WorkspaceChoice::Main).unwrap();
+        assert_eq!(builder.channel.id, channel_id);
+        assert_eq!(builder.session_id, session_id);
+        assert_eq!(store.project_channel_metadata(&channel_id).unwrap().unwrap().kind, crate::model::ProjectChannelKind::Legacy);
+        assert_eq!(store.channel_agents(&channel_id).unwrap(), vec![builder.channel.agent_id.clone()]);
+        assert!(store.project_agents(&builder.project.id).unwrap().contains(&builder.channel.agent_id));
     }
 
     fn git_repo() -> tempfile::TempDir {

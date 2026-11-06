@@ -361,6 +361,32 @@ impl Store {
             tx.pragma_update(None, "user_version", 4)?;
             tx.commit()?;
         }
+        if self.schema_version()? < 5 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch("ALTER TABLE project_channels RENAME TO project_channels_v4;
+                CREATE TABLE project_channels (
+                    channel_id TEXT PRIMARY KEY REFERENCES channels(id),
+                    project_id TEXT NOT NULL REFERENCES projects(id),
+                    kind TEXT NOT NULL CHECK(kind IN ('general','branch','archived_legacy','legacy')),
+                    branch_name TEXT,
+                    archived_into TEXT REFERENCES channels(id));
+                INSERT INTO project_channels(channel_id,project_id,kind,branch_name,archived_into)
+                    SELECT channel_id,project_id,kind,branch_name,archived_into FROM project_channels_v4;
+                DROP TABLE project_channels_v4;
+                DROP INDEX IF EXISTS one_project_general_channel;
+                DROP INDEX IF EXISTS one_project_active_branch;
+                CREATE UNIQUE INDEX one_project_general_channel ON project_channels(project_id) WHERE kind='general';
+                CREATE UNIQUE INDEX one_project_active_branch ON project_channels(project_id,branch_name) WHERE kind='branch' AND branch_name IS NOT NULL;
+                INSERT INTO project_channels(channel_id,project_id,kind)
+                    SELECT c.id,c.project_id,'legacy' FROM channels c
+                    WHERE c.project_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM project_channels pc WHERE pc.channel_id=c.id);
+                INSERT OR IGNORE INTO channel_agents(channel_id,agent_id)
+                    SELECT c.id,c.agent_id FROM channels c JOIN project_channels pc ON pc.channel_id=c.id;
+                INSERT OR IGNORE INTO project_agents(project_id,agent_id)
+                    SELECT c.project_id,c.agent_id FROM channels c JOIN project_channels pc ON pc.channel_id=c.id;")?;
+            tx.pragma_update(None, "user_version", 5)?;
+            tx.commit()?;
+        }
         self.conn.execute_batch("CREATE TABLE IF NOT EXISTS direct_message_list (agent_id TEXT PRIMARY KEY REFERENCES agents(id));")?;
         Ok(())
     }
@@ -901,6 +927,23 @@ impl Store {
             "DELETE FROM channel_branches WHERE channel_id=?1",
             params![channel.0],
         )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Ensure a bootstrap-created project channel has catalogue metadata without changing its identity or runtime mode.
+    pub fn register_bootstrap_project_channel(&self, channel: &ChannelId) -> Result<()> {
+        let value = self.load_channel(channel)?;
+        let Some(project) = value.project_id.as_ref() else { return Ok(()) };
+        let tx = self.conn.unchecked_transaction()?;
+        let has_metadata: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM project_channels WHERE channel_id=?1)", params![channel.0], |r| r.get(0))?;
+        if !has_metadata {
+            let has_general: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM project_channels WHERE project_id=?1 AND kind='general')", params![project.0], |r| r.get(0))?;
+            let kind = if value.name.eq_ignore_ascii_case("general") && !has_general { "general" } else { "legacy" };
+            tx.execute("INSERT INTO project_channels(channel_id,project_id,kind) VALUES(?1,?2,?3)", params![channel.0, project.0, kind])?;
+        }
+        tx.execute("INSERT OR IGNORE INTO channel_agents(channel_id,agent_id) VALUES(?1,?2)", params![channel.0, value.agent_id.0])?;
+        tx.execute("INSERT OR IGNORE INTO project_agents(project_id,agent_id) VALUES(?1,?2)", params![project.0, value.agent_id.0])?;
         tx.commit()?;
         Ok(())
     }
@@ -2299,6 +2342,7 @@ mod tests {
         let v1 = Store::open(&path).unwrap().schema_version().unwrap();
         let v2 = Store::open(&path).unwrap().schema_version().unwrap();
         assert!(v1 >= 2);
+        assert_eq!(v1, 5);
         assert_eq!(v1, v2);
     }
 
@@ -2342,7 +2386,7 @@ mod tests {
             conn.execute("INSERT INTO channels (id, project_id, name, agent_id, workspace_mode) VALUES ('c', 'p', 'general', 'a', 'main_checkout')", []).unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 4);
+        assert_eq!(store.schema_version().unwrap(), 5);
         let channels = store.channels_for_project(&ProjectId("p".into())).unwrap();
         assert_eq!(channels.len(), 1);
         assert_eq!(
