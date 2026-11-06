@@ -244,9 +244,11 @@ impl Provider for CodexProvider {
             }
             if spec.mode == SessionMode::Conversation {
                 params["config"]["mcp_servers"]["discard-memory"]["enabled"] = json!(true);
+                // The scoped memory service owns shared-write approval. Default auto
+                // mode would require a CLI prompt that never policy cannot answer.
+                params["config"]["mcp_servers"]["discard-memory"]["default_tools_approval_mode"] = json!("approve");
                 params["config"]["mcp_servers"]["discard-memory"]["omit_tools_from"] = json!(["deferred", "code_mode"]);
-                params["config"]["mcp_servers"]["discard-memory"]["enabled_tools"] =
-                    json!(["memory_search", "memory_list", "memory_read", "memory_save", "memory_edit", "memory_forget"]);
+                params["config"]["mcp_servers"]["discard-memory"]["enabled_tools"] = json!(crate::conversation::MEMORY_TOOLS);
             }
         }
 

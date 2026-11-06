@@ -75,6 +75,12 @@ pub fn build_args(spec: &SessionSpec) -> Vec<String> {
         }
     }
     if spec.mode == SessionMode::Conversation {
+        // These tools enforce scoped memory and shared-write approval in Discard.
+        // Permit only these exact names; native tools remain absent.
+        args.extend([
+            "--allowedTools".into(),
+            crate::conversation::MEMORY_TOOLS.iter().map(|name| format!("mcp__discard-memory__{name}")).collect::<Vec<_>>().join(","),
+        ]);
         args.extend(
             ["--tools", "", "--strict-mcp-config", "--disable-slash-commands", "--restricted", "--system-prompt-snapshot", "off"]
                 .map(String::from),
@@ -169,9 +175,17 @@ impl Provider for ClaudeProvider {
                 .map_err(|e| crate::conversation::setup(e.to_string()))?;
             let help_text = String::from_utf8_lossy(&help.stdout);
             if !help.status.success()
-                || ["--tools", "--strict-mcp-config", "--restricted", "--disable-slash-commands", "--system-prompt-snapshot", "--settings"]
-                    .iter()
-                    .any(|flag| !help_text.contains(flag))
+                || [
+                    "--tools",
+                    "--allowedTools",
+                    "--strict-mcp-config",
+                    "--restricted",
+                    "--disable-slash-commands",
+                    "--system-prompt-snapshot",
+                    "--settings",
+                ]
+                .iter()
+                .any(|flag| !help_text.contains(flag))
             {
                 return Err(crate::conversation::setup("Claude is missing a required conversation control"));
             }
@@ -447,6 +461,22 @@ mod tests {
         let args = build_args(&spec(EnforcementMode::HostPrompts));
         for flag in ["--model", "--append-system-prompt", "--resume", "--mcp-config"] {
             assert!(!args.contains(&flag.to_string()), "{flag}");
+        }
+    }
+
+    #[test]
+    fn conversation_memory_permissions_allow_only_the_exact_scoped_tools() {
+        for enforcement in [EnforcementMode::HostPrompts, EnforcementMode::ProviderDenies] {
+            let mut s = spec(enforcement);
+            assert!(!build_args(&s).iter().any(|arg| arg == "--allowedTools"));
+            s.mode = SessionMode::Conversation;
+            let args = build_args(&s);
+            let allowed = args.iter().position(|arg| arg == "--allowedTools").expect("scoped memory permission list");
+            assert_eq!(
+                args[allowed + 1],
+                "mcp__discard-memory__memory_search,mcp__discard-memory__memory_list,mcp__discard-memory__memory_read,mcp__discard-memory__memory_save,mcp__discard-memory__memory_edit,mcp__discard-memory__memory_forget"
+            );
+            assert!(args.windows(2).any(|pair| pair == ["--tools", ""]));
         }
     }
 

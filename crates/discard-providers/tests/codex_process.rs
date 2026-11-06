@@ -201,6 +201,10 @@ async fn the_memory_mcp_config_is_translated_into_thread_config() {
     assert_eq!(params["config"]["mcp_servers"]["discard-memory"]["url"], "http://127.0.0.1:5555/mcp");
     assert_eq!(params["config"]["mcp_servers"]["discard-memory"]["http_headers"]["Authorization"], "Bearer tok");
     assert_eq!(params["developerInstructions"], "PROMPT");
+    assert!(
+        params["config"]["mcp_servers"]["discard-memory"].get("default_tools_approval_mode").is_none(),
+        "Coding mode must keep its existing approval behavior"
+    );
 }
 
 #[tokio::test]
@@ -317,6 +321,9 @@ async fn conversation_startup_disables_inherited_servers_before_prompt_and_clean
     let session = provider.start_session(s).await.unwrap();
     let request = rig.request("thread/start");
     assert_eq!(request["params"]["allowProviderModelFallback"], false);
+    assert_eq!(request["params"]["config"]["mcp_servers"]["discard-memory"]["default_tools_approval_mode"], "approve");
+    assert_eq!(request["params"]["approvalPolicy"], "never");
+    assert_eq!(request["params"]["sandbox"], "read-only");
     assert_eq!(request["params"]["model"], "exact-model");
     assert_eq!(request["params"]["config"]["mcp_servers"]["inherited"]["enabled"], false);
     assert_eq!(request["params"]["developerInstructions"], "Synthetic scoped memory.");
