@@ -39,4 +39,6 @@ pub mod advanced;
 
 pub mod memory_items;
 
+pub mod mentions;
 pub mod conversation_context;
+pub mod worktree_context;

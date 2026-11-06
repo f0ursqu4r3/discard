@@ -53,6 +53,7 @@ pub enum Update {
     Notice(String),
     ConversationMarker(Message),
     ResponseCompleted(Message),
+    Responding(crate::model::MessageAuthor),
     /// The live reply remains available for copying; no saved response ID exists.
     ResponseSaveFailed(String),
     MemoryChanges { response: MessageId, changes: Vec<crate::memory_items::MemoryChange> },
@@ -62,6 +63,8 @@ pub enum Update {
 pub struct UiState {
     channel_id: ChannelId,
     history: Vec<Message>,
+    authors: std::collections::HashMap<MessageId, crate::model::MessageAuthor>,
+    responder: Option<crate::model::MessageAuthor>,
     live: Timeline,
     turn_running: bool,
     response_save_failed: bool,
@@ -70,8 +73,12 @@ pub struct UiState {
 
 impl UiState {
     pub fn new(channel_id: ChannelId, history: Vec<Message>) -> Self {
-        Self { channel_id, history, live: Timeline::new(), turn_running: false, response_save_failed: false, notice: None }
+        Self { channel_id, history, authors: Default::default(), responder: None, live: Timeline::new(), turn_running: false, response_save_failed: false, notice: None }
     }
+
+    pub fn with_authors(mut self, authors: std::collections::HashMap<MessageId, crate::model::MessageAuthor>) -> Self { self.authors = authors; self }
+    pub fn authors(&self) -> &std::collections::HashMap<MessageId, crate::model::MessageAuthor> { &self.authors }
+    pub fn responder(&self) -> Option<&crate::model::MessageAuthor> { self.responder.as_ref() }
 
     /// The user pressed send.
     pub fn channel_id(&self) -> &ChannelId { &self.channel_id }
@@ -85,6 +92,7 @@ impl UiState {
         });
         self.live = Timeline::new();
         self.turn_running = true;
+        self.responder = None;
         self.response_save_failed = false;
         self.notice = None;
     }
@@ -92,7 +100,11 @@ impl UiState {
     pub fn apply(&mut self, update: Update) {
         match update {
             Update::ResponseSaveFailed(message) => { self.response_save_failed = true; self.notice = Some(message); },
-            Update::ResponseCompleted(message) => { self.live = Timeline::new(); self.history.push(message); },
+            Update::Responding(author) => self.responder = Some(author),
+            Update::ResponseCompleted(message) => {
+                if let Some(author) = &self.responder { self.authors.insert(message.id.clone(), author.clone()); }
+                self.live = Timeline::new(); self.history.push(message);
+            },
             Update::ConversationMarker(message) => self.history.push(message),
             Update::MemoryChanges { .. } => {},
             Update::Event(event) => self.live.apply(&event.kind),

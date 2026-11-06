@@ -401,6 +401,12 @@ impl Store {
             tx.pragma_update(None, "user_version", 7)?;
             tx.commit()?;
         }
+        if self.schema_version()? < 8 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch("ALTER TABLE messages ADD COLUMN author_json TEXT;")?;
+            tx.pragma_update(None, "user_version", 8)?;
+            tx.commit()?;
+        }
         self.conn.execute_batch("CREATE TABLE IF NOT EXISTS direct_message_list (agent_id TEXT PRIMARY KEY REFERENCES agents(id));")?;
         Ok(())
     }
@@ -2103,6 +2109,22 @@ impl Store {
         Ok(())
     }
 
+    pub fn insert_authored_message(&self, message: &Message, author: &crate::model::MessageAuthor) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        self.insert_message(message)?;
+        tx.execute("UPDATE messages SET author_json=?2 WHERE id=?1", params![message.id.0, serde_json::to_string(author)?])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn message_authors(&self, channel: &ChannelId) -> Result<std::collections::HashMap<MessageId, crate::model::MessageAuthor>> {
+        let mut statement = self.conn.prepare("SELECT id,author_json FROM messages WHERE channel_id=?1 AND author_json IS NOT NULL")?;
+        let rows = statement.query_map(params![channel.0], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        let mut authors = std::collections::HashMap::new();
+        for row in rows { let (id, json) = row?; authors.insert(MessageId(id), serde_json::from_str(&json)?); }
+        Ok(authors)
+    }
+
     pub fn messages_for_channel(&self, c: &ChannelId) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, role, blocks_json FROM messages WHERE channel_id = ?1 ORDER BY ord",
@@ -2401,7 +2423,7 @@ mod tests {
         let v1 = Store::open(&path).unwrap().schema_version().unwrap();
         let v2 = Store::open(&path).unwrap().schema_version().unwrap();
         assert!(v1 >= 2);
-        assert_eq!(v1, 7);
+        assert_eq!(v1, 8);
         assert_eq!(v1, v2);
     }
 
@@ -2445,7 +2467,7 @@ mod tests {
             conn.execute("INSERT INTO channels (id, project_id, name, agent_id, workspace_mode) VALUES ('c', 'p', 'general', 'a', 'main_checkout')", []).unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 7);
+        assert_eq!(store.schema_version().unwrap(), 8);
         let channels = store.channels_for_project(&ProjectId("p".into())).unwrap();
         assert_eq!(channels.len(), 1);
         assert_eq!(

@@ -20,9 +20,25 @@ Selecting a project opens its saved active channel, or `general` on a first visi
 
 Project channels have durable IDs and metadata. A branch resolves to its canonical channel, so reopening it reuses its transcript even when another direct conversation is active. Store branch-rename operations preserve channel identity, and Store retirement operations release a name for later reuse. App detection of Git branch renames and user-facing branch retirement are not implemented. Migration preserves old messages and sessions, chooses a canonical channel from each branch and `general` group that has an active candidate, and keeps duplicate histories as linked archives. If every candidate is archived, migration leaves no active canonical channel for that group.
 
-Each channel can have a versioned plain-text topic. Topic edits use an expected version and retain earlier revisions with the editor kind. Topics are metadata; they do not change transcript messages or task state. Before each Conversation-mode response, Engine reads the latest topic and adds it as labelled context data outside the transcript. The prompt states that a topic is not a tool request and that explicit system instructions and the user's message take precedence. Channel membership is saved, but membership does not dispatch mentions or start additional responses.
+Each channel can have a versioned plain-text topic. Topic edits use an expected version and retain earlier revisions with the editor kind. Topics are metadata; they do not change transcript messages or task state. Before each Conversation-mode response, Engine reads the latest topic and adds it as labelled context data outside the transcript. The prompt states that a topic is not a tool request and that explicit system instructions and the user's message take precedence. Channel membership is saved. Membership alone does not start a response.
 
-Selecting a project or branch channel does not switch Git branches or create a worktree. Normal Conversation mode still uses the provider adapter's empty working directory. Project-channel membership and the saved main-agent setting do not provide per-message author attribution. Project replies use the channel's assigned agent name, icon, and color. Historical messages do not record their own author agent, so this remains channel-level identity. Direct-chat labels are unchanged.
+Selecting a project or branch channel does not switch Git branches or create a worktree. Normal Conversation mode still uses the provider adapter's empty working directory. Each unmentioned project message uses the current project main agent, including messages in existing branch and detached worktree channels. The channel's saved agent is a fallback when no project main agent exists. Each response keeps the configuration selected when it starts; a default change affects the next response.
+
+## Worktree snapshots
+
+Before each Conversation-mode reply in a channel with a saved worktree binding, Discard runs bounded read-only
+Git queries in that worktree. The prompt includes the saved path and repository, current HEAD and file status,
+five recent commits, and up to 12 local or cached remote refs that contain HEAD. The configured model provider
+receives this snapshot as context data. Direct chats and channels without a worktree binding receive no snapshot.
+
+The snapshot follows the stored conversation binding, never the selected sidebar project or provider working
+directory. Each query has a two-second timeout and a 4 KiB output limit. Failed or oversized queries report an
+unknown state. Git hooks, filesystem monitors, and optional lock writes are disabled. The queries do not fetch,
+change files, switch branches, or create worktrees. Ignored files and submodule contents remain uninspected.
+
+Prompt guidance asks the agent to state the observed worktree state, suggest a useful next step, and explain
+missing evidence. It identifies repository strings as untrusted data. The snapshot does not grant shell or Git
+mutation tools. The snapshot counts toward the input budget and is not inserted into saved transcript messages.
 
 ## Context budget
 
@@ -60,3 +76,13 @@ An approval commits an immutable `ApprovedSnapshot` in the authoritative item do
 The runtime reads approval receipts after persisting its change rows. This closes the ordering where approval occurs after its pending-proposal snapshot but before the response association exists. Store associates an approval with the proposal's original persisted response, including when a later turn observes the approval. Notifications use that exact response ID.
 
 App approval returns a committed outcome separately from response-notice persistence. If SQLite cannot save the association after memory commits, clients refresh and show that memory was approved. Durable receipts and existing proposal rows support retry without approving again. Memory reads retry the association and can show the truthful approved card while writes remain unavailable. Each card keeps the original approved version for Undo. A later item edit makes that Undo stale. The item document and SQLite are separate stores; this protocol does not claim a cross-store transaction.
+
+## Agent mentions
+
+In Conversation mode, a new user message can select one configured agent with `@Jordan` or `@"Jordan Lee"`. The composer filters active agents with configured models and lists project members first. Enter or Tab inserts the selected name; arrow keys select another result, and Escape closes the list. The mention button opens the same list.
+
+An explicit mention overrides the project default for that response. Discard adds the agent to the project and channel membership sets. It uses that agent's provider, model, personality, and private memory, with the same project and conversation context. The next unmentioned message uses the current project default. This also applies to channels created before the default changed. Direct chats remain bound to their own agent.
+
+Unknown names, duplicate names, and more than one recipient produce an error before sending. Mentions in code, blockquotes, email addresses, topics, old messages, and model output do not route a response. Mentions do not create agents or start concurrent responses.
+
+New replies store their author ID, name, provider, and avatar. The transcript and live response use this author, and model history includes it. Older replies without author metadata retain the channel identity as a display fallback.

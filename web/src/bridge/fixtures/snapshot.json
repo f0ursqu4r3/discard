@@ -13,6 +13,7 @@
   "channel": "general",
   "agent": "Agent",
   "provider": "example",
+  "responder": null,
   "agentStatus": "working",
   "turnRunning": true,
   "notice": null,

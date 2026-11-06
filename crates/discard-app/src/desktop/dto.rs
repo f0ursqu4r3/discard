@@ -17,7 +17,15 @@ pub struct ChannelDto {
 
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
+pub struct ChannelWorktreeDto {
+    pub path: String,
+    pub branch: String,
+}
+
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectChannelDto {
+    pub worktree: Option<ChannelWorktreeDto>,
     pub repository: String,
     pub id: String,
     pub project_id: String,
@@ -76,6 +84,7 @@ pub struct MessageDto {
     pub role: String,
     pub blocks: Vec<BlockDto>,
     pub continues_group: bool,
+    pub author: Option<discard_core::model::MessageAuthor>,
 }
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -97,6 +106,7 @@ pub struct BranchRowDto {
     pub collapsed: bool,
     pub has_children: bool,
     pub detached: bool,
+    pub worktree: Option<String>,
 }
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -169,6 +179,7 @@ pub struct SnapshotDto {
     pub channel: String,
     pub agent: String,
     pub provider: String,
+    pub responder: Option<discard_core::model::MessageAuthor>,
     pub agent_status: String,
     pub turn_running: bool,
     pub notice: Option<String>,
@@ -191,20 +202,29 @@ pub struct SnapshotDto {
 }
 
 pub fn history_dto(messages: &[Message]) -> Vec<MessageDto> {
+    history_dto_with_authors(messages, &std::collections::HashMap::new())
+}
+
+pub fn history_dto_with_authors(
+    messages: &[Message],
+    authors: &std::collections::HashMap<discard_core::model::MessageId, discard_core::model::MessageAuthor>,
+) -> Vec<MessageDto> {
     let mut previous = None;
-    messages
-        .iter()
-        .map(|message| {
-            let dto = MessageDto {
-                id: message.id.0.clone(),
-                role: message.role.as_str().into(),
-                blocks: message.blocks.clone(),
-                continues_group: continues_group(previous, message.role),
-            };
-            previous = Some(message.role);
-            dto
-        })
-        .collect()
+    let mut previous_author = None;
+    messages.iter().map(|message| {
+        let author = authors.get(&message.id).cloned();
+        let author_id = author.as_ref().map(|a| a.agent_id.clone());
+        let dto = MessageDto {
+            id: message.id.0.clone(),
+            role: message.role.as_str().into(),
+            blocks: message.blocks.clone(),
+            continues_group: continues_group(previous, message.role) && previous_author == author_id,
+            author,
+        };
+        previous = Some(message.role);
+        previous_author = author_id;
+        dto
+    }).collect()
 }
 
 #[cfg(test)]
@@ -224,6 +244,7 @@ fn sample_snapshot() -> SnapshotDto {
         channel: "general".into(),
         agent: "Agent".into(),
         provider: "example".into(),
+        responder: None,
         agent_status: "working".into(),
         turn_running: true,
         notice: None,
@@ -291,6 +312,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             [false, false, true]
         );
+    }
+
+#[test]
+    fn different_reply_authors_start_new_groups() {
+        use discard_core::model::{AgentId, MessageAuthor};
+        let messages: Vec<_> = (0..3).map(|_| Message { id: MessageId::new(), channel_id: ChannelId::new(), role: Role::Agent, blocks: vec![] }).collect();
+        let quinn = MessageAuthor { agent_id: AgentId::new(), name: "Quinn".into(), provider: "test".into(), avatar: None };
+        let jordan = MessageAuthor { agent_id: AgentId::new(), name: "Jordan".into(), provider: "test".into(), avatar: None };
+        let authors = [(messages[0].id.clone(), quinn), (messages[1].id.clone(), jordan.clone()), (messages[2].id.clone(), jordan)].into_iter().collect();
+        let rows = history_dto_with_authors(&messages, &authors);
+        assert_eq!(rows.iter().map(|m| m.continues_group).collect::<Vec<_>>(), [false, false, true]);
+        assert_eq!(rows[0].author.as_ref().unwrap().name, "Quinn");
+        assert_eq!(rows[1].author.as_ref().unwrap().name, "Jordan");
     }
 
     #[test]

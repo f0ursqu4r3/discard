@@ -20,10 +20,15 @@ pub fn input_budget(window: Option<u64>) -> usize {
 }
 
 pub fn replay(messages: &[Message]) -> Vec<(MessageId, String)> {
+    replay_with_authors(messages, &std::collections::HashMap::new())
+}
+
+pub fn replay_with_authors(messages: &[Message], authors: &std::collections::HashMap<MessageId, crate::model::MessageAuthor>) -> Vec<(MessageId, String)> {
     messages
         .iter()
         .filter(|m| m.role != Role::System)
         .flat_map(|m| {
+            let author = authors.get(&m.id).map(|a| format!("Author: {}\n", serde_json::to_string(a).expect("author serializes"))).unwrap_or_default();
             let body = serde_json::to_string(&m.blocks).expect("message blocks serialize");
             let mut parts = Vec::new();
             let mut start = 0;
@@ -36,7 +41,7 @@ pub fn replay(messages: &[Message]) -> Vec<(MessageId, String)> {
                 parts.push((
                     id,
                     format!(
-                        "<message role=\"{}\" part=\"{}\">\n{}\n</message>\n",
+                        "<message role=\"{}\" part=\"{}\">\n{author}{}\n</message>\n",
                         m.role.as_str(),
                         parts.len(),
                         &body[start..end]

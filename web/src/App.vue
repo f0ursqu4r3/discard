@@ -764,6 +764,7 @@ watch(
                 :key="store.snapshot.channelId"
                 :messages="store.history"
                 :live="store.snapshot.liveBlocks"
+                :live-author="store.snapshot.responder"
                 :running="store.snapshot.turnRunning"
                 :new-anchor-id="store.snapshot.newAnchorId"
                 :agent="store.snapshot.agent"
@@ -923,17 +924,26 @@ watch(
             </div>
             <template v-if="page === 'conversation' && store.snapshot.channelId">
               <p
-                v-if="thinkingLine(store.snapshot.turnRunning, [store.snapshot.agent])"
+                v-if="
+                  thinkingLine(store.snapshot.turnRunning, [
+                    store.snapshot.responder?.name ?? store.snapshot.agent,
+                  ])
+                "
                 class="flex items-center gap-2 px-5 py-1 text-xs text-muted-foreground"
               >
                 <LoaderCircle class="size-3 motion-safe:animate-spin" />
-                {{ thinkingLine(store.snapshot.turnRunning, [store.snapshot.agent]) }}
+                {{
+                  thinkingLine(store.snapshot.turnRunning, [
+                    store.snapshot.responder?.name ?? store.snapshot.agent,
+                  ])
+                }}
               </p>
               <Composer
                 :key="store.snapshot.channelId"
                 v-model:draft="drafts[store.snapshot.channelId]"
                 :channel="store.snapshot.channel"
                 :direct-message="!store.snapshot.activeProjectId"
+                :project-id="store.snapshot.activeProjectId"
                 :agent="store.snapshot.agent"
                 :archived="store.snapshot.composerDisabled || store.snapshot.archived"
                 :busy="

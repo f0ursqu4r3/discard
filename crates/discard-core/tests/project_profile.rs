@@ -36,13 +36,14 @@ fn version_five_projects_gain_optional_appearance_without_losing_data() {
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch("ALTER TABLE projects DROP COLUMN avatar;
+            ALTER TABLE messages DROP COLUMN author_json;
             DROP INDEX one_project_active_branch;
             ALTER TABLE project_channels DROP COLUMN repository;
             CREATE UNIQUE INDEX one_project_active_branch ON project_channels(project_id,branch_name) WHERE kind='branch' AND branch_name IS NOT NULL;
             PRAGMA user_version=5;").unwrap();
     }
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 7);
+    assert_eq!(store.schema_version().unwrap(), 8);
     assert_eq!(store.list_projects().unwrap(), vec![project.clone()]);
     assert_eq!(store.project_avatar(&project.id).unwrap(), None);
 }

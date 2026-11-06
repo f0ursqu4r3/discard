@@ -119,3 +119,70 @@ test('unread branch indicators belong only to their repository', () => {
   expect(list.find('[data-ui-id="saved-channel-navigation"]').exists()).toBe(false)
   list.unmount()
 })
+
+test('detached worktree unread markers use the saved path and commit, then clear on read', async () => {
+  const base = {
+    depth: 0,
+    current: false,
+    collapsed: false,
+    hasChildren: false,
+    kind: 'worktree',
+    detached: true,
+    label: 'abcdef1',
+  }
+  const channel: ProjectChannelDto = {
+    id: 'detached',
+    projectId: 'project',
+    name: 'frontend/abcdef1',
+    agentId: 'agent',
+    workspaceMode: 'worktree',
+    kind: 'legacy',
+    branch: null,
+    archived: false,
+    archivedInto: null,
+    worktree: { path: '/detached/first', branch: 'abcdef1' },
+  }
+  const runtime = {
+    id: channel.id,
+    projectId: 'project',
+    name: channel.name,
+    agentId: 'agent',
+    agent: 'Agent',
+    provider: 'codex',
+    workspaceMode: 'worktree',
+    running: false,
+    unread: true,
+    pendingApprovals: 0,
+  }
+  const list = mount(ChannelList, {
+    props: {
+      projectId: 'project',
+      projectPath: '/project',
+      branches: [
+        { ...base, key: 'first', worktree: '/detached/first' },
+        { ...base, key: 'second', worktree: '/detached/second' },
+      ],
+      projectChannels: [channel],
+      channels: [runtime],
+    },
+  })
+  const unread = (key: string) =>
+    list
+      .get(`[data-ui-id="worktrees-row-${key}"]`)
+      .find('[data-ui-id="channel-unread-pip"]')
+      .exists()
+  expect(unread('first')).toBe(true)
+  expect(unread('second')).toBe(false)
+  await list.setProps({ channels: [{ ...runtime, unread: false }] })
+  expect(unread('first')).toBe(false)
+  await list.setProps({
+    channels: [runtime],
+    projectChannels: [{ ...channel, worktree: { path: '/detached/first', branch: 'oldhead' } }],
+  })
+  expect(unread('first')).toBe(false)
+  await list.setProps({ projectChannels: [{ ...channel, projectId: 'other' }] })
+  expect(unread('first')).toBe(false)
+  await list.setProps({ projectChannels: [{ ...channel, archived: true }] })
+  expect(unread('first')).toBe(false)
+  list.unmount()
+})

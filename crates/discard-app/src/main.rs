@@ -201,6 +201,7 @@ fn run_app(
                  store.latest_session(&channel.id).map_err(|e| e.to_string())?.ok_or("This channel has no session")?,
                  store.messages_for_channel(&channel.id).map_err(|e| e.to_string())?)
             };
+            let authors = lock(&store).message_authors(&channel.id).map_err(|e| e.to_string())?;
             let read_only = {
                 let store = lock(&store);
                 store.agent_archived(&channel.agent_id).unwrap_or(true) || store.channel_archived(&channel.id).map_err(|e| e.to_string())?
@@ -208,7 +209,7 @@ fn run_app(
             if read_only {
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, updates) = mpsc::unbounded_channel();
-                return Ok((CoreInit { state: UiState::new(channel.id.clone(), history), commands, project: project.as_ref().map(|p| p.name.clone()).unwrap_or_default(), channel: channel.name.clone(), agent: agent.name, provider: agent.provider }, updates));
+                return Ok((CoreInit { state: UiState::new(channel.id.clone(), history).with_authors(authors), commands, project: project.as_ref().map(|p| p.name.clone()).unwrap_or_default(), channel: channel.name.clone(), agent: agent.name, provider: agent.provider }, updates));
             }
             let provider = provider_for(&agent.provider)?;
             let (commands_tx, commands_rx) = mpsc::unbounded_channel();
@@ -225,7 +226,7 @@ fn run_app(
                 system_prompt: Some(agent.runtime_system_prompt()), policy: agent.policy,
             };
             handle.spawn(engine.run(commands_rx, updates_tx));
-            Ok((CoreInit { state: UiState::new(channel.id.clone(), history), commands: commands_tx,
+            Ok((CoreInit { state: UiState::new(channel.id.clone(), history).with_authors(authors), commands: commands_tx,
                 project: project.as_ref().map(|p|p.name.clone()).unwrap_or_default(), channel: channel.name.clone(), agent: agent.name, provider: agent.provider }, updates_rx))
         })
     };

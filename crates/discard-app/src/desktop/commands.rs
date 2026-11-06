@@ -13,8 +13,8 @@ pub fn get_history(core: State<'_, Arc<AppCore>>) -> HistoryDto {
     core.history_snapshot()
 }
 #[tauri::command]
-pub fn send_message(core: State<'_, Arc<AppCore>>, channel_id: String, text: String) -> Result<(), String> {
-    core.send_to(Some(&channel_id), text)
+pub fn send_message(channels: State<'_, Arc<super::channels::Channels>>, channel_id: String, text: String) -> Result<(), String> {
+    channels.send_message(&channel_id, text)
 }
 #[tauri::command]
 pub fn decide_approval(core: State<'_, Arc<AppCore>>, channel_id: String, approval_id: String, decision: String) {

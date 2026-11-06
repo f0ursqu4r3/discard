@@ -231,6 +231,69 @@ async fn each_turn_refreshes_personality_memory_model_and_retains_only_own_histo
 }
 
 #[tokio::test]
+async fn worktree_facts_reach_each_reply_without_entering_history_or_direct_chats() {
+    use discard_core::{model::Channel, store::WorktreeRecord};
+    let mut rig = Rig::new(vec![Step::text("direct answer"), Step::idle()]).await;
+    rig.commands.send(Command::Send("direct request".into())).unwrap();
+    rig.done().await;
+    assert!(!rig.probe.sent.lock().unwrap()[0].contains("<worktree-snapshot>"));
+    rig.task.abort();
+    let _ = (&mut rig.task).await;
+    let repo = rig._dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    for args in [vec!["init", "-q", "-b", "main"], vec!["commit", "--allow-empty", "-m", "Initial commit"], vec!["checkout", "--detach"]] {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
+            .args(args).current_dir(&repo).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+    let (channel, session) = {
+        let store = rig.store.lock().unwrap();
+        let project = store.import_project_folder(&repo).unwrap();
+        let channel = Channel { id: ChannelId::new(), project_id: Some(project.id), name: "worktree".into(),
+            agent_id: rig.agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+        let record = WorktreeRecord { channel_id: channel.id.clone(), path: repo.to_string_lossy().into(),
+            branch: "saved-head".into(), base_commit: String::new(), repo: repo.to_string_lossy().into(), owned: false };
+        store.create_named_repository_channel(&channel, "", None, Some(&record)).unwrap();
+        let session = store.latest_session(&channel.id).unwrap().unwrap();
+        (channel, session)
+    };
+    let provider = Arc::new(FakeProvider::new(vec![Step::text("worktree answer"), Step::idle()]));
+    let probe = provider.probe.clone();
+    let engine = Engine {
+        reasoning_effort: None, mode: SessionMode::Conversation, providers: vec![provider.clone()],
+        store: rig.store.clone(), agent_id: rig.agent.clone(), project_id: channel.project_id.clone(),
+        memory: Some(rig.runtime.clone()), plugin_write: false, workspace_mode: WorkspaceMode::Worktree,
+        workspace: None, observer: None, channel_name: channel.name.clone(), provider,
+        channel_id: channel.id.clone(), session_id: session,
+        // This unrelated path must never supply the worktree snapshot.
+        cwd: rig._dir.path().join("empty"), model: None, system_prompt: None, policy: ApprovalPolicy::Ask,
+    };
+    let (commands, rx) = mpsc::unbounded_channel();
+    let (tx, updates) = mpsc::unbounded_channel();
+    rig.commands = commands;
+    rig.updates = updates;
+    rig.task = tokio::spawn(engine.run(rx, tx));
+    rig.commands.send(Command::Send("What can we do with this worktree?".into())).unwrap();
+    rig.done().await;
+    std::fs::write(repo.join("new-file.txt"), "local change").unwrap();
+    rig.commands.send(Command::Send("What changed?".into())).unwrap();
+    rig.done().await;
+    let sent = probe.sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 2);
+    assert!(sent[0].contains("# branch.head (detached)"));
+    assert!(sent[0].contains("Initial commit"));
+    assert!(!sent[0].contains("new-file.txt"));
+    assert!(sent[1].contains("? new-file.txt"));
+    assert!(sent.iter().all(|text| text.matches("<worktree-snapshot>").count() == 1));
+    assert!(!sent[0].contains("direct request"));
+    assert!(!probe.specs.lock().unwrap().iter().any(|spec| spec.mode != SessionMode::Conversation));
+    let history = rig.store.lock().unwrap().messages_for_channel(&channel.id).unwrap();
+    assert!(!history.iter().any(|message| format!("{:?}", message.blocks).contains("<worktree-snapshot>")));
+    rig.close().await;
+}
+
+#[tokio::test]
 async fn conversation_prompt_refreshes_topic_without_writing_it_to_the_transcript() {
     let mut rig = Rig::new(vec![Step::text("first answer"), Step::text("second answer"), Step::idle()]).await;
     rig.store.lock().unwrap().save_channel_topic(&rig.channel, 0, "Old topic", discard_core::model::TopicAuthorKind::User, None).unwrap();
@@ -1048,5 +1111,112 @@ async fn approval_between_change_snapshot_and_row_insert_keeps_original_approved
     assert!(records.iter().all(|(id, _)| id == &response));
     assert!(records.iter().any(|(_,c)|matches!(c,discard_core::memory_items::MemoryChange::Saved{item,..} if item.version==1 && item.content=="original approved value" && item.origin==MutationOrigin::Approved)));
     assert!(updates.iter().any(|u|matches!(u,Update::MemoryChanges{response:id,changes} if id==&response && changes.iter().any(|c|matches!(c,discard_core::memory_items::MemoryChange::Saved{item,..} if item.version==1)))));
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn explicit_mention_routes_one_reply_and_persists_its_author() {
+    let mut rig = Rig::new(vec![Step::idle()]).await;
+    rig.task.abort();
+    let _ = (&mut rig.task).await;
+    let (channel, jordan) = {
+        let store = rig.store.lock().unwrap();
+        let project = store.import_project_folder(rig._dir.path()).unwrap();
+        store.ensure_project_general_channel(&project.id, &rig.agent).unwrap();
+        let channel = store.create_conversation(&rig.agent, Some(&project.id), "Existing worktree").unwrap();
+        let mut config = store.load_agent(&rig.agent).unwrap();
+        config.name = "Jordan Lee".into();
+        config.model = Some("jordan-model".into());
+        config.system_prompt = "Jordan's review instructions".into();
+        let jordan = store.create_agent(&config).unwrap();
+        store.save_channel_topic(&channel.id, 0, "@Unknown must not dispatch", discard_core::model::TopicAuthorKind::User, None).unwrap();
+        (channel, jordan)
+    };
+    rig.memory.create_item(&Scope::Agent(jordan.clone()), ItemKind::Instruction, "Jordan private instruction", Some(&channel.id), MutationOrigin::User).unwrap();
+    rig.memory.create_item(&Scope::Agent(rig.agent.clone()), ItemKind::Instruction, "Default private instruction", Some(&channel.id), MutationOrigin::User).unwrap();
+    let provider = Arc::new(FakeProvider::new(vec![Step::text("answer from selected agent"), Step::idle()]));
+    let probe = provider.probe.clone();
+    let session = rig.store.lock().unwrap().latest_session(&channel.id).unwrap().unwrap();
+    let engine = Engine {
+        reasoning_effort: None, mode: SessionMode::Conversation, providers: vec![provider.clone()],
+        store: rig.store.clone(), agent_id: rig.agent.clone(), project_id: channel.project_id.clone(),
+        memory: Some(rig.runtime.clone()), plugin_write: false, workspace_mode: WorkspaceMode::MainCheckout,
+        workspace: None, observer: None, channel_name: channel.name.clone(), provider,
+        channel_id: channel.id.clone(), session_id: session, cwd: rig._dir.path().into(),
+        model: None, system_prompt: None, policy: ApprovalPolicy::Ask,
+    };
+    let (commands, rx) = mpsc::unbounded_channel();
+    let (tx, updates) = mpsc::unbounded_channel();
+    rig.commands = commands;
+    rig.updates = updates;
+    rig.task = tokio::spawn(engine.run(rx, tx));
+    rig.commands.send(Command::Send("@\"Jordan Lee\" review this worktree".into())).unwrap();
+    let first = rig.done().await;
+    assert!(first.iter().any(|u| matches!(u, Update::Responding(author) if author.agent_id == jordan && author.name == "Jordan Lee")));
+    {
+        let store = rig.store.lock().unwrap();
+        assert!(store.project_agents(channel.project_id.as_ref().unwrap()).unwrap().contains(&jordan));
+        assert!(store.channel_agents(&channel.id).unwrap().contains(&jordan));
+        assert_eq!(store.load_channel(&channel.id).unwrap().agent_id, rig.agent);
+    }
+    // Mentions in history, topics, quotes and code must not select the next responder.
+    rig.commands.send(Command::Send("Follow up\n> @Unknown\n`@Unknown`".into())).unwrap();
+    let second = rig.done().await;
+    assert!(second.iter().any(|u| matches!(u, Update::Responding(author) if author.agent_id == rig.agent)));
+    {
+        let specs = probe.specs.lock().unwrap();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].model.as_deref(), Some("jordan-model"));
+        assert_eq!(specs[1].model.as_deref(), Some("one"));
+        let first = specs[0].system_prompt.as_deref().unwrap();
+        assert!(first.contains("Jordan's review instructions"));
+        assert!(first.contains("Jordan private instruction"));
+        assert!(!first.contains("Default private instruction"));
+        let second = specs[1].system_prompt.as_deref().unwrap();
+        assert!(second.contains("Default private instruction"));
+        assert!(!second.contains("Jordan private instruction"));
+    }
+    assert!(probe.sent.lock().unwrap()[1].contains("\"name\":\"Jordan Lee\""));
+    // Read from a second connection to prove attribution survives runtime disposal.
+    let reopened = Store::open(&rig._dir.path().join("store.db")).unwrap();
+    let authors = reopened.message_authors(&channel.id).unwrap();
+    let history = reopened.messages_for_channel(&channel.id).unwrap();
+    let replies: Vec<_> = history.iter().filter(|m| m.role == Role::Agent).collect();
+    assert_eq!(replies.len(), 2);
+    assert_eq!(authors[&replies[0].id].agent_id, jordan);
+    assert_eq!(authors[&replies[1].id].agent_id, rig.agent);
+    // The project default must also change an existing worktree/branch channel's next reply.
+    // Keep its saved agent stale to reproduce channels created before a default change.
+    {
+        let store = rig.store.lock().unwrap();
+        store.set_project_main_agent(channel.project_id.as_ref().unwrap(), &jordan).unwrap();
+        assert_eq!(store.load_channel(&channel.id).unwrap().agent_id, rig.agent);
+    }
+    rig.commands.send(Command::Send("Use the new project default".into())).unwrap();
+    let third = rig.done().await;
+    assert!(third.iter().any(|u| matches!(u, Update::Responding(author) if author.agent_id == jordan)));
+    assert_eq!(probe.specs.lock().unwrap()[2].model.as_deref(), Some("jordan-model"));
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn invalid_mentions_fail_before_saving_or_calling_a_provider() {
+    let mut rig = Rig::new(vec![Step::text("must not run"), Step::idle()]).await;
+    {
+        let store = rig.store.lock().unwrap();
+        let mut config = store.load_agent(&rig.agent).unwrap();
+        config.name = "Jordan".into();
+        store.create_agent(&config).unwrap();
+        config.name = "Duplicate".into();
+        store.create_agent(&config).unwrap();
+        store.create_agent(&config).unwrap();
+    }
+    for (message, reason) in [("@Nobody hello", "No active"), ("@A @Jordan hello", "one agent"), ("@Duplicate hello", "More than one"), ("@Jordan hello", "project channel")] {
+        rig.commands.send(Command::Send(message.into())).unwrap();
+        let updates = rig.done().await;
+        assert!(updates.iter().any(|u| matches!(u, Update::Error(error) if error.contains(reason))), "{updates:?}");
+    }
+    assert!(rig.probe.specs.lock().unwrap().is_empty());
+    assert!(rig.store.lock().unwrap().messages_for_channel(&rig.channel).unwrap().is_empty());
     rig.close().await;
 }

@@ -253,7 +253,7 @@ impl AppCore {
     }
     pub fn begin_agent_change(&self, id: &str) -> Result<(), String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if s.changing_agents.contains(id) || std::iter::once(&s.active).chain(s.parked.values()).any(|c| c.agent_id == id && (c.ui.turn_running() || c.archive_busy)) {
+        if s.changing_agents.contains(id) || std::iter::once(&s.active).chain(s.parked.values()).any(|c| (c.agent_id == id || c.ui.responder().is_some_and(|author| author.agent_id.0 == id)) && (c.ui.turn_running() || c.archive_busy)) {
             return Err("Stop this agent's responses before changing its lifecycle.".into());
         }
         s.changing_agents.insert(id.to_owned()); Ok(())
@@ -383,7 +383,7 @@ impl AppCore {
     }
     pub fn history_snapshot(&self) -> HistoryDto {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        HistoryDto { channel_id: s.active.channel_id.clone(), rev: s.history_rev, messages: history_dto(s.active.ui.history()) }
+        HistoryDto { channel_id: s.active.channel_id.clone(), rev: s.history_rev, messages: history_dto_with_authors(s.active.ui.history(), s.active.ui.authors()) }
     }
     pub fn snapshot(&self) -> SnapshotDto {
         let (mut snapshot, slot_state, context) = {
@@ -402,12 +402,13 @@ impl AppCore {
             let window = state.window.state();
             let branches = state.branches.iter().enumerate().map(|(index, row)| BranchRowDto {
                 repository: state.branch_repositories.get(index).cloned().unwrap_or_default(),
-                key: discard_core::worktree::repository_branch_key(state.branch_repositories.get(index).map(String::as_str).unwrap_or(""), &row.name),
+                key: row.selection_key(state.branch_repositories.get(index).map(String::as_str).unwrap_or("")),
                 label: row.name.clone(),
                 kind: match row.kind { RowKind::Main => "main", RowKind::Worktree => "worktree", RowKind::Branch => "branch" }.into(),
                 depth: row.depth(), current: state.current_branch.is_some_and(|i| std::ptr::eq(&state.branches[i], row)),
                 collapsed: state.collapsed.contains(&row.name),
                 detached: row.detached,
+                worktree: row.worktree.as_ref().map(|path| path.to_string_lossy().into_owned()),
                 has_children: state.branches.iter().enumerate().any(|(child_index, child)| state.branch_repositories.get(child_index) == state.branch_repositories.get(index) && child.parent.as_ref() == Some(&row.name)),
             }).collect();
             let mut channels: Vec<_> = std::iter::once(&state.active).chain(state.parked.values())
@@ -434,6 +435,7 @@ impl AppCore {
                 channel: state.active.channel.clone(),
                 agent: state.active.agent.clone(),
                 provider: state.active.provider.clone(),
+                responder: ui.responder().cloned(),
                 agent_status: match ui.agent_status() {
                     AgentStatus::Idle => "idle",
                     AgentStatus::Working => "working",
@@ -550,7 +552,7 @@ impl AppCore {
                 (m.kind == discard_core::model::ProjectChannelKind::Branch)
                     .then(|| m.branch.as_ref().map(|branch| (m.repository.clone(), branch.clone()))).flatten()
             });
-            let legacy = metadata.is_none();
+            let legacy = metadata.as_ref().is_none_or(|metadata| metadata.kind == discard_core::model::ProjectChannelKind::Legacy);
             let worktree = legacy.then(|| store.worktree_for(&channel).ok().flatten().map(|record| PathBuf::from(record.path))).flatten();
             let current = legacy.then(|| super::windows::branch_current_directory(Some(mode), &project, worktree.as_deref())).flatten();
             (canonical_branch, current)
@@ -570,7 +572,7 @@ impl AppCore {
             });
         }
         let selected = canonical_branch.and_then(|(repository, branch)| {
-            rows.iter().enumerate().position(|(index, row)| branch_repositories[index] == repository && row.name == branch)
+            rows.iter().enumerate().position(|(index, row)| branch_repositories[index] == repository && !row.detached && row.name == branch)
         }).or_else(|| current.and_then(|path| current_row(&rows, &path.canonicalize().unwrap_or(path))));
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if self.branch_generation.load(Ordering::SeqCst) == generation {
@@ -789,16 +791,14 @@ impl AppCore {
         }
     }
     pub fn history(&self) -> Vec<MessageDto> {
-        history_dto(
-            self.state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .active.ui
-                .history(),
-        )
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        history_dto_with_authors(state.active.ui.history(), state.active.ui.authors())
     }
     pub fn send(&self, text: String) { let _ = self.send_to(None, text); }
     pub fn send_to(&self, channel: Option<&str>, text: String) -> Result<(), String> {
+        self.send_to_agent(channel, text, None)
+    }
+    pub fn send_to_agent(&self, channel: Option<&str>, text: String, recipient: Option<discard_core::model::MessageAuthor>) -> Result<(), String> {
         if text.trim().is_empty() {
             return Ok(());
         }
@@ -807,9 +807,13 @@ impl AppCore {
         if s.active.channel_id.is_empty() || s.active.read_only || s.changing_agents.contains(&s.active.agent_id) || s.changing_channels.contains(&s.active.channel_id) || s.project_busy || s.active.ui.turn_running() || s.active.archived || s.active.archive_busy || s.active.archive.is_some() {
             return Err("This channel cannot send a message right now.".into());
         }
+        if recipient.as_ref().is_some_and(|agent| s.changing_agents.contains(&agent.agent_id.0)) {
+            return Err("The mentioned agent is being updated. Try again.".into());
+        }
         if s.active.commands.send(Command::Send(text.clone())).is_ok() {
             s.active.new_anchor = None;
             s.active.ui.user_sent(&text);
+            if let Some(author) = recipient { s.active.ui.apply(Update::Responding(author)); }
             s.rev += 1;
             s.history_rev += 1;
             self.changed.notify_one();

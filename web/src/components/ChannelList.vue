@@ -15,6 +15,7 @@ import {
   Plus,
 } from '@lucide/vue'
 import ProjectAvatar from './workspace/ProjectAvatar.vue'
+import NavigationContextMenu from './NavigationContextMenu.vue'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './ui/collapsible'
@@ -92,6 +93,26 @@ const unreadBranches = computed(
         .map((channel) => branchIdentity(channel.repository, channel.branch ?? '')),
     ),
 )
+const unreadWorktrees = computed(
+  () =>
+    new Set(
+      props.projectChannels
+        .filter(
+          (channel) =>
+            channel.projectId === props.projectId &&
+            !channel.archived &&
+            channel.kind === 'legacy' &&
+            channel.worktree &&
+            unreadChannelIds.value.has(channel.id),
+        )
+        .map((channel) => JSON.stringify([channel.worktree!.path, channel.worktree!.branch])),
+    ),
+)
+function rowUnread(row: BranchRowDto) {
+  return row.detached
+    ? unreadWorktrees.value.has(JSON.stringify([row.worktree, row.label]))
+    : unreadBranches.value.has(branchIdentity(row.repository, row.label))
+}
 const navigation = [
   { id: 'overview', label: 'Overview', icon: Monitor },
   { id: 'agents', label: 'Agents', icon: Users },
@@ -274,38 +295,49 @@ const approvals = computed(
           </Button>
         </div>
 
-        <button
-          v-if="projectId"
-          type="button"
-          data-ui-id="project-general-channel"
-          :aria-current="
-            generalChannel?.id === channelId && page === 'conversation' ? 'page' : undefined
-          "
-          :disabled="busy"
-          :class="
-            cn(
-              'mt-3 flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring',
-              generalChannel?.id === channelId && page === 'conversation'
-                ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                : 'text-muted-foreground',
-            )
-          "
-          @click="
+        <NavigationContextMenu
+          kind="channel"
+          name="general"
+          :id="generalChannel?.id"
+          :busy="busy"
+          @open="
             generalChannel
               ? emit('selectChannel', generalChannel.id)
               : emit('action', `select_project:${projectId}`)
           "
         >
-          <Hash class="size-4 shrink-0" />
-          <span class="min-w-0 flex-1 truncate">general</span>
-          <span
-            v-if="generalChannel && unreadChannelIds.has(generalChannel.id)"
-            data-ui-id="channel-unread-pip"
-            role="img"
-            aria-label="Unread messages"
-            class="size-2 shrink-0 rounded-full bg-sidebar-foreground"
-          />
-        </button>
+          <button
+            type="button"
+            data-ui-id="project-general-channel"
+            :aria-current="
+              generalChannel?.id === channelId && page === 'conversation' ? 'page' : undefined
+            "
+            :disabled="busy"
+            :class="
+              cn(
+                'mt-3 flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring',
+                generalChannel?.id === channelId && page === 'conversation'
+                  ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                  : 'text-muted-foreground',
+              )
+            "
+            @click="
+              generalChannel
+                ? emit('selectChannel', generalChannel.id)
+                : emit('action', `select_project:${projectId}`)
+            "
+          >
+            <Hash class="size-4 shrink-0" />
+            <span class="min-w-0 flex-1 truncate">general</span>
+            <span
+              v-if="generalChannel && unreadChannelIds.has(generalChannel.id)"
+              data-ui-id="channel-unread-pip"
+              role="img"
+              aria-label="Unread messages"
+              class="size-2 shrink-0 rounded-full bg-sidebar-foreground"
+            />
+          </button>
+        </NavigationContextMenu>
 
         <p v-if="repositoriesLoading" role="status" class="mt-5 px-2 text-xs text-muted-foreground">
           Scanning repositories…
@@ -370,43 +402,52 @@ const approvals = computed(
                 </button>
               </CollapsibleTrigger>
               <CollapsibleContent class="flex flex-col gap-0.5">
-                <button
+                <NavigationContextMenu
                   v-for="row in group.rows"
                   :key="row.key"
-                  type="button"
-                  :data-ui-id="`${group.id}-row-${row.key}`"
-                  :aria-current="row.current && page === 'conversation' ? 'page' : undefined"
-                  :disabled="busy || !projectId || row.detached"
-                  :title="
-                    row.detached
-                      ? `${row.label} — detached HEAD; select a branch to open a channel`
-                      : row.label
-                  "
-                  :class="
-                    cn(
-                      'flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring',
-                      row.current && page === 'conversation'
-                        ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                        : 'text-muted-foreground',
-                    )
-                  "
-                  @click="emit('openBranch', row.key)"
+                  :kind="group.id === 'worktrees' ? 'worktree' : 'branch'"
+                  :name="row.label"
+                  :id="row.key"
+                  :path="group.id === 'worktrees' ? row.worktree : undefined"
+                  :busy="busy || !projectId"
+                  @open="emit('openBranch', row.key)"
                 >
-                  <component :is="group.icon" class="size-4 shrink-0" />
-                  <span class="min-w-0 flex-1 truncate">{{ row.label }}</span>
-                  <span
-                    v-if="unreadBranches.has(branchIdentity(row.repository, row.label))"
-                    data-ui-id="channel-unread-pip"
-                    role="img"
-                    aria-label="Unread messages"
-                    class="size-2 shrink-0 rounded-full bg-sidebar-foreground"
-                  />
-                  <span
-                    v-if="group.id === 'worktrees'"
-                    class="size-1.5 shrink-0 rounded-full bg-success"
-                    aria-label="Worktree available"
-                  />
-                </button>
+                  <button
+                    type="button"
+                    :data-ui-id="`${group.id}-row-${row.key}`"
+                    :aria-current="row.current && page === 'conversation' ? 'page' : undefined"
+                    :disabled="busy || !projectId"
+                    :title="
+                      row.detached
+                        ? `${row.label} — detached HEAD${row.worktree ? ` · ${row.worktree}` : ''}`
+                        : row.label
+                    "
+                    :class="
+                      cn(
+                        'flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring',
+                        row.current && page === 'conversation'
+                          ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                          : 'text-muted-foreground',
+                      )
+                    "
+                    @click="emit('openBranch', row.key)"
+                  >
+                    <component :is="group.icon" class="size-4 shrink-0" />
+                    <span class="min-w-0 flex-1 truncate">{{ row.label }}</span>
+                    <span
+                      v-if="rowUnread(row)"
+                      data-ui-id="channel-unread-pip"
+                      role="img"
+                      aria-label="Unread messages"
+                      class="size-2 shrink-0 rounded-full bg-sidebar-foreground"
+                    />
+                    <span
+                      v-if="group.id === 'worktrees'"
+                      class="size-1.5 shrink-0 rounded-full bg-success"
+                      aria-label="Worktree available"
+                    />
+                  </button>
+                </NavigationContextMenu>
                 <p v-if="!group.rows.length" class="px-2 py-1 text-xs text-muted-foreground">
                   No {{ group.label.toLowerCase() }} found
                 </p>
@@ -430,28 +471,38 @@ const approvals = computed(
             </button>
           </CollapsibleTrigger>
           <CollapsibleContent class="flex flex-col gap-0.5">
-            <button
+            <NavigationContextMenu
               v-for="channel in savedChannels"
               :key="channel.id"
-              type="button"
-              :data-ui-id="`saved-channel-${channel.id}`"
-              :disabled="busy"
-              class="flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-xs text-muted-foreground outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"
-              @click="emit('selectChannel', channel.id)"
+              kind="channel"
+              :name="channel.branch ?? channel.name"
+              :id="channel.id"
+              :busy="busy"
+              @open="emit('selectChannel', channel.id)"
             >
-              <Hash class="size-4 shrink-0" />
-              <span class="min-w-0 flex-1 truncate">{{ channel.branch ?? channel.name }}</span>
-              <span
-                v-if="unreadChannelIds.has(channel.id)"
-                data-ui-id="channel-unread-pip"
-                role="img"
-                aria-label="Unread messages"
-                class="size-2 shrink-0 rounded-full bg-sidebar-foreground"
-              />
-              <span class="shrink-0">
-                {{ channel.archived ? 'History' : channel.kind === 'legacy' ? 'Saved' : 'Channel' }}
-              </span>
-            </button>
+              <button
+                type="button"
+                :data-ui-id="`saved-channel-${channel.id}`"
+                :disabled="busy"
+                class="flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-xs text-muted-foreground outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"
+                @click="emit('selectChannel', channel.id)"
+              >
+                <Hash class="size-4 shrink-0" />
+                <span class="min-w-0 flex-1 truncate">{{ channel.branch ?? channel.name }}</span>
+                <span
+                  v-if="unreadChannelIds.has(channel.id)"
+                  data-ui-id="channel-unread-pip"
+                  role="img"
+                  aria-label="Unread messages"
+                  class="size-2 shrink-0 rounded-full bg-sidebar-foreground"
+                />
+                <span class="shrink-0">
+                  {{
+                    channel.archived ? 'History' : channel.kind === 'legacy' ? 'Saved' : 'Channel'
+                  }}
+                </span>
+              </button>
+            </NavigationContextMenu>
           </CollapsibleContent>
         </Collapsible>
         <Collapsible

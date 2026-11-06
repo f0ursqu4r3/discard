@@ -44,6 +44,16 @@ row is highlighted, and the main checkout has a `main` tag. Click a parent row t
 branches. Click a branch row to open its canonical project conversation. If it has no canonical conversation,
 Discard creates one. Opening the conversation does not switch the Git checkout or create a worktree.
 
+Detached worktrees are selectable. Each detached worktree opens a saved conversation bound to its repository,
+path, and displayed commit. Two worktrees at the same commit have separate conversations. Opening a detached
+worktree does not create a branch or change the checkout. Discard borrows the existing directory. If the checkout
+changes, a stale row cannot open it and Coding workspace validation rejects the old binding.
+
+Branch, worktree, and channel rows have custom context menus. Right-click a row, or press Shift+F10 while it has
+focus. Menus open the selected row and copy its name or ID. Worktree menus also copy the directory path. Planned
+management actions stay disabled and show **Soon**. Unread markers on detached worktrees match the saved path
+and commit, so worktrees at the same commit do not share an unread marker.
+
 ## Archiving
 
 `GitWorkspace::archive` removes a channel's worktree only if all of these are true: no uncommitted changes, no

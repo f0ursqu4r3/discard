@@ -100,7 +100,8 @@ test('a fenced Markdown block uses the code component and offers copy', async ()
   const code = markdown.findComponent(CodeBlock)
   expect(code.exists()).toBe(true)
   expect(code.text()).toContain('let x = 1;')
-  expect(code.text()).toContain('Copy')
+  expect(code.get('[data-slot="code-block-copy-button"]').attributes('aria-label')).toBe('Copy')
+  expect(code.find('[data-slot="code-block-content"]').exists()).toBe(true)
 })
 
 test('a fenced block nested in a list uses the code component', async () => {
@@ -167,4 +168,24 @@ test('an unsaved reply remains visible and has no streaming cursor after the tur
   })
   expect(view.text()).toContain('Copy this unsaved reply.')
   expect(view.find('[data-testid="stream-cursor"]').exists()).toBe(false)
+})
+
+test('saved and live replies use their own author, not the channel default', () => {
+  const jordan = { agentId: 'jordan', name: 'Jordan', provider: 'test', avatar: null }
+  const quinn = { agentId: 'quinn', name: 'Quinn', provider: 'test', avatar: null }
+  const list = mount(MessageList, {
+    props: {
+      conversationId: 'channel',
+      agent: 'Quinn',
+      newAnchorId: null,
+      messages: [{ id: 'old', role: 'agent', blocks: [], continuesGroup: false, author: quinn }],
+      live: [{ type: 'markdown', text: 'Jordan reply' }],
+      liveAuthor: jordan,
+      running: true,
+    },
+  })
+  expect(list.findAll('[data-testid="message-identity"]').map((row) => row.text())).toEqual([
+    'Quinn',
+    'Jordan',
+  ])
 })

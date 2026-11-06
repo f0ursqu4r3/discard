@@ -16,6 +16,10 @@ const props = defineProps<{
   prompts?: PromptDto[]
   showCursor?: boolean
 }>()
+const authorName = computed(() => props.message.author?.name ?? props.agent ?? 'Agent')
+const authorAvatar = computed(() =>
+  props.message.author ? props.message.author.avatar : props.agentAvatar,
+)
 const target = computed(() =>
   props.message.id === 'live'
     ? null
@@ -40,8 +44,8 @@ async function copy() {
       <div class="w-9 shrink-0">
         <AgentAvatar
           v-if="!message.continuesGroup && message.role === 'agent'"
-          :name="agent || 'Agent'"
-          :avatar="agentAvatar"
+          :name="authorName"
+          :avatar="authorAvatar"
           class="size-9"
         />
         <Avatar v-else-if="!message.continuesGroup" class="size-9">
@@ -56,9 +60,7 @@ async function copy() {
           data-testid="message-identity"
           class="flex items-center gap-2 font-semibold"
         >
-          {{
-            message.role === 'user' ? 'You' : message.role === 'agent' ? agent || 'Agent' : 'System'
-          }}
+          {{ message.role === 'user' ? 'You' : message.role === 'agent' ? authorName : 'System' }}
         </div>
         <BlockView
           :channel-id="channelId"

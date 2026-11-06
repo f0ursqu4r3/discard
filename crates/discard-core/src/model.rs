@@ -183,6 +183,15 @@ impl Role {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageAuthor {
+    pub agent_id: AgentId,
+    pub name: String,
+    pub provider: String,
+    pub avatar: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
     pub id: MessageId,

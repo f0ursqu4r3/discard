@@ -30,6 +30,10 @@ Borrowed checkout directories remain intact when their channels are archived. Ow
 
 Normal Conversation mode uses an empty app-owned provider working directory and exposes scoped memory tools. It does not prepare a git worktree or give the provider external write actions. The deliberate Coding path retains native resume and workspace preparation behavior.
 
+Code fences, structured code blocks, tool output, and diffs use the shadcn-vue `CodeBlock` components. Code
+blocks retain syntax highlighting, streamed updates, keyboard scrolling, and exact text copying. Inline code
+styles do not apply to fenced blocks. Diffs retain the configured added and removed colors.
+
 ## Memory links and fresh conversations
 
 The conversation Memory panel and Settings item inspector provide a source link when the saved source still exists. The link uses lazy stored-history selection, including retained archived/deleted-agent history. An unavailable source is marked.

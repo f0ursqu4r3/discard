@@ -34,7 +34,8 @@ impl GitWorkspace {
     pub fn conversation_directory(&self, project_dir: &Path, channel: &ChannelId) -> Result<PathBuf, String> {
         let store = self.store();
         let metadata = store.project_channel_metadata(channel).map_err(|e| e.to_string())?;
-        let Some(metadata) = metadata.filter(|metadata| metadata.kind == crate::model::ProjectChannelKind::Branch) else {
+        let Some(metadata) = metadata.filter(|metadata| matches!(metadata.kind,
+            crate::model::ProjectChannelKind::Branch | crate::model::ProjectChannelKind::Legacy)) else {
             return Ok(project_dir.to_path_buf());
         };
         if let Some(record) = store.worktree_for(channel).map_err(|e| e.to_string())? {

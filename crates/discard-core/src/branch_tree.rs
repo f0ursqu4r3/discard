@@ -17,6 +17,15 @@ pub struct TreeRow {
 
 impl TreeRow {
     pub fn depth(&self) -> u8 { u8::from(self.parent.is_some()) }
+
+    /// Detached checkouts at the same commit need distinct, path-scoped keys.
+    pub fn selection_key(&self, repository: &str) -> String {
+        if self.detached {
+            serde_json::to_string(&(repository, &self.name, &self.worktree)).expect("worktree key serializes")
+        } else {
+            crate::worktree::repository_branch_key(repository, &self.name)
+        }
+    }
 }
 
 pub fn build_tree(entries: &[BranchEntry], distance: &dyn Fn(&str, &str) -> Option<usize>) -> Vec<TreeRow> {
@@ -33,6 +42,8 @@ pub fn build_tree(entries: &[BranchEntry], distance: &dyn Fn(&str, &str) -> Opti
     for entry in parents {
         rows.push(TreeRow { name: entry.branch.clone(), kind: if entry.is_main_checkout { RowKind::Main } else { RowKind::Worktree }, worktree: entry.worktree.clone(), detached: entry.detached, is_discard: entry.is_discard, parent: None });
         rows.extend(children.iter().filter(|child| child.parent.as_deref() == Some(&entry.branch)).cloned());
+        // Detached worktrees can share a label; emit each child under only the first match.
+        children.retain(|child| child.parent.as_deref() != Some(&entry.branch));
     }
     rows.extend(children.into_iter().filter(|child| child.parent.is_none()));
     rows
@@ -108,6 +119,18 @@ mod tests {
         assert_eq!(rows[0].name, "abcdef1");
         assert!(rows[0].detached);
         assert_eq!(rows[0].kind, RowKind::Worktree);
+    }
+
+    #[test]
+    fn detached_worktrees_at_the_same_commit_keep_distinct_keys_and_do_not_repeat_children() {
+        let mut first = entry("abcdef1", Some("/first"), false);
+        first.detached = true;
+        let mut second = first.clone();
+        second.worktree = Some("/second".into());
+        let rows = build_tree(&[first, second, entry("topic", None, false)], &|_, _| Some(0));
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.iter().filter(|row| row.name == "topic").count(), 1);
+        assert_ne!(rows[0].selection_key(""), rows[2].selection_key(""));
     }
 
     #[test]

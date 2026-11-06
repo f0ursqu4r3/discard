@@ -77,7 +77,7 @@ pub fn parse_branches(worktree_porcelain: &str, branch_refs: &str) -> Vec<Branch
         let rank = |e: &BranchEntry| if e.is_main_checkout { 0 } else if e.worktree.is_some() { 1 } else { 2 };
         rank(a).cmp(&rank(b)).then_with(|| a.branch.cmp(&b.branch))
     });
-    entries.dedup_by(|a, b| a.branch == b.branch);
+    entries.dedup_by(|a, b| a.branch == b.branch && a.detached == b.detached && a.worktree == b.worktree);
     entries
 }
 

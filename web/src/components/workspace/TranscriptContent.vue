@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, ref, watch } from 'vue'
 import { MessageSquare } from '@lucide/vue'
-import type { BlockDto, MessageDto, PromptDto } from '@/bridge/types'
+import type { BlockDto, MessageDto, MessageAuthorDto, PromptDto } from '@/bridge/types'
 import type { TranscriptPosition } from './transcript'
 import { useMessageScrollerContext } from '../ui/message-scroller/useMessageScroller'
 import { markRead } from '@/bridge/api'
@@ -24,6 +24,7 @@ import { hasLiveRow, rowCount } from '../messages'
 const props = defineProps<{
   messages: MessageDto[]
   live: BlockDto[]
+  liveAuthor?: MessageAuthorDto | null
   running: boolean
   newAnchorId: string | null
   agent?: string
@@ -70,7 +71,10 @@ const liveMessage = computed<MessageDto>(() => ({
   id: 'live',
   role: 'agent',
   blocks: props.live,
-  continuesGroup: props.messages.at(-1)?.role === 'agent',
+  author: props.liveAuthor,
+  continuesGroup:
+    props.messages.at(-1)?.role === 'agent' &&
+    props.messages.at(-1)?.author?.agentId === props.liveAuthor?.agentId,
 }))
 let lastRead: string | undefined
 function read() {

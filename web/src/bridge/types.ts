@@ -3,7 +3,14 @@ export type BlockDto =
   | { type: 'code'; language: string | null; text: string }
   | { type: 'tool_call'; call_id: string; name: string; input: unknown; output: string | null }
   | { type: 'approval'; approval_id: string; tool: string; summary: string }
+export interface MessageAuthorDto {
+  agentId: string
+  name: string
+  provider: string
+  avatar: string | null
+}
 export interface MessageDto {
+  author?: MessageAuthorDto | null
   id: string
   role: string
   blocks: BlockDto[]
@@ -27,6 +34,7 @@ export interface ChannelDto {
   pendingApprovals: number
 }
 export interface ProjectChannelDto {
+  worktree?: { path: string; branch: string } | null
   repository?: string
   id: string
   projectId: string
@@ -84,6 +92,7 @@ export interface BranchRowDto {
   collapsed: boolean
   hasChildren: boolean
   detached?: boolean
+  worktree?: string | null
 }
 export interface ThemeDto {
   mode: string
@@ -128,6 +137,7 @@ export interface SnapshotDto {
   channel: string
   agent: string
   provider: string
+  responder?: MessageAuthorDto | null
   agentStatus: string
   turnRunning: boolean
   notice: string | null

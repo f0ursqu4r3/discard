@@ -6,6 +6,10 @@ export type ProjectMenuAction =
   | 'copy-path'
   | 'copy-id'
 
+export type PlannedMenuEntry =
+  | { kind: 'planned'; label: string; control?: 'checkbox' }
+  | { kind: 'planned-radio'; labels: string[] }
+
 export type ProjectMenuEntry =
   | { kind: 'separator' }
   | { kind: 'submenu'; label: string; children: ProjectMenuEntry[] }
@@ -16,11 +20,13 @@ export type ProjectMenuEntry =
       disabled?: boolean
       destructive?: boolean
     }
-  | { kind: 'planned'; label: string; control?: 'checkbox' }
-  | { kind: 'planned-radio'; labels: string[] }
+  | PlannedMenuEntry
 
 const separator: ProjectMenuEntry = { kind: 'separator' }
-const planned = (label: string, control?: 'checkbox'): ProjectMenuEntry => ({
+export const planned = (
+  label: string,
+  control?: 'checkbox',
+): Extract<PlannedMenuEntry, { kind: 'planned' }> => ({
   kind: 'planned',
   label,
   control,

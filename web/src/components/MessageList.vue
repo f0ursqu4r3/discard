@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import type { BlockDto, MessageDto, PromptDto } from '../bridge/types'
+import type { BlockDto, MessageDto, MessageAuthorDto, PromptDto } from '../bridge/types'
 import { MessageScrollerProvider } from './ui/message-scroller'
 import type { TranscriptPosition } from './workspace/transcript'
 import TranscriptContent from './workspace/TranscriptContent.vue'
 defineProps<{
   messages: MessageDto[]
   live: BlockDto[]
+  liveAuthor?: MessageAuthorDto | null
   running: boolean
   newAnchorId: string | null
   agent?: string

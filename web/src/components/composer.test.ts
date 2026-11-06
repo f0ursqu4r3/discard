@@ -1,5 +1,5 @@
-import { mount } from '@vue/test-utils'
-import { expect, test } from 'vite-plus/test'
+import { flushPromises, mount } from '@vue/test-utils'
+import { expect, test, vi } from 'vite-plus/test'
 import Composer from './Composer.vue'
 import { maySend } from './composer'
 
@@ -74,4 +74,95 @@ test('DM composer names the agent and has no channel labels or footer', () => {
   expect(composer.text()).not.toContain('General')
   expect(composer.text()).not.toContain('Enter to send')
   expect(composer.element.lastElementChild?.getAttribute('data-slot')).toBe('input-group')
+})
+
+const api = vi.hoisted(() => ({ getAgents: vi.fn(), getProjectMembers: vi.fn() }))
+vi.mock('../bridge/api', () => api)
+const configured = (id: string, name: string) => ({
+  id,
+  name,
+  model: 'test',
+  archived: false,
+  provider: 'test',
+})
+
+function mentionComposer() {
+  api.getAgents.mockResolvedValue([
+    configured('alex', 'Alex'),
+    configured('jordan', 'Jordan'),
+    configured('lee', 'Jordan Lee'),
+  ])
+  api.getProjectMembers.mockResolvedValue([{ id: 'jordan' }])
+  return mount(Composer, {
+    props: {
+      archived: false,
+      busy: false,
+      running: false,
+      channel: 'worktree',
+      projectId: 'project',
+    },
+  })
+}
+
+test('typing @ opens project members first; Enter selects without sending', async () => {
+  const composer = mentionComposer()
+  const input = composer.get('textarea')
+  await input.setValue('@')
+  await flushPromises()
+  expect(composer.findAll('[role="option"]').map((option) => option.text())).toEqual([
+    'JordanProject member',
+    'AlexAdd to channel',
+    'Jordan LeeAdd to channel',
+  ])
+  await input.trigger('keydown', { key: 'Enter' })
+  expect(input.element.value).toBe('@Jordan ')
+  expect(composer.emitted('send')).toBeUndefined()
+  await input.trigger('keydown', { key: 'Enter' })
+  expect(composer.emitted('send')?.[0]).toEqual(['@Jordan'])
+})
+
+test('filters names, supports Tab, and quotes names with spaces', async () => {
+  const composer = mentionComposer()
+  const input = composer.get('textarea')
+  await input.setValue('@Jo')
+  await flushPromises()
+  await input.trigger('keydown', { key: 'ArrowDown' })
+  await input.trigger('keydown', { key: 'Tab' })
+  expect(input.element.value).toBe('@"Jordan Lee" ')
+  expect(composer.emitted('send')).toBeUndefined()
+})
+
+test('mention button opens suggestions and Escape closes them', async () => {
+  const composer = mentionComposer()
+  await composer.get('[aria-label="Mention an agent"]').trigger('click')
+  await flushPromises()
+  expect(composer.get('textarea').element.value).toBe('@')
+  expect(composer.find('[role="listbox"]').exists()).toBe(true)
+  await composer.get('textarea').trigger('keydown', { key: 'Escape' })
+  expect(composer.find('[role="listbox"]').exists()).toBe(false)
+})
+
+test('click inserts a mention at the caret and preserves trailing text', async () => {
+  const composer = mentionComposer()
+  const input = composer.get('textarea')
+  await input.setValue('Ask @Jo about this')
+  input.element.setSelectionRange(7, 7)
+  await input.trigger('click')
+  await flushPromises()
+  await composer.findAll('[role="option"]')[0]!.trigger('click')
+  expect(input.element.value).toBe('Ask @Jordan about this')
+})
+
+test('duplicate names are disabled and unmatched Enter does not send', async () => {
+  const composer = mentionComposer()
+  api.getAgents.mockResolvedValue([configured('one', 'Jordan'), configured('two', 'Jordan')])
+  await composer.get('textarea').setValue('@Jo')
+  await flushPromises()
+  expect(
+    composer
+      .findAll('[role="option"]')
+      .every((option) => option.attributes('disabled') !== undefined),
+  ).toBe(true)
+  await composer.get('textarea').trigger('keydown', { key: 'Enter' })
+  expect(composer.emitted('send')).toBeUndefined()
 })
