@@ -44,6 +44,8 @@ import AgentProfileDialog from './components/agents/AgentProfileDialog.vue'
 import Composer from './components/Composer.vue'
 import MessageList from './components/MessageList.vue'
 import NavigationPanel from './components/workspace/NavigationPanel.vue'
+import DirectMessageSidebar from './components/workspace/DirectMessageSidebar.vue'
+import ChannelList from './components/ChannelList.vue'
 import MemoryBrowser from './components/memory/MemoryBrowser.vue'
 import { Button } from './components/ui/button'
 let view: ReturnType<typeof shallowMount> | undefined
@@ -95,6 +97,32 @@ test('a valid DM opens with no project and uses contact navigation', () => {
   expect(wrapper.getComponent(NavigationPanel).props('page')).toBe('direct-messages')
   expect(wrapper.getComponent(MessageList).props('agent')).toBe(mocks.store.snapshot!.agent)
 })
+
+test.each([false, true])(
+  'DM drawer excludes channel navigation with compact layout %s',
+  async (compact) => {
+    vi.mocked(window.matchMedia).mockReturnValue({
+      matches: compact,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as MediaQueryList)
+    mocks.store.snapshot = { ...mocks.store.snapshot!, projectId: 'selected-project' }
+    const wrapper = app()
+    expect(wrapper.getComponent(NavigationPanel).props('page')).toBe('direct-messages')
+    expect(wrapper.findComponent(DirectMessageSidebar).exists()).toBe(true)
+    expect(wrapper.findComponent(ChannelList).exists()).toBe(false)
+    expect(wrapper.getComponent(DirectMessageSidebar).props('channelId')).toBe(
+      mocks.store.snapshot.channelId,
+    )
+    wrapper.getComponent(DirectMessageSidebar).vm.$emit('action', 'show_friends')
+    await flushPromises()
+    expect(wrapper.getComponent(NavigationPanel).props('page')).toBe('direct-messages')
+    wrapper.getComponent(NavigationPanel).vm.$emit('navigate', 'overview')
+    await flushPromises()
+    expect(wrapper.findComponent(DirectMessageSidebar).exists()).toBe(false)
+    expect(wrapper.findComponent(ChannelList).exists()).toBe(true)
+  },
+)
 
 test('project transcript labels saved replies neutrally after the main agent changes', () => {
   mocks.store.snapshot = {

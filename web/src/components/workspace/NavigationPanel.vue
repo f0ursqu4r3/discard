@@ -7,6 +7,7 @@ import type { ProjectMenuAction } from '../project-menu'
 import type { ProjectEntry } from '@/bridge/api'
 import ChannelList from '../ChannelList.vue'
 import UserBar from './UserBar.vue'
+import DirectMessageSidebar from './DirectMessageSidebar.vue'
 defineProps<{
   projects?: import('@/bridge/api').ProjectEntry[]
   snapshot: SnapshotDto
@@ -53,8 +54,16 @@ const emit = defineEmits<{
         "
         @add-project="emit('action', 'import_project')"
       />
+      <DirectMessageSidebar
+        v-if="!compact && page === 'direct-messages'"
+        class="min-w-0 flex-1"
+        :channel-id="snapshot.channelId"
+        :busy="busy"
+        @select-channel="emit('selectChannel', $event)"
+        @action="emit('action', $event)"
+      />
       <ChannelList
-        v-if="!compact"
+        v-else-if="!compact"
         class="min-w-0 flex-1"
         :page="page"
         :busy="busy"

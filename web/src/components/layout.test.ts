@@ -44,7 +44,6 @@ describe('server rail', () => {
 
 test('Git branches and worktrees populate separate lists and open their branch', async () => {
   const list = mount(ChannelList, {
-    global: { stubs: { AgentsNavigation: true } },
     props: {
       projectId: 'project',
       activeProjectId: 'project',
@@ -80,7 +79,6 @@ test('Git branches and worktrees populate separate lists and open their branch',
 
 test('saved conversations stay behind Git navigation while approvals remain accessible', async () => {
   const list = mount(ChannelList, {
-    global: { stubs: { AgentsNavigation: true } },
     props: {
       projectId: 'project',
       activeProjectId: 'project',
@@ -170,7 +168,6 @@ test('saved widths exclude the project rail', async () => {
 
 test('a branch row without children has no collapse control', async () => {
   const list = mount(ChannelList, {
-    global: { stubs: { AgentsNavigation: true } },
     props: {
       projectId: 'project',
       activeProjectId: 'project',
@@ -251,23 +248,10 @@ test('project rail keeps separate entries and selects by project ID', async () =
   expect(rail.findAll('[data-ui-id="project-selection-pill"]')).toHaveLength(1)
 })
 
-test('DM navigation omits the project header and channel controls', async () => {
-  const { shallowMount } = await import('@vue/test-utils')
-  const { default: ChannelList } = await import('./ChannelList.vue')
-  const nav = shallowMount(ChannelList, {
-    props: { page: 'direct-messages', projectId: 'selected-project', branches: [] },
-    global: { renderStubDefaultSlot: true },
-  })
-  expect(nav.find('[data-ui-id="project-header"]').exists()).toBe(false)
-  expect(nav.find('[data-ui-id="project-navigation"]').exists()).toBe(true)
-  expect(nav.getComponent({ name: 'AgentsNavigation' }).props('projectId')).toBeNull()
-})
-
-test('project general channel stays available from a direct chat context', async () => {
+test('project general channel stays available when the active conversation has no project', async () => {
   const list = mount(ChannelList, {
-    global: { stubs: { AgentsNavigation: true } },
     props: {
-      page: 'direct-messages',
+      page: 'overview',
       projectId: 'selected-project',
       activeProjectId: null,
       branches: [],
@@ -292,11 +276,10 @@ test('project general channel stays available from a direct chat context', async
   expect(list.emitted('selectChannel')).toEqual([['general-id']])
 })
 
-test('branch rows can open selected-project channels from a direct chat context', async () => {
+test('branch rows can open selected-project channels when the active conversation has no project', async () => {
   const list = mount(ChannelList, {
-    global: { stubs: { AgentsNavigation: true } },
     props: {
-      page: 'direct-messages',
+      page: 'overview',
       projectId: 'selected-project',
       activeProjectId: null,
       branches: [
@@ -318,7 +301,6 @@ test('branch rows can open selected-project channels from a direct chat context'
 
 test('saved channel history opens by its durable channel id', async () => {
   const list = mount(ChannelList, {
-    global: { stubs: { AgentsNavigation: true } },
     props: {
       projectId: 'project',
       activeProjectId: 'project',
@@ -334,7 +316,6 @@ test('saved channel history opens by its durable channel id', async () => {
 
 test('saved branch opens by id when live Git rows omit it', async () => {
   const list = mount(ChannelList, {
-    global: { stubs: { AgentsNavigation: true } },
     props: {
       projectId: 'project',
       activeProjectId: 'project',
@@ -363,7 +344,6 @@ test('saved branch opens by id when live Git rows omit it', async () => {
 
 test('archived branch history stays reachable when Git still lists the branch', async () => {
   const list = mount(ChannelList, {
-    global: { stubs: { AgentsNavigation: true } },
     props: {
       projectId: 'project',
       activeProjectId: 'project',
@@ -402,7 +382,6 @@ test('archived branch history stays reachable when Git still lists the branch', 
 test('project conversation creation stays visible, disabled, and marked Soon', async () => {
   const list = mount(ChannelList, {
     attachTo: document.body,
-    global: { stubs: { AgentsNavigation: true } },
     props: { projectId: 'project', activeProjectId: 'project', branches: [] },
   })
   await list.get('[data-ui-id="project-header"]').trigger('click')

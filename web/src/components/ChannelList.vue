@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, watch } from 'vue'
+import { computed, reactive, watch } from 'vue';
 import {
   ChevronDown,
   ChevronRight,
@@ -13,110 +13,135 @@ import {
   Boxes,
   ShieldCheck,
   Plus,
-} from '@lucide/vue'
-import AgentsNavigation from './workspace/AgentsNavigation.vue'
-import BrandMark from './workspace/BrandMark.vue'
-import { Button } from './ui/button'
-import { Badge } from './ui/badge'
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './ui/collapsible'
+} from '@lucide/vue';
+import BrandMark from './workspace/BrandMark.vue';
+import { Button } from './ui/button';
+import { Badge } from './ui/badge';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from './ui/collapsible';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from './ui/dropdown-menu'
-import { cn } from '@/lib/utils'
-import type { BranchRowDto, ChannelDto, ContextTargetDto, ProjectChannelDto } from '../bridge/types'
-import type { WorkspacePage } from './workspace/types'
+} from './ui/dropdown-menu';
+import { cn } from '@/lib/utils';
+import type {
+  BranchRowDto,
+  ChannelDto,
+  ContextTargetDto,
+  ProjectChannelDto,
+} from '../bridge/types';
+import type { WorkspacePage } from './workspace/types';
 const props = withDefaults(
   defineProps<{
-    projectId?: string
-    activeProjectId?: string | null
-    branches: BranchRowDto[]
-    channels?: ChannelDto[]
-    projectChannels?: ProjectChannelDto[]
-    channelId?: string
-    project?: string
-    projectPath?: string
-    projectDisplayPath?: string
-    channel?: string
-    agent?: string
-    unread?: boolean
-    pendingApprovals?: number
-    target?: ContextTargetDto
-    page?: WorkspacePage
-    busy?: boolean
+    projectId?: string;
+    activeProjectId?: string | null;
+    branches: BranchRowDto[];
+    channels?: ChannelDto[];
+    projectChannels?: ProjectChannelDto[];
+    channelId?: string;
+    project?: string;
+    projectPath?: string;
+    projectDisplayPath?: string;
+    channel?: string;
+    agent?: string;
+    unread?: boolean;
+    pendingApprovals?: number;
+    target?: ContextTargetDto;
+    page?: WorkspacePage;
+    busy?: boolean;
   }>(),
-  { page: 'conversation', channels: () => [], projectChannels: () => [] },
-)
+  { page: 'conversation', channels: () => [], projectChannels: () => [] }
+);
 const emit = defineEmits<{
-  toggleBranch: [key: string]
-  navigate: [page: WorkspacePage]
-  action: [id: string]
-  selectChannel: [id: string]
-  inspectChannel: [id: string]
-  openBranch: [key: string]
-  approvals: []
-}>()
+  toggleBranch: [key: string];
+  navigate: [page: WorkspacePage];
+  action: [id: string];
+  selectChannel: [id: string];
+  inspectChannel: [id: string];
+  openBranch: [key: string];
+  approvals: [];
+}>();
 const generalChannel = computed(() =>
-  props.projectChannels.find((channel) => channel.kind === 'general' && !channel.archived),
-)
+  props.projectChannels.find(
+    (channel) => channel.kind === 'general' && !channel.archived
+  )
+);
 const navigation = [
   { id: 'overview', label: 'Overview', icon: Monitor },
   { id: 'agents', label: 'Agents', icon: Users },
   { id: 'memory', label: 'Memory', icon: Cpu },
   { id: 'artifacts', label: 'Artifacts', icon: FileText },
-] as const
+] as const;
 const sections = reactive({
   branches: true,
   worktrees: true,
   integrations: true,
   archived: false,
-})
-const gitBranches = computed(() => props.branches.filter((row) => !row.detached))
-const worktrees = computed(() => props.branches.filter((row) => row.kind !== 'branch'))
+});
+const gitBranches = computed(() =>
+  props.branches.filter((row) => !row.detached)
+);
+const worktrees = computed(() =>
+  props.branches.filter((row) => row.kind !== 'branch')
+);
 const savedChannels = computed(() =>
   props.projectChannels.filter((channel) => {
-    if (channel.kind === 'general') return false
+    if (channel.kind === 'general') return false;
     if (
       !channel.archived &&
       channel.kind === 'branch' &&
       channel.branch &&
       gitBranches.value.some((row) => row.key === channel.branch)
     )
-      return false
-    return true
-  }),
-)
+      return false;
+    return true;
+  })
+);
 watch(
   () => props.projectPath,
   (path) => {
     try {
       Object.assign(
         sections,
-        { branches: true, worktrees: true, integrations: true, archived: false },
-        JSON.parse(localStorage.getItem(`discard:sections:${path}`) ?? '{}'),
-      )
+        {
+          branches: true,
+          worktrees: true,
+          integrations: true,
+          archived: false,
+        },
+        JSON.parse(localStorage.getItem(`discard:sections:${path}`) ?? '{}')
+      );
     } catch {
       /* Use the default section state. */
     }
   },
-  { immediate: true },
-)
+  { immediate: true }
+);
 watch(sections, (value) => {
   try {
-    localStorage.setItem(`discard:sections:${props.projectPath}`, JSON.stringify(value))
+    localStorage.setItem(
+      `discard:sections:${props.projectPath}`,
+      JSON.stringify(value)
+    );
   } catch {
     /* Navigation remains usable when storage is unavailable. */
   }
-})
+});
 const approvals = computed(
   () =>
-    props.channels.reduce((count, channel) => count + channel.pendingApprovals, 0) ||
+    props.channels.reduce(
+      (count, channel) => count + channel.pendingApprovals,
+      0
+    ) ||
     props.pendingApprovals ||
-    0,
-)
+    0
+);
 </script>
 <template>
   <nav
@@ -124,7 +149,7 @@ const approvals = computed(
     aria-label="Workspace navigation"
     class="flex h-full min-w-0 flex-col bg-sidebar text-sidebar-foreground"
   >
-    <DropdownMenu v-if="page !== 'direct-messages' && projectId">
+    <DropdownMenu v-if="projectId">
       <DropdownMenuTrigger as-child>
         <button
           data-ui-id="project-header"
@@ -137,15 +162,24 @@ const approvals = computed(
             <span class="block truncate text-sm font-semibold">
               {{ project }}
             </span>
-            <span class="block truncate text-xs text-muted-foreground" :title="projectPath">
+            <span
+              class="block truncate text-xs text-muted-foreground"
+              :title="projectPath"
+            >
               {{ projectDisplayPath ?? projectPath }}
             </span>
           </span>
-          <ChevronDown class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          <ChevronDown
+            class="size-4 shrink-0 text-muted-foreground"
+            aria-hidden="true"
+          />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent data-ui-id="project-menu" align="start" class="w-60">
-        <DropdownMenuItem :disabled="!projectId" @select="emit('navigate', 'overview')">
+        <DropdownMenuItem
+          :disabled="!projectId"
+          @select="emit('navigate', 'overview')"
+        >
           <Monitor />
           Project overview
         </DropdownMenuItem>
@@ -160,7 +194,10 @@ const approvals = computed(
           Agents
         </DropdownMenuItem>
         <DropdownMenuSeparator />
-        <DropdownMenuItem :disabled="!projectId" @select="emit('navigate', 'project-settings')">
+        <DropdownMenuItem
+          :disabled="!projectId"
+          @select="emit('navigate', 'project-settings')"
+        >
           <Settings />
           Project settings
         </DropdownMenuItem>
@@ -174,36 +211,6 @@ const approvals = computed(
       data-ui-id="channel-panel-scroll"
       class="flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto overscroll-contain p-2.5"
     >
-      <AgentsNavigation
-        v-if="page === 'direct-messages' || !projectId"
-        :project-id="null"
-        :project="project"
-        :channel-id="channelId"
-        :busy="busy"
-        @select="emit('selectChannel', $event)"
-        @action="emit('action', $event)"
-      />
-      <button
-        v-if="projectId"
-        type="button"
-        data-ui-id="project-general-channel"
-        :aria-current="
-          generalChannel?.id === channelId && page === 'conversation' ? 'page' : undefined
-        "
-        :disabled="busy || !generalChannel"
-        :class="
-          cn(
-            'mt-3 flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring',
-            generalChannel?.id === channelId && page === 'conversation'
-              ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-              : 'text-muted-foreground',
-          )
-        "
-        @click="generalChannel && emit('selectChannel', generalChannel.id)"
-      >
-        <Hash class="size-4 shrink-0" />
-        <span class="truncate">general</span>
-      </button>
       <template v-if="projectId">
         <div data-ui-id="project-navigation" class="flex flex-col gap-0.5">
           <Button
@@ -231,6 +238,31 @@ const approvals = computed(
             Settings
           </Button>
         </div>
+
+        <button
+          v-if="projectId"
+          type="button"
+          data-ui-id="project-general-channel"
+          :aria-current="
+            generalChannel?.id === channelId && page === 'conversation'
+              ? 'page'
+              : undefined
+          "
+          :disabled="busy || !generalChannel"
+          :class="
+            cn(
+              'mt-3 flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring',
+              generalChannel?.id === channelId && page === 'conversation'
+                ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                : 'text-muted-foreground'
+            )
+          "
+          @click="generalChannel && emit('selectChannel', generalChannel.id)"
+        >
+          <Hash class="size-4 shrink-0" />
+          <span class="truncate">general</span>
+        </button>
+
         <Collapsible
           v-for="group in [
             {
@@ -256,9 +288,14 @@ const approvals = computed(
               :data-ui-id="`${group.id}-toggle`"
               class="flex h-7 w-full items-center gap-1 px-1 text-xs font-semibold text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
-              <component :is="sections[group.id] ? ChevronDown : ChevronRight" class="size-3" />
+              <component
+                :is="sections[group.id] ? ChevronDown : ChevronRight"
+                class="size-3"
+              />
               {{ group.label }}
-              <span class="ml-1 font-normal tabular-nums">{{ group.rows.length }}</span>
+              <span class="ml-1 font-normal tabular-nums">{{
+                group.rows.length
+              }}</span>
             </button>
           </CollapsibleTrigger>
           <CollapsibleContent class="flex flex-col gap-0.5">
@@ -267,7 +304,9 @@ const approvals = computed(
               :key="row.key"
               type="button"
               :data-ui-id="`${group.id}-row-${row.key}`"
-              :aria-current="row.current && page === 'conversation' ? 'page' : undefined"
+              :aria-current="
+                row.current && page === 'conversation' ? 'page' : undefined
+              "
               :disabled="busy || !projectId"
               :title="row.label"
               :class="
@@ -275,7 +314,7 @@ const approvals = computed(
                   'flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring',
                   row.current && page === 'conversation'
                     ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                    : 'text-muted-foreground',
+                    : 'text-muted-foreground'
                 )
               "
               @click="emit('openBranch', row.key)"
@@ -288,7 +327,10 @@ const approvals = computed(
                 aria-label="Worktree available"
               />
             </button>
-            <p v-if="!group.rows.length" class="px-2 py-1 text-xs text-muted-foreground">
+            <p
+              v-if="!group.rows.length"
+              class="px-2 py-1 text-xs text-muted-foreground"
+            >
               No {{ group.label.toLowerCase() }} found
             </p>
           </CollapsibleContent>
@@ -304,7 +346,10 @@ const approvals = computed(
               data-ui-id="saved-channel-toggle"
               class="flex h-7 w-full items-center gap-1 px-1 text-xs font-semibold text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
-              <component :is="sections.archived ? ChevronDown : ChevronRight" class="size-3" />
+              <component
+                :is="sections.archived ? ChevronDown : ChevronRight"
+                class="size-3"
+              />
               Saved channels
             </button>
           </CollapsibleTrigger>
@@ -319,9 +364,17 @@ const approvals = computed(
               @click="emit('selectChannel', channel.id)"
             >
               <Hash class="size-4 shrink-0" />
-              <span class="min-w-0 flex-1 truncate">{{ channel.branch ?? channel.name }}</span>
+              <span class="min-w-0 flex-1 truncate">{{
+                channel.branch ?? channel.name
+              }}</span>
               <span class="shrink-0">
-                {{ channel.archived ? 'History' : channel.kind === 'legacy' ? 'Saved' : 'Channel' }}
+                {{
+                  channel.archived
+                    ? 'History'
+                    : channel.kind === 'legacy'
+                      ? 'Saved'
+                      : 'Channel'
+                }}
               </span>
             </button>
           </CollapsibleContent>
@@ -336,7 +389,10 @@ const approvals = computed(
               data-ui-id="integrations-toggle"
               class="flex h-7 w-full items-center gap-1 px-1 text-xs font-semibold text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
-              <component :is="sections.integrations ? ChevronDown : ChevronRight" class="size-3" />
+              <component
+                :is="sections.integrations ? ChevronDown : ChevronRight"
+                class="size-3"
+              />
               Integrations
             </button>
           </CollapsibleTrigger>

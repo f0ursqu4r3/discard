@@ -48,6 +48,7 @@ import { Button } from './components/ui/button'
 import { Badge } from './components/ui/badge'
 import { Toaster } from './components/ui/sonner'
 import NavigationPanel from './components/workspace/NavigationPanel.vue'
+import DirectMessageSidebar from './components/workspace/DirectMessageSidebar.vue'
 import ContextPanel from './components/workspace/ContextPanel.vue'
 import WorkspacePageView from './components/workspace/WorkspacePage.vue'
 import BrandMark from './components/workspace/BrandMark.vue'
@@ -975,7 +976,16 @@ watch(
           <Button variant="ghost" class="shrink-0" @click="navigationOpen = false">
             Close navigation
           </Button>
+          <DirectMessageSidebar
+            v-if="navigationPage === 'direct-messages'"
+            class="min-h-0 flex-1"
+            :channel-id="store.snapshot.channelId"
+            :busy="switching"
+            @select-channel="selectChannel"
+            @action="action"
+          />
           <ChannelList
+            v-else
             :channels="store.snapshot.channels"
             :project-channels="projectChannels"
             :channel-id="store.snapshot.channelId"

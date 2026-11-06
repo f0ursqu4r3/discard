@@ -4,6 +4,8 @@ import WorkspacePage from './WorkspacePage.vue'
 import ContextPanel from './ContextPanel.vue'
 import UserBar from './UserBar.vue'
 import NavigationPanel from './NavigationPanel.vue'
+import DirectMessageSidebar from './DirectMessageSidebar.vue'
+import AgentsNavigation from './AgentsNavigation.vue'
 import snapshotFixture from '@/bridge/fixtures/snapshot.json'
 import type { MessageDto, SnapshotDto } from '@/bridge/types'
 vi.mock('@/bridge/api', () => ({
@@ -60,6 +62,42 @@ test.each([null, 'another-project'])(
       .find((card) => card.text().includes('Branches'))
     expect(branchCard?.text()).toContain('2')
     expect(overview.text()).toContain('~/git/discard')
+  },
+)
+
+test.each([null, 'project'])(
+  'DM navigation excludes selected-project data with active project %s',
+  async (activeProjectId) => {
+    const view = mount(NavigationPanel, {
+      props: { page: 'direct-messages', snapshot: { ...snapshot, activeProjectId } },
+    })
+    expect(view.findComponent(DirectMessageSidebar).exists()).toBe(true)
+    expect(view.find('[data-ui-id="channel-panel"]').exists()).toBe(false)
+    for (const id of [
+      'project-header',
+      'project-general-channel',
+      'project-navigation',
+      'branches-list',
+      'worktrees-list',
+      'integrations-navigation',
+    ]) {
+      expect(view.find(`[data-ui-id="${id}"]`).exists()).toBe(false)
+    }
+    expect(view.text()).toContain('Direct Messages')
+    const agents = view.getComponent(AgentsNavigation)
+    expect(agents.props('projectId')).toBeNull()
+    expect(agents.props('channelId')).toBe(snapshot.channelId)
+    agents.vm.$emit('select', 'dm')
+    expect(view.emitted('selectChannel')).toEqual([['dm']])
+    await agents.get('button').trigger('click')
+    expect(view.emitted('action')).toEqual([['show_friends']])
+
+    await view.setProps({ busy: true })
+    expect(agents.props('busy')).toBe(true)
+    await view.setProps({ page: 'overview' })
+    expect(view.findComponent(DirectMessageSidebar).exists()).toBe(false)
+    expect(view.find('[data-ui-id="project-navigation"]').exists()).toBe(true)
+    view.unmount()
   },
 )
 
