@@ -93,14 +93,24 @@ fn ensure_guide(store: &MemoryStore, agent: &AgentId) -> Result<(), String> {
     }
 }
 
-impl MemoryService for MemoryRuntime {
-    fn prepare(&self, agent: &AgentId, project: Option<&ProjectId>, source: &discard_core::model::ChannelId, base_prompt: Option<&str>, plugin_write: bool) -> Result<PreparedMemory, String> {
+impl MemoryRuntime {
+    fn prepare_scoped(&self, agent: &AgentId, project: Option<&ProjectId>, source: &discard_core::model::ChannelId, base_prompt: Option<&str>, plugin_write: bool, can_write: bool, query: Option<&str>) -> Result<PreparedMemory, String> {
         if plugin_write {
             ensure_guide(&self.store, agent)?;
         }
         let scopes = Scope::applicable(agent, project);
-        let blocks = self.store.core_blocks(&scopes).map_err(|e| format!("could not read memory: {e}"))?;
-        let system_prompt = compose_system_prompt(base_prompt, &blocks);
+        let mut blocks = self.store.core_blocks(&scopes).map_err(|e| format!("could not read memory: {e}"))?;
+        // Mandatory instructions/preferences are already present. Match other live items against
+        // this turn and its recent conversation. Tools can retrieve additional facts on demand.
+        let terms: std::collections::HashSet<String> = query.unwrap_or("").split(|c: char| !c.is_alphanumeric()).filter(|s| s.len() >= 3).map(str::to_lowercase).collect();
+        for item in self.store.list_items(&scopes).map_err(|e| e.to_string())? {
+            if !matches!(item.kind, discard_core::memory_items::ItemKind::Instruction | discard_core::memory_items::ItemKind::Preference) && (query.is_none() || item.content.split(|c: char| !c.is_alphanumeric()).any(|word| terms.contains(&word.to_lowercase()))) {
+                blocks.push(discard_core::memory::Block { scope: item.scope.clone(), path: item.path(), text: item.content });
+            }
+        }
+        blocks.sort_by_key(|b| scopes.iter().position(|s| s == &b.scope).unwrap_or(usize::MAX));
+        let mut system_prompt = compose_system_prompt(base_prompt, &blocks);
+        if self.store.capture_paused(source).map_err(|e| e.to_string())? { system_prompt.push_str("\nAutomatic capture is paused for this conversation. Do not save or propose memory. Only the user can resume capture in the app.\n"); }
 
         let identity = |surface: Surface, scopes: &[ScopeKindOrd]| Identity {
             agent: agent.clone(),
@@ -109,7 +119,7 @@ impl MemoryService for MemoryRuntime {
             write_scopes: [if project.is_some() {ScopeKindOrd::AgentProject} else {ScopeKindOrd::Agent}].into(),
             surface,
             scopes: scopes.iter().copied().collect(),
-            can_write: true,
+            can_write,
         };
         let token = self.registry.issue(identity(Surface::Memory, &Scope::applicable(agent,project).iter().map(|s|s.kind().into()).collect::<Vec<_>>()), TOKEN_TTL)?;
         let mut extra_tokens = Vec::new();
@@ -153,6 +163,21 @@ impl MemoryService for MemoryRuntime {
         Ok(PreparedMemory { system_prompt, mcp_config: path, token })
     }
 
+}
+
+impl MemoryService for MemoryRuntime {
+    fn prepare(&self, agent: &AgentId, project: Option<&ProjectId>, source: &discard_core::model::ChannelId, base_prompt: Option<&str>, plugin_write: bool) -> Result<PreparedMemory, String> {
+        self.prepare_scoped(agent, project, source, base_prompt, plugin_write, true, None)
+    }
+    fn prepare_turn(&self, agent: &AgentId, project: Option<&ProjectId>, source: &discard_core::model::ChannelId, base_prompt: Option<&str>, plugin_write: bool, query: &str) -> Result<PreparedMemory, String> {
+        self.prepare_scoped(agent, project, source, base_prompt, plugin_write, true, Some(query))
+    }
+    fn prepare_summary(&self, agent: &AgentId, project: Option<&ProjectId>, source: &discard_core::model::ChannelId) -> Result<PreparedMemory, String> {
+        self.prepare_scoped(agent, project, source, None, false, false, None)
+    }
+    fn changes(&self, source: &discard_core::model::ChannelId) -> Result<Vec<discard_core::memory_items::MemoryChange>, String> {
+        self.store.memory_changes(source).map_err(|e| e.to_string())
+    }
     fn finish(&self, token: &str) {
         self.registry.revoke(token);
         let files = self.files.lock().unwrap_or_else(|p| p.into_inner()).remove(token);

@@ -187,10 +187,13 @@ fn run_app(
     let launcher: desktop::channels::Launcher = {
         let store = store.clone(); let git_workspace = git_workspace.clone(); let memory = memory.clone();
         let manager = manager.clone(); let handle = runtime.handle().clone();
+        let conversation_dir = data_dir.join("conversations");
+        let session_mode = if options.builder { discard_core::provider::SessionMode::Coding } else { discard_core::provider::SessionMode::Conversation };
         Arc::new(move |channel| {
-            let project_id = channel.project_id.as_ref().ok_or("Direct conversations are not available in this launcher yet.")?;
-            let project = lock(&store).list_projects().map_err(|e| e.to_string())?.into_iter().find(|p| &p.id == project_id).ok_or("Project unavailable")?;
-            let project_dir = PathBuf::from(&project.path);
+            let project = channel.project_id.as_ref().map(|id| {
+                lock(&store).list_projects().map_err(|e| e.to_string())?.into_iter().find(|p| &p.id == id).ok_or_else(|| "Project unavailable".to_string())
+            }).transpose()?;
+            let project_dir = project.as_ref().map(|p| PathBuf::from(&p.path)).unwrap_or_else(|| conversation_dir.clone());
             let (agent, session_id, history) = {
                 let store = lock(&store);
                 (store.load_agent(&channel.agent_id).map_err(|e| e.to_string())?,
@@ -201,22 +204,23 @@ fn run_app(
             let (commands_tx, commands_rx) = mpsc::unbounded_channel();
             let (updates_tx, updates_rx) = mpsc::unbounded_channel();
             let engine = Engine {
-                store: store.clone(), agent_id: channel.agent_id.clone(), project_id: project_id.clone(),
+        mode: session_mode, providers: discard_core::bootstrap::PROVIDERS.iter().filter_map(|id| provider_for(id).ok()).collect(),
+                store: store.clone(), agent_id: channel.agent_id.clone(), project_id: channel.project_id.clone(),
                 memory: Some(memory.clone()), plugin_write: agent.plugin_write,
                 workspace_mode: channel.workspace_mode, workspace: Some(git_workspace.clone()),
-                observer: Some(Arc::new(plugin_events::PluginEvents::with_context(manager.clone(), Some((channel.agent_id.clone(), project_id.clone()))))),
+                observer: Some(Arc::new(plugin_events::PluginEvents::with_context(manager.clone(), Some((channel.agent_id.clone(), channel.project_id.clone()))))),
                 channel_name: channel.name.clone(), provider, channel_id: channel.id.clone(), session_id,
                 cwd: project_dir.clone(), model: agent.model.clone(),
                 system_prompt: Some(agent.system_prompt.clone()).filter(|p| !p.is_empty()), policy: agent.policy,
             };
             handle.spawn(engine.run(commands_rx, updates_tx));
             Ok((CoreInit { state: UiState::new(channel.id.clone(), history), commands: commands_tx,
-                project: project.name.clone(), channel: channel.name.clone(), agent: agent.name, provider: agent.provider }, updates_rx))
+                project: project.as_ref().map(|p|p.name.clone()).unwrap_or_default(), channel: channel.name.clone(), agent: agent.name, provider: agent.provider }, updates_rx))
         })
     };
     let on_ready: desktop::channels::OnReady = Arc::new(move |core| {
         let project_core = Arc::downgrade(core);
-        plugin_memory.set_project_source(Arc::new(move || project_core.upgrade().map(|core| core.current_project().id)));
+        plugin_memory.set_project_source(Arc::new(move || project_core.upgrade().and_then(|core| core.active_context().1)));
         let core = Arc::downgrade(core);
         plugin_memory.set_active_source(Arc::new(move || discard_core::model::AgentId(core.upgrade().map(|core| core.active_agent_id()).unwrap_or_default())));
     });

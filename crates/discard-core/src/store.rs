@@ -89,6 +89,8 @@ CREATE TABLE approval_audit (
     policy TEXT NOT NULL,
     PRIMARY KEY (approval_id, n)
 );
+CREATE TABLE conversation_context (channel_id TEXT PRIMARY KEY REFERENCES channels(id), state_json TEXT NOT NULL);
+CREATE TABLE response_memory (channel_id TEXT NOT NULL REFERENCES channels(id), response_id TEXT NOT NULL REFERENCES messages(id), change_key TEXT NOT NULL, change_json TEXT NOT NULL, PRIMARY KEY(channel_id, change_key));
 CREATE TABLE messages (
     ord INTEGER PRIMARY KEY AUTOINCREMENT,
     id TEXT NOT NULL UNIQUE,
@@ -361,7 +363,7 @@ impl Store {
                     "DELETE FROM approvals WHERE turn_id IN (SELECT t.id FROM turns t JOIN sessions s ON t.session_id=s.id WHERE s.channel_id=?1)",
                     "DELETE FROM turns WHERE session_id IN (SELECT id FROM sessions WHERE channel_id=?1)",
                     "DELETE FROM events WHERE session_id IN (SELECT id FROM sessions WHERE channel_id=?1)",
-                    "DELETE FROM sessions WHERE channel_id=?1", "DELETE FROM messages WHERE channel_id=?1", "DELETE FROM worktrees WHERE channel_id=?1", "DELETE FROM channel_branches WHERE channel_id=?1", "DELETE FROM channels WHERE id=?1"
+                    "DELETE FROM conversation_context WHERE channel_id=?1", "DELETE FROM response_memory WHERE channel_id=?1", "DELETE FROM sessions WHERE channel_id=?1", "DELETE FROM messages WHERE channel_id=?1", "DELETE FROM worktrees WHERE channel_id=?1", "DELETE FROM channel_branches WHERE channel_id=?1", "DELETE FROM channels WHERE id=?1"
                 ] { self.conn.execute(sql,params![channel.id.0])?; }
             }
         }
@@ -446,6 +448,16 @@ impl Store {
         Ok(())
     }
 
+    pub fn load_channel(&self, id: &ChannelId) -> Result<Channel> {
+        let (project, name, agent, mode) = self.conn.query_row("SELECT project_id,name,agent_id,workspace_mode FROM channels WHERE id=?1", params![id.0], |r| {
+            Ok((r.get::<_,Option<String>>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?))
+        })?;
+        let workspace_mode = WorkspaceMode::parse(&mode).ok_or_else(|| StoreError::Corrupt(format!("workspace_mode {mode}")))?;
+        Ok(Channel { id: id.clone(), project_id: project.map(ProjectId), name, agent_id: AgentId(agent), workspace_mode })
+    }
+    pub fn channel_archived(&self, id: &ChannelId) -> Result<bool> {
+        Ok(self.conn.query_row("SELECT archived FROM channels WHERE id=?1", params![id.0], |r|r.get(0))?)
+    }
     pub fn insert_channel(&self, c: &Channel) -> Result<()> {
         self.conn.execute(
             "INSERT INTO channels (id, project_id, name, agent_id, workspace_mode) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -695,6 +707,24 @@ impl Store {
             });
         }
         Ok(Approval { id: id.clone(), turn_id: TurnId(turn_id), tool, input: serde_json::from_str(&input)?, state, audit })
+    }
+
+    pub fn conversation_context(&self, channel: &ChannelId) -> Result<crate::conversation_context::ConversationContext> {
+        let json: Option<String> = self.conn.query_row("SELECT state_json FROM conversation_context WHERE channel_id=?1", params![channel.0], |r| r.get(0)).optional()?;
+        Ok(json.map(|j| serde_json::from_str(&j)).transpose()?.unwrap_or_default())
+    }
+    pub fn set_conversation_context(&self, channel: &ChannelId, state: &crate::conversation_context::ConversationContext) -> Result<()> {
+        self.conn.execute("INSERT INTO conversation_context VALUES (?1,?2) ON CONFLICT(channel_id) DO UPDATE SET state_json=excluded.state_json", params![channel.0, serde_json::to_string(state)?])?;
+        Ok(())
+    }
+    pub fn response_memory(&self, channel: &ChannelId) -> Result<Vec<(MessageId, crate::memory_items::MemoryChange)>> {
+        let mut stmt=self.conn.prepare("SELECT response_id,change_json FROM response_memory WHERE channel_id=?1 ORDER BY rowid")?;
+        let rows=stmt.query_map(params![channel.0], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?;
+        rows.map(|row| {let (id,json)=row?; Ok((MessageId(id),serde_json::from_str(&json)?))}).collect()
+    }
+    pub fn record_response_memory(&self, channel: &ChannelId, response: &MessageId, change: &crate::memory_items::MemoryChange) -> Result<bool> {
+        let key=match change {crate::memory_items::MemoryChange::Saved {key,..}=>key.clone(), crate::memory_items::MemoryChange::Proposed(p)=>p.id.clone()};
+        Ok(self.conn.execute("INSERT OR IGNORE INTO response_memory VALUES (?1,?2,?3,?4)", params![channel.0,response.0,key,serde_json::to_string(change)?])? > 0)
     }
 
     pub fn insert_message(&self, m: &Message) -> Result<()> {

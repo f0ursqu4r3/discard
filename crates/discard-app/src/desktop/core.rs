@@ -32,6 +32,7 @@ struct ChannelState {
     provider: String,
     channel_id: String,
     agent_id: String,
+    project_id: Option<discard_core::model::ProjectId>,
     mode: discard_core::model::WorkspaceMode,
     new_anchor: Option<String>,
     archive: Option<String>,
@@ -41,7 +42,7 @@ struct ChannelState {
 impl ChannelState {
     fn new(init: CoreInit) -> Self {
         Self { ui: init.state, commands: init.commands, channel: init.channel, agent: init.agent,
-            provider: init.provider, channel_id: String::new(), agent_id: String::new(),
+            provider: init.provider, channel_id: String::new(), agent_id: String::new(), project_id: None,
             mode: discard_core::model::WorkspaceMode::MainCheckout, new_anchor: None,
             archive: None, archived: false, archive_busy: false }
     }
@@ -136,7 +137,7 @@ impl AppCore {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.runtime_generation += 1;
         s.active = ChannelState::new(init);
-        s.active.channel_id = channel.id.0.clone(); s.active.agent_id = channel.agent_id.0.clone(); s.active.mode = channel.workspace_mode;
+        s.active.channel_id = channel.id.0.clone(); s.active.agent_id = channel.agent_id.0.clone(); s.active.mode = channel.workspace_mode; s.active.project_id = channel.project_id.clone();
         s.project = project.name.clone(); s.project_id = project.id.0.clone(); s.project_path = project.path.clone();
         s.parked.clear(); s.branches.clear(); s.collapsed.clear(); s.current_branch = None;
         if let Some(marker) = startup_marker(s.active.ui.history(), s.window.last_read(&channel.id.0)) { let _ = s.window.set_last_read(&channel.id.0, &marker); }
@@ -155,6 +156,10 @@ impl AppCore {
         s.project_busy = false; s.rev += 1; self.changed.notify_one();
     }
     pub fn active_channel_id(&self) -> String { self.state.lock().unwrap_or_else(|e| e.into_inner()).active.channel_id.clone() }
+    pub fn active_context(&self) -> (AgentId, Option<discard_core::model::ProjectId>) {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        (AgentId(state.active.agent_id.clone()), state.active.project_id.clone())
+    }
     pub fn active_agent_id(&self) -> String { self.state.lock().unwrap_or_else(|e| e.into_inner()).active.agent_id.clone() }
     pub fn any_running(&self) -> bool {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -168,7 +173,7 @@ impl AppCore {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if s.active.channel_id == channel.id.0 || s.parked.contains_key(&channel.id.0) { return; }
         let mut runtime = ChannelState::new(init);
-        runtime.channel_id = channel.id.0.clone(); runtime.agent_id = channel.agent_id.0.clone(); runtime.mode = channel.workspace_mode;
+        runtime.channel_id = channel.id.0.clone(); runtime.agent_id = channel.agent_id.0.clone(); runtime.mode = channel.workspace_mode; runtime.project_id = channel.project_id.clone();
         if let Some(marker) = startup_marker(runtime.ui.history(), s.window.last_read(&channel.id.0)) { let _ = s.window.set_last_read(&channel.id.0, &marker); }
         runtime.new_anchor = new_divider_anchor(runtime.ui.history(), s.window.last_read(&channel.id.0), None, false);
         s.parked.insert(channel.id.0.clone(), runtime);
@@ -198,7 +203,7 @@ impl AppCore {
         HistoryDto { channel_id: s.active.channel_id.clone(), rev: s.history_rev, messages: history_dto(s.active.ui.history()) }
     }
     pub fn snapshot(&self) -> SnapshotDto {
-        let (mut snapshot, slot_state) = {
+        let (mut snapshot, slot_state, context) = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let ui = &state.active.ui;
             let rev = state.rev;
@@ -289,7 +294,7 @@ impl AppCore {
                 },
                 theme,
             };
-            (snapshot, slot_state)
+            (snapshot, slot_state, (AgentId(state.active.agent_id.clone()), state.active.project_id.clone()))
         };
         let plugins = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
         let mut slots = BTreeMap::new();
@@ -297,7 +302,7 @@ impl AppCore {
             plugins.set_ui_state(slot_state.clone());
             let mut manager = plugins.manager().lock().unwrap_or_else(|e| e.into_inner());
             slots = self.slot_cache.lock().unwrap_or_else(|e| e.into_inner())
-                .get_or_render(&slot_state, || PluginMemory::for_context(AgentId(snapshot.agent_id.clone()), discard_core::model::ProjectId(snapshot.project_id.clone()), || super::slots::render_slots(&mut manager, &slot_state)));
+                .get_or_render(&slot_state, || { let (agent, project) = context; PluginMemory::for_context(agent, project, || super::slots::render_slots(&mut manager, &slot_state)) });
             let errors = manager.errors();
             drop(manager);
             let report = self.load_report.lock().unwrap_or_else(|e| e.into_inner());
@@ -357,6 +362,7 @@ impl AppCore {
         state.project_id = project_id;
         state.project_path = project_dir.to_string_lossy().into_owned();
         state.active.agent_id = agent_id;
+        state.active.project_id = (!state.project_id.is_empty()).then(|| discard_core::model::ProjectId(state.project_id.clone()));
     }
     /// Initialize read markers for this channel, treating old history as read on first use.
     pub fn configure_read_marker(&self, data_dir: &Path, channel_id: &str) {
@@ -446,7 +452,7 @@ impl AppCore {
     }
     /// Run a plugin action, then discard any cached trees it could have changed.
     pub fn plugin_action(&self, plugin: &str, action: &str) -> Result<(), String> {
-        let (agent, project) = { let state = self.state.lock().unwrap_or_else(|e| e.into_inner()); (AgentId(state.active.agent_id.clone()), discard_core::model::ProjectId(state.project_id.clone())) };
+        let (agent, project) = { let state = self.state.lock().unwrap_or_else(|e| e.into_inner()); (AgentId(state.active.agent_id.clone()), state.active.project_id.clone()) };
         let plugins = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
         let Some(plugins) = plugins.as_ref() else { return Err("plugins are unavailable".into()) };
         let result = PluginMemory::for_context(agent, project, || plugins.manager().lock().unwrap_or_else(|e| e.into_inner()).run_action(plugin, action).map_err(|e| e.to_string()));
@@ -522,7 +528,7 @@ impl AppCore {
         MenuContext { turn_running, archived, safe_mode, pending_reviews: plugins.pending().len(), plugin_items }
     }
     pub fn run_plugin_menu(&self, plugin: &str, index: usize, target: Option<&discard_core::context_menu::ContextTarget>) -> Result<(), String> {
-        let (agent, project) = { let state = self.state.lock().unwrap_or_else(|e| e.into_inner()); (AgentId(state.active.agent_id.clone()), discard_core::model::ProjectId(state.project_id.clone())) };
+        let (agent, project) = { let state = self.state.lock().unwrap_or_else(|e| e.into_inner()); (AgentId(state.active.agent_id.clone()), state.active.project_id.clone()) };
         let plugins = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
         let Some(plugins) = plugins.as_ref() else { return Err("plugins are unavailable".into()) };
         let (kind, id) = target.map_or(("app".to_owned(), String::new()), |target| (target.kind().id().to_owned(), target.target_id()));
@@ -628,6 +634,18 @@ impl AppCore {
 mod read_tests {
     use super::*;
     use discard_core::model::{ChannelId, Message, MessageId, Role};
+
+    #[test]
+    fn direct_conversation_context_does_not_use_selected_sidebar_project() {
+        let channel = ChannelId::new();
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let core = AppCore::new(CoreInit { state: UiState::new(channel.clone(), vec![]), commands, project: "Selected sidebar project".into(), channel: "Direct".into(), agent: "A".into(), provider: "fake".into() });
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let direct = discard_core::model::Channel { id: channel.clone(), agent_id: AgentId::new(), project_id: None, name: "Direct".into(), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout };
+        core.add_channel(CoreInit { state: UiState::new(channel.clone(), vec![]), commands, project: String::new(), channel: "Direct".into(), agent: "A".into(), provider: "fake".into() }, &direct);
+        core.switch_channel(&channel.0).unwrap();
+        assert_eq!(core.active_context(), (direct.agent_id, None));
+    }
 
     #[test]
     fn marking_read_updates_snapshot_and_revision() {

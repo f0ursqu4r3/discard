@@ -105,9 +105,10 @@ async fn send_streams_then_finishes() {
     let session = SessionId::new();
     store.create_session(&session, &channel.id).unwrap();
     let engine = Engine {
+        mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::new(Mutex::new(store)),
         agent_id,
-        project_id: project.id,
+        project_id: Some(project.id),
         memory: None,
         plugin_write: false,
         workspace_mode: WorkspaceMode::MainCheckout,

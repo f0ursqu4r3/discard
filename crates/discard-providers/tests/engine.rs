@@ -66,9 +66,10 @@ fn start_full(
     let store = Arc::new(Mutex::new(store));
     let probe = provider.probe.clone();
     let engine = Engine {
+        mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::clone(&store),
         agent_id: agent_id.clone(),
-        project_id: project_id.clone(),
+        project_id: Some(project_id.clone()),
         memory,
         plugin_write: false,
         workspace_mode: discard_core::model::WorkspaceMode::MainCheckout,
@@ -464,9 +465,10 @@ fn start_workspace(
     let store = Arc::new(Mutex::new(store));
     let probe = provider.probe.clone();
     let engine = Engine {
+        mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::clone(&store),
         agent_id,
-        project_id: project.id,
+        project_id: Some(project.id),
         memory,
         plugin_write: false,
         workspace_mode: mode,

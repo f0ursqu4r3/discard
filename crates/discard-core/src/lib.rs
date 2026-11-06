@@ -38,3 +38,5 @@ pub mod workspace_page;
 pub mod advanced;
 
 pub mod memory_items;
+
+pub mod conversation_context;

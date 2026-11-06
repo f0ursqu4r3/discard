@@ -51,6 +51,9 @@ pub enum Update {
     Error(String),
     /// Something the user should know that does not stop the turn.
     Notice(String),
+    ConversationMarker(Message),
+    ResponseCompleted(Message),
+    MemoryChanges { response: MessageId, changes: Vec<crate::memory_items::MemoryChange> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -82,6 +85,9 @@ impl UiState {
 
     pub fn apply(&mut self, update: Update) {
         match update {
+            Update::ResponseCompleted(message) => { self.live = Timeline::new(); self.history.push(message); },
+            Update::ConversationMarker(message) => self.history.push(message),
+            Update::MemoryChanges { .. } => {},
             Update::Event(event) => self.live.apply(&event.kind),
             Update::ApprovalState { approval_id, state } => self.live.mark_approval(&approval_id, state),
             Update::TurnFinished(_) => self.finish_turn(),

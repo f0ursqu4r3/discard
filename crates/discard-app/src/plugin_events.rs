@@ -16,7 +16,7 @@ impl PluginEvents {
     pub fn new(manager: Arc<Mutex<PluginManager>>) -> Self {
         Self::with_context(manager, None)
     }
-    pub fn with_context(manager: Arc<Mutex<PluginManager>>, context: Option<(discard_core::model::AgentId, discard_core::model::ProjectId)>) -> Self {
+    pub fn with_context(manager: Arc<Mutex<PluginManager>>, context: Option<(discard_core::model::AgentId, Option<discard_core::model::ProjectId>)>) -> Self {
         let (tx, rx) = channel::<(String, Value)>();
         std::thread::Builder::new()
             .name("plugin-events".into())

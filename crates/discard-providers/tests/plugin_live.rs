@@ -50,9 +50,10 @@ async fn build_plugin(provider: Arc<dyn Provider>, model: Option<&str>) {
     let memory: Arc<dyn MemoryService> = runtime.clone();
 
     let engine = Engine {
+        mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::new(Mutex::new(db)),
         agent_id,
-        project_id: project.id.clone(),
+        project_id: Some(project.id.clone()),
         memory: Some(memory),
         plugin_write: true,
         workspace_mode: discard_core::model::WorkspaceMode::MainCheckout,
@@ -83,7 +84,7 @@ async fn build_plugin(provider: Arc<dyn Provider>, model: Option<&str>) {
             }
             Update::TurnFinished(outcome) => break outcome,
             Update::Error(m) | Update::SetupNeeded(m) => panic!("engine problem: {m}"),
-            Update::ApprovalState { .. } | Update::Notice(_) => {}
+            Update::ApprovalState { .. } | Update::Notice(_) | Update::ResponseCompleted(_) | Update::ConversationMarker(_) | Update::MemoryChanges { .. } => {}
         }
     };
     assert_eq!(outcome, TurnOutcome::Completed, "tools used: {tools:?}");
