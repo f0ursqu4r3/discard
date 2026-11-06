@@ -616,6 +616,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migrated_project_branch_and_topic_survive_service_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "--allow-empty", "-m", "initial"]);
+        git(&["branch", "feature/persisted"]);
+
+        let db = dir.path().join("project-channels.db");
+        let (project_id, agent_id, general_id, branch_id) = {
+            let store = Store::open(&db).unwrap();
+            let project = store.import_project_folder(dir.path()).unwrap();
+            let agent = configured_agent(&store);
+            let general = store.create_conversation(&agent, Some(&project.id), "general").unwrap();
+            let branch = store.create_conversation(&agent, Some(&project.id), "Feature").unwrap();
+            for (channel, text) in [(&general, "legacy general history"), (&branch, "legacy branch history")] {
+                store.insert_message(&discard_core::model::Message {
+                    id: discard_core::model::MessageId::new(),
+                    channel_id: channel.id.clone(),
+                    role: discard_core::model::Role::User,
+                    blocks: vec![discard_core::model::Block::Markdown { text: text.into() }],
+                }).unwrap();
+            }
+            (project.id, agent, general.id, branch.id)
+        };
+
+        // Reopen this database as a v3 fixture. The app Store then exercises the real v4 migration.
+        {
+            let connection = rusqlite::Connection::open(&db).unwrap();
+            connection.execute_batch("DROP TABLE channel_topic_revisions;
+                DROP TABLE project_last_channels;
+                DROP TABLE project_channel_views;
+                DROP TABLE channel_agents;
+                DROP TABLE project_agents;
+                DROP TABLE project_main_agents;
+                DROP TABLE project_channels;
+                DROP TABLE channel_branches;
+                CREATE TABLE channel_branches (channel_id TEXT PRIMARY KEY REFERENCES channels(id), branch TEXT NOT NULL);").unwrap();
+            connection.execute("INSERT INTO channel_branches(channel_id,branch) VALUES(?1,'feature/persisted')", [&branch_id.0]).unwrap();
+            connection.pragma_update(None, "user_version", 3).unwrap();
+        }
+
+        let migrated = Store::open(&db).unwrap();
+        assert_eq!(migrated.project_channel_metadata(&branch_id).unwrap().unwrap().branch.as_deref(), Some("feature/persisted"));
+        assert_eq!(migrated.messages_for_channel(&branch_id).unwrap().len(), 1);
+        let general = migrated.load_channel(&general_id).unwrap();
+        let app_core = core(&general, dir.path());
+        let store = Arc::new(Mutex::new(migrated));
+        let service = Channels::new(app_core.clone(), store.clone(), Handle::current(), launcher());
+
+        assert_eq!(service.activate_project(&project_id).unwrap(), general_id.0);
+        let unrelated = store.lock().unwrap().create_agent(&AgentConfig {
+            reasoning_effort: None,
+            name: "Direct agent".into(),
+            provider: "codex".into(),
+            model: Some("direct-model".into()),
+            avatar: None,
+            system_prompt: String::new(),
+            policy: ApprovalPolicy::Ask,
+            plugin_write: false,
+        }).unwrap();
+        service.open_agent(&unrelated).unwrap();
+        assert_eq!(service.open_branch("feature/persisted").unwrap(), branch_id.0);
+        assert_eq!(app_core.snapshot().channel, "Feature");
+        assert_eq!(store.lock().unwrap().channel_agents(&branch_id).unwrap(), vec![agent_id.clone()]);
+        service.update_channel_topic(&project_id, &branch_id, 0, "Keep the migrated branch history").unwrap();
+        assert_eq!(store.lock().unwrap().messages_for_channel(&branch_id).unwrap().len(), 1);
+
+        drop(service);
+        drop(app_core);
+        drop(store);
+        let reopened = Store::open(&db).unwrap();
+        assert_eq!(reopened.last_project_channel(&project_id).unwrap().unwrap().id, branch_id);
+        assert_eq!(reopened.channel_topic(&branch_id).unwrap().text, "Keep the migrated branch history");
+        assert_eq!(reopened.channel_topic_history(&branch_id).unwrap().len(), 1);
+        let branch_messages = reopened.messages_for_channel(&branch_id).unwrap();
+        assert!(matches!(
+            branch_messages.as_slice(),
+            [discard_core::model::Message { blocks, .. }]
+                if matches!(blocks.as_slice(), [discard_core::model::Block::Markdown { text }] if text == "legacy branch history")
+        ));
+        assert_eq!(reopened.load_channel(&general_id).unwrap().agent_id, agent_id);
+
+        let reopened_general = reopened.load_channel(&general_id).unwrap();
+        let reopened_core = core(&reopened_general, dir.path());
+        let reopened_store = Arc::new(Mutex::new(reopened));
+        let reopened_service = Channels::new(reopened_core.clone(), reopened_store, Handle::current(), launcher());
+        assert_eq!(reopened_service.activate_project(&project_id).unwrap(), branch_id.0);
+        assert_eq!(reopened_core.active_channel_id(), branch_id.0);
+        assert_eq!(reopened_core.snapshot().channel, "Feature");
+    }
+
+    #[tokio::test]
     async fn project_activation_fails_without_a_configured_agent() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in_memory().unwrap();

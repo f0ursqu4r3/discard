@@ -1,12 +1,12 @@
 # Worktrees
 
-Each channel in a git project works in its own git worktree, so agents running in parallel do not overwrite each
-other. Worktrees live under `$DISCARD_HOME/worktrees/` (default `~/.discard/worktrees/`), outside every project.
+Coding sessions that use a worktree run outside the project checkout, under `$DISCARD_HOME/worktrees/` (default
+`~/.discard/worktrees/`). This keeps those sessions from overwriting the project checkout.
 
 ## Rules
 
-- **Created before the session starts.** On a channel's first turn, Discard creates the worktree, then starts the
-  provider session inside it. A running session is never moved to another directory.
+- **Created before a Coding session starts.** When a channel uses a worktree, Discard creates it before starting
+  the provider session. A running session is never moved to another directory.
 - **Serialized per repository.** Parallel channels create their worktrees one at a time, so git's locks do not
   collide.
 - **Branches from `HEAD`.** Each worktree gets a branch `discard/<channel>-<id>` that starts at the repository's
@@ -27,6 +27,10 @@ other. Worktrees live under `$DISCARD_HOME/worktrees/` (default `~/.discard/work
 - Changing an existing channel's mode starts a **new session**, because the provider's old session belongs to the
   old directory. The new session does not carry over the old conversation. A "confirm a summary first" screen is
   not built yet.
+- Project channels are durable conversations associated with `general` or a canonical branch. Opening a project
+  or branch channel restores its conversation; it does not switch the Git checkout or create a worktree. Normal
+  Conversation mode still uses an empty provider working directory. Worktree creation and branch mutation remain
+  separate operations.
 
 ## Branch list
 

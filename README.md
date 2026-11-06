@@ -70,3 +70,5 @@ cargo test -p discard-providers --test worktree_live  -- --ignored
 - `docs/memory.md`, `docs/plugins.md`, `docs/worktrees.md`: how each part works and its limits.
 - `docs/settings.md`: the settings file, the menu bar, key bindings, and the Settings window.
 - `docs/ui-juice-spec.md`: the UI polish spec (surfaces 1 to 5 and the chrome changes).
+- `docs/runtime/conversation-context.md`: conversation context, project channels, and topics.
+- `docs/project-channel-status.md`: implemented project-channel behavior and the remaining orchestration roadmap.
