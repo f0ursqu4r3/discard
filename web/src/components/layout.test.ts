@@ -1,9 +1,10 @@
-import { mount } from '@vue/test-utils'
+import { mount, shallowMount } from '@vue/test-utils'
 import { describe, expect, test } from 'vite-plus/test'
 import { serverInitials, serverPillHeight } from './layout'
 import ChannelList from './ChannelList.vue'
 import ServerRail from './ServerRail.vue'
 import UserBar from './workspace/UserBar.vue'
+import type { WorkspacePage } from './workspace/types'
 
 describe('server rail', () => {
   test.each([
@@ -258,4 +259,22 @@ test('DM navigation omits the project header and channel controls', async () => 
   expect(nav.find('[data-ui-id="project-header"]').exists()).toBe(false)
   expect(nav.find('[data-ui-id="project-navigation"]').exists()).toBe(false)
   expect(nav.getComponent({ name: 'AgentsNavigation' }).props('projectId')).toBeNull()
+})
+
+test.each<WorkspacePage>([
+  'conversation',
+  'overview',
+  'agents',
+  'memory',
+  'artifacts',
+  'project-settings',
+])('project %s navigation omits the agent/conversation list', (page) => {
+  const nav = shallowMount(ChannelList, {
+    props: { page, projectId: 'project', activeProjectId: 'project', branches: [] },
+    global: { renderStubDefaultSlot: true },
+  })
+  expect(nav.findComponent({ name: 'AgentsNavigation' }).exists()).toBe(false)
+  expect(nav.find('[data-ui-id="project-header"]').exists()).toBe(true)
+  expect(nav.find('[data-ui-id="project-navigation"]').exists()).toBe(true)
+  nav.unmount()
 })

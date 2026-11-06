@@ -1,6 +1,7 @@
 import { mount, flushPromises } from '@vue/test-utils'
 import { beforeEach, expect, test, vi } from 'vite-plus/test'
 import MemoryBrowser from './memory/MemoryBrowser.vue'
+import { Select } from './ui/select'
 import MemoryResponse from './memory/MemoryResponse.vue'
 import { invoke } from '@tauri-apps/api/core'
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
@@ -73,7 +74,8 @@ test('conversation browser inspects history, edits with version, moves to shared
       channelId: 'current',
     }),
   )
-  await view.get('select').setValue('global')
+  view.getComponent(Select).vm.$emit('update:modelValue', 'global')
+  await flushPromises()
   await button(view, 'Move')
   expect(invoke).toHaveBeenCalledWith(
     'memory_mutate',
@@ -101,6 +103,25 @@ test('forget passes requester, explains transcript, shows pause and supports res
   expect(invoke).toHaveBeenCalledWith('memory_resume', { channelId: 'current' })
   await button(view, 'Start fresh conversation')
   expect(invoke).toHaveBeenCalledWith('memory_fresh_conversation', { channelId: 'current' })
+})
+test('the domain Select filters memory and can return to all domains', async () => {
+  const view = mount(MemoryBrowser)
+  try {
+    await flushPromises()
+    const domains = view.getComponent(Select)
+    expect(view.get('label').attributes('for')).toBe(view.get('[role="combobox"]').attributes('id'))
+    domains.vm.$emit('update:modelValue', 'global')
+    await flushPromises()
+    expect(view.text()).not.toContain(item.content)
+    domains.vm.$emit('update:modelValue', 'agent:a')
+    await flushPromises()
+    expect(view.text()).toContain(item.content)
+    domains.vm.$emit('update:modelValue', 'all')
+    await flushPromises()
+    expect(view.text()).toContain(item.content)
+  } finally {
+    view.unmount()
+  }
 })
 test('settings browses all domains and source-unavailable items; errors keep draft and offer import/reload', async () => {
   vi.mocked(invoke).mockResolvedValueOnce({

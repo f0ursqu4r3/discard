@@ -354,7 +354,7 @@ impl Provider for CodexProvider {
             });
         }
 
-        Ok(Box::new(CodexSession { child, pgid, stdin, events, shared, thread_id, next_id: 10, _conversation_files: files }))
+        Ok(Box::new(CodexSession { child, pgid, stdin, events, shared, thread_id, reasoning_effort: spec.reasoning_effort, next_id: 10, _conversation_files: files }))
     }
 }
 
@@ -468,6 +468,7 @@ struct CodexSession {
     events: mpsc::UnboundedReceiver<RawEvent>,
     shared: Arc<Shared>,
     thread_id: String,
+    reasoning_effort: Option<String>,
     next_id: i64,
     _conversation_files: Option<crate::conversation::ConversationFiles>,
 }
@@ -495,8 +496,9 @@ impl ProviderSession for CodexSession {
 
     async fn send_user_message(&mut self, text: &str) -> Result<(), ProviderError> {
         self.next_id += 1;
-        let request = json!({"jsonrpc": "2.0", "id": self.next_id, "method": "turn/start",
+        let mut request = json!({"jsonrpc": "2.0", "id": self.next_id, "method": "turn/start",
             "params": {"threadId": self.thread_id, "input": [{"type": "text", "text": text}]}});
+        if let Some(effort) = &self.reasoning_effort { request["params"]["effort"] = json!(effort); }
         write_line(&self.stdin, &request).await
     }
 
@@ -538,6 +540,7 @@ mod tests {
 
     fn spec(enforcement: EnforcementMode) -> SessionSpec {
         SessionSpec {
+            reasoning_effort: None,
             mode: discard_core::provider::SessionMode::Coding,
             cwd: PathBuf::from("/work/proj"),
             model: None,

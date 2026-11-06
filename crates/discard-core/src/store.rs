@@ -397,7 +397,7 @@ impl Store {
             }
         }
         // Keep a minimal tombstone so retained history still has a readable author.
-        let tombstone=AgentConfig { name:"Deleted agent".into(),avatar:None,provider:String::new(),model:None,system_prompt:String::new(),policy:crate::capability::ApprovalPolicy::DenyAll,plugin_write:false };
+        let tombstone=AgentConfig { reasoning_effort: None, name:"Deleted agent".into(),avatar:None,provider:String::new(),model:None,system_prompt:String::new(),policy:crate::capability::ApprovalPolicy::DenyAll,plugin_write:false };
         self.conn.execute("UPDATE agents SET config_toml=?2,archived=1,deleted=1 WHERE id=?1",params![id.0,tombstone.to_toml()?])?;
         tx.commit()?;
         Ok(result)
@@ -915,6 +915,7 @@ mod tests {
             .insert_agent(
                 &agent,
                 &AgentConfig {
+                    reasoning_effort: None,
                     name: "Scout".into(),
                     avatar: None,
                     provider: "claude".into(),
@@ -1220,6 +1221,7 @@ mod tests {
         {
             let store = Store::open(&path).unwrap();
             store.insert_agent(&agent, &AgentConfig {
+                reasoning_effort: None,
                 name: "Friend".into(), avatar: None, provider: "codex".into(), model: Some("exact".into()),
                 system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false,
             }).unwrap();
@@ -1289,6 +1291,7 @@ mod tests {
                 .insert_agent(
                     &agent,
                     &AgentConfig {
+                        reasoning_effort: None,
                         name: "A".into(),
                         avatar: None,
                         provider: "claude".into(),
@@ -1357,7 +1360,7 @@ mod project_folder_tests {
 mod agent_lifecycle_tests {
     use super::*;
     use crate::capability::ApprovalPolicy;
-    fn config() -> AgentConfig { AgentConfig { name: crate::agent::generated_name(), avatar: None, provider: "claude".into(), model: Some("same-model".into()), system_prompt: "Be clear".into(), policy: ApprovalPolicy::Ask, plugin_write: false } }
+    fn config() -> AgentConfig { AgentConfig { reasoning_effort: None, name: crate::agent::generated_name(), avatar: None, provider: "claude".into(), model: Some("same-model".into()), system_prompt: "Be clear".into(), policy: ApprovalPolicy::Ask, plugin_write: false } }
     #[test]
     fn independent_agents_have_editable_names_and_default_direct_chats() {
         let store = Store::open_in_memory().unwrap(); let mut cfg = config();

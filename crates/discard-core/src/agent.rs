@@ -13,6 +13,8 @@ pub struct AgentConfig {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
     pub system_prompt: String,
     pub policy: ApprovalPolicy,
     /// May write plugins (as drafts the user must review). Off by default.
@@ -32,6 +34,7 @@ impl AgentConfig {
         if self.name.trim().is_empty() { return Err("Enter an agent name.".into()); }
         if self.provider.trim().is_empty() { return Err("Select a provider.".into()); }
         if self.model.as_ref().is_some_and(|model| model.trim().is_empty()) { return Err("Select a model.".into()); }
+        if self.reasoning_effort.as_ref().is_some_and(|effort| !matches!(effort.as_str(), "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra")) { return Err("Choose a valid reasoning level.".into()); }
         Ok(())
     }
 
@@ -99,6 +102,7 @@ mod tests {
 
     fn cfg(policy: ApprovalPolicy) -> AgentConfig {
         AgentConfig {
+            reasoning_effort: None,
             name: "Scout".into(),
             avatar: None,
             provider: "claude".into(),
@@ -133,7 +137,8 @@ mod tests {
 
     #[test]
     fn config_round_trips_through_toml() {
-        let c = cfg(ApprovalPolicy::Ask);
+        let mut c = cfg(ApprovalPolicy::Ask);
+        c.reasoning_effort = Some("high".into());
         let text = c.to_toml().unwrap();
         assert_eq!(AgentConfig::from_toml(&text).unwrap(), c);
     }
@@ -142,6 +147,7 @@ mod tests {
     fn toml_defaults_optional_fields() {
         let c = AgentConfig::from_toml("name='A'\nprovider='claude'\npolicy='ask'\n").unwrap();
         assert_eq!(c.model, None);
+        assert_eq!(c.reasoning_effort, None);
         assert_eq!(c.system_prompt, "");
     }
 

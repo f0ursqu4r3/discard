@@ -37,6 +37,7 @@ impl Harness {
             .insert_agent(
                 &agent,
                 &AgentConfig {
+                    reasoning_effort: None,
                     name: "A".into(),
                     avatar: None,
                     provider: "fake".into(),
@@ -78,6 +79,7 @@ where
     Fut: Future<Output = ()>,
 {
     let spec = SessionSpec {
+        reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding,
         cwd: PathBuf::from("."),
         model: None,

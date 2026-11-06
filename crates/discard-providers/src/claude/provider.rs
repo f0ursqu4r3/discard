@@ -95,6 +95,9 @@ pub fn build_args(spec: &SessionSpec) -> Vec<String> {
             .to_string(),
         ]);
     }
+    if let Some(effort) = &spec.reasoning_effort {
+        args.extend(["--effort".into(), effort.clone()]);
+    }
     if let Some(model) = &spec.model {
         args.extend(["--model".into(), model.clone()]);
     }
@@ -409,6 +412,7 @@ mod tests {
 
     fn spec(enforcement: EnforcementMode) -> SessionSpec {
         SessionSpec {
+            reasoning_effort: None,
             mode: discard_core::provider::SessionMode::Coding,
             cwd: PathBuf::from("."),
             model: None,
@@ -450,11 +454,13 @@ mod tests {
     fn optional_settings_are_passed_through() {
         let mut s = spec(EnforcementMode::HostPrompts);
         s.model = Some("haiku".into());
+        s.reasoning_effort = Some("high".into());
         s.system_prompt = Some("Be brief.".into());
         s.resume_handle = Some("sess-1".into());
         s.mcp_config = Some(PathBuf::from("/run/discard/mcp.json"));
         let args = build_args(&s);
         assert!(has_pair(&args, "--model", "haiku"));
+        assert!(has_pair(&args, "--effort", "high"));
         assert!(has_pair(&args, "--append-system-prompt", "Be brief."));
         assert!(has_pair(&args, "--resume", "sess-1"));
         assert!(has_pair(&args, "--mcp-config", "/run/discard/mcp.json"));
@@ -463,7 +469,7 @@ mod tests {
     #[test]
     fn omitted_settings_add_no_flags() {
         let args = build_args(&spec(EnforcementMode::HostPrompts));
-        for flag in ["--model", "--append-system-prompt", "--resume", "--mcp-config"] {
+        for flag in ["--effort", "--model", "--append-system-prompt", "--resume", "--mcp-config"] {
             assert!(!args.contains(&flag.to_string()), "{flag}");
         }
     }

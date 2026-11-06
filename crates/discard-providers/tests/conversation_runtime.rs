@@ -51,6 +51,7 @@ impl Rig {
         let store = Store::open(&dir.path().join("store.db")).unwrap();
         let agent = store
             .create_agent(&AgentConfig {
+                reasoning_effort: None,
                 name: "A".into(),
                 avatar: None,
                 provider: "fake".into(),
@@ -71,6 +72,7 @@ impl Rig {
             .unwrap();
         let memory_service = decorate(runtime.clone(), memory.clone());
         let engine = Engine {
+            reasoning_effort: None,
             mode: SessionMode::Conversation,
             providers: vec![provider.clone()],
             store: store.clone(),
@@ -153,6 +155,7 @@ async fn each_turn_refreshes_personality_memory_model_and_retains_only_own_histo
     rig.done().await;
     rig.edit(|c| {
         c.model = Some("two".into());
+        c.reasoning_effort = Some("high".into());
         c.system_prompt = "Second personality".into();
     });
     rig.memory
@@ -171,6 +174,8 @@ async fn each_turn_refreshes_personality_memory_model_and_retains_only_own_histo
     assert_eq!(specs.len(), 2);
     assert_eq!(specs[0].model.as_deref(), Some("one"));
     assert_eq!(specs[1].model.as_deref(), Some("two"));
+    assert_eq!(specs[0].reasoning_effort, None);
+    assert_eq!(specs[1].reasoning_effort.as_deref(), Some("high"));
     assert!(
         specs[1]
             .system_prompt
@@ -637,6 +642,7 @@ async fn provider_switch_preserves_conversation_and_records_visible_marker() {
         .unwrap()
         .unwrap();
     let engine = Engine {
+        reasoning_effort: None,
         mode: SessionMode::Conversation,
         providers: vec![other.clone()],
         store: rig.store.clone(),

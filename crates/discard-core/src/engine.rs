@@ -101,6 +101,7 @@ pub struct Engine {
     pub session_id: SessionId,
     pub cwd: PathBuf,
     pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
     pub system_prompt: Option<String>,
     pub policy: ApprovalPolicy,
 }
@@ -146,6 +147,7 @@ impl Engine {
         snapshot.provider = provider;
         snapshot.system_prompt = Some(config.runtime_system_prompt());
         snapshot.model = config.model;
+        snapshot.reasoning_effort = config.reasoning_effort;
         snapshot.policy = config.policy;
         snapshot.plugin_write = false;
         Ok(snapshot)
@@ -203,6 +205,7 @@ impl Engine {
         let prepared = service.prepare_summary(&self.agent_id, self.project_id.as_ref(), &self.channel_id)?;
         let _revoke = RevokeOnDrop { service: service.clone(), token: prepared.token.clone() };
         let spec = SessionSpec {
+            reasoning_effort: self.reasoning_effort.clone(),
             mode: crate::provider::SessionMode::Conversation, cwd: self.cwd.clone(), model: self.model.clone(),
             system_prompt: Some("Summarize only the supplied history. Do not use tools or capture memory.".into()),
             enforcement: self.provider.capabilities().enforcement_for(self.policy).map_err(|e| e.to_string())?,
@@ -261,7 +264,15 @@ impl Engine {
                 Ok(snapshot) => snapshot,
                 Err(error) => { send(updates, Update::Error(error)); self.finish(updates, crate::driver::TurnOutcome::Failed); return; }
             }
-        } else { self.clone() };
+        } else {
+            let mut snapshot = self.clone();
+            let config = crate::driver::lock(&self.store).load_agent(&self.agent_id);
+            match config {
+                Ok(config) => snapshot.reasoning_effort = config.reasoning_effort,
+                Err(error) => { send(updates, Update::Error(error.to_string())); self.finish(updates, crate::driver::TurnOutcome::Failed); return; }
+            }
+            snapshot
+        };
         snapshot.turn_snapshot(sequencer, text, commands, updates).await;
     }
 
@@ -361,6 +372,7 @@ impl Engine {
         } else { text.clone() };
         let resume_handle = if self.mode == crate::provider::SessionMode::Coding { crate::driver::lock(&self.store).resume_handle(&self.session_id).ok().flatten() } else { None };
         let spec = SessionSpec {
+            reasoning_effort: self.reasoning_effort.clone(),
             mode: self.mode,
             cwd,
             model: self.model.clone(),

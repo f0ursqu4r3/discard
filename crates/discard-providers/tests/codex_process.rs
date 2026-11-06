@@ -73,6 +73,7 @@ async fn wait_for_file(path: &Path) {
 
 fn spec() -> SessionSpec {
     SessionSpec {
+        reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding,
         cwd: PathBuf::from("."),
         model: None,
@@ -177,6 +178,21 @@ async fn the_thread_id_becomes_the_resume_handle_and_resume_uses_thread_resume()
     let s = rig2.provider("approval").start_session(sp).await.unwrap();
     assert_eq!(s.resume_handle().as_deref(), Some("thread-old"));
     assert_eq!(rig2.request("thread/resume")["params"]["threadId"], "thread-old");
+}
+
+#[tokio::test]
+async fn reasoning_level_reaches_new_and_resumed_turns() {
+    for handle in [None, Some("thread-old".to_string())] {
+        let rig = Rig::new();
+        let mut sp = spec();
+        sp.resume_handle = handle;
+        sp.reasoning_effort = Some("high".into());
+        let mut session = rig.provider("approval").start_session(sp).await.unwrap();
+        session.send_user_message("hello").await.unwrap();
+        // Wait for the fixture to process and record the turn request.
+        tokio::time::timeout(Duration::from_secs(5), session.next_event()).await.unwrap();
+        assert_eq!(rig.request("turn/start")["params"]["effort"], "high");
+    }
 }
 
 #[tokio::test]

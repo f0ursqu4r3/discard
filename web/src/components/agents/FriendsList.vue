@@ -3,13 +3,12 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getAgents, type AgentEntry } from '@/bridge/api'
 import { Users, UserPlus } from '@lucide/vue'
-import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar'
+import AgentAvatar from '@/components/agents/AgentAvatar.vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Empty, EmptyHeader, EmptyTitle, EmptyDescription, EmptyMedia } from '@/components/ui/empty'
-import { serverInitials } from '@/components/layout'
 const emit = defineEmits<{ action: [id: string] }>()
 const agents = ref<AgentEntry[]>([]),
   query = ref(''),
@@ -106,10 +105,7 @@ onUnmounted(() => {
                 )
               "
             >
-              <Avatar class="size-10">
-                <AvatarImage v-if="agent.avatar" :src="agent.avatar" />
-                <AvatarFallback>{{ serverInitials(agent.name) }}</AvatarFallback>
-              </Avatar>
+              <AgentAvatar :name="agent.name" :avatar="agent.avatar" class="size-10" />
               <span class="min-w-0">
                 <span class="block truncate font-medium">{{ agent.name }}</span>
                 <span class="block truncate text-sm text-muted-foreground">

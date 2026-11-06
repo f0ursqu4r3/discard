@@ -238,7 +238,7 @@ const branchCount = computed(() =>
               {{ snapshot.turnRunning ? 'Running' : 'Idle' }}
             </Badge>
           </Button>
-          <p v-else>Choose a conversation in this project from the navigation.</p>
+          <p v-else>Open a branch or create a conversation from the project menu.</p>
         </CardContent>
       </Card>
     </div>

@@ -138,7 +138,7 @@ mod tests {
         let project = Project { id: ProjectId::new(), name: "p".into(), path: repo.to_string_lossy().into() };
         store.insert_project(&project).unwrap();
         let agent = AgentId::new();
-        store.insert_agent(&agent, &AgentConfig { name: "A".into(), avatar: None, provider: "claude".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        store.insert_agent(&agent, &AgentConfig { reasoning_effort: None, name: "A".into(), avatar: None, provider: "claude".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         let channel = Channel { id: ChannelId::new(), project_id: Some(project.id), name: "general".into(), agent_id: agent, workspace_mode: WorkspaceMode::Worktree };
         store.insert_channel(&channel).unwrap();
         store.create_session(&SessionId::new(), &channel.id).unwrap();

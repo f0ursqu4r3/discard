@@ -1,5 +1,5 @@
 //! Read provider model metadata without sending a user message or starting a thread.
-use discard_core::provider::{ModelInfo, ProviderError};
+use discard_core::provider::{ModelInfo, ProviderError, ReasoningOption};
 use nix::{
     sys::signal::{Signal, killpg},
     unistd::Pid,
@@ -60,6 +60,17 @@ async fn rpc(lines: &mut Lines<BufReader<ChildStdout>>, id: u64) -> Result<Value
         }
     }
 }
+fn reasoning_options(row: &Value, claude: bool) -> Vec<ReasoningOption> {
+    let key = if claude { "supportedEffortLevels" } else { "supportedReasoningEfforts" };
+    if claude && row["supportsEffort"] == false { return vec![]; }
+    let mut seen = HashSet::new();
+    row[key].as_array().into_iter().flatten().filter_map(|entry| {
+        let value = if claude { entry.as_str() } else { entry["reasoningEffort"].as_str() }?;
+        if !matches!(value, "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra") || !seen.insert(value) { return None; }
+        Some(ReasoningOption { value: value.into(), description: entry["description"].as_str().unwrap_or_default().into() })
+    }).collect()
+}
+
 fn parse_models(rows: &Value, claude: bool) -> Result<Vec<ModelInfo>> {
     let mut rows: Vec<_> = rows
         .as_array()
@@ -94,6 +105,7 @@ fn parse_models(rows: &Value, claude: bool) -> Result<Vec<ModelInfo>> {
             continue;
         }
         out.push(ModelInfo {
+            reasoning_efforts: reasoning_options(row, claude),
             id: id.into(),
             name: row["displayName"]
                 .as_str()
@@ -200,6 +212,25 @@ async fn probe(mut command: Command, claude: bool, timeout: Duration) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn model_catalogs_expose_supported_reasoning_levels_only() {
+        let claude = parse_models(&json!([
+            {"value":"thinking","supportsEffort":true,"supportedEffortLevels":["low","high","max"]},
+            {"value":"no-thinking","supportsEffort":false,"supportedEffortLevels":["low"]},
+            {"value":"legacy"}
+        ]), true).unwrap();
+        assert_eq!(claude[0].reasoning_efforts.iter().map(|e| e.value.as_str()).collect::<Vec<_>>(), ["low", "high", "max"]);
+        assert!(claude[1].reasoning_efforts.is_empty());
+        assert!(claude[2].reasoning_efforts.is_empty());
+        let codex = parse_models(&json!([{"model":"m","supportedReasoningEfforts":[
+            {"reasoningEffort":"high","description":"Think longer"},
+            {"reasoningEffort":"high"}, {"reasoningEffort":"ultra"}, {"reasoningEffort":"invalid"}
+        ]}]), false).unwrap();
+        assert_eq!(codex[0].reasoning_efforts.len(), 2);
+        assert_eq!(codex[0].reasoning_efforts[0].description, "Think longer");
+        assert_eq!(serde_json::to_value(&codex[0]).unwrap()["reasoningEfforts"][1]["value"], "ultra");
+    }
+
     #[test]
     fn claude_resolves_aliases_deduplicates_default_and_keeps_explicit_context_variants() {
         let rows = json!([

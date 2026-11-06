@@ -50,7 +50,8 @@ fn start_full(
     store
         .insert_agent(
             &agent,
-            &AgentConfig { name: "A".into(), avatar: None, provider: "fake".into(), model: None, system_prompt: String::new(), policy, plugin_write: false },
+            &AgentConfig {
+        reasoning_effort: None, name: "A".into(), avatar: None, provider: "fake".into(), model: None, system_prompt: String::new(), policy, plugin_write: false },
         )
         .unwrap();
     let channel = Channel {
@@ -66,6 +67,7 @@ fn start_full(
     let store = Arc::new(Mutex::new(store));
     let probe = provider.probe.clone();
     let engine = Engine {
+        reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::clone(&store),
         agent_id: agent_id.clone(),
@@ -131,6 +133,24 @@ async fn a_turn_streams_updates_and_persists_both_messages() {
     assert_eq!(msgs.len(), 2);
     assert_eq!((msgs[0].role, &msgs[0].blocks[..]), (Role::User, &[Block::Markdown { text: "hello".into() }][..]));
     assert_eq!((msgs[1].role, &msgs[1].blocks[..]), (Role::Agent, &[Block::Markdown { text: "Hi there".into() }][..]));
+}
+
+#[tokio::test]
+async fn builder_turns_reload_saved_reasoning_and_can_clear_it() {
+    let mut rig = start(FakeProvider::new(vec![Step::text("done"), Step::idle()]), ApprovalPolicy::Ask);
+    for effort in [Some("high"), Some("low"), None] {
+        {
+            let store = rig.store.lock().unwrap();
+            let agent = store.load_channel(&rig.channel).unwrap().agent_id;
+            let mut config = store.load_agent(&agent).unwrap();
+            config.model = Some("model".into());
+            config.reasoning_effort = effort.map(str::to_string);
+            store.update_agent(&agent, &config).unwrap();
+        }
+        rig.commands.send(Command::Send("hello".into())).unwrap();
+        rig.until_finished().await;
+        assert_eq!(rig.probe.specs.lock().unwrap().last().unwrap().reasoning_effort.as_deref(), effort);
+    }
 }
 
 #[tokio::test]
@@ -457,7 +477,7 @@ fn start_workspace(
     let project = Project { id: ProjectId::new(), name: "p".into(), path: "/p".into() };
     store.insert_project(&project).unwrap();
     let agent_id = AgentId::new();
-    store.insert_agent(&agent_id, &AgentConfig { name: "A".into(), avatar: None, provider: "fake".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+    store.insert_agent(&agent_id, &AgentConfig { reasoning_effort: None, name: "A".into(), avatar: None, provider: "fake".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
     let channel = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "general".into(), agent_id: agent_id.clone(), workspace_mode: mode };
     store.insert_channel(&channel).unwrap();
     let session = SessionId::new();
@@ -465,6 +485,7 @@ fn start_workspace(
     let store = Arc::new(Mutex::new(store));
     let probe = provider.probe.clone();
     let engine = Engine {
+        reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::clone(&store),
         agent_id,

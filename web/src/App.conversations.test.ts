@@ -6,6 +6,7 @@ import AgentsNavigation from './components/workspace/AgentsNavigation.vue'
 import { beforeEach, afterEach, expect, test, vi } from 'vite-plus/test'
 import fixture from './bridge/fixtures/snapshot.json'
 import type { MessageDto, SnapshotDto } from './bridge/types'
+import type { WorkspacePage } from './components/workspace/types'
 const mocks = vi.hoisted(() => ({
   store: {
     snapshot: null as SnapshotDto | null,
@@ -47,9 +48,11 @@ import NavigationPanel from './components/workspace/NavigationPanel.vue'
 import CreateChannelDialog from './components/workspace/CreateChannelDialog.vue'
 import MemoryBrowser from './components/memory/MemoryBrowser.vue'
 import { Button } from './components/ui/button'
+import { Select } from './components/ui/select'
 let view: ReturnType<typeof shallowMount> | undefined
 beforeEach(() => {
   vi.clearAllMocks()
+  localStorage.removeItem('discard:last-direct-message')
   catalogHandlers.clear()
   mocks.store.snapshot = {
     ...structuredClone(fixture),
@@ -114,6 +117,93 @@ test('DM new-conversation context stays direct while a sidebar project is select
   const wrapper = app()
   expect(wrapper.getComponent(CreateChannelDialog).props('projectId')).toBeNull()
   expect(wrapper.getComponent(NavigationPanel).props('page')).toBe('direct-messages')
+})
+test('Direct Messages returns to the active DM from a project page without reopening it', async () => {
+  mocks.store.snapshot = { ...mocks.store.snapshot!, projectId: 'project' }
+  const wrapper = app()
+  wrapper.getComponent(NavigationPanel).vm.$emit('navigate', 'overview')
+  await flushPromises()
+  expect(wrapper.findComponent(MessageList).exists()).toBe(false)
+  wrapper.getComponent(NavigationPanel).vm.$emit('navigate', 'direct-messages')
+  await flushPromises()
+  expect(wrapper.findComponent(MessageList).exists()).toBe(true)
+  expect(wrapper.findComponent(FriendsList).exists()).toBe(false)
+  expect(invoke).not.toHaveBeenCalledWith('switch_channel', expect.anything())
+})
+test('Direct Messages restores the last opened DM after remounting with a project conversation', async () => {
+  mocks.store.snapshot = { ...mocks.store.snapshot!, channelId: 'last-dm' }
+  app().unmount()
+  mocks.store.snapshot = {
+    ...mocks.store.snapshot!,
+    channelId: 'project-chat',
+    activeProjectId: 'project',
+    projectId: 'project',
+  }
+  vi.mocked(invoke).mockImplementation(async (name, args) => {
+    if (name === 'get_conversations')
+      return [
+        { id: 'another-dm', projectId: null },
+        { id: 'last-dm', projectId: null },
+      ]
+    if (name === 'switch_channel') {
+      mocks.store.snapshot = {
+        ...mocks.store.snapshot!,
+        channelId: (args as { channelId: string }).channelId,
+        activeProjectId: null,
+      }
+    }
+  })
+  const wrapper = app()
+  wrapper.getComponent(NavigationPanel).vm.$emit('navigate', 'overview')
+  await flushPromises()
+  wrapper.getComponent(NavigationPanel).vm.$emit('navigate', 'direct-messages')
+  await flushPromises()
+  expect(invoke).toHaveBeenCalledWith('switch_channel', { channelId: 'last-dm' })
+  expect(wrapper.getComponent(MessageList).props('conversationId')).toBe('last-dm')
+  expect(wrapper.getComponent(NavigationPanel).props('page')).toBe('direct-messages')
+  wrapper.getComponent(NavigationPanel).vm.$emit('action', 'show_friends')
+  await flushPromises()
+  expect(wrapper.findComponent(FriendsList).exists()).toBe(true)
+})
+test.each([null, 'deleted-dm'])(
+  'Direct Messages falls back to Agents without an available DM (%s)',
+  async (saved) => {
+    if (saved) localStorage.setItem('discard:last-direct-message', saved)
+    mocks.store.snapshot = {
+      ...mocks.store.snapshot!,
+      activeProjectId: 'project',
+      projectId: 'project',
+    }
+    vi.mocked(invoke).mockImplementation(async (name) =>
+      name === 'get_conversations' ? [] : undefined,
+    )
+    const wrapper = app()
+    wrapper.getComponent(NavigationPanel).vm.$emit('navigate', 'direct-messages')
+    await flushPromises()
+    expect(wrapper.findComponent(FriendsList).exists()).toBe(true)
+    expect(wrapper.findComponent(MessageList).exists()).toBe(false)
+    expect(invoke).not.toHaveBeenCalledWith('switch_channel', expect.anything())
+    expect(localStorage.getItem('discard:last-direct-message')).toBeNull()
+  },
+)
+test('a failed DM switch keeps the project view and the remembered DM', async () => {
+  localStorage.setItem('discard:last-direct-message', 'last-dm')
+  mocks.store.snapshot = {
+    ...mocks.store.snapshot!,
+    activeProjectId: 'project',
+    projectId: 'project',
+  }
+  vi.mocked(invoke).mockImplementation(async (name) => {
+    if (name === 'get_conversations') return [{ id: 'last-dm', projectId: null }]
+    if (name === 'switch_channel') throw new Error('Conversation is busy')
+  })
+  const wrapper = app()
+  wrapper.getComponent(NavigationPanel).vm.$emit('navigate', 'overview')
+  await flushPromises()
+  wrapper.getComponent(NavigationPanel).vm.$emit('navigate', 'direct-messages')
+  await flushPromises()
+  expect(wrapper.getComponent(ChannelHeader).props('channel')).toBe('Project overview')
+  expect(localStorage.getItem('discard:last-direct-message')).toBe('last-dm')
 })
 test('retained deleted-agent history disables its composer and keeps history readable', () => {
   mocks.store.snapshot = {
@@ -220,7 +310,8 @@ test('top-level menu creation refreshes the same-context conversation catalog', 
     .find((dialog) => dialog.props('open'))!
   expect(topLevelDialog).toBeDefined()
   await topLevelDialog.get('#channel-name').setValue('New menu discussion')
-  await topLevelDialog.get('#conversation-agent').setValue('a')
+  topLevelDialog.getComponent(Select).vm.$emit('update:modelValue', 'a')
+  await flushPromises()
   await topLevelDialog.get('form').trigger('submit')
   await flushPromises()
   expect(mocks.store.refresh).toHaveBeenCalled()
@@ -448,6 +539,8 @@ test.each([null, 'project'])(
     }
     const wrapper = app()
     const header = wrapper.getComponent(ChannelHeader)
+    expect(header.props('directMessage')).toBe(!activeProjectId)
+    expect(header.props('sidebarAvailable')).toBe(true)
     expect(header.props('channel')).toBe(
       activeProjectId ? mocks.store.snapshot!.channel : mocks.store.snapshot!.agent,
     )
@@ -456,6 +549,23 @@ test.each([null, 'project'])(
     expect(wrapper.getComponent(Composer).props('directMessage')).toBe(!activeProjectId)
     expect(wrapper.findComponent(MessageList).exists()).toBe(true)
     if (!activeProjectId) expect(header.props('subtitle')).toBeUndefined()
+  },
+)
+
+test.each<WorkspacePage>(['overview', 'agents', 'memory', 'artifacts', 'project-settings'])(
+  'project page %s hides the short-profile control while a DM remains active',
+  async (page) => {
+    mocks.store.snapshot = { ...mocks.store.snapshot!, projectId: 'project' }
+    const wrapper = app()
+    wrapper.getComponent(ChannelHeader).vm.$emit('toggleMembers')
+    await flushPromises()
+    wrapper.getComponent(NavigationPanel).vm.$emit('navigate', page)
+    await flushPromises()
+    const header = wrapper.getComponent(ChannelHeader)
+    expect(header.props('directMessage')).toBe(false)
+    expect(header.props('sidebarAvailable')).toBe(false)
+    expect(header.props('memberListVisible')).toBe(false)
+    expect(header.props('agentName')).toBeUndefined()
   },
 )
 

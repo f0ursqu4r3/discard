@@ -15,6 +15,7 @@ const props = defineProps<{
   snapshot: SnapshotDto
   directMessage?: boolean
   profileRequest?: number
+  agentAvatar?: string | null
 }>()
 const emit = defineEmits<{ action: [id: string]; approvals: [] }>()
 const tab = ref('context')
@@ -101,6 +102,7 @@ const branch = computed(() => props.snapshot.branches.find((row) => row.current)
         <MemberList
           v-if="directMessage || !snapshot.slots.member_list"
           :agent="snapshot.agent"
+          :avatar="agentAvatar"
           :status="snapshot.agentStatus"
           :provider="snapshot.provider"
           :target="{

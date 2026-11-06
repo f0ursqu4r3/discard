@@ -80,6 +80,7 @@ mod tests {
         };
         let id = AgentId::new();
         let cfg = AgentConfig {
+            reasoning_effort: None,
             name: "Agent".into(),
             avatar: None,
             provider: "claude".into(),

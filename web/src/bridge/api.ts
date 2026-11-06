@@ -48,12 +48,23 @@ export const selectProject = (projectId: string) => invoke<void>('select_project
 export const removeProject = (projectId: string) => invoke<void>('remove_project', { projectId })
 export const revealProject = (path: string) => invoke<void>('settings_reveal_workspace', { path })
 
+export interface ReasoningOption {
+  value: string
+  description: string
+}
+export interface ProviderModel {
+  id: string
+  name: string
+  description: string
+  reasoningEfforts?: ReasoningOption[]
+}
 export interface AgentEntry {
   id: string
   name: string
   avatar: string | null
   provider: string
   model: string
+  reasoningEffort?: string | null
   systemPrompt: string
   policy: string
   pluginWrite: boolean

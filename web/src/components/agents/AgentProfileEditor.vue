@@ -1,5 +1,13 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+} from '@/components/ui/select'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { getAgents, type AgentEntry } from '@/bridge/api'
 import {
@@ -12,6 +20,9 @@ import {
 } from '@/components/ui/field'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import AgentIconPicker from './AgentIconPicker.vue'
+import ReasoningSelect from './ReasoningSelect.vue'
+import type { ProviderModel } from '@/bridge/api'
 import { Textarea } from '@/components/ui/textarea'
 import { Switch } from '@/components/ui/switch'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -28,7 +39,7 @@ type Review = {
   blocked: string | null
   needsConfirm: boolean
 }
-const draft = ref({ ...props.agent }),
+const draft = ref({ ...props.agent, reasoningEffort: props.agent.reasoningEffort ?? null }),
   providers = ref<{ id: string; setup: string }[]>([])
 const review = ref<Review | null>(null),
   busy = ref(false),
@@ -38,7 +49,59 @@ const review = ref<Review | null>(null),
 const deleteConversations = ref(false),
   deletePrivateMemory = ref(false)
 let generation = 0,
+  modelGeneration = 0,
   disposed = false
+type Model = ProviderModel
+const models = ref<Model[]>([]),
+  modelsLoading = ref(false),
+  modelsError = ref('')
+const availableModels = computed(() => {
+  if (
+    draft.value.provider === props.agent.provider &&
+    props.agent.model &&
+    !models.value.some((model) => model.id === props.agent.model)
+  ) {
+    return [
+      { id: props.agent.model, name: props.agent.model, description: 'Saved model' },
+      ...models.value,
+    ]
+  }
+  return models.value
+})
+const validModel = computed(() =>
+  availableModels.value.some((model) => model.id === draft.value.model),
+)
+const reasoningModel = computed(() => models.value.find((model) => model.id === draft.value.model))
+watch(
+  () => [draft.value.provider, draft.value.model],
+  () => {
+    draft.value.reasoningEffort = null
+  },
+  { flush: 'sync' },
+)
+async function loadModels() {
+  const current = ++modelGeneration
+  const provider = draft.value.provider
+  models.value = []
+  modelsError.value = ''
+  modelsLoading.value = true
+  try {
+    const result = await invoke<Model[]>('settings_provider_models', { provider })
+    if (!disposed && current === modelGeneration) models.value = result
+  } catch (cause) {
+    if (!disposed && current === modelGeneration) modelsError.value = String(cause)
+  } finally {
+    if (!disposed && current === modelGeneration) modelsLoading.value = false
+  }
+}
+watch(
+  () => draft.value.provider,
+  (_provider, previous) => {
+    if (previous !== undefined) draft.value.model = ''
+    void loadModels()
+  },
+  { immediate: true, flush: 'sync' },
+)
 watch(busy, (value) => emit('busy', value), { flush: 'sync' })
 watch(
   draft,
@@ -68,6 +131,7 @@ onMounted(async () => {
 onUnmounted(() => {
   disposed = true
   generation++
+  modelGeneration++
   emit('busy', false)
 })
 async function currentAgent() {
@@ -82,7 +146,7 @@ async function save(confirmed = false) {
     !review.value ||
     review.value.blocked ||
     !draft.value.name.trim() ||
-    !draft.value.model.trim()
+    !validModel.value
   )
     return
   busy.value = true
@@ -139,41 +203,72 @@ async function remove() {
         <FieldLabel for="agent-name">Name</FieldLabel>
         <Input id="agent-name" v-model="draft.name" :disabled="busy" required />
       </Field>
-      <Field>
-        <FieldLabel for="agent-avatar">Avatar URL (optional)</FieldLabel>
-        <Input
-          id="agent-avatar"
-          :model-value="draft.avatar ?? ''"
-          :disabled="busy"
-          @update:model-value="draft.avatar = String($event) || null"
-        />
-      </Field>
+      <AgentIconPicker v-model="draft.avatar" :name="draft.name" :disabled="busy" />
       <Field>
         <FieldLabel for="agent-provider">Provider</FieldLabel>
-        <select
-          id="agent-provider"
-          v-model="draft.provider"
-          :disabled="busy"
-          required
-          class="w-full rounded-md border border-input bg-background p-2 text-sm"
-        >
-          <option
-            v-for="provider in providers"
-            :key="provider.id"
-            :value="provider.id"
-            :disabled="provider.setup !== 'Ready' && provider.id !== props.agent.provider"
-          >
-            {{ provider.id }} · {{ provider.setup }}
-          </option>
-        </select>
+        <Select v-model="draft.provider" :disabled="busy" required>
+          <SelectTrigger id="agent-provider" class="w-full">
+            <SelectValue placeholder="Choose a provider" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem
+                v-for="provider in providers"
+                :key="provider.id"
+                :value="provider.id"
+                :disabled="provider.setup !== 'Ready' && provider.id !== props.agent.provider"
+              >
+                {{ provider.id }} · {{ provider.setup }}
+              </SelectItem>
+            </SelectGroup>
+          </SelectContent>
+        </Select>
       </Field>
       <Field>
         <FieldLabel for="agent-model">Model ID</FieldLabel>
-        <Input id="agent-model" v-model="draft.model" :disabled="busy" required />
+        <Select
+          v-model="draft.model"
+          :disabled="busy || modelsLoading || !availableModels.length"
+          required
+        >
+          <SelectTrigger id="agent-model" class="w-full" :aria-busy="modelsLoading">
+            <SelectValue :placeholder="modelsLoading ? 'Loading models…' : 'Choose a model'" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem
+                v-for="model in availableModels"
+                :key="model.id"
+                :value="model.id"
+                :title="model.description"
+              >
+                {{ model.name }}
+              </SelectItem>
+            </SelectGroup>
+          </SelectContent>
+        </Select>
         <FieldDescription>
-          Use the exact model ID. Changes apply to the next response.
+          <span v-if="draft.model">{{ draft.model }}.</span>
+          Changes apply to the next response.
         </FieldDescription>
+        <p v-if="modelsLoading" role="status" class="text-sm text-muted-foreground">
+          Loading available models…
+        </p>
+        <div v-else-if="modelsError || !models.length" class="flex flex-col items-start gap-2">
+          <p :role="modelsError ? 'alert' : 'status'" class="text-sm text-muted-foreground">
+            {{ modelsError || 'This provider returned no available models.' }}
+          </p>
+          <Button type="button" variant="outline" size="sm" :disabled="busy" @click="loadModels">
+            Retry models
+          </Button>
+        </div>
       </Field>
+      <ReasoningSelect
+        v-model="draft.reasoningEffort"
+        :model="reasoningModel"
+        :loading="modelsLoading"
+        :disabled="busy || !draft.model"
+      />
       <Field>
         <FieldLabel for="agent-prompt">Personality (optional)</FieldLabel>
         <Textarea
@@ -235,11 +330,7 @@ async function remove() {
       <Button
         type="submit"
         :disabled="
-          busy ||
-          !draft.name.trim() ||
-          !draft.model.trim() ||
-          !!review?.blocked ||
-          !review?.changes.length
+          busy || !draft.name.trim() || !validModel || !!review?.blocked || !review?.changes.length
         "
       >
         Save profile

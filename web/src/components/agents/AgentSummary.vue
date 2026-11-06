@@ -2,11 +2,10 @@
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getAgents, type AgentEntry } from '@/bridge/api'
-import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar'
+import AgentAvatar from '@/components/agents/AgentAvatar.vue'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { serverInitials } from '@/components/layout'
 const props = defineProps<{ agentId: string; name: string; status: string }>()
 const emit = defineEmits<{ profile: [id: string] }>()
 const agent = ref<AgentEntry | null>(null),
@@ -49,10 +48,11 @@ onUnmounted(() => {
 <template>
   <section data-ui-id="agent-summary" class="flex min-h-full flex-col gap-5">
     <div class="h-16 shrink-0 rounded-t-lg bg-muted" aria-hidden="true" />
-    <Avatar class="-mt-12 ml-4 size-20 ring-4 ring-card">
-      <AvatarImage v-if="agent?.avatar" :src="agent.avatar" />
-      <AvatarFallback>{{ serverInitials(agent?.name || name) }}</AvatarFallback>
-    </Avatar>
+    <AgentAvatar
+      :name="agent?.name || name"
+      :avatar="agent?.avatar"
+      class="-mt-12 ml-4 size-20 ring-4 ring-card"
+    />
     <div class="flex min-h-0 flex-1 flex-col gap-5 px-3 pb-3">
       <div>
         <h2 class="break-words text-lg font-semibold">{{ agent?.name || name }}</h2>

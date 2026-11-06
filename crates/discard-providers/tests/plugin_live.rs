@@ -36,7 +36,7 @@ async fn build_plugin(provider: Arc<dyn Provider>, model: Option<&str>) {
     let project = Project { id: ProjectId::new(), name: "p".into(), path: project_dir.to_string_lossy().into() };
     db.insert_project(&project).unwrap();
     let agent_id = AgentId::new();
-    db.insert_agent(&agent_id, &AgentConfig { name: "Builder".into(), avatar: None, provider: "any".into(), model: model.map(str::to_string), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: true }).unwrap();
+    db.insert_agent(&agent_id, &AgentConfig { reasoning_effort: None, name: "Builder".into(), avatar: None, provider: "any".into(), model: model.map(str::to_string), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: true }).unwrap();
     let channel = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "builder".into(), agent_id: agent_id.clone(), workspace_mode: WorkspaceMode::MainCheckout };
     db.insert_channel(&channel).unwrap();
     let session = SessionId::new();
@@ -50,6 +50,7 @@ async fn build_plugin(provider: Arc<dyn Provider>, model: Option<&str>) {
     let memory: Arc<dyn MemoryService> = runtime.clone();
 
     let engine = Engine {
+        reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::new(Mutex::new(db)),
         agent_id,

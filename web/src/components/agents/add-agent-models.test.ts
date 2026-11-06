@@ -124,3 +124,46 @@ test('the shadcn model menu supports keyboard opening and selecting a displayed 
   await flushPromises()
   expect(view.findAllComponents(Select)[1]!.props('modelValue')).toBe(claude.id)
 })
+
+test('creation uses the selected model reasoning levels and resets them when the model changes', async () => {
+  list = async (provider) =>
+    provider === 'claude'
+      ? [
+          {
+            ...claude,
+            reasoningEfforts: [
+              { value: 'low', description: 'Faster replies' },
+              { value: 'high', description: 'Think longer' },
+            ],
+          },
+        ]
+      : [{ ...codex, reasoningEfforts: [{ value: 'medium', description: '' }] }]
+  await modal()
+  expect(view.findAllComponents(Select)[2]!.props('disabled')).toBe(true)
+  await choose(1, claude.id)
+  const trigger = view.findAll('[role="combobox"]')[2]!
+  await trigger.trigger('keydown', { key: 'Enter' })
+  await flushPromises()
+  const options = [...document.querySelectorAll('[role="option"]')]
+  expect(options.map((option) => option.textContent?.trim())).toEqual([
+    'Provider default',
+    'Low',
+    'High',
+  ])
+  await new DOMWrapper(options[2]!).trigger('keydown', { key: 'Enter' })
+  await flushPromises()
+  expect(view.text()).toContain('Think longer')
+  await view.get('form').trigger('submit')
+  await flushPromises()
+  expect(invoke).toHaveBeenCalledWith('settings_agent_create', {
+    draft: expect.objectContaining({ reasoningEffort: 'high' }),
+  })
+  await choose(0, 'codex')
+  await choose(1, codex.id)
+  expect(view.findAllComponents(Select)[2]!.props('modelValue')).toBe('default')
+  await view.get('form').trigger('submit')
+  await flushPromises()
+  expect(invoke).toHaveBeenLastCalledWith('settings_agent_create', {
+    draft: expect.objectContaining({ reasoningEffort: null }),
+  })
+})

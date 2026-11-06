@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Users, UserRound } from '@lucide/vue'
-import { Avatar, AvatarFallback } from './ui/avatar'
+import AgentAvatar from './agents/AgentAvatar.vue'
 import { Button } from './ui/button'
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from './ui/card'
-import { serverInitials } from './layout'
 import ContextMenuHost from './ContextMenuHost.vue'
 import type { ContextTargetDto } from '../bridge/types'
 const props = defineProps<{
   agent: string
+  avatar?: string | null
   status: string
   provider: string
   target?: ContextTargetDto
@@ -44,11 +44,7 @@ const statusColor = computed(
     <CardContent>
       <ContextMenuHost :target="target ?? null">
         <div class="flex items-center gap-3">
-          <Avatar class="size-8">
-            <AvatarFallback class="bg-primary/20 text-xs text-primary">
-              {{ serverInitials(agent) }}
-            </AvatarFallback>
-          </Avatar>
+          <AgentAvatar :name="agent" :avatar="avatar" class="size-8" />
           <div class="min-w-0 flex-1">
             <p class="truncate text-xs font-semibold">{{ agent }}</p>
             <p class="text-xs text-muted-foreground">{{ statusLabel }} · {{ provider }}</p>

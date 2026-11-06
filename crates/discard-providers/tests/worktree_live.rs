@@ -38,7 +38,7 @@ async fn run(provider: Arc<dyn Provider>, model: Option<&str>) {
     let project = Project { id: ProjectId::new(), name: "repo".into(), path: repo.to_string_lossy().into() };
     db.insert_project(&project).unwrap();
     let agent_id = AgentId::new();
-    db.insert_agent(&agent_id, &AgentConfig { name: "A".into(), avatar: None, provider: "any".into(), model: model.map(str::to_string), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+    db.insert_agent(&agent_id, &AgentConfig { reasoning_effort: None, name: "A".into(), avatar: None, provider: "any".into(), model: model.map(str::to_string), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
     let channel = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "general".into(), agent_id: agent_id.clone(), workspace_mode: WorkspaceMode::Worktree };
     db.insert_channel(&channel).unwrap();
     let session = SessionId::new();
@@ -47,6 +47,7 @@ async fn run(provider: Arc<dyn Provider>, model: Option<&str>) {
     let workspace = Arc::new(GitWorkspace::new(&dir.path().join("worktrees"), Arc::clone(&store)));
 
     let engine = Engine {
+        reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::clone(&store),
         agent_id,

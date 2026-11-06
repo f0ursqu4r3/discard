@@ -207,6 +207,7 @@ mod tests {
 
     fn spec(enforcement: EnforcementMode) -> SessionSpec {
         SessionSpec {
+            reasoning_effort: None,
             mode: discard_core::provider::SessionMode::Coding,
             cwd: PathBuf::from("."),
             model: None,

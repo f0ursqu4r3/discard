@@ -44,6 +44,7 @@ pub struct SessionSpec {
     pub mode: SessionMode,
     pub cwd: PathBuf,
     pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
     pub system_prompt: Option<String>,
     pub enforcement: EnforcementMode,
     /// Provider-native session ID to resume. `None` starts a new session.
@@ -53,9 +54,17 @@ pub struct SessionSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub id: String,
     pub name: String,
+    pub description: String,
+    pub reasoning_efforts: Vec<ReasoningOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReasoningOption {
+    pub value: String,
     pub description: String,
 }
 

@@ -3,6 +3,7 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { invoke } from '@tauri-apps/api/core'
 import AgentsNavigation from './AgentsNavigation.vue'
 import CreateChannelDialog from './CreateChannelDialog.vue'
+import { Select } from '../ui/select'
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 const handlers = new Map<string, () => void>()
 vi.mock('@tauri-apps/api/event', () => ({
@@ -137,7 +138,8 @@ test.each([null, 'project'])(
     const form = view
     await form.get('#channel-name').setValue('New discussion')
     expect(form.get('[data-ui-id="create-channel-submit"]').attributes('disabled')).toBeDefined()
-    await form.get('#conversation-agent').setValue('b')
+    form.getComponent(Select).vm.$emit('update:modelValue', 'b')
+    await flushPromises()
     await view.setProps({ projectId: 'different-project' })
     await form.get('form').trigger('submit')
     await flushPromises()

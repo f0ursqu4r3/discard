@@ -1,4 +1,12 @@
 <script setup lang="ts">
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+} from '@/components/ui/select'
 import { ref, watch } from 'vue'
 import { createConversation, getAgents, type AgentEntry } from '@/bridge/api'
 import {
@@ -10,6 +18,7 @@ import {
   DialogFooter,
 } from '../ui/dialog'
 import { Input } from '../ui/input'
+import { Field, FieldGroup, FieldLabel } from '../ui/field'
 import { Button } from '../ui/button'
 const open = defineModel<boolean>('open', { default: false })
 const props = defineProps<{
@@ -72,28 +81,34 @@ async function submit() {
         <DialogTitle>New conversation</DialogTitle>
         <DialogDescription>{{ project }}. This conversation keeps this context.</DialogDescription>
       </DialogHeader>
-      <form id="create-channel-form" class="space-y-3" @submit.prevent="submit">
-        <label class="block" for="channel-name">Conversation name</label>
-        <Input
-          id="channel-name"
-          v-model="name"
-          data-ui-id="channel-name-input"
-          :disabled="busy"
-          required
-        />
-        <label class="block" for="conversation-agent">Agent</label>
-        <select
-          id="conversation-agent"
-          v-model="agentId"
-          :disabled="busy"
-          required
-          class="w-full rounded-md border bg-background p-2"
-        >
-          <option disabled value="">Choose an agent</option>
-          <option v-for="agent in agents" :key="agent.id" :value="agent.id">
-            {{ agent.name }} · {{ agent.provider }} · {{ agent.model }}
-          </option>
-        </select>
+      <form id="create-channel-form" class="flex flex-col gap-3" @submit.prevent="submit">
+        <FieldGroup>
+          <Field>
+            <FieldLabel for="channel-name">Conversation name</FieldLabel>
+            <Input
+              id="channel-name"
+              v-model="name"
+              data-ui-id="channel-name-input"
+              :disabled="busy"
+              required
+            />
+          </Field>
+          <Field>
+            <FieldLabel for="conversation-agent">Agent</FieldLabel>
+            <Select v-model="agentId" :disabled="busy" required>
+              <SelectTrigger id="conversation-agent" class="w-full">
+                <SelectValue placeholder="Choose an agent" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem v-for="agent in agents" :key="agent.id" :value="agent.id">
+                    {{ agent.name }} · {{ agent.provider }} · {{ agent.model }}
+                  </SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </Field>
+        </FieldGroup>
         <p v-if="!agents.length">
           Add an agent from Friends, or open an archived profile to restore it.
         </p>

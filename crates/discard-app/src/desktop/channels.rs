@@ -276,7 +276,7 @@ mod tests {
         let project = Project { id: ProjectId::new(), name: "Project".into(), path: dir.path().to_string_lossy().into_owned() };
         store.insert_project(&project).unwrap();
         let agent = AgentId::new();
-        store.insert_agent(&agent, &AgentConfig { name: "Builder".into(), provider: "codex".into(), model: Some("agent-model".into()), avatar: None, system_prompt: "Review changes".into(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        store.insert_agent(&agent, &AgentConfig { reasoning_effort: None, name: "Builder".into(), provider: "codex".into(), model: Some("agent-model".into()), avatar: None, system_prompt: "Review changes".into(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         let first = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "general".into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::MainCheckout };
         store.create_named_channel(&first, None, None).unwrap();
         let store = Arc::new(Mutex::new(store));
@@ -318,7 +318,7 @@ mod tests {
         let project = Project { id: ProjectId::new(), name: "p".into(), path: dir.path().to_string_lossy().into_owned() };
         let agent = AgentId::new();
         store.insert_project(&project).unwrap();
-        store.insert_agent(&agent, &AgentConfig { name: "Builder".into(), provider: "codex".into(), model: None, avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        store.insert_agent(&agent, &AgentConfig { reasoning_effort: None, name: "Builder".into(), provider: "codex".into(), model: None, avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         let first = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "old".into(), agent_id: agent, workspace_mode: WorkspaceMode::Worktree };
         let manager = WorktreeManager::new(dir.path());
         let prepared = manager.recorded(dir.path(), dir.path(), "old").unwrap();

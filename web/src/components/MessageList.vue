@@ -9,6 +9,7 @@ defineProps<{
   running: boolean
   newAnchorId: string | null
   agent?: string
+  agentAvatar?: string | null
   prompts?: PromptDto[]
   memoryRevision?: number
   conversationId: string

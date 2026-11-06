@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, watch } from 'vue'
+import { computed, reactive, watch } from 'vue';
 import {
   ChevronDown,
   ChevronRight,
@@ -13,59 +13,75 @@ import {
   Boxes,
   ShieldCheck,
   Plus,
-} from '@lucide/vue'
-import AgentsNavigation from './workspace/AgentsNavigation.vue'
-import BrandMark from './workspace/BrandMark.vue'
-import { Button } from './ui/button'
-import { Badge } from './ui/badge'
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './ui/collapsible'
+} from '@lucide/vue';
+import AgentsNavigation from './workspace/AgentsNavigation.vue';
+import BrandMark from './workspace/BrandMark.vue';
+import { Button } from './ui/button';
+import { Badge } from './ui/badge';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from './ui/collapsible';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from './ui/dropdown-menu'
-import { cn } from '@/lib/utils'
-import type { BranchRowDto, ChannelDto, ContextTargetDto } from '../bridge/types'
-import type { WorkspacePage } from './workspace/types'
+} from './ui/dropdown-menu';
+import { cn } from '@/lib/utils';
+import type {
+  BranchRowDto,
+  ChannelDto,
+  ContextTargetDto,
+} from '../bridge/types';
+import type { WorkspacePage } from './workspace/types';
 const props = withDefaults(
   defineProps<{
-    projectId?: string
-    activeProjectId?: string | null
-    branches: BranchRowDto[]
-    channels?: ChannelDto[]
-    channelId?: string
-    project?: string
-    projectPath?: string
-    channel?: string
-    agent?: string
-    unread?: boolean
-    pendingApprovals?: number
-    target?: ContextTargetDto
-    page?: WorkspacePage
-    busy?: boolean
+    projectId?: string;
+    activeProjectId?: string | null;
+    branches: BranchRowDto[];
+    channels?: ChannelDto[];
+    channelId?: string;
+    project?: string;
+    projectPath?: string;
+    channel?: string;
+    agent?: string;
+    unread?: boolean;
+    pendingApprovals?: number;
+    target?: ContextTargetDto;
+    page?: WorkspacePage;
+    busy?: boolean;
   }>(),
-  { page: 'conversation', channels: () => [] },
-)
+  { page: 'conversation', channels: () => [] }
+);
 const emit = defineEmits<{
-  toggleBranch: [key: string]
-  navigate: [page: WorkspacePage]
-  action: [id: string]
-  selectChannel: [id: string]
-  openBranch: [key: string]
-  createChannel: []
-  approvals: []
-}>()
+  toggleBranch: [key: string];
+  navigate: [page: WorkspacePage];
+  action: [id: string];
+  selectChannel: [id: string];
+  openBranch: [key: string];
+  createChannel: [];
+  approvals: [];
+}>();
 const navigation = [
   { id: 'overview', label: 'Overview', icon: Monitor },
   { id: 'agents', label: 'Agents', icon: Users },
   { id: 'memory', label: 'Memory', icon: Cpu },
   { id: 'artifacts', label: 'Artifacts', icon: FileText },
-] as const
-const sections = reactive({ branches: true, worktrees: true, integrations: true })
-const gitBranches = computed(() => props.branches.filter((row) => !row.detached))
-const worktrees = computed(() => props.branches.filter((row) => row.kind !== 'branch'))
+] as const;
+const sections = reactive({
+  branches: true,
+  worktrees: true,
+  integrations: true,
+});
+const gitBranches = computed(() =>
+  props.branches.filter((row) => !row.detached)
+);
+const worktrees = computed(() =>
+  props.branches.filter((row) => row.kind !== 'branch')
+);
 watch(
   () => props.projectPath,
   (path) => {
@@ -73,27 +89,33 @@ watch(
       Object.assign(
         sections,
         { branches: true, worktrees: true, integrations: true },
-        JSON.parse(localStorage.getItem(`discard:sections:${path}`) ?? '{}'),
-      )
+        JSON.parse(localStorage.getItem(`discard:sections:${path}`) ?? '{}')
+      );
     } catch {
       /* Use the default section state. */
     }
   },
-  { immediate: true },
-)
+  { immediate: true }
+);
 watch(sections, (value) => {
   try {
-    localStorage.setItem(`discard:sections:${props.projectPath}`, JSON.stringify(value))
+    localStorage.setItem(
+      `discard:sections:${props.projectPath}`,
+      JSON.stringify(value)
+    );
   } catch {
     /* Navigation remains usable when storage is unavailable. */
   }
-})
+});
 const approvals = computed(
   () =>
-    props.channels.reduce((count, channel) => count + channel.pendingApprovals, 0) ||
+    props.channels.reduce(
+      (count, channel) => count + channel.pendingApprovals,
+      0
+    ) ||
     props.pendingApprovals ||
-    0,
-)
+    0
+);
 </script>
 <template>
   <nav
@@ -114,15 +136,24 @@ const approvals = computed(
             <span class="block truncate text-sm font-semibold">
               {{ project }}
             </span>
-            <span class="block truncate text-xs text-muted-foreground" :title="projectPath">
+            <span
+              class="block truncate text-xs text-muted-foreground"
+              :title="projectPath"
+            >
               {{ projectPath }}
             </span>
           </span>
-          <ChevronDown class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          <ChevronDown
+            class="size-4 shrink-0 text-muted-foreground"
+            aria-hidden="true"
+          />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent data-ui-id="project-menu" align="start" class="w-60">
-        <DropdownMenuItem :disabled="!projectId" @select="emit('navigate', 'overview')">
+        <DropdownMenuItem
+          :disabled="!projectId"
+          @select="emit('navigate', 'overview')"
+        >
           <Monitor />
           Project overview
         </DropdownMenuItem>
@@ -135,7 +166,10 @@ const approvals = computed(
           Agents
         </DropdownMenuItem>
         <DropdownMenuSeparator />
-        <DropdownMenuItem :disabled="!projectId" @select="emit('navigate', 'project-settings')">
+        <DropdownMenuItem
+          :disabled="!projectId"
+          @select="emit('navigate', 'project-settings')"
+        >
           <Settings />
           Project settings
         </DropdownMenuItem>
@@ -150,7 +184,8 @@ const approvals = computed(
       class="flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto overscroll-contain p-2.5"
     >
       <AgentsNavigation
-        :project-id="page === 'direct-messages' || !projectId ? null : projectId"
+        v-if="page === 'direct-messages' || !projectId"
+        :project-id="null"
         :project="project"
         :channel-id="channelId"
         :busy="busy"
@@ -186,8 +221,18 @@ const approvals = computed(
         </div>
         <Collapsible
           v-for="group in [
-            { id: 'branches', label: 'Branches', rows: gitBranches, icon: Hash },
-            { id: 'worktrees', label: 'Worktrees', rows: worktrees, icon: Monitor },
+            {
+              id: 'branches',
+              label: 'Branches',
+              rows: gitBranches,
+              icon: Hash,
+            },
+            {
+              id: 'worktrees',
+              label: 'Worktrees',
+              rows: worktrees,
+              icon: Monitor,
+            },
           ] as const"
           :key="group.id"
           v-model:open="sections[group.id]"
@@ -199,9 +244,14 @@ const approvals = computed(
               :data-ui-id="`${group.id}-toggle`"
               class="flex h-7 w-full items-center gap-1 px-1 text-xs font-semibold text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
-              <component :is="sections[group.id] ? ChevronDown : ChevronRight" class="size-3" />
+              <component
+                :is="sections[group.id] ? ChevronDown : ChevronRight"
+                class="size-3"
+              />
               {{ group.label }}
-              <span class="ml-1 font-normal tabular-nums">{{ group.rows.length }}</span>
+              <span class="ml-1 font-normal tabular-nums">{{
+                group.rows.length
+              }}</span>
             </button>
           </CollapsibleTrigger>
           <CollapsibleContent class="flex flex-col gap-0.5">
@@ -210,15 +260,19 @@ const approvals = computed(
               :key="row.key"
               type="button"
               :data-ui-id="`${group.id}-row-${row.key}`"
-              :aria-current="row.current && page === 'conversation' ? 'page' : undefined"
-              :disabled="busy || !activeProjectId || activeProjectId !== projectId"
+              :aria-current="
+                row.current && page === 'conversation' ? 'page' : undefined
+              "
+              :disabled="
+                busy || !activeProjectId || activeProjectId !== projectId
+              "
               :title="row.label"
               :class="
                 cn(
                   'flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring',
                   row.current && page === 'conversation'
                     ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                    : 'text-muted-foreground',
+                    : 'text-muted-foreground'
                 )
               "
               @click="emit('openBranch', row.key)"
@@ -231,7 +285,10 @@ const approvals = computed(
                 aria-label="Worktree available"
               />
             </button>
-            <p v-if="!group.rows.length" class="px-2 py-1 text-xs text-muted-foreground">
+            <p
+              v-if="!group.rows.length"
+              class="px-2 py-1 text-xs text-muted-foreground"
+            >
               No {{ group.label.toLowerCase() }} found
             </p>
           </CollapsibleContent>
@@ -246,7 +303,10 @@ const approvals = computed(
               data-ui-id="integrations-toggle"
               class="flex h-7 w-full items-center gap-1 px-1 text-xs font-semibold text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
-              <component :is="sections.integrations ? ChevronDown : ChevronRight" class="size-3" />
+              <component
+                :is="sections.integrations ? ChevronDown : ChevronRight"
+                class="size-3"
+              />
               Integrations
             </button>
           </CollapsibleTrigger>

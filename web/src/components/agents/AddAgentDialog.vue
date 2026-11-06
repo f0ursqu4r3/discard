@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import ReasoningSelect from './ReasoningSelect.vue'
+import type { ProviderModel } from '@/bridge/api'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import type { AgentEntry } from '@/bridge/api'
@@ -34,7 +36,7 @@ const providers = ref<{ id: string; setup: string }[]>([])
 const loading = ref(false),
   busy = ref(false),
   error = ref('')
-type Model = { id: string; name: string; description: string }
+type Model = ProviderModel
 const models = ref<Model[]>([]),
   modelsLoading = ref(false),
   modelsError = ref('')
@@ -65,6 +67,14 @@ async function loadModels() {
   }
 }
 watch(() => [props.open, draft.value?.provider], loadModels, { flush: 'sync' })
+watch(
+  () => draft.value?.model,
+  () => {
+    if (draft.value) draft.value.reasoningEffort = null
+  },
+  { flush: 'sync' },
+)
+const reasoningModel = computed(() => models.value.find((model) => model.id === draft.value?.model))
 const ready = computed(() => providers.value.filter((p) => p.setup === 'Ready'))
 const canCreate = computed(
   () =>
@@ -90,6 +100,7 @@ watch(
       providers.value = connections
       draft.value = {
         ...defaults,
+        reasoningEffort: defaults.reasoningEffort ?? null,
         provider: connections.find((p) => p.setup === 'Ready')?.id ?? '',
       }
     } catch (cause) {
@@ -195,6 +206,12 @@ async function create() {
               </Button>
             </div>
           </Field>
+          <ReasoningSelect
+            v-model="draft.reasoningEffort"
+            :model="reasoningModel"
+            :loading="modelsLoading"
+            :disabled="busy || !draft.model"
+          />
         </FieldGroup>
         <div v-if="!ready.length" class="flex flex-col items-start gap-2">
           <p class="text-sm text-muted-foreground">Connect a provider before adding an agent.</p>

@@ -8,11 +8,10 @@ import {
   DialogTitle,
   DialogDescription,
 } from '@/components/ui/dialog'
-import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar'
+import AgentAvatar from '@/components/agents/AgentAvatar.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { serverInitials } from '@/components/layout'
 import AgentProfileEditor from './AgentProfileEditor.vue'
 const props = defineProps<{ agentId: string | null }>()
 const emit = defineEmits<{ close: []; message: [id: string]; busy: [value: boolean] }>()
@@ -60,7 +59,9 @@ function edit() {
 </script>
 <template>
   <Dialog :open="!!agentId" @update:open="!$event && !busy && emit('close')">
+    <!-- Mount the portal on open so the profile and its overlay sit above an existing sheet. -->
     <DialogContent
+      v-if="agentId"
       class="max-h-[85dvh] overflow-y-auto sm:max-w-lg"
       @interact-outside="busy && $event.preventDefault()"
       @escape-key-down="busy && $event.preventDefault()"
@@ -91,10 +92,7 @@ function edit() {
         />
         <div v-else class="flex flex-col gap-5" data-ui-id="agent-profile-view">
           <div class="flex items-center gap-4">
-            <Avatar class="size-16">
-              <AvatarImage v-if="agent.avatar" :src="agent.avatar" />
-              <AvatarFallback>{{ serverInitials(agent.name) }}</AvatarFallback>
-            </Avatar>
+            <AgentAvatar :name="agent.name" :avatar="agent.avatar" class="size-16" />
             <div class="min-w-0">
               <h2 class="truncate text-xl font-semibold">{{ agent.name }}</h2>
               <Badge v-if="agent.archived" variant="secondary">Archived</Badge>

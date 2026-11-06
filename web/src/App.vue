@@ -18,6 +18,7 @@ import {
   openBranchChannel,
   chooseProjectFolder,
   getProjects,
+  getConversations,
   selectProject,
   removeProject,
   revealProject,
@@ -54,12 +55,14 @@ import FriendsList from './components/agents/FriendsList.vue'
 import AddAgentDialog from './components/agents/AddAgentDialog.vue'
 import AgentHistorySearch from './components/agents/AgentHistorySearch.vue'
 import AgentProfileDialog from './components/agents/AgentProfileDialog.vue'
+import { useAgentAvatar } from './components/agents/useAgentAvatar'
 import type { WorkspacePage } from './components/workspace/types'
 import type { ProjectMenuAction } from './components/project-menu'
 import type { TranscriptPosition } from './components/workspace/transcript'
 // Match the macOS overlay in tauri.conf.json; browser previews keep their normal inset.
 const integratedTitlebar = isTauri() && /mac/i.test(navigator.platform)
 const store = useStore()
+const agentAvatar = useAgentAvatar(() => store.snapshot?.agentId)
 const projects = ref<ProjectEntry[]>([])
 async function refreshProjects() {
   projects.value = await getProjects()
@@ -75,6 +78,30 @@ useWebShortcuts()
 const drafts = reactive<Record<string, string>>({})
 const transcriptPositions = reactive<Record<string, TranscriptPosition>>({})
 const page = ref<WorkspacePage>('conversation')
+const lastDirectMessageKey = 'discard:last-direct-message'
+let lastDirectMessage: string | null = null
+try {
+  lastDirectMessage = localStorage.getItem(lastDirectMessageKey)
+} catch {
+  // Keep navigation usable when browser storage is unavailable.
+}
+function rememberDirectMessage(id: string | null) {
+  lastDirectMessage = id
+  try {
+    if (id) localStorage.setItem(lastDirectMessageKey, id)
+    else localStorage.removeItem(lastDirectMessageKey)
+  } catch {
+    // The last DM still remains available for this session.
+  }
+}
+watch(
+  () => [page.value, store.snapshot?.channelId, store.snapshot?.activeProjectId] as const,
+  ([currentPage, channelId, projectId]) => {
+    if (currentPage === 'conversation' && channelId && projectId === null)
+      rememberDirectMessage(channelId)
+  },
+  { immediate: true },
+)
 const addAgentOpen = ref(false),
   profileId = ref<string | null>(null),
   profileBusy = ref(false)
@@ -127,7 +154,7 @@ const navigationOpen = ref(false),
 const showContextPanel = computed(
   () =>
     isWide.value &&
-    page.value !== 'direct-messages' &&
+    page.value === 'conversation' &&
     !!store.snapshot?.channelId &&
     !!store.snapshot?.memberListVisible,
 )
@@ -169,9 +196,45 @@ const tools = computed(() =>
 )
 function navigate(value: WorkspacePage) {
   page.value = value
-  if (value === 'direct-messages') contextOpen.value = false
+  if (value !== 'conversation') contextOpen.value = false
   navigationOpen.value = false
   if (value === 'conversation') conversationTab.value = 'conversation'
+}
+async function navigateFromSidebar(value: WorkspacePage) {
+  if (value !== 'direct-messages') {
+    navigate(value)
+    return
+  }
+  if (switching.value) return
+  const snapshot = store.snapshot
+  if (snapshot?.channelId && snapshot.activeProjectId === null) {
+    navigate('conversation')
+    return
+  }
+  if (!lastDirectMessage) {
+    navigate('direct-messages')
+    return
+  }
+  switching.value = true
+  try {
+    const conversations = await getConversations()
+    if (disposed) return
+    const previous = conversations.find(
+      (conversation) => conversation.id === lastDirectMessage && conversation.projectId === null,
+    )
+    if (!previous) {
+      rememberDirectMessage(null)
+      navigate('direct-messages')
+      return
+    }
+    await switchChannel(previous.id)
+    await store.refresh()
+    if (!disposed) navigate('conversation')
+  } catch (error) {
+    toast.error('Could not open direct message', { description: String(error) })
+  } finally {
+    switching.value = false
+  }
 }
 function openProviderConnections() {
   addAgentOpen.value = false
@@ -504,7 +567,7 @@ watch(
         compact
         :snapshot="store.snapshot"
         :page="navigationPage"
-        @navigate="navigate"
+        @navigate="navigateFromSidebar"
         @action="action"
         @toggle-branch="toggleBranch"
         :busy="switching"
@@ -531,7 +594,7 @@ watch(
               :projects="projects"
               :snapshot="store.snapshot"
               :page="navigationPage"
-              @navigate="navigate"
+              @navigate="navigateFromSidebar"
               @action="action"
               @toggle-branch="toggleBranch"
               :busy="switching"
@@ -562,10 +625,13 @@ watch(
                   ? projects.find((p) => p.id === store.snapshot?.activeProjectId)?.name
                   : undefined
               "
-              :direct-message="page === 'direct-messages' || !store.snapshot.activeProjectId"
+              :direct-message="
+                page === 'direct-messages' ||
+                (page === 'conversation' && !store.snapshot.activeProjectId)
+              "
               :compact="isCompact"
               :agent-id="store.snapshot.agentId"
-              :sidebar-available="page !== 'direct-messages' && !!store.snapshot.channelId"
+              :sidebar-available="page === 'conversation' && !!store.snapshot.channelId"
               :agent-name="
                 page === 'conversation' && store.snapshot.agentId ? store.snapshot.agent : undefined
               "
@@ -617,6 +683,7 @@ watch(
                 :running="store.snapshot.turnRunning"
                 :new-anchor-id="store.snapshot.newAnchorId"
                 :agent="store.snapshot.agent"
+                :agent-avatar="agentAvatar"
                 :prompts="store.snapshot.prompts"
               />
               <div
@@ -809,8 +876,12 @@ watch(
               />
               <ContextPanel
                 v-else
+                :agent-avatar="agentAvatar"
                 :profile-request="profileRequest"
-                :direct-message="page === 'direct-messages' || !store.snapshot.activeProjectId"
+                :direct-message="
+                  page === 'direct-messages' ||
+                  (page === 'conversation' && !store.snapshot.activeProjectId)
+                "
                 :snapshot="store.snapshot"
                 @action="action"
                 @approvals="navigate('conversation')"
@@ -855,7 +926,7 @@ watch(
             :unread="store.snapshot.unread"
             :pending-approvals="store.snapshot.pendingApprovals"
             :target="{ type: 'channel', id: store.snapshot.channelId }"
-            @navigate="navigate"
+            @navigate="navigateFromSidebar"
             @action="action"
             @toggle-branch="toggleBranch"
             :busy="switching"
@@ -884,9 +955,13 @@ watch(
           />
           <ContextPanel
             v-else
+            :agent-avatar="agentAvatar"
             :profile-request="profileRequest"
             class="min-h-0 flex-1"
-            :direct-message="page === 'direct-messages' || !store.snapshot.activeProjectId"
+            :direct-message="
+              page === 'direct-messages' ||
+              (page === 'conversation' && !store.snapshot.activeProjectId)
+            "
             :snapshot="store.snapshot"
             @action="action"
             @approvals="

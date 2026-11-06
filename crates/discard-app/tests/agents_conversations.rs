@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 
 fn config() -> AgentConfig {
     AgentConfig {
+        reasoning_effort: None,
         name: generated_name(),
         avatar: Some("avatar.png".into()),
         provider: "codex".into(),

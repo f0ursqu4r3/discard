@@ -75,6 +75,7 @@ mod tests {
             .insert_agent(
                 &agent,
                 &AgentConfig {
+                    reasoning_effort: None,
                     name: "agent".into(),
                     avatar: None,
                     provider: "claude".into(),

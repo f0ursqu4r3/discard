@@ -213,6 +213,7 @@ fn run_app(
             let (commands_tx, commands_rx) = mpsc::unbounded_channel();
             let (updates_tx, updates_rx) = mpsc::unbounded_channel();
             let engine = Engine {
+        reasoning_effort: agent.reasoning_effort.clone(),
         mode: session_mode, providers: discard_core::bootstrap::PROVIDERS.iter().filter_map(|id| provider_for(id).ok()).collect(),
                 store: store.clone(), agent_id: channel.agent_id.clone(), project_id: channel.project_id.clone(),
                 memory: Some(memory.clone()), plugin_write: agent.plugin_write,

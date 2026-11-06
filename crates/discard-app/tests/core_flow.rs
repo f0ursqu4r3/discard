@@ -84,6 +84,7 @@ async fn send_streams_then_finishes() {
         .insert_agent(
             &agent_id,
             &AgentConfig {
+                reasoning_effort: None,
                 name: "A".into(),
                 avatar: None,
                 provider: "fake".into(),
@@ -105,6 +106,7 @@ async fn send_streams_then_finishes() {
     let session = SessionId::new();
     store.create_session(&session, &channel.id).unwrap();
     let engine = Engine {
+        reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::new(Mutex::new(store)),
         agent_id,

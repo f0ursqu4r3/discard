@@ -1,45 +1,58 @@
 <script setup lang="ts">
-import type { MessageDto, PromptDto } from '../bridge/types'
-import { Avatar, AvatarFallback } from './ui/avatar'
-import { Button } from './ui/button'
-import { Badge } from './ui/badge'
-import BlockView from './BlockView.vue'
-import ContextMenuHost from './ContextMenuHost.vue'
-import { runAction } from '../bridge/api'
-import { computed } from 'vue'
-import { serverInitials } from './layout'
+import type { MessageDto, PromptDto } from '../bridge/types';
+import { Avatar, AvatarFallback } from './ui/avatar';
+import AgentAvatar from './agents/AgentAvatar.vue';
+import { Button } from './ui/button';
+import BlockView from './BlockView.vue';
+import ContextMenuHost from './ContextMenuHost.vue';
+import { runAction } from '../bridge/api';
+import { computed } from 'vue';
+import { serverInitials } from './layout';
 const props = defineProps<{
-  channelId: string
-  message: MessageDto
-  agent?: string
-  prompts?: PromptDto[]
-  showCursor?: boolean
-}>()
+  channelId: string;
+  message: MessageDto;
+  agent?: string;
+  agentAvatar?: string | null;
+  prompts?: PromptDto[];
+  showCursor?: boolean;
+}>();
 const target = computed(() =>
   props.message.id === 'live'
     ? null
     : {
         type: 'message' as const,
         id: props.message.id,
-        hasText: props.message.blocks.some((block) => 'text' in block && !!block.text),
-      },
-)
+        hasText: props.message.blocks.some(
+          (block) => 'text' in block && !!block.text
+        ),
+      }
+);
 async function copy() {
-  if (!target.value) return
-  const text = await runAction('copy_message_text', target.value)
-  if (text !== null) await navigator.clipboard.writeText(text)
+  if (!target.value) return;
+  const text = await runAction('copy_message_text', target.value);
+  if (text !== null) await navigator.clipboard.writeText(text);
 }
 </script>
 <template>
   <ContextMenuHost :target="target">
     <article
       :data-ui-id="`message-${message.id}`"
-      class="group relative flex gap-3 px-3 py-3 text-xs leading-6 hover:bg-muted/30 sm:px-6"
+      class="group relative flex gap-3 px-3 py-2 text-xs leading-6 hover:bg-muted/30 sm:px-6"
     >
       <div class="w-9 shrink-0">
-        <Avatar v-if="!message.continuesGroup" class="size-9">
+        <AgentAvatar
+          v-if="!message.continuesGroup && message.role === 'agent'"
+          :name="agent || 'Agent'"
+          :avatar="agentAvatar"
+          class="size-9"
+        />
+        <Avatar v-else-if="!message.continuesGroup" class="size-9">
           <AvatarFallback class="bg-primary/20 text-primary">
-            {{ serverInitials(message.role === 'user' ? 'You' : agent || message.role) }}
+            {{
+              serverInitials(
+                message.role === 'user' ? 'You' : agent || message.role
+              )
+            }}
           </AvatarFallback>
         </Avatar>
       </div>
@@ -50,11 +63,12 @@ async function copy() {
           class="flex items-center gap-2 font-semibold"
         >
           {{
-            message.role === 'user' ? 'You' : message.role === 'agent' ? agent || 'Agent' : 'System'
+            message.role === 'user'
+              ? 'You'
+              : message.role === 'agent'
+                ? agent || 'Agent'
+                : 'System'
           }}
-          <Badge v-if="message.role === 'agent'" variant="secondary" class="text-xs font-normal">
-            Agent
-          </Badge>
         </div>
         <BlockView
           :channel-id="channelId"
@@ -65,7 +79,12 @@ async function copy() {
           :message-id="target?.id"
           :index="i"
         />
-        <span v-if="showCursor" data-testid="stream-cursor" class="text-muted-foreground">▍</span>
+        <span
+          v-if="showCursor"
+          data-testid="stream-cursor"
+          class="text-muted-foreground"
+          >▍</span
+        >
       </div>
       <Button
         v-if="target"

@@ -1,5 +1,14 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+} from '@/components/ui/select'
+import { ref, useId, watch } from 'vue'
+import { Field, FieldLabel } from '../ui/field'
 import { invoke } from '@tauri-apps/api/core'
 import { useMemory } from './useMemory'
 import type { MemoryItem } from './types'
@@ -25,7 +34,9 @@ const {
 const selected = ref<MemoryItem | null>(null)
 const draft = ref('')
 const target = ref('')
-const filter = ref('')
+const filter = ref('all')
+const filterId = useId()
+const targetId = useId()
 const error = ref('')
 const busy = ref(false)
 function inspect(item: MemoryItem) {
@@ -83,7 +94,7 @@ watch(
   () => {
     selected.value = null
     error.value = ''
-    filter.value = ''
+    filter.value = 'all'
   },
 )
 watch([() => props.revision, () => props.running], () => {
@@ -117,15 +128,22 @@ watch([() => props.revision, () => props.running], () => {
       :paused="data.paused"
       @changed="reload"
     />
-    <label v-if="channelId === undefined" class="block space-y-1">
-      <span>Domain</span>
-      <select v-model="filter" class="block w-full rounded border border-input bg-background p-2">
-        <option value="">All domains</option>
-        <option v-for="scope in data.scopes" :key="scope.scope" :value="scope.scope">
-          {{ scope.title }}
-        </option>
-      </select>
-    </label>
+    <Field v-if="channelId === undefined">
+      <FieldLabel :for="filterId">Domain</FieldLabel>
+      <Select v-model="filter">
+        <SelectTrigger :id="filterId" class="w-full">
+          <SelectValue placeholder="All domains" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            <SelectItem value="all">All domains</SelectItem>
+            <SelectItem v-for="scope in data.scopes" :key="scope.scope" :value="scope.scope">
+              {{ scope.title }}
+            </SelectItem>
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+    </Field>
     <MemoryProposalCard
       v-for="proposal in data.proposals"
       :key="proposal.id"
@@ -137,7 +155,7 @@ watch([() => props.revision, () => props.running], () => {
       No saved memory in these domains.
     </p>
     <article
-      v-for="item in data.items.filter((i) => !filter || i.scope === filter)"
+      v-for="item in data.items.filter((i) => filter === 'all' || i.scope === filter)"
       :key="item.id"
       class="space-y-2 rounded border border-border p-3"
     >
@@ -193,14 +211,21 @@ watch([() => props.revision, () => props.running], () => {
         />
       </label>
       <Button size="sm" :disabled="busy || !draft.trim()" @click="mutate('edit')">Save edit</Button>
-      <label class="block space-y-1">
-        <span>Move to domain</span>
-        <select v-model="target" class="block w-full rounded border border-input bg-background p-2">
-          <option v-for="scope in data.scopes" :key="scope.scope" :value="scope.scope">
-            {{ scope.title }}
-          </option>
-        </select>
-      </label>
+      <Field>
+        <FieldLabel :for="targetId">Move to domain</FieldLabel>
+        <Select v-model="target">
+          <SelectTrigger :id="targetId" class="w-full">
+            <SelectValue placeholder="Choose a domain" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem v-for="scope in data.scopes" :key="scope.scope" :value="scope.scope">
+                {{ scope.title }}
+              </SelectItem>
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+      </Field>
       <p class="text-xs text-muted-foreground">
         Global memory is shared with all agents. Project memory is shared within that project.
       </p>

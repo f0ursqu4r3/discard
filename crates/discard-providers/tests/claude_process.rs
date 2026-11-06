@@ -58,6 +58,7 @@ async fn wait_for_file(path: &Path) {
 
 fn spec() -> SessionSpec {
     SessionSpec {
+        reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding,
         cwd: PathBuf::from("."),
         model: None,

@@ -2,6 +2,7 @@ import { beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import { invoke } from '@tauri-apps/api/core'
 import AgentProfileEditor from './AgentProfileEditor.vue'
+import AgentIconPicker from './AgentIconPicker.vue'
 import AgentProfileDialog from './AgentProfileDialog.vue'
 import AddAgentDialog from './AddAgentDialog.vue'
 import { Select } from '@/components/ui/select'
@@ -34,6 +35,9 @@ beforeEach(() => {
         return [
           { id: 'same-model', name: 'Same model', description: '' },
           { id: 'unavailable', name: 'Unavailable', description: '' },
+          { id: 'provider/exact-ID:2026', name: 'New model', description: '' },
+          { id: 'unsaved-model', name: 'Unsaved model', description: '' },
+          { id: 'exact/new-model', name: 'Updated model', description: '' },
         ]
       if (name === 'settings_agent_defaults')
         return { ...original, name: 'Alex', avatar: null, provider: '', model: '' }
@@ -68,8 +72,11 @@ async function editor() {
 test('edits identity, exact model, optional personality and avatar without restart', async () => {
   const view = await editor()
   await view.get('#agent-name').setValue('River')
-  await view.get('#agent-provider').setValue('codex')
-  await view.get('#agent-model').setValue('provider/exact-ID:2026')
+  expect(view.find('#agent-avatar').exists()).toBe(false)
+  view.getComponent(AgentIconPicker).vm.$emit('update:modelValue', 'lucide:rocket:#123456')
+  view.findAllComponents(Select)[0]!.vm.$emit('update:modelValue', 'codex')
+  await flushPromises()
+  view.findAllComponents(Select)[1]!.vm.$emit('update:modelValue', 'provider/exact-ID:2026')
   await view.get('#agent-prompt').setValue('')
   await flushPromises()
   await view.get('form').trigger('submit')
@@ -80,7 +87,7 @@ test('edits identity, exact model, optional personality and avatar without resta
       id: 'a',
       draft: expect.objectContaining({
         name: 'River',
-        avatar: 'old.png',
+        avatar: 'lucide:rocket:#123456',
         provider: 'codex',
         model: 'provider/exact-ID:2026',
         systemPrompt: '',
@@ -142,13 +149,13 @@ test('archive and restore preserve editable data; delete choices are independent
 })
 test('failed save keeps the unsaved draft and shows the real error', async () => {
   const view = await editor()
-  await view.get('#agent-model').setValue('unsaved-model')
+  view.findAllComponents(Select)[1]!.vm.$emit('update:modelValue', 'unsaved-model')
   await flushPromises()
   vi.mocked(invoke).mockRejectedValueOnce('Model is unavailable')
   await view.get('form').trigger('submit')
   await flushPromises()
   expect(view.get('[role="alert"]').text()).toBe('Model is unavailable')
-  expect((view.get('#agent-model').element as HTMLInputElement).value).toBe('unsaved-model')
+  expect(view.findAllComponents(Select)[1]!.props('modelValue')).toBe('unsaved-model')
 })
 
 test('a profile opens in view mode and edits only after Edit profile', async () => {
@@ -191,7 +198,7 @@ test('failed creation keeps the entered name and model', async () => {
 })
 test('permission expansion still requires confirmation in the profile', async () => {
   const view = await editor()
-  await view.get('#agent-model').setValue('exact/new-model')
+  view.findAllComponents(Select)[1]!.vm.$emit('update:modelValue', 'exact/new-model')
   await flushPromises()
   vi.mocked(invoke).mockRejectedValueOnce('Confirmation is required')
   await view.get('form').trigger('submit')
