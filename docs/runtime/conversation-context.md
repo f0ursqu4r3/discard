@@ -32,4 +32,13 @@ Conversation deletion removes saved summary state and response-memory records be
 
 Desktop `AppCore::active_context()` returns the active agent and optional conversation project under one lock. Engine plugin events capture their source context. Slot, action and menu callbacks pin the captured context. The sidebar's selected project must not supply direct-chat memory scope.
 
-The full no-project startup, conversation navigation, agent forms and memory controls are implemented by the later desktop/UI tasks. This runtime change makes the launcher accept a real project-less conversation. It does not replace the earlier project bootstrap path.
+Normal startup creates no project, agent, conversation, or bootstrap workspace. It restores the independently saved conversation when that conversation still exists. With no saved conversation, the app opens agent navigation. Creating an agent creates its default direct conversation. Additional direct and project conversations use an explicit agent and a fixed optional project. Selecting a sidebar project does not change the active conversation. The deliberate `--builder` path retains Coding bootstrap. Agent forms and memory controls apply edits without restarting; active responses finish with their original configuration.
+
+
+## Approval receipts and response notices
+
+An approval commits an immutable `ApprovedSnapshot` in the authoritative item document. This flat metadata record contains the approved content, scope, origin, version, source, identifiers, timestamps, and kind. It contains no nested MemoryItem, approval snapshots, or copied history. The item's ordinary history retains its revisions. Later edits, moves, Forget, Undo, and capture Resume do not change that receipt. Only the live current body enters prompt/search retrieval; receipts and revision history remain outside retrieval.
+
+The runtime reads approval receipts after persisting its change rows. This closes the ordering where approval occurs after its pending-proposal snapshot but before the response association exists. Store associates an approval with the proposal's original persisted response, including when a later turn observes the approval. Notifications use that exact response ID.
+
+App approval returns a committed outcome separately from response-notice persistence. If SQLite cannot save the association after memory commits, clients refresh and show that memory was approved. Durable receipts and existing proposal rows support retry without approving again. Memory reads retry the association and can show the truthful approved card while writes remain unavailable. Each card keeps the original approved version for Undo. A later item edit makes that Undo stale. The item document and SQLite are separate stores; this protocol does not claim a cross-store transaction.

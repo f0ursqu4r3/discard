@@ -37,6 +37,16 @@ impl Rig {
         provider: Arc<dyn discard_core::provider::Provider>,
         probe: Probe,
     ) -> Self {
+        Self::with_memory_service(provider, probe, |runtime, _| runtime).await
+    }
+    async fn with_memory_service(
+        provider: Arc<dyn discard_core::provider::Provider>,
+        probe: Probe,
+        decorate: impl FnOnce(
+            Arc<MemoryRuntime>,
+            Arc<MemoryStore>,
+        ) -> Arc<dyn discard_core::engine::MemoryService>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("store.db")).unwrap();
         let agent = store
@@ -59,13 +69,14 @@ impl Rig {
         let runtime = MemoryRuntime::start(memory.clone(), &dir.path().join("run"))
             .await
             .unwrap();
+        let memory_service = decorate(runtime.clone(), memory.clone());
         let engine = Engine {
             mode: SessionMode::Conversation,
             providers: vec![provider.clone()],
             store: store.clone(),
             agent_id: agent.clone(),
             project_id: None,
-            memory: Some(runtime.clone()),
+            memory: Some(memory_service),
             plugin_write: true,
             workspace_mode: WorkspaceMode::Worktree,
             workspace: None,
@@ -888,5 +899,101 @@ async fn user_memory_edit_during_response_is_not_an_assistant_save_marker() {
             .unwrap()
             .is_empty()
     );
+    rig.close().await;
+}
+
+struct ApproveAfterSnapshot {
+    runtime: Arc<MemoryRuntime>,
+    memory: Arc<MemoryStore>,
+}
+impl discard_core::engine::MemoryService for ApproveAfterSnapshot {
+    fn prepare(
+        &self,
+        agent: &AgentId,
+        project: Option<&discard_core::model::ProjectId>,
+        source: &ChannelId,
+        base: Option<&str>,
+        plugin: bool,
+    ) -> Result<discard_core::engine::PreparedMemory, String> {
+        self.runtime.prepare(agent, project, source, base, plugin)
+    }
+    fn changes(
+        &self,
+        source: &ChannelId,
+    ) -> Result<Vec<discard_core::memory_items::MemoryChange>, String> {
+        let snapshot = self.runtime.changes(source)?;
+        for change in &snapshot {
+            if let discard_core::memory_items::MemoryChange::Proposed(p) = change {
+                let approved = self.memory.approve_proposal(&p.id).unwrap();
+                self.memory
+                    .update_item(
+                        &approved.id,
+                        approved.version,
+                        "later user edit",
+                        MutationOrigin::User,
+                    )
+                    .unwrap();
+            }
+        }
+        Ok(snapshot)
+    }
+    fn approved_changes(
+        &self,
+        source: &ChannelId,
+    ) -> Result<Vec<discard_core::memory_items::MemoryChange>, String> {
+        self.runtime.approved_changes(source)
+    }
+    fn finish(&self, token: &str) {
+        self.runtime.finish(token)
+    }
+}
+
+#[tokio::test]
+async fn approval_between_change_snapshot_and_row_insert_keeps_original_approved_card() {
+    let provider = Arc::new(FakeProvider::new(vec![Step::text("response"), Step::Hang]));
+    let probe = provider.probe.clone();
+    let mut rig = Rig::with_memory_service(provider, probe, |runtime, memory| {
+        Arc::new(ApproveAfterSnapshot { runtime, memory })
+    })
+    .await;
+    rig.commands.send(Command::Send("remember".into())).unwrap();
+    while !matches!(rig.updates.recv().await, Some(Update::Event(_))) {}
+    let proposal = rig
+        .memory
+        .capture_item(
+            &rig.agent,
+            None,
+            &rig.channel,
+            &Scope::Global,
+            ItemKind::Fact,
+            "original approved value",
+        )
+        .unwrap();
+    assert!(matches!(
+        proposal,
+        discard_core::memory_items::SaveOutcome::Proposed(_)
+    ));
+    rig.commands.send(Command::Cancel).unwrap();
+    let updates = rig.done().await;
+    let response = updates
+        .iter()
+        .find_map(|u| {
+            if let Update::ResponseCompleted(m) = u {
+                Some(m.id.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let records = rig
+        .store
+        .lock()
+        .unwrap()
+        .response_memory(&rig.channel)
+        .unwrap();
+    assert_eq!(records.len(), 2);
+    assert!(records.iter().all(|(id, _)| id == &response));
+    assert!(records.iter().any(|(_,c)|matches!(c,discard_core::memory_items::MemoryChange::Saved{item,..} if item.version==1 && item.content=="original approved value" && item.origin==MutationOrigin::Approved)));
+    assert!(updates.iter().any(|u|matches!(u,Update::MemoryChanges{response:id,changes} if id==&response && changes.iter().any(|c|matches!(c,discard_core::memory_items::MemoryChange::Saved{item,..} if item.version==1)))));
     rig.close().await;
 }

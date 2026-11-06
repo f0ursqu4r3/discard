@@ -736,3 +736,70 @@ fn direct_app_forget_pauses_original_and_requesting_conversation_without_proposa
     assert!(s.pending_proposals().unwrap().is_empty());
     assert!(s.memory_changes(&requester).unwrap().iter().any(|change|matches!(change,discard_core::memory_items::MemoryChange::Saved{item,..} if item.id==i.id && item.deleted)));
 }
+
+#[test]
+fn approval_receipts_are_flat_immutable_metadata_and_do_not_enter_retrieval() {
+    let dir = tempfile::tempdir().unwrap();
+    let memory = MemoryStore::open_in_memory_index(dir.path()).unwrap();
+    let agent = AgentId::new();
+    let channel = ChannelId::new();
+    let SaveOutcome::Proposed(proposal) = memory
+        .capture_item(
+            &agent,
+            None,
+            &channel,
+            &Scope::Global,
+            ItemKind::Preference,
+            "historic approved pear",
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    let approved = memory.approve_proposal(&proposal.id).unwrap();
+    let original = memory.approved_changes(&channel).unwrap();
+    memory
+        .update_item(
+            &approved.id,
+            approved.version,
+            "current apricot",
+            MutationOrigin::User,
+        )
+        .unwrap();
+    assert_eq!(memory.approved_changes(&channel).unwrap(), original);
+    assert!(
+        memory
+            .search(&[Scope::Global], "pear", 10)
+            .unwrap()
+            .is_empty()
+    );
+    let blocks = memory.core_blocks(&[Scope::Global]).unwrap();
+    let prompt = discard_core::memory::compose_system_prompt(None, &blocks);
+    assert!(prompt.contains("current apricot"));
+    assert!(!prompt.contains("pear"));
+    assert_eq!(
+        memory.read(&Scope::Global, &approved.path()).unwrap().text,
+        "current apricot"
+    );
+    let raw = std::fs::read_to_string(
+        dir.path()
+            .join(".items")
+            .join(format!("{}.md", approved.id)),
+    )
+    .unwrap();
+    let meta = raw
+        .split_once("\n\n")
+        .unwrap()
+        .0
+        .strip_prefix("<!-- discard-memory ")
+        .unwrap()
+        .strip_suffix(" -->")
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_str(meta).unwrap();
+    let receipt = &json["approved_snapshots"][0];
+    assert!(receipt.get("approved_snapshots").is_none());
+    assert!(receipt.get("item").is_none());
+    assert!(receipt.get("history").is_none());
+    assert_eq!(receipt["revision"]["version"], 1);
+    assert_eq!(receipt["revision"]["content"], "historic approved pear");
+}

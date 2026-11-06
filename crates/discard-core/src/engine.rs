@@ -74,6 +74,8 @@ pub trait MemoryService: Send + Sync {
         Err("Read-only summary memory is not available.".into())
     }
     fn changes(&self, _source: &ChannelId) -> Result<Vec<crate::memory_items::MemoryChange>, String> { Ok(vec![]) }
+    /// Immutable approval receipts used to reconcile decisions made after a change snapshot.
+    fn approved_changes(&self, _source: &ChannelId) -> Result<Vec<crate::memory_items::MemoryChange>, String> { Ok(vec![]) }
     /// Revoke the token and remove the config file. Must be safe to call twice.
     fn finish(&self, token: &str);
 }
@@ -485,13 +487,29 @@ impl Engine {
             if self.mode == crate::provider::SessionMode::Conversation { send(updates, Update::ResponseCompleted(response.clone())); }
             let mut recorded = Vec::new();
             for change in changes {
-                match crate::driver::lock(&self.store).record_response_memory(&self.channel_id, &response.id, &change) {
-                    Ok(true) => recorded.push(change),
-                    Ok(false) => {},
+                match crate::driver::lock(&self.store).record_response_memory_at(&self.channel_id, &response.id, &change) {
+                    Ok(Some(id)) => recorded.push((id, change)),
+                    Ok(None) => {},
                     Err(e) => send(updates, Update::Error(e.to_string())),
                 }
             }
-            if !recorded.is_empty() { send(updates, Update::MemoryChanges { response: response.id, changes: recorded }); }
+            // The app may approve after the snapshot but before its Proposed row exists.
+            // Read durable receipts only after rows are recorded, closing either ordering.
+            if let Some(memory) = &self.memory {
+                match memory.approved_changes(&self.channel_id) {
+                    Ok(approvals) => match crate::driver::lock(&self.store).reconcile_response_memory(&self.channel_id, &approvals) {
+                        Ok(recovered) => recorded.extend(recovered),
+                        Err(e) => send(updates, Update::Error(e.to_string())),
+                    },
+                    Err(e) => send(updates, Update::Error(e)),
+                }
+            }
+            let mut groups: Vec<(MessageId, Vec<crate::memory_items::MemoryChange>)> = Vec::new();
+            for (id, change) in recorded {
+                if let Some((_, changes)) = groups.iter_mut().find(|(response, _)| response == &id) { changes.push(change); }
+                else { groups.push((id, vec![change])); }
+            }
+            for (response, changes) in groups { send(updates, Update::MemoryChanges { response, changes }); }
         }
         match result {
             Ok((_turn, outcome)) => {

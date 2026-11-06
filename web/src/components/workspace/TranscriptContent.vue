@@ -19,6 +19,7 @@ import MessageRow from '../MessageRow.vue'
 import MemoryResponse from '../memory/MemoryResponse.vue'
 import MemoryCaptureStatus from '../memory/MemoryCaptureStatus.vue'
 import { useMemory } from '../memory/useMemory'
+import { Button } from '../ui/button'
 import { hasLiveRow, rowCount } from '../messages'
 const props = defineProps<{
   messages: MessageDto[]
@@ -135,6 +136,12 @@ onUnmounted(() => window.removeEventListener('focus', read))
     <p v-if="memory.error.value" role="alert" class="mx-6 text-xs">
       Memory could not load: {{ memory.error.value }}
     </p>
+    <div v-if="memory.data.value.warnings?.length" class="mx-6 space-y-2 text-xs">
+      <p v-for="warning in memory.data.value.warnings" :key="warning" role="status">
+        {{ warning }}
+      </p>
+      <Button size="sm" variant="outline" @click="memory.reload">Retry memory notice</Button>
+    </div>
     <MessageScroller>
       <MessageScrollerViewport
         data-ui-id="message-viewport"

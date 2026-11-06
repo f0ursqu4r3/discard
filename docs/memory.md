@@ -23,6 +23,8 @@ Automatic saves use agent memory in direct conversations and agent-project memor
 
 **Automatic save** cards appear beside the response that saved them. **Approved update** cards identify approved changes, including approvals made after the response ended. User edits in Settings are not labeled as automatic saves. **Undo** uses the saved version. A later change can make Undo or an approval stale. Discard then shows an error; reload memory and inspect the current item before retrying.
 
+If memory approval succeeds but its response notice cannot be saved, Discard reports that memory is approved and saved. The decision controls close. **Reload memory** or **Retry memory notice** retries the saved association without approving again. The recovered card keeps the original approved version, even after a later edit. A stale Undo still requires inspection of the current item.
+
 ## Controls
 
 Open the conversation's **Memory** panel to browse applicable items. Open **Settings → Memory** to browse all four domains, including retained items whose agents or projects are no longer present.

@@ -68,6 +68,61 @@ pub struct MemoryItem {
     #[serde(default)]
     pub paused_capture_conversations: Vec<ChannelId>,
     pub proposal_id: Option<String>,
+    /// Immutable, nonrecursive approval receipts, committed with the item.
+    #[serde(default)]
+    pub approved_snapshots: Vec<ApprovedSnapshot>,
+}
+/// A flat receipt keeps the exact approved version without nesting MemoryItem.
+/// Stored only in hidden metadata; never indexed or composed into prompts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovedSnapshot {
+    pub item_id: String,
+    pub kind: ItemKind,
+    pub revision: ItemRevision,
+    pub source_conversation: Option<ChannelId>,
+    pub created_at: u64,
+    pub proposal_id: String,
+}
+impl ApprovedSnapshot {
+    fn from_item(item: &MemoryItem, proposal_id: String) -> Self {
+        Self {
+            item_id: item.id.clone(),
+            kind: item.kind,
+            revision: ItemRevision {
+                version: item.version,
+                scope: item.scope.clone(),
+                content: item.content.clone(),
+                deleted: item.deleted,
+                updated_at: item.updated_at,
+                origin: MutationOrigin::Approved,
+                change_conversation: item.change_conversation.clone(),
+            },
+            source_conversation: item.source_conversation.clone(),
+            created_at: item.created_at,
+            proposal_id,
+        }
+    }
+    fn into_item(self) -> MemoryItem {
+        MemoryItem {
+            id: self.item_id,
+            scope: self.revision.scope,
+            kind: self.kind,
+            committed_body_hash: version_of(&self.revision.content),
+            content: self.revision.content,
+            source_conversation: self.source_conversation,
+            change_conversation: self.revision.change_conversation,
+            created_at: self.created_at,
+            updated_at: self.revision.updated_at,
+            version: self.revision.version,
+            deleted: self.revision.deleted,
+            origin: MutationOrigin::Approved,
+            history: vec![],
+            recapture_suppression: vec![],
+            paused_capture_conversations: vec![],
+            proposal_id: Some(self.proposal_id),
+            approved_snapshots: vec![],
+        }
+    }
 }
 impl MemoryItem {
     pub fn path(&self) -> String {
@@ -252,6 +307,16 @@ impl MemoryStore {
             return Err(MemoryError::TooLarge);
         }
         item.committed_body_hash = version_of(&item.content);
+        if item.origin == MutationOrigin::Approved
+            && let Some(proposal_id) = item.proposal_id.clone()
+            && !item
+                .approved_snapshots
+                .iter()
+                .any(|s| s.proposal_id == proposal_id && s.revision.version == item.version)
+        {
+            item.approved_snapshots
+                .push(ApprovedSnapshot::from_item(item, proposal_id));
+        }
         // The metadata body snapshot preserves the previous committed revision if
         // an external editor changes the authoritative readable body.
         self.write_document(".items", &item.id, item, &item.content)?;
@@ -323,6 +388,7 @@ impl MemoryStore {
             recapture_suppression: vec![],
             paused_capture_conversations: vec![],
             proposal_id,
+            approved_snapshots: vec![],
         };
         self.persist_item(&mut item)?;
         Ok(item)
@@ -649,10 +715,10 @@ impl MemoryStore {
         for id in self.document_ids(".proposals")? {
             let (p, _): (MemoryProposal, String) = self.read_document(".proposals", &id)?;
             if !p.resolved
-                && !self
-                    .all_items()?
-                    .iter()
-                    .any(|i| i.proposal_id.as_ref() == Some(&p.id))
+                && !self.all_items()?.iter().any(|i| {
+                    i.proposal_id.as_ref() == Some(&p.id)
+                        || i.approved_snapshots.iter().any(|s| &s.proposal_id == &p.id)
+                })
             {
                 out.push(p);
             }
@@ -664,10 +730,10 @@ impl MemoryStore {
         let _guard = lock(&self.write_lock);
         let (mut p, _): (MemoryProposal, String) = self.read_document(".proposals", id)?;
         if p.resolved
-            || self
-                .all_items()?
-                .iter()
-                .any(|i| i.proposal_id.as_deref() == Some(id))
+            || self.all_items()?.iter().any(|i| {
+                i.proposal_id.as_deref() == Some(id)
+                    || i.approved_snapshots.iter().any(|s| s.proposal_id == id)
+            })
         {
             return Err(MemoryError::NotFound(id.into()));
         }
@@ -727,10 +793,36 @@ impl MemoryStore {
         p.resolved = true;
         self.write_document(".proposals", id, &p, "Rejected")
     }
+    /// Durable approved versions, independent of later edits, moves, Undo, or resume.
+    pub fn approved_changes(&self, source: &ChannelId) -> Result<Vec<MemoryChange>> {
+        Ok(self
+            .all_items()?
+            .into_iter()
+            .flat_map(|item| item.approved_snapshots)
+            .filter(|item| {
+                item.revision
+                    .change_conversation
+                    .as_ref()
+                    .or(item.source_conversation.as_ref())
+                    == Some(source)
+            })
+            .map(ApprovedSnapshot::into_item)
+            .map(|item| MemoryChange::Saved {
+                key: format!("{}:{}", item.id, item.version),
+                item,
+            })
+            .collect())
+    }
     pub fn memory_changes(&self, source: &ChannelId) -> Result<Vec<MemoryChange>> {
         let mut changes = self
             .all_items()?
             .into_iter()
+            .filter(|i| {
+                !i.approved_snapshots.iter().any(|s| {
+                    s.revision.version == i.version
+                        && Some(&s.proposal_id) == i.proposal_id.as_ref()
+                })
+            })
             .filter(|i| {
                 i.change_conversation
                     .as_ref()
@@ -742,6 +834,7 @@ impl MemoryStore {
                 item,
             })
             .collect::<Vec<_>>();
+        changes.extend(self.approved_changes(source)?);
         changes.extend(
             self.pending_proposals()?
                 .into_iter()

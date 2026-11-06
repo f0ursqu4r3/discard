@@ -450,3 +450,210 @@ fn runtime_memory_notification_refreshes_cards_without_changing_transcript_ids()
     assert_eq!(core.snapshot().memory_rev, before + 1);
     assert!(core.history_snapshot().messages.is_empty());
 }
+
+#[test]
+fn approval_before_proposal_row_persistence_reconciles_to_original_response() {
+    use discard_core::memory_items::MemoryChange;
+    let (_dir, memory, store, agent, channel) = setup();
+    let SaveOutcome::Proposed(proposal) = memory
+        .capture_item(
+            &agent,
+            None,
+            &channel,
+            &Scope::Global,
+            ItemKind::Fact,
+            "approved while response is saving",
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    // The runtime has copied this pending snapshot, but has not saved its response row.
+    let snapshot = MemoryChange::Proposed(proposal.clone());
+    resolve_proposal(&memory, &store, &proposal.id, true, Some(&channel.0)).unwrap();
+    let response = MessageId::new();
+    store
+        .insert_message(&Message {
+            id: response.clone(),
+            channel_id: channel.clone(),
+            role: Role::Agent,
+            blocks: vec![],
+        })
+        .unwrap();
+    store
+        .record_response_memory(&channel, &response, &snapshot)
+        .unwrap();
+    let view = memory_view(&memory, &store, Some(&channel.0)).unwrap();
+    assert!(
+        view["responses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["responseId"] == response.0 && r["type"] == "approved")
+    );
+    assert!(store.response_memory(&channel).unwrap().iter().any(|(id,change)|id==&response && matches!(change, MemoryChange::Saved{item,..} if item.origin==MutationOrigin::Approved)));
+}
+
+#[test]
+fn committed_approval_survives_sql_notice_failure_reopen_and_later_edit() {
+    use discard_core::memory_items::MemoryChange;
+    let (dir, memory, _unused, _a, _c) = setup();
+    let store = Store::open(&dir.path().join("approval.db")).unwrap();
+    let agent = store
+        .create_agent(&AgentConfig {
+            name: "Ada".into(),
+            avatar: None,
+            provider: "codex".into(),
+            model: Some("exact".into()),
+            system_prompt: String::new(),
+            policy: ApprovalPolicy::DenyAll,
+            plugin_write: false,
+        })
+        .unwrap();
+    let channel = store.default_conversation(&agent).unwrap().id;
+    let SaveOutcome::Proposed(proposal) = memory
+        .capture_item(
+            &agent,
+            None,
+            &channel,
+            &Scope::Global,
+            ItemKind::Fact,
+            "original approved value",
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    let response = MessageId::new();
+    store
+        .insert_message(&Message {
+            id: response.clone(),
+            channel_id: channel.clone(),
+            role: Role::Agent,
+            blocks: vec![],
+        })
+        .unwrap();
+    store
+        .record_response_memory(
+            &channel,
+            &response,
+            &MemoryChange::Proposed(proposal.clone()),
+        )
+        .unwrap();
+    let sql = rusqlite::Connection::open(dir.path().join("approval.db")).unwrap();
+    sql.execute_batch("CREATE TRIGGER reject_memory_notice BEFORE INSERT ON response_memory WHEN instr(NEW.change_key, ':') > 0 BEGIN SELECT RAISE(ABORT, 'test notice disk failure'); END;").unwrap();
+    let outcome = resolve_proposal(&memory, &store, &proposal.id, true, Some(&channel.0))
+        .expect("the approved memory already committed");
+    assert!(outcome.committed);
+    assert!(outcome.association_pending);
+    assert!(outcome.warning.as_ref().unwrap().contains("approved"));
+    assert!(memory.pending_proposals().unwrap().is_empty());
+    let failed_view = memory_view(&memory, &store, Some(&channel.0)).unwrap();
+    assert!(!failed_view["warnings"].as_array().unwrap().is_empty());
+    assert!(
+        failed_view["responses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["type"] == "approved" && r["item"]["version"] == 1)
+    );
+    let item = memory.list_items(&[Scope::Global]).unwrap().remove(0);
+    memory
+        .update_item(
+            &item.id,
+            item.version,
+            "later user edit",
+            MutationOrigin::User,
+        )
+        .unwrap();
+    drop(memory);
+    let memory = MemoryStore::open_in_memory_index(dir.path()).unwrap();
+    sql.execute_batch("DROP TRIGGER reject_memory_notice;")
+        .unwrap();
+    let view = memory_view(&memory, &store, Some(&channel.0)).unwrap();
+    let card = view["responses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["type"] == "approved")
+        .unwrap();
+    assert_eq!(card["responseId"], response.0);
+    assert_eq!(card["item"]["version"], 1);
+    assert_eq!(card["item"]["content"], "original approved value");
+    assert!(
+        mutate(
+            &memory,
+            &store,
+            &item.id,
+            1,
+            "undo",
+            None,
+            None,
+            Some(&channel.0)
+        )
+        .is_err()
+    );
+    let records = store.response_memory(&channel).unwrap();
+    assert_eq!(records.len(), 2);
+    assert!(records.iter().any(|(_,c)|matches!(c,MemoryChange::Saved{item,..} if item.version==1 && item.content=="original approved value")));
+    sql.execute_batch("CREATE TRIGGER reject_memory_notice BEFORE INSERT ON response_memory BEGIN SELECT RAISE(ABORT, 'no more writes'); END;").unwrap();
+    let settled = memory_view(&memory, &store, Some(&channel.0)).unwrap();
+    assert!(
+        settled["warnings"].as_array().unwrap().is_empty(),
+        "settled associations must not attempt more writes"
+    );
+    assert_eq!(store.response_memory(&channel).unwrap().len(), 2);
+}
+
+#[test]
+fn approval_observed_by_a_later_response_keeps_its_original_response_id() {
+    use discard_core::memory_items::MemoryChange;
+    let (_dir, memory, store, agent, channel) = setup();
+    let SaveOutcome::Proposed(proposal) = memory
+        .capture_item(
+            &agent,
+            None,
+            &channel,
+            &Scope::Global,
+            ItemKind::Fact,
+            "shared value",
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    let original = MessageId::new();
+    let later = MessageId::new();
+    for id in [&original, &later] {
+        store
+            .insert_message(&Message {
+                id: id.clone(),
+                channel_id: channel.clone(),
+                role: Role::Agent,
+                blocks: vec![],
+            })
+            .unwrap();
+    }
+    store
+        .record_response_memory(
+            &channel,
+            &original,
+            &MemoryChange::Proposed(proposal.clone()),
+        )
+        .unwrap();
+    memory.approve_proposal(&proposal.id).unwrap();
+    let receipt = memory.approved_changes(&channel).unwrap().remove(0);
+    assert_eq!(
+        store
+            .record_response_memory_at(&channel, &later, &receipt)
+            .unwrap(),
+        Some(original.clone())
+    );
+    assert!(
+        store
+            .response_memory(&channel)
+            .unwrap()
+            .iter()
+            .all(|(id, _)| id == &original)
+    );
+}

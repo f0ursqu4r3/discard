@@ -41,6 +41,44 @@ fn item_dto(item: &MemoryItem, store: &Store) -> Value {
         "sourceAvailable":item.source_conversation.as_ref().is_some_and(|c| store.load_channel(c).is_ok()),
         "history":item.history.iter().map(|h| json!({"version":h.version,"scope":h.scope.label(),"content":h.content,"deleted":h.deleted,"updatedAt":h.updated_at,"origin":h.origin})).collect::<Vec<_>>() })
 }
+/// Reconcile durable receipts, and render truthful cards even while SQL writes fail.
+fn response_records(
+    memory: &MemoryStore,
+    store: &Store,
+    channel: &ChannelId,
+) -> Result<
+    (
+        Vec<(discard_core::model::MessageId, MemoryChange)>,
+        Vec<String>,
+    ),
+    String,
+> {
+    let approvals = memory.approved_changes(channel).map_err(failure)?;
+    let warnings=store.reconcile_response_memory(channel,&approvals).err().map(|e|format!("Memory is approved and saved. Its response notice could not be saved. Reload memory to retry: {e}")).into_iter().collect();
+    let mut records = store.response_memory(channel).map_err(failure)?;
+    for approval in approvals {
+        let MemoryChange::Saved { key, item } = &approval else {
+            continue;
+        };
+        let Some(proposal_id) = &item.proposal_id else {
+            continue;
+        };
+        if records
+            .iter()
+            .any(|(_, c)| matches!(c,MemoryChange::Saved{key:existing,..} if existing==key))
+        {
+            continue;
+        }
+        if let Some((response, _)) = records
+            .iter()
+            .find(|(_, c)| matches!(c,MemoryChange::Proposed(p) if &p.id==proposal_id))
+        {
+            records.push((response.clone(), approval));
+        }
+    }
+    Ok((records, warnings))
+}
+
 /// Read context from the saved conversation. Sidebar selection is never used.
 pub fn memory_view(
     memory: &MemoryStore,
@@ -64,8 +102,11 @@ pub fn memory_view(
         json!({"id":p.id,"scope":scope,"content":content,"action":action,"sourceConversation":p.source_conversation.0})
     }).collect();
     let mut responses = Vec::new();
+    let mut warnings = Vec::new();
     if let Some(channel) = &channel {
-        for (response, change) in store.response_memory(&channel.id).map_err(failure)? {
+        let (records, problems) = response_records(memory, store, &channel.id)?;
+        warnings.extend(problems);
+        for (response, change) in records {
             match change {
                 MemoryChange::Saved {key,item} if item.origin != MutationOrigin::User => responses.push(json!({"key":key,"responseId":response.0,"type":if item.origin==MutationOrigin::Automatic {"automatic"} else {"approved"},"item":item_dto(&item,store)})),
                 MemoryChange::Proposed(p) => responses.push(json!({"key":p.id,"responseId":response.0,"type":"proposal","proposalId":p.id,"pending":pending.iter().any(|current|current.id==p.id)})),
@@ -73,8 +114,13 @@ pub fn memory_view(
             }
         }
     }
+    if channel.is_none() {
+        for conversation in store.all_conversations().map_err(failure)? {
+            warnings.extend(response_records(memory, store, &conversation.id)?.1);
+        }
+    }
     Ok(
-        json!({"agentId":channel.as_ref().map(|c| &c.agent_id.0),"projectId":channel.as_ref().and_then(|c|c.project_id.as_ref().map(|p|&p.0)),"items":items.iter().map(|i|item_dto(i,store)).collect::<Vec<_>>(),"scopes":choices.iter().map(|r|json!({"scope":r.scope.label(),"title":format!("{} · {}",r.scope.label(),r.title)})).collect::<Vec<_>>(),"proposals":proposals,"responses":responses,"paused":channel.as_ref().map(|c|memory.capture_paused(&c.id)).transpose().map_err(failure)?.unwrap_or(false)}),
+        json!({"warnings":warnings,"agentId":channel.as_ref().map(|c| &c.agent_id.0),"projectId":channel.as_ref().and_then(|c|c.project_id.as_ref().map(|p|&p.0)),"items":items.iter().map(|i|item_dto(i,store)).collect::<Vec<_>>(),"scopes":choices.iter().map(|r|json!({"scope":r.scope.label(),"title":format!("{} · {}",r.scope.label(),r.title)})).collect::<Vec<_>>(),"proposals":proposals,"responses":responses,"paused":channel.as_ref().map(|c|memory.capture_paused(&c.id)).transpose().map_err(failure)?.unwrap_or(false)}),
     )
 }
 /// Explicit app actions authorize shared domain choices. Model JSON never calls this API.
@@ -119,6 +165,15 @@ pub fn mutate(
     }
     .map_err(failure)
 }
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryResolution {
+    pub status: &'static str,
+    pub committed: bool,
+    pub association_pending: bool,
+    pub warning: Option<String>,
+}
+
 /// Hold the agent Store lock at command entry through approval, so lifecycle changes cannot race it.
 pub fn resolve_proposal(
     memory: &MemoryStore,
@@ -126,7 +181,7 @@ pub fn resolve_proposal(
     id: &str,
     approve: bool,
     requester: Option<&str>,
-) -> Result<(), String> {
+) -> Result<MemoryResolution, String> {
     let proposal = memory
         .pending_proposals()
         .map_err(failure)?
@@ -139,7 +194,13 @@ pub fn resolve_proposal(
         return Err("Proposal belongs to another conversation".into());
     }
     if !approve {
-        return memory.reject_proposal(id).map_err(failure);
+        memory.reject_proposal(id).map_err(failure)?;
+        return Ok(MemoryResolution {
+            status: "rejected",
+            committed: false,
+            association_pending: false,
+            warning: None,
+        });
     }
     let source = conversation(store, &proposal.source_conversation.0)?;
     if source.agent_id != proposal.agent || store.agent_archived(&proposal.agent).unwrap_or(true) {
@@ -155,26 +216,68 @@ pub fn resolve_proposal(
     if !scopes.contains(&scope) {
         return Err("The proposal no longer matches its source conversation context".into());
     }
-    let records = store.response_memory(&source.id).map_err(failure)?;
-    let item = memory.approve_proposal(id).map_err(failure)?;
-    // Attach a later approval to the original persisted response, never a fabricated ID.
-    if let Some((response, _)) = records
-        .into_iter()
-        .find(|(_, change)| matches!(change,MemoryChange::Proposed(p) if p.id==id))
-    {
-        store
-            .record_response_memory(
-                &source.id,
-                &response,
-                &MemoryChange::Saved {
-                    key: format!("{}:{}", item.id, item.version),
-                    item,
-                },
-            )
-            .map_err(failure)?;
-    }
-    Ok(())
+    let mut warning = None;
+    // An item commit can precede an index/proposal-file error. Its atomic receipt
+    // still proves that approval happened, so never report that as an uncommitted write.
+    let item = match memory.approve_proposal(id) {
+        Ok(item) => item,
+        Err(error) => {
+            let committed = memory
+                .approved_changes(&source.id)
+                .map_err(failure)?
+                .into_iter()
+                .find_map(|c| match c {
+                    MemoryChange::Saved { item, .. } if item.proposal_id.as_deref() == Some(id) => {
+                        Some(item)
+                    }
+                    _ => None,
+                });
+            let Some(item) = committed else {
+                return Err(failure(error));
+            };
+            warning = Some(format!(
+                "Memory is approved and saved. Reload memory to retry its remaining records: {error}"
+            ));
+            item
+        }
+    };
+    let key = format!("{}:{}", item.id, item.version);
+    let approvals = memory.approved_changes(&source.id);
+    let linked = match approvals {
+        Ok(approvals) => match store.reconcile_response_memory(&source.id, &approvals) {
+            Ok(_) => match store.response_memory(&source.id) {
+                Ok(records) => records.iter().any(
+                    |(_, c)| matches!(c,MemoryChange::Saved{key:existing,..} if existing==&key),
+                ),
+                Err(error) => {
+                    warning = Some(format!(
+                        "Memory is approved and saved. Reload memory to retry its response notice: {error}"
+                    ));
+                    false
+                }
+            },
+            Err(error) => {
+                warning = Some(format!(
+                    "Memory is approved and saved. Its response notice could not be saved. Reload memory to retry: {error}"
+                ));
+                false
+            }
+        },
+        Err(error) => {
+            warning = Some(format!(
+                "Memory is approved and saved. Reload memory to retry its response notice: {error}"
+            ));
+            false
+        }
+    };
+    Ok(MemoryResolution {
+        status: "approved",
+        committed: true,
+        association_pending: !linked,
+        warning,
+    })
 }
+
 pub fn resume(memory: &MemoryStore, store: &Store, channel: &str) -> Result<(), String> {
     let channel = conversation(store, channel)?;
     memory.resume_capture(&channel.id).map_err(failure)
@@ -223,9 +326,9 @@ pub fn memory_resolve(
     id: String,
     approve: bool,
     channel_id: Option<String>,
-) -> Result<(), String> {
+) -> Result<MemoryResolution, String> {
     use tauri::Emitter;
-    resolve_proposal(
+    let outcome = resolve_proposal(
         &context.memory,
         &context.store.lock().unwrap_or_else(|e| e.into_inner()),
         &id,
@@ -233,7 +336,7 @@ pub fn memory_resolve(
         channel_id.as_deref(),
     )?;
     let _ = app.emit("discard://memory", ());
-    Ok(())
+    Ok(outcome)
 }
 #[tauri::command]
 pub fn memory_resume(

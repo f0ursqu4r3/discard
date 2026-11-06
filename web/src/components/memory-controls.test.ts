@@ -159,12 +159,12 @@ test('response cards use persisted versions for undo and resolve proposals after
     approve: true,
     channelId: 'current',
   })
-  await button(view, 'Reject')
-  expect(invoke).toHaveBeenCalledWith('memory_resolve', {
-    id: 'p',
-    approve: false,
-    channelId: 'current',
-  })
+  expect(
+    view
+      .findAll('button')
+      .find((button) => button.text() === 'Reject')!
+      .attributes('disabled'),
+  ).toBeDefined()
 })
 
 test('transcript attaches saved cards only to their persisted response and never to unsaved live reply', async () => {
@@ -231,4 +231,65 @@ test('runtime memory revision reloads cards after response text is already prese
   await view.setProps({ memoryRevision: 1 })
   await flushPromises()
   expect(view.get('[data-ui-id="response-memory"]').text()).toContain('Automatic save')
+})
+
+test('committed approval with a pending response notice disables decisions and refreshes clients', async () => {
+  const { default: MemoryProposalCard } = await import('./memory/MemoryProposal.vue')
+  vi.mocked(invoke).mockResolvedValueOnce({
+    status: 'approved',
+    committed: true,
+    associationPending: true,
+    warning: 'Memory is approved and saved. Reload memory to retry its response notice.',
+  })
+  const view = mount(MemoryProposalCard, {
+    props: {
+      channelId: 'current',
+      proposal: {
+        id: 'p',
+        action: 'Create',
+        scope: 'global',
+        content: 'Shared value',
+        sourceConversation: 'current',
+      },
+    },
+  })
+  await button(view, 'Approve')
+  expect(view.emitted('changed')).toHaveLength(1)
+  expect(view.text()).toContain('Memory is approved and saved')
+  expect(view.findAll('button').every((b) => b.attributes('disabled') !== undefined)).toBe(true)
+  await view.get('button').trigger('click')
+  expect(invoke).toHaveBeenCalledTimes(1)
+})
+
+test('pending notice warnings provide a working reload and rejection settles its own proposal', async () => {
+  vi.mocked(invoke).mockResolvedValueOnce({
+    ...structuredClone(data),
+    warnings: ['Memory is approved and saved. Reload memory to retry its response notice.'],
+  })
+  const browser = mount(MemoryBrowser, { props: { channelId: 'current' } })
+  await flushPromises()
+  expect(browser.get('[role="status"]').text()).toContain('Memory is approved and saved')
+  await button(browser, 'Reload memory')
+  expect(browser.find('[role="status"]').exists()).toBe(false)
+  const { default: MemoryProposalCard } = await import('./memory/MemoryProposal.vue')
+  vi.mocked(invoke).mockResolvedValueOnce({
+    status: 'rejected',
+    committed: false,
+    associationPending: false,
+    warning: null,
+  })
+  const view = mount(MemoryProposalCard, {
+    props: {
+      proposal: {
+        id: 'other',
+        action: 'Create',
+        scope: 'global',
+        content: 'Do not keep',
+        sourceConversation: 'source',
+      },
+    },
+  })
+  await button(view, 'Reject')
+  expect(view.emitted('changed')).toHaveLength(1)
+  expect(view.findAll('button').every((b) => b.attributes('disabled') !== undefined)).toBe(true)
 })

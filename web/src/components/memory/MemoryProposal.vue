@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import type { MemoryProposal } from './types'
+import type { MemoryProposal, MemoryResolution } from './types'
 import { Button } from '../ui/button'
 const props = defineProps<{
   proposal: MemoryProposal
@@ -10,15 +10,21 @@ const props = defineProps<{
 const emit = defineEmits<{ changed: [] }>()
 const error = ref('')
 const busy = ref(false)
+const settled = ref(false)
+const notice = ref('')
 async function resolve(approve: boolean) {
+  if (settled.value || busy.value) return
   busy.value = true
   error.value = ''
   try {
-    await invoke('memory_resolve', {
+    const outcome = await invoke<MemoryResolution>('memory_resolve', {
       id: props.proposal.id,
       approve,
       channelId: props.channelId ?? null,
     })
+    settled.value = true
+    notice.value =
+      outcome?.warning ?? (approve ? 'Memory is approved and saved.' : 'Memory proposal rejected.')
     emit('changed')
   } catch (cause) {
     error.value = String(cause)
@@ -33,9 +39,12 @@ async function resolve(approve: boolean) {
     <p class="whitespace-pre-wrap wrap-break-word">{{ proposal.content }}</p>
     <p class="text-xs text-muted-foreground">Approve only if this saved information is correct.</p>
     <div class="flex gap-2">
-      <Button size="sm" :disabled="busy" @click="resolve(true)">Approve</Button>
-      <Button size="sm" variant="outline" :disabled="busy" @click="resolve(false)">Reject</Button>
+      <Button size="sm" :disabled="busy || settled" @click="resolve(true)">Approve</Button>
+      <Button size="sm" variant="outline" :disabled="busy || settled" @click="resolve(false)">
+        Reject
+      </Button>
     </div>
+    <p v-if="notice" role="status">{{ notice }}</p>
     <p v-if="error" role="alert">{{ error }}</p>
   </section>
 </template>

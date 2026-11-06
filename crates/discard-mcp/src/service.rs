@@ -178,6 +178,9 @@ impl MemoryService for MemoryRuntime {
     fn changes(&self, source: &discard_core::model::ChannelId) -> Result<Vec<discard_core::memory_items::MemoryChange>, String> {
         self.store.memory_changes(source).map_err(|e| e.to_string())
     }
+    fn approved_changes(&self, source: &discard_core::model::ChannelId) -> Result<Vec<discard_core::memory_items::MemoryChange>, String> {
+        self.store.approved_changes(source).map_err(|e|e.to_string())
+    }
     fn finish(&self, token: &str) {
         self.registry.revoke(token);
         let files = self.files.lock().unwrap_or_else(|p| p.into_inner()).remove(token);

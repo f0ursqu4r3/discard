@@ -109,6 +109,7 @@ watch([() => props.revision, () => props.running], () => {
     <p v-if="error || loadError" role="alert" class="text-destructive">
       {{ error || loadError }}
     </p>
+    <p v-for="warning in data.warnings ?? []" :key="warning" role="status">{{ warning }}</p>
     <p v-if="channelId === ''">Choose a conversation to see applicable memory.</p>
     <MemoryCaptureStatus
       v-if="channelId"

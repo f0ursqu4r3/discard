@@ -736,8 +736,33 @@ impl Store {
         rows.map(|row| {let (id,json)=row?; Ok((MessageId(id),serde_json::from_str(&json)?))}).collect()
     }
     pub fn record_response_memory(&self, channel: &ChannelId, response: &MessageId, change: &crate::memory_items::MemoryChange) -> Result<bool> {
-        let key=match change {crate::memory_items::MemoryChange::Saved {key,..}=>key.clone(), crate::memory_items::MemoryChange::Proposed(p)=>p.id.clone()};
-        Ok(self.conn.execute("INSERT OR IGNORE INTO response_memory VALUES (?1,?2,?3,?4)", params![channel.0,response.0,key,serde_json::to_string(change)?])? > 0)
+        Ok(self.record_response_memory_at(channel, response, change)?.is_some())
+    }
+    /// Prefer a proposal's original response over a later turn that observes its approval.
+    pub fn record_response_memory_at(&self, channel: &ChannelId, response: &MessageId, change: &crate::memory_items::MemoryChange) -> Result<Option<MessageId>> {
+        use crate::memory_items::MemoryChange;
+        let mut target=response.clone();
+        if let MemoryChange::Saved {item,..}=change && item.origin==crate::memory_items::MutationOrigin::Approved && let Some(proposal_id)=&item.proposal_id {
+            if let Some((id,_))=self.response_memory(channel)?.into_iter().find(|(_,c)|matches!(c,MemoryChange::Proposed(p) if &p.id==proposal_id)) { target=id; }
+        }
+        let key=match change {MemoryChange::Saved {key,..}=>key.clone(),MemoryChange::Proposed(p)=>p.id.clone()};
+        let inserted=self.conn.execute("INSERT OR IGNORE INTO response_memory VALUES (?1,?2,?3,?4)",params![channel.0,target.0,key,serde_json::to_string(change)?])? > 0;
+        Ok(inserted.then_some(target))
+    }
+    /// Retry approval links using immutable receipts and already-persisted proposal rows.
+    /// No response ID is inferred or created when the proposal row is still absent.
+    pub fn reconcile_response_memory(&self, channel: &ChannelId, approvals: &[crate::memory_items::MemoryChange]) -> Result<Vec<(MessageId,crate::memory_items::MemoryChange)>> {
+        use crate::memory_items::MemoryChange;
+        let records=self.response_memory(channel)?;
+        let mut recorded=Vec::new();
+        for approval in approvals {
+            let MemoryChange::Saved {key,item}=approval else { continue };
+            if records.iter().any(|(_,c)|matches!(c,MemoryChange::Saved{key:existing,..} if existing==key)) { continue; }
+            let Some(proposal_id)=&item.proposal_id else { continue };
+            if let Some((response,_))=records.iter().find(|(_,c)|matches!(c,MemoryChange::Proposed(p) if &p.id==proposal_id))
+                && let Some(id)=self.record_response_memory_at(channel,response,approval)? { recorded.push((id,approval.clone())); }
+        }
+        Ok(recorded)
     }
 
     pub fn insert_message(&self, m: &Message) -> Result<()> {

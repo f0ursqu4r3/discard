@@ -34,7 +34,14 @@ export interface MemoryRecord {
   proposalId?: string
   pending?: boolean
 }
+export interface MemoryResolution {
+  status: 'approved' | 'rejected'
+  committed: boolean
+  associationPending: boolean
+  warning: string | null
+}
 export interface MemoryView {
+  warnings?: string[]
   agentId?: string | null
   projectId?: string | null
   items: MemoryItem[]
