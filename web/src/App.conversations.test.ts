@@ -38,6 +38,7 @@ import Composer from './components/Composer.vue'
 import MessageList from './components/MessageList.vue'
 import NavigationPanel from './components/workspace/NavigationPanel.vue'
 import CreateChannelDialog from './components/workspace/CreateChannelDialog.vue'
+import MemoryBrowser from './components/memory/MemoryBrowser.vue'
 import { Button } from './components/ui/button'
 let view: ReturnType<typeof shallowMount> | undefined
 beforeEach(() => {
@@ -234,3 +235,105 @@ test('memory source and fresh-conversation events open the transcript and keep s
     expect(mocks.store.snapshot?.activeProjectId).toBeNull()
   }
 })
+
+test.each([true, false])(
+  'Memory source selection opens retained history only when selection succeeds (selected=%s)',
+  async (selected) => {
+    mocks.store.snapshot = {
+      ...mocks.store.snapshot!,
+      projectId: 'separate-sidebar-project',
+      activeProjectId: 'separate-sidebar-project',
+    }
+    const copyNotice = 'Reply was not saved. Copy the reply before sending again.'
+    const restartNotice =
+      'Conversation history is open, but its session could not restart: provider unavailable. Select this conversation again to retry.'
+    vi.mocked(invoke).mockImplementation(async (name, payload) => {
+      if (name === 'get_conversations') return []
+      if (name === 'memory_get')
+        return {
+          items: [
+            {
+              id: 'memory-item',
+              scope: 'global',
+              kind: 'fact',
+              content: 'Saved fact',
+              version: 1,
+              createdAt: 1,
+              updatedAt: 1,
+              deleted: false,
+              history: [],
+              sourceConversation: 'retained-chat',
+              sourceAvailable: true,
+            },
+          ],
+          scopes: [],
+          proposals: [],
+          responses: [],
+          paused: false,
+        }
+      if (name === 'switch_channel') {
+        expect(payload).toEqual({ channelId: 'retained-chat' })
+        if (!selected) throw new Error('Source conversation is unavailable')
+        // Backend contract: retained-history selection succeeds despite restart failure.
+        // switch_channel then emits the shared event and focuses the main window.
+        mocks.store.snapshot = {
+          ...mocks.store.snapshot!,
+          channelId: 'retained-chat',
+          activeProjectId: null,
+          notice: `${copyNotice}\n\n${restartNotice}`,
+          liveBlocks: [{ type: 'markdown', text: 'Retained unsaved reply' }],
+        }
+        catalogHandlers.get('discard://conversation-opened')?.forEach((handler) => handler())
+      }
+    })
+    view = shallowMount(App, {
+      global: {
+        renderStubDefaultSlot: true,
+        stubs: {
+          WorkspacePageView: false,
+          MemoryBrowser: false,
+          Notices: false,
+          NoticeList: false,
+          ResizablePanelGroup: { template: '<div><slot /></div>' },
+          ResizablePanel: { template: '<div><slot /></div>' },
+        },
+      },
+    })
+    await flushPromises()
+    view.getComponent(NavigationPanel).vm.$emit('navigate', 'memory')
+    await flushPromises()
+    expect(view.findComponent(MessageList).exists()).toBe(false)
+    const browser = view.getComponent(MemoryBrowser)
+    await browser
+      .findAllComponents(Button)
+      .find((button) => button.text() === 'Inspect')!
+      .trigger('click')
+    await browser
+      .findAllComponents(Button)
+      .find((button) => button.text() === 'Open source conversation')!
+      .trigger('click')
+    await flushPromises()
+    expect(invoke).toHaveBeenCalledWith('switch_channel', { channelId: 'retained-chat' })
+    expect(mocks.store.snapshot?.projectId).toBe('separate-sidebar-project')
+    if (selected) {
+      expect(view.findComponent(MemoryBrowser).exists()).toBe(false)
+      expect(view.getComponent(MessageList).props('live')).toEqual([
+        { type: 'markdown', text: 'Retained unsaved reply' },
+      ])
+      const notices = view.get('[data-ui-id="protected-notices"]')
+      expect(notices.text()).toContain(copyNotice)
+      expect(notices.text()).toContain(restartNotice)
+      await view
+        .findAllComponents(Button)
+        .find((button) => button.text() === 'Copy reply before sending again')!
+        .trigger('click')
+      await flushPromises()
+      expect(mocks.copy).toHaveBeenCalledWith('Retained unsaved reply')
+      expect(mocks.store.snapshot?.activeProjectId).toBeNull()
+    } else {
+      expect(view.findComponent(MessageList).exists()).toBe(false)
+      expect(browser.get('[role="alert"]').text()).toContain('Source conversation is unavailable')
+      expect(mocks.store.snapshot?.channelId).toBe('channel')
+    }
+  },
+)

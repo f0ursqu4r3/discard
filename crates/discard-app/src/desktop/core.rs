@@ -590,6 +590,20 @@ impl AppCore {
         state.rev += 1;
         self.changed.notify_one();
     }
+    /// Retain an existing recovery notice when an idle conversation cannot restart.
+    pub fn append_channel_notice(&self, id: &str, message: String) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let channel = if state.active.channel_id == id { Some(&mut state.active) } else { state.parked.get_mut(id) };
+        let Some(channel) = channel else { return };
+        let message = match channel.ui.notice() {
+            Some(existing) if existing.contains(&message) => return,
+            Some(existing) => format!("{existing}\n\n{message}"),
+            None => message,
+        };
+        channel.ui.apply(Update::Notice(message));
+        state.rev += 1;
+        self.changed.notify_one();
+    }
     pub fn ask(&self, ending: super::plan::Confirm) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.confirm = Some(ending);

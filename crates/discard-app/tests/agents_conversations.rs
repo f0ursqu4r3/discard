@@ -680,12 +680,15 @@ async fn folder_reload_preserves_unsaved_replies_and_only_restarts_affected_tran
     assert_eq!(core.active_channel_id(), direct.id.0);
     assert!(!core.channel_session_closed(&direct.id.0));
     assert!(core.channel_session_closed(&parked.id.0));
-    assert!(
-        channels
-            .select(&parked.id.0)
-            .unwrap_err()
-            .contains("test replacement")
+    let direct_notice = core.snapshot().notice;
+    assert!(channels.select("missing-history").is_err());
+    assert_eq!(
+        core.active_channel_id(),
+        direct.id.0,
+        "failed history selection must not open another conversation"
     );
+    assert_eq!(core.snapshot().notice, direct_notice);
+    channels.select(&parked.id.0).unwrap();
     assert_eq!(
         core.active_channel_id(),
         parked.id.0,
@@ -698,6 +701,16 @@ async fn folder_reload_preserves_unsaved_replies_and_only_restarts_affected_tran
         "saved reply and current question stay visible"
     );
     let retained = core.snapshot();
+    let notice = retained.notice.as_deref().unwrap();
+    assert!(notice.contains("Copy the reply before sending again."));
+    assert!(notice.contains("test replacement launch failure"));
+    assert!(notice.contains("Conversation history is open"));
+    channels.select(&parked.id.0).unwrap();
+    assert_eq!(
+        core.snapshot().notice,
+        retained.notice,
+        "repeated restart failure must not duplicate the notice"
+    );
     fail_launch.store(false, std::sync::atomic::Ordering::SeqCst);
     channels.select(&parked.id.0).unwrap();
     assert!(!core.channel_session_closed(&parked.id.0));

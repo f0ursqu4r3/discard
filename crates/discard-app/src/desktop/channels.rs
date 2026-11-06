@@ -83,8 +83,11 @@ impl Channels {
         else { self.core.clear_branch_source(); }
         self.core.clear_slots();
         self.core.refresh_branches(self.core.request_branch_refresh());
-        // Cached history stays selectable even if its replacement runtime fails to launch.
-        if restart { self.start_mode(&channel, true)?; }
+        // Selection succeeded. Report a restart failure in the retained transcript so
+        // callers still open that history through the shared conversation-opened event.
+        if restart && let Err(error) = self.start_mode(&channel, true) {
+            self.core.append_channel_notice(id, format!("Conversation history is open, but its session could not restart: {error}. Select this conversation again to retry."));
+        }
         Ok(())
     }
     pub fn reload_project(&self, id: &ProjectId) -> Result<(), String> {
