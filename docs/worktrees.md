@@ -41,7 +41,8 @@ worktree branch with the first name alphabetically.
 
 A filled marker shows a row with a worktree. Rows without a worktree are dimmed. The current channel's worktree
 row is highlighted, and the main checkout has a `main` tag. Click a parent row to collapse or expand its
-branches. Rows do not start any other actions yet.
+branches. Click a branch row to open its canonical project conversation. If it has no canonical conversation,
+Discard creates one. Opening the conversation does not switch the Git checkout or create a worktree.
 
 ## Archiving
 
