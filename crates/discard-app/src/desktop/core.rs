@@ -59,6 +59,7 @@ struct State {
     parked: BTreeMap<String, ChannelState>,
     rev: u64,
     history_rev: u64,
+    memory_rev: u64,
     theme: ThemeDto,
     window: StateStore,
     branches: Vec<TreeRow>,
@@ -105,6 +106,7 @@ impl AppCore {
                 plugin_notice: None,
                 rev: 0,
                 history_rev: 0,
+                memory_rev: 0,
                 theme: ThemeDto {
                     mode: "dark".into(),
                     tokens: BTreeMap::new(),
@@ -322,6 +324,7 @@ impl AppCore {
             let snapshot = SnapshotDto {
                 rev,
                 history_rev,
+                memory_rev: state.memory_rev,
                 project: state.project.clone(),
                 project_id: state.project_id.clone(),
                 project_path: state.project_path.clone(),
@@ -691,6 +694,7 @@ impl AppCore {
     pub fn apply_runtime(&self, channel: &str, generation: Option<u64>, update: Update) -> bool {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if generation.is_some_and(|generation| generation != s.runtime_generation) { return false; }
+        let memory_changed = matches!(&update, Update::MemoryChanges { .. });
         if s.active.channel_id != channel {
             let marker = s.window.last_read(channel).map(str::to_owned);
             let Some(parked) = s.parked.get_mut(channel) else { return false };
@@ -698,11 +702,13 @@ impl AppCore {
             parked.ui.apply(update);
             parked.new_anchor = new_divider_anchor(parked.ui.history(), marker.as_deref(), parked.new_anchor.as_deref(), false);
             let finished = was_running && !parked.ui.turn_running();
+            if memory_changed { s.memory_rev += 1; }
             if !s.active.ui.turn_running() && !s.parked.values().any(|c| c.ui.turn_running()) { s.confirm = None; }
             s.rev += 1;
             self.changed.notify_one();
             return finished;
         }
+        if memory_changed { s.memory_rev += 1; }
         let old_len = s.active.ui.history().len();
         let was_running = s.active.ui.turn_running();
         s.active.ui.apply(update);

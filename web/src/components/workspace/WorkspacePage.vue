@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getConversations, type ConversationEntry } from '@/bridge/api'
-import { Bot, FileText, FolderGit2, GitBranch, MessagesSquare, Settings, Cpu } from '@lucide/vue'
+import { Bot, FileText, FolderGit2, GitBranch, MessagesSquare, Settings } from '@lucide/vue'
 import type { MessageDto, SnapshotDto } from '@/bridge/types'
 import type { WorkspacePage } from './types'
 import {
@@ -16,6 +16,7 @@ import {
   DialogClose,
 } from '../ui/dialog'
 import BrandMark from './BrandMark.vue'
+import MemoryBrowser from '../memory/MemoryBrowser.vue'
 import { Button } from '../ui/button'
 import { Badge } from '../ui/badge'
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../ui/card'
@@ -29,7 +30,11 @@ import {
   EmptyContent,
 } from '../ui/empty'
 defineOptions({ name: 'WorkspacePageView' })
-const props = defineProps<{ page: WorkspacePage; snapshot: SnapshotDto; messages: MessageDto[] }>()
+const props = defineProps<{
+  page: WorkspacePage
+  snapshot: SnapshotDto
+  messages: MessageDto[]
+}>()
 const emit = defineEmits<{ action: [id: string]; conversation: [] }>()
 const conversations = ref<ConversationEntry[]>([])
 const error = ref('')
@@ -129,18 +134,15 @@ const branchCount = computed(() =>
         </Card>
       </TabsContent>
       <TabsContent value="memory" class="m-0 overflow-auto overscroll-contain p-6">
-        <Empty>
-          <EmptyHeader>
-            <EmptyMedia variant="icon"><Cpu /></EmptyMedia>
-            <EmptyTitle>Agent memory</EmptyTitle>
-            <EmptyDescription>Review stored notes in Settings → Memory.</EmptyDescription>
-          </EmptyHeader>
-          <EmptyContent>
-            <Button variant="outline" @click="emit('action', 'open_settings')">
-              Open settings
-            </Button>
-          </EmptyContent>
-        </Empty>
+        <MemoryBrowser
+          v-if="snapshot.channelId && !snapshot.activeProjectId"
+          :channel-id="snapshot.channelId"
+          :agent-id="snapshot.agentId"
+          :project-id="null"
+          :revision="snapshot.memoryRev"
+          :running="snapshot.turnRunning"
+        />
+        <p v-else>Choose a direct conversation to see its memory.</p>
       </TabsContent>
       <TabsContent value="settings" class="m-0 overflow-auto overscroll-contain p-6">
         <Card size="sm">
@@ -221,7 +223,9 @@ const branchCount = computed(() =>
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <DialogClose as-child><Button variant="ghost">Cancel</Button></DialogClose>
+            <DialogClose as-child>
+              <Button variant="ghost">Cancel</Button>
+            </DialogClose>
             <DialogClose as-child>
               <Button variant="destructive" @click="emit('action', 'remove_project')">
                 Remove project
@@ -259,14 +263,20 @@ const branchCount = computed(() =>
         <BrandMark class="size-12" />
         <div class="min-w-0">
           <h2 class="text-xl font-semibold">{{ snapshot.project }}</h2>
-          <p class="truncate text-sm text-muted-foreground">{{ snapshot.projectPath }}</p>
+          <p class="truncate text-sm text-muted-foreground">
+            {{ snapshot.projectPath }}
+          </p>
         </div>
       </div>
       <div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Card
           v-for="stat in [
             { label: 'Branches', value: branchCount, icon: GitBranch },
-            { label: 'Conversations', value: conversations.length, icon: MessagesSquare },
+            {
+              label: 'Conversations',
+              value: conversations.length,
+              icon: MessagesSquare,
+            },
             { label: 'Agents', value: projectAgents.length, icon: Bot },
             {
               label: 'Current messages',
@@ -326,16 +336,20 @@ const branchCount = computed(() =>
       <p v-if="!projectAgents.length">No agents have conversations in this project.</p>
       <p v-if="error" role="alert">{{ error }}</p>
     </div>
-    <Empty v-else-if="page === 'memory'">
-      <EmptyHeader>
-        <EmptyMedia variant="icon"><Cpu /></EmptyMedia>
-        <EmptyTitle>Project memory</EmptyTitle>
-        <EmptyDescription>Review project and agent notes in Settings → Memory.</EmptyDescription>
-      </EmptyHeader>
-      <EmptyContent>
-        <Button variant="outline" @click="emit('action', 'open_settings')">Open settings</Button>
-      </EmptyContent>
-    </Empty>
+    <div v-else-if="page === 'memory'" class="overflow-auto p-3">
+      <MemoryBrowser
+        v-if="snapshot.channelId && snapshot.activeProjectId === snapshot.projectId"
+        :channel-id="snapshot.channelId"
+        :agent-id="snapshot.agentId"
+        :project-id="snapshot.activeProjectId"
+        :revision="snapshot.memoryRev"
+        :running="snapshot.turnRunning"
+      />
+      <p v-else>
+        Choose a conversation in this project to see its memory. Settings → Memory shows all
+        domains.
+      </p>
+    </div>
     <Empty v-else>
       <EmptyHeader>
         <EmptyMedia variant="icon"><FileText /></EmptyMedia>

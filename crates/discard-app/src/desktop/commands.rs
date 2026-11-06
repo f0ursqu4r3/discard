@@ -100,9 +100,11 @@ pub async fn create_channel(channels: State<'_, Arc<super::channels::Channels>>,
     tauri::async_runtime::spawn_blocking(move || channels.create(&name, &workspace_mode, &source_channel)).await.map_err(|e| e.to_string())?
 }
 #[tauri::command]
-pub async fn switch_channel(channels: State<'_, Arc<super::channels::Channels>>, channel_id: String) -> Result<(), String> {
+pub async fn switch_channel(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, channel_id: String) -> Result<(), String> {
     let channels = channels.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || channels.select(&channel_id)).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || channels.select(&channel_id)).await.map_err(|e| e.to_string())??;
+    super::windows::show_conversation(&app);
+    Ok(())
 }
 #[tauri::command]
 pub async fn open_branch_channel(channels: State<'_, Arc<super::channels::Channels>>, key: String) -> Result<String, String> {

@@ -35,13 +35,13 @@
 
 **Interfaces:** `Channel.project_id: Option<ProjectId>`; agent lifecycle operations in `Store`; `AgentDraft` includes editable name, avatar, provider, model, and personality alongside existing policy fields. Use `system_prompt` as the stored personality field. Add archive state to stored agent records, not to their IDs.
 
-- [ ] Add behavior tests for generated editable names, two agents sharing a model, archive/restore, and permanent deletion choices that preserve shared data.
-- [ ] Add store tests for one default direct conversation per agent, multiple additional conversations, nullable project context, and context fixed at creation.
-- [ ] Implement `Store::create_agent(&AgentConfig) -> Result<AgentId>`, `Store::set_agent_archived(&AgentId, bool) -> Result<()>`, and `Store::agent_archived(&AgentId) -> Result<bool>`.
-- [ ] Implement `Store::create_conversation(&AgentId, Option<&ProjectId>, &str) -> Result<Channel>` and `Store::conversations_for_agent(&AgentId) -> Result<Vec<Channel>>`; creation also creates the initial session.
-- [ ] Add a generated-name helper and validate nonempty names and provider/model choices. Keep separate IDs even when names match.
-- [ ] Change the fresh database schema and adapt callers to optional projects. Do not add compatibility migrations for this feature.
-- [ ] Run `cargo test -p discard-core` and compile the workspace to locate all interface callers.
+- [x] Add behavior tests for generated editable names, two agents sharing a model, archive/restore, and permanent deletion choices that preserve shared data.
+- [x] Add store tests for one default direct conversation per agent, multiple additional conversations, nullable project context, and context fixed at creation.
+- [x] Implement `Store::create_agent(&AgentConfig) -> Result<AgentId>`, `Store::set_agent_archived(&AgentId, bool) -> Result<()>`, and `Store::agent_archived(&AgentId) -> Result<bool>`.
+- [x] Implement `Store::create_conversation(&AgentId, Option<&ProjectId>, &str) -> Result<Channel>` and `Store::conversations_for_agent(&AgentId) -> Result<Vec<Channel>>`; creation also creates the initial session.
+- [x] Add a generated-name helper and validate nonempty names and provider/model choices. Keep separate IDs even when names match.
+- [x] Change the fresh database schema and adapt callers to optional projects. Do not add compatibility migrations for this feature.
+- [x] Run `cargo test -p discard-core` and compile the workspace to locate all interface callers.
 
 ### Task 2: Four-domain memory items
 
@@ -49,13 +49,13 @@
 
 **Interfaces:** Add `Scope::AgentProject(AgentId, ProjectId)` and `ScopeKind::AgentProject`. Add `Scope::applicable(&AgentId, Option<&ProjectId>) -> Vec<Scope>` in precedence order. MCP identity binds the agent, optional project, source conversation, and separate read/write grants. Item mutations use expected versions.
 
-- [ ] Test the complete domain matrix with two agents and two projects, including project-less access, scope discovery, search, and path validation for both IDs.
-- [ ] Add item storage containing content, kind (fact/preference/instruction/decision/commitment), source conversation, timestamps, and version history. Keep markdown authoritative and the index rebuildable.
-- [ ] Implement list/read/create/update/delete/move/undo operations with optimistic concurrency. Forgotten items and superseded versions must not enter retrieval. Keep a suppression record to prevent immediate automatic recapture from the same conversation.
-- [ ] Separate read grants from write grants. Automatic tool writes target only the matching private domain. Shared writes produce a proposal for user approval; callers cannot self-authorize by setting a JSON flag.
-- [ ] Add memory delete and correction behavior. Inferred replacements require clarification; explicit user edits and approved proposals may replace an item.
-- [ ] Add tests for stale edit, stale Undo, deleted search hits, move between domains, history inspection, and failed shared-write escalation.
-- [ ] Run `cargo test -p discard-core -p discard-mcp -p discard-lua`.
+- [x] Test the complete domain matrix with two agents and two projects, including project-less access, scope discovery, search, and path validation for both IDs.
+- [x] Add item storage containing content, kind (fact/preference/instruction/decision/commitment), source conversation, timestamps, and version history. Keep markdown authoritative and the index rebuildable.
+- [x] Implement list/read/create/update/delete/move/undo operations with optimistic concurrency. Forgotten items and superseded versions must not enter retrieval. Keep a suppression record to prevent immediate automatic recapture from the same conversation.
+- [x] Separate read grants from write grants. Automatic tool writes target only the matching private domain. Shared writes produce a proposal for user approval; callers cannot self-authorize by setting a JSON flag.
+- [x] Add memory delete and correction behavior. Inferred replacements require clarification; explicit user edits and approved proposals may replace an item.
+- [x] Add tests for stale edit, stale Undo, deleted search hits, move between domains, history inspection, and failed shared-write escalation.
+- [x] Run `cargo test -p discard-core -p discard-mcp -p discard-lua`.
 
 ### Task 3: Conversation-only provider sessions
 
@@ -63,13 +63,13 @@
 
 **Interfaces:** Add an explicit conversation-only session mode to `SessionSpec`. In this mode only Discard memory MCP tools are available. Preserve the selected provider/model and use app-owned empty working directories. Keep provider authentication intact.
 
-- [ ] Read `.superpowers/sdd/2026-11-05-agents-and-memory/runtime-research.md` for version-matched source evidence and supported CLI controls.
-- [ ] Add process-fixture tests asserting conversation-only controls, disabled inherited MCP/plugins/provider memory, fresh system prompts, and `allowProviderModelFallback:false` for Codex.
-- [ ] Implement Claude's documented tool/settings restrictions and disable both automatic memory and CLAUDE.md context loading with the verified environment switches.
-- [ ] Implement Codex startup catalog sanitization, exact selected-model validation, explicit inherited-server disables, and verified feature controls. Never edit the user's catalog or auth. Required controls that cannot be enforced must produce a visible error.
-- [ ] Check the installed provider's actual tool surface or a supported runtime capability signal. Do not equate fake-process argument tests with proof of isolation. Document any verification limits.
-- [ ] Add tests for missing/incompatible catalogs, missing selected model, malformed MCP settings, and required-control failures. Preserve existing coding-session behavior outside the new mode.
-- [ ] Run provider unit/process tests and compile all workspace test targets. Publish context-budget metadata available from the selected model for Task 4.
+- [x] Read `.superpowers/sdd/2026-11-05-agents-and-memory/runtime-research.md` for version-matched source evidence and supported CLI controls.
+- [x] Add process-fixture tests asserting conversation-only controls, disabled inherited MCP/plugins/provider memory, fresh system prompts, and `allowProviderModelFallback:false` for Codex.
+- [x] Implement Claude's documented tool/settings restrictions and disable both automatic memory and CLAUDE.md context loading with the verified environment switches.
+- [x] Implement Codex startup catalog sanitization, exact selected-model validation, explicit inherited-server disables, and verified feature controls. Never edit the user's catalog or auth. Required controls that cannot be enforced must produce a visible error.
+- [x] Check the installed provider's actual tool surface or a supported runtime capability signal. Do not equate fake-process argument tests with proof of isolation. Document any verification limits.
+- [x] Add tests for missing/incompatible catalogs, missing selected model, malformed MCP settings, and required-control failures. Preserve existing coding-session behavior outside the new mode.
+- [x] Run provider unit/process tests and compile all workspace test targets. Publish context-budget metadata available from the selected model for Task 4.
 
 ### Task 4: Per-turn agent configuration and context
 
@@ -77,14 +77,14 @@
 
 **Interfaces:** Resolve a `Provider` from the current `AgentConfig.provider` at each turn. `MemoryService::prepare` takes optional project context and source conversation. Context contains the current transcript, personality, and current applicable memory; it never imports another conversation's transcript.
 
-- [ ] Add fake-provider tests for live model/personality edits, edits during a response, no fallback on provider failure, and conversation continuity across provider changes.
-- [ ] Refresh configuration before each queued turn. Record a transcript marker when the provider/model differs from the previous turn. Archived/deleted agents cannot start a new turn.
-- [ ] Rebuild provider input from the app's transcript and current memory. Do not resume a provider-native session that retains stale prompts or a previous model's context.
-- [ ] Implement context limits and summaries of older messages, preserving the complete transcript. Include relevant memory and all applicable instructions/preferences; report when a summary is used.
-- [ ] Make memory capture part of the turn workflow. Prompt/tool guidance must exclude guesses and secrets, obey private defaults, and surface saved-item events and shared-write proposals to the UI.
-- [ ] Route approval decisions back to the bound proposal. Ensure a rejected proposal cannot mutate shared memory.
-- [ ] In conversation-only mode, expose memory tools without external write actions. Project-less chats use an app-owned empty working directory and cannot inherit project plugins or filesystem access.
-- [ ] Run focused engine/context/provider tests, then `cargo test --workspace`.
+- [x] Add fake-provider tests for live model/personality edits, edits during a response, no fallback on provider failure, and conversation continuity across provider changes.
+- [x] Refresh configuration before each queued turn. Record a transcript marker when the provider/model differs from the previous turn. Archived/deleted agents cannot start a new turn.
+- [x] Rebuild provider input from the app's transcript and current memory. Do not resume a provider-native session that retains stale prompts or a previous model's context.
+- [x] Implement context limits and summaries of older messages, preserving the complete transcript. Include relevant memory and all applicable instructions/preferences; report when a summary is used.
+- [x] Make memory capture part of the turn workflow. Prompt/tool guidance must exclude guesses and secrets, obey private defaults, and surface saved-item events and shared-write proposals to the UI.
+- [x] Route approval decisions back to the bound proposal. Ensure a rejected proposal cannot mutate shared memory.
+- [x] In conversation-only mode, expose memory tools without external write actions. Project-less chats use an app-owned empty working directory and cannot inherit project plugins or filesystem access.
+- [x] Run focused engine/context/provider tests, then `cargo test --workspace`.
 
 ### Task 5: Desktop agent and conversation controls
 
@@ -92,12 +92,12 @@
 
 **Interfaces:** Tauri commands create/edit/archive/restore/delete agents and create/select direct or project conversations. DTOs expose agent IDs, optional project context, archive state, and provider/model labels. Keep bridge types and command registration synchronized.
 
-- [ ] Add create/edit forms with a generated editable name, provider/model selection, optional avatar and personality, and clear validation errors.
-- [ ] Add agent navigation and a default direct chat. Support additional conversations and project conversations with explicit agent selection.
-- [ ] Add archive/restore and permanent-delete choices. Prevent running-response deletion; preserve shared memory. Kept history remains readable even if its agent is deleted.
-- [ ] Show model-change markers, context-summary notices, and model errors with retry/model-selection controls.
-- [ ] Add Vue and Rust tests for command payloads, direct-chat selection without a project, multiple conversations, pending edits, and deletion choices.
-- [ ] Run `pnpm --dir web test`, `pnpm --dir web typecheck`, and focused desktop tests.
+- [x] Add create/edit forms with a generated editable name, provider/model selection, optional avatar and personality, and clear validation errors.
+- [x] Add agent navigation and a default direct chat. Support additional conversations and project conversations with explicit agent selection.
+- [x] Add archive/restore and permanent-delete choices. Prevent running-response deletion; preserve shared memory. Kept history remains readable even if its agent is deleted.
+- [x] Show model-change markers, context-summary notices, and model errors with retry/model-selection controls.
+- [x] Add Vue and Rust tests for command payloads, direct-chat selection without a project, multiple conversations, pending edits, and deletion choices.
+- [x] Run `pnpm --dir web test`, `pnpm --dir web typecheck`, and focused desktop tests.
 
 ### Task 6: Memory controls and final integration
 
@@ -105,11 +105,11 @@
 
 **Interfaces:** User memory commands expose items, versions, domain choices, source links, history, and mutation results. Conversation events expose saved items and pending shared-memory proposals. User edits use the same versioned storage as agent tools.
 
-- [ ] Implement all-domain Settings browsing and conversation-scoped memory browsing with inspect/edit/delete/move controls.
-- [ ] Show automatic saves beside responses with Undo. Show shared-write proposals with approve/reject. Reject stale approvals and stale Undo operations with a clear error.
-- [ ] Add a Forget action with an explanation that transcript deletion is separate and a working fresh-conversation action.
-- [ ] Show when automatic capture is paused after Forget/Undo. Provide working app-only resume and fresh-conversation actions; pass the current conversation when forgetting an item sourced elsewhere.
-- [ ] Test memory freshness on the next response, source links, scope restrictions, global/project approval, contradiction handling, and forgotten-item suppression across a fresh conversation.
-- [ ] Update documentation to describe actual new behavior and remove obsolete restart/session-start restrictions.
-- [ ] Run workspace tests, web tests, type checks, lint, and formatting checks. Inspect the working UI where the available runtime permits it.
+- [x] Implement all-domain Settings browsing and conversation-scoped memory browsing with inspect/edit/delete/move controls.
+- [x] Show automatic saves beside responses with Undo. Show shared-write proposals with approve/reject. Reject stale approvals and stale Undo operations with a clear error.
+- [x] Add a Forget action with an explanation that transcript deletion is separate and a working fresh-conversation action.
+- [x] Show when automatic capture is paused after Forget/Undo. Provide working app-only resume and fresh-conversation actions; pass the current conversation when forgetting an item sourced elsewhere.
+- [x] Test memory freshness on the next response, source links, scope restrictions, global/project approval, contradiction handling, and forgotten-item suppression across a fresh conversation.
+- [x] Update documentation to describe actual new behavior and remove obsolete restart/session-start restrictions.
+- [x] Run workspace tests, web tests, type checks, lint, and formatting checks. Inspect the working UI where the available runtime permits it.
 - [ ] Review the complete change against every requirement in the spec. Resolve important findings before reporting completion.

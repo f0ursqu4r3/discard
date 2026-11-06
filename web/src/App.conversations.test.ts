@@ -35,6 +35,7 @@ vi.mock('./bridge/api', async (original) => ({
 vi.mock('vue-sonner', () => ({ toast: { error: vi.fn(), success: vi.fn() } }))
 import App from './App.vue'
 import Composer from './components/Composer.vue'
+import MessageList from './components/MessageList.vue'
 import NavigationPanel from './components/workspace/NavigationPanel.vue'
 import CreateChannelDialog from './components/workspace/CreateChannelDialog.vue'
 import { Button } from './components/ui/button'
@@ -212,4 +213,24 @@ test('top-level menu creation refreshes the same-context conversation catalog', 
   expect(mocks.store.refresh).toHaveBeenCalled()
   expect(navigation.props('projectId')).toBeNull()
   expect(navigation.text()).toContain('New menu discussion')
+})
+
+test('memory source and fresh-conversation events open the transcript and keep sidebar selection', async () => {
+  mocks.store.snapshot = {
+    ...mocks.store.snapshot!,
+    projectId: 'separate-sidebar-project',
+    activeProjectId: null,
+  }
+  const wrapper = app()
+  await flushPromises()
+  for (const action of ['source link', 'fresh conversation']) {
+    wrapper.getComponent(NavigationPanel).vm.$emit('navigate', 'memory')
+    await flushPromises()
+    expect(wrapper.findComponent(MessageList).exists(), action).toBe(false)
+    catalogHandlers.get('discard://conversation-opened')?.forEach((handler) => handler())
+    await flushPromises()
+    expect(wrapper.findComponent(MessageList).exists(), action).toBe(true)
+    expect(mocks.store.snapshot?.projectId).toBe('separate-sidebar-project')
+    expect(mocks.store.snapshot?.activeProjectId).toBeNull()
+  }
 })

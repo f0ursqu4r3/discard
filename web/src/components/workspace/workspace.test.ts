@@ -35,6 +35,9 @@ test('DM profile hides project-specific branch and plugin content', () => {
   expect(view.find('[data-ui-id="context-plugin-slot"]').exists()).toBe(false)
   expect(view.text()).toContain(snapshot.agent)
   expect(view.text()).toContain('Profile')
+  const planned = view.findAll('[role="tab"]').find((tab) => tab.text().includes('Projects'))!
+  expect(planned.attributes('disabled')).toBeDefined()
+  expect(planned.text()).toContain('Soon')
 })
 
 test('shared user bar opens application settings when reviews are pending', async () => {

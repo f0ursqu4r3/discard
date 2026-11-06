@@ -75,6 +75,7 @@ export interface SnapshotDto {
   composerDisabled: boolean
   rev: number
   historyRev: number
+  memoryRev: number
   project: string
   projectId: string
   projectPath: string
