@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { GitBranch, FolderGit2, Hash, Activity, ShieldCheck } from '@lucide/vue'
 import type { SnapshotDto } from '@/bridge/types'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../ui/tabs'
@@ -7,12 +7,23 @@ import { Card, CardHeader, CardTitle, CardContent } from '../ui/card'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
 import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from '../ui/empty'
+import AgentSummary from '../agents/AgentSummary.vue'
 import MemberList from '../MemberList.vue'
 import MemoryBrowser from '../memory/MemoryBrowser.vue'
 import PluginElement from '@/plugin/PluginElement.vue'
-const props = defineProps<{ snapshot: SnapshotDto; directMessage?: boolean }>()
+const props = defineProps<{
+  snapshot: SnapshotDto
+  directMessage?: boolean
+  profileRequest?: number
+}>()
 const emit = defineEmits<{ action: [id: string]; approvals: [] }>()
 const tab = ref('context')
+watch(
+  () => [props.snapshot.agentId, props.profileRequest],
+  () => {
+    tab.value = 'context'
+  },
+)
 const branch = computed(() => props.snapshot.branches.find((row) => row.current)?.label)
 </script>
 <template>
@@ -31,7 +42,15 @@ const branch = computed(() => props.snapshot.branches.find((row) => row.current)
       </TabsList>
     </div>
     <TabsContent value="context" class="m-0 min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">
-      <div class="flex flex-col gap-3">
+      <AgentSummary
+        v-if="directMessage"
+        :key="snapshot.agentId"
+        :agent-id="snapshot.agentId"
+        :name="snapshot.agent"
+        :status="snapshot.agentStatus"
+        @profile="emit('action', `view_agent_profile:${$event}`)"
+      />
+      <div v-else class="flex flex-col gap-3">
         <Card v-if="!directMessage" data-ui-id="branch-context" size="sm">
           <CardHeader>
             <CardTitle class="flex items-center gap-2 text-sm">

@@ -103,6 +103,8 @@ pub async fn create_channel(channels: State<'_, Arc<super::channels::Channels>>,
 pub async fn switch_channel(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, channel_id: String) -> Result<(), String> {
     let channels = channels.inner().clone();
     tauri::async_runtime::spawn_blocking(move || channels.select(&channel_id)).await.map_err(|e| e.to_string())??;
+    use tauri::Emitter;
+    let _ = app.emit("discard://conversations", ());
     super::windows::show_conversation(&app);
     Ok(())
 }
@@ -165,12 +167,25 @@ pub async fn choose_project_folder(app: tauri::AppHandle, channels: State<'_, Ar
 #[tauri::command]
 pub fn get_conversations(context: State<'_, super::settings::SettingsContext>) -> Result<Vec<serde_json::Value>, String> {
     let store = context.store.lock().unwrap_or_else(|e| e.into_inner());
+    let direct_messages = store.direct_message_agents().map_err(|e| e.to_string())?;
     store.all_conversations().map_err(|e| e.to_string())?.into_iter().map(|channel| {
         let agent = store.load_agent(&channel.agent_id).map_err(|e| e.to_string())?;
         let archived = store.channel_archived(&channel.id).map_err(|e| e.to_string())?;
         let agent_archived = store.agent_archived(&channel.agent_id).ok();
-        Ok(serde_json::json!({"id":channel.id.0,"name":channel.name,"agentId":channel.agent_id.0,"agent":agent.name,"provider":agent.provider,"model":agent.model,"projectId":channel.project_id.map(|p|p.0),"workspaceMode":channel.workspace_mode.as_str(),"archived":archived,"agentArchived":agent_archived == Some(true),"deleted":agent_archived.is_none()}))
+        let is_default = store.default_conversation(&channel.agent_id).map(|c| c.id == channel.id).unwrap_or(false);
+        let in_dm_list = channel.project_id.is_none() && direct_messages.contains(&channel.agent_id);
+        Ok(serde_json::json!({"inDmList":in_dm_list,"isDefault":is_default,"id":channel.id.0,"name":channel.name,"agentId":channel.agent_id.0,"agent":agent.name,"provider":agent.provider,"model":agent.model,"projectId":channel.project_id.map(|p|p.0),"workspaceMode":channel.workspace_mode.as_str(),"archived":archived,"agentArchived":agent_archived == Some(true),"deleted":agent_archived.is_none()}))
     }).collect()
+}
+
+#[tauri::command]
+pub async fn search_agent_history(context: State<'_, super::settings::SettingsContext>, agent_id: String, query: String) -> Result<discard_core::store::HistorySearch, String> {
+    let store = context.store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        store.lock().unwrap_or_else(|e| e.into_inner())
+            .search_direct_history(&discard_core::model::AgentId(agent_id), &query)
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string())?
 }
 #[tauri::command]
 pub async fn create_conversation(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, agent_id: String, project_id: Option<String>, name: String) -> Result<String, String> {
@@ -182,9 +197,12 @@ pub async fn create_conversation(app: tauri::AppHandle, channels: State<'_, Arc<
     result
 }
 #[tauri::command]
-pub async fn open_agent_chat(channels: State<'_, Arc<super::channels::Channels>>, agent_id: String) -> Result<String, String> {
+pub async fn open_agent_chat(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, agent_id: String) -> Result<String, String> {
+    use tauri::Emitter;
     let channels = channels.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || channels.open_agent(&discard_core::model::AgentId(agent_id))).await.map_err(|e| e.to_string())?
+    let id = tauri::async_runtime::spawn_blocking(move || channels.open_agent(&discard_core::model::AgentId(agent_id))).await.map_err(|e| e.to_string())??;
+    let _ = app.emit("discard://conversations", ());
+    Ok(id)
 }
 
 #[tauri::command]

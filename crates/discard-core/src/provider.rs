@@ -52,11 +52,22 @@ pub struct SessionSpec {
     pub mcp_config: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ModelInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+}
+
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn id(&self) -> &str;
     fn capabilities(&self) -> &CapabilityMatrix;
     async fn check_setup(&self) -> SetupStatus;
+    /// Available models reported by this provider, without starting a conversation.
+    async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        Err(ProviderError::Setup("This provider does not expose a model list.".into()))
+    }
     /// Catalog context limit for the exact model, when the provider publishes one.
     fn model_context_window(&self, _model: &str) -> Option<u64> {
         None

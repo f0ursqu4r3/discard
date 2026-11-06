@@ -2,13 +2,14 @@
 use super::{core::AppCore, plan::{self, Confirm, Plan}};
 use discard_core::{action::Action, context_menu::ContextTarget, model::ChannelId, settings::SettingsStore, workspace::GitWorkspace};
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 pub type Relaunch = Arc<dyn Fn(bool) -> Result<(), String> + Send + Sync>;
 
 /// One provider and the last result of its setup check.
 #[derive(Clone)]
 pub struct ProviderInfo {
+    pub provider: Arc<dyn discard_core::provider::Provider>,
     pub id: String,
     pub matrix: discard_core::capability::CapabilityMatrix,
     pub setup: Arc<Mutex<Option<discard_core::provider::SetupStatus>>>,
@@ -64,6 +65,17 @@ pub fn run(app: &AppHandle, core: &Arc<AppCore>, actions: &DesktopActions, actio
     }
     match plan::plan(action, if matches!(action, Action::Quit | Action::ToggleSafeMode | Action::CloseWindow) { core.any_running() } else { ctx.turn_running }, actions.confirms(), ctx.safe_mode) {
         Plan::OpenSettings(page) => if let Err(error) = super::windows::open_settings(app, page) { core.notice(format!("Cannot open Settings: {error}")); },
+        Plan::OpenAgentProfile => {
+            let id = match &target {
+                Some(ContextTarget::Agent { id, .. }) => id.clone(),
+                _ => core.snapshot().agent_id,
+            };
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.emit("discard://agent-profile", id);
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }
         Plan::CancelTurn => core.cancel(),
         Plan::ToggleMemberList => { let _ = core.set_member_list_visible(!core.snapshot().member_list_visible); }
         Plan::Ask(ending) => core.ask(ending),

@@ -36,17 +36,11 @@ pub const LABEL_WORKSPACE_REVEAL: &str = "Reveal";
 pub const LABEL_RESET_SETTINGS: &str = "Reset settings";
 pub const LABEL_REBUILD_MEMORY_INDEX: &str = "Rebuild memory index";
 pub const LABEL_CLEAR_LOGS: &str = "Clear logs";
-pub const LABEL_AGENT: &str = "Agent";
-pub const LABEL_MODEL: &str = "Model";
-pub const LABEL_SYSTEM_PROMPT: &str = "System prompt";
-pub const LABEL_APPROVAL_POLICY: &str = "Approval policy";
-pub const LABEL_PLUGIN_WRITE: &str = "plugin.write";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
     General,
     Appearance,
-    Agents,
     Providers,
     Plugins,
     Memory,
@@ -61,7 +55,6 @@ impl SettingsPage {
         &[
             SettingsPage::General,
             SettingsPage::Appearance,
-            SettingsPage::Agents,
             SettingsPage::Providers,
             SettingsPage::Plugins,
             SettingsPage::Memory,
@@ -76,7 +69,6 @@ impl SettingsPage {
         match self {
             SettingsPage::General => "General",
             SettingsPage::Appearance => "Appearance",
-            SettingsPage::Agents => "Agents",
             SettingsPage::Providers => "Providers",
             SettingsPage::Plugins => "Plugins",
             SettingsPage::Memory => "Memory",
@@ -89,7 +81,7 @@ impl SettingsPage {
 
     /// Only available pages have a body. The others show as "Soon".
     pub fn is_available(self) -> bool {
-        matches!(self, SettingsPage::General | SettingsPage::Appearance | SettingsPage::Plugins | SettingsPage::Providers | SettingsPage::Agents | SettingsPage::Keybindings | SettingsPage::Logs | SettingsPage::Memory | SettingsPage::Workspaces | SettingsPage::Advanced)
+        matches!(self, SettingsPage::General | SettingsPage::Appearance | SettingsPage::Plugins | SettingsPage::Providers | SettingsPage::Keybindings | SettingsPage::Logs | SettingsPage::Memory | SettingsPage::Workspaces | SettingsPage::Advanced)
     }
 
     /// Field labels the search also matches. Pages with no body have none.
@@ -107,7 +99,6 @@ impl SettingsPage {
             SettingsPage::Memory => &[LABEL_MEMORY_SCOPES, LABEL_MEMORY_FILES, LABEL_MEMORY_REVEAL],
             SettingsPage::Logs => &[LABEL_LOG_LEVEL, LABEL_LOG_COMPONENT, LABEL_LOG_ID, LABEL_LOG_FOLLOW],
             SettingsPage::Keybindings => &[LABEL_KEYBINDINGS_RECORD, LABEL_KEYBINDINGS_RESET, LABEL_KEYBINDINGS_UNBIND, "Shortcut", "Key"],
-            SettingsPage::Agents => &[LABEL_AGENT, LABEL_MODEL, LABEL_SYSTEM_PROMPT, LABEL_APPROVAL_POLICY, LABEL_PLUGIN_WRITE],
             SettingsPage::Plugins => &[
                 "Safe mode",
                 "Review",
@@ -149,8 +140,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_ten_pages_are_available() {
-        assert_eq!(SettingsPage::all().len(), 10);
+    fn all_nine_pages_are_available() {
+        assert_eq!(SettingsPage::all().len(), 9);
         let available: Vec<_> = SettingsPage::all()
             .iter()
             .copied()
@@ -158,7 +149,7 @@ mod tests {
             .collect();
         assert_eq!(
             available,
-            vec![SettingsPage::General, SettingsPage::Appearance, SettingsPage::Agents, SettingsPage::Providers, SettingsPage::Plugins, SettingsPage::Memory, SettingsPage::Workspaces, SettingsPage::Keybindings, SettingsPage::Logs, SettingsPage::Advanced]
+            vec![SettingsPage::General, SettingsPage::Appearance, SettingsPage::Providers, SettingsPage::Plugins, SettingsPage::Memory, SettingsPage::Workspaces, SettingsPage::Keybindings, SettingsPage::Logs, SettingsPage::Advanced]
         );
     }
 
@@ -184,9 +175,10 @@ mod tests {
     }
 
     #[test]
-    fn agent_labels_are_searchable() {
-        for label in ["Agent", "Model", "System prompt", "Approval policy", "plugin.write"] { assert!(search(label).contains(&SettingsPage::Agents)); }
-        assert!(SettingsPage::Agents.is_available());
+    fn agent_profiles_are_not_settings_pages() {
+        for label in ["Agents", "Model", "System prompt", "Approval policy", "plugin.write"] {
+            assert!(search(label).is_empty(), "{label}");
+        }
     }
 
     #[test]

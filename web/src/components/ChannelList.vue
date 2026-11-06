@@ -101,7 +101,7 @@ const approvals = computed(
     aria-label="Workspace navigation"
     class="flex h-full min-w-0 flex-col bg-sidebar text-sidebar-foreground"
   >
-    <DropdownMenu>
+    <DropdownMenu v-if="page !== 'direct-messages' && projectId">
       <DropdownMenuTrigger as-child>
         <button
           data-ui-id="project-header"
@@ -109,14 +109,13 @@ const approvals = computed(
           aria-label="Project menu"
           class="flex h-16 w-full shrink-0 items-center gap-3 border-b border-border/60 px-4 text-left outline-none transition-colors hover:bg-sidebar-accent/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         >
-          <BrandMark v-if="page !== 'direct-messages'" class="size-8 shrink-0" />
-          <Users v-else class="size-7 shrink-0 text-muted-foreground" />
+          <BrandMark class="size-8 shrink-0" />
           <span class="min-w-0 flex-1">
             <span class="block truncate text-sm font-semibold">
-              {{ page === 'direct-messages' || !projectId ? 'Agents' : project }}
+              {{ project }}
             </span>
             <span class="block truncate text-xs text-muted-foreground" :title="projectPath">
-              {{ page === 'direct-messages' || !projectId ? 'Direct chats' : projectPath }}
+              {{ projectPath }}
             </span>
           </span>
           <ChevronDown class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -131,9 +130,9 @@ const approvals = computed(
           <Plus />
           New conversation
         </DropdownMenuItem>
-        <DropdownMenuItem @select="emit('action', 'open_agent_settings')">
+        <DropdownMenuItem @select="emit('action', 'show_friends')">
           <Users />
-          Manage agents
+          Agents
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem :disabled="!projectId" @select="emit('navigate', 'project-settings')">

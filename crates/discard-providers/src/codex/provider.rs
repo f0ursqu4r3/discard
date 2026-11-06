@@ -168,6 +168,10 @@ impl Provider for CodexProvider {
 
     /// Checks that the CLI exists and reports a login through its exit status.
     /// Discard never reads, stores, or logs credentials.
+    async fn models(&self) -> Result<Vec<discard_core::provider::ModelInfo>, ProviderError> {
+        crate::models::codex(self.command()).await
+    }
+
     async fn check_setup(&self) -> SetupStatus {
         let version =
             self.command().arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true).status();

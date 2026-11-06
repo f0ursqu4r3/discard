@@ -136,6 +136,23 @@ pub struct Store {
     conn: Connection,
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryMatch {
+    pub channel_id: String,
+    pub channel_name: String,
+    pub message_id: String,
+    pub role: String,
+    pub preview: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistorySearch {
+    pub results: Vec<HistoryMatch>,
+    pub has_more: bool,
+}
+
 fn decision_str(d: Decision) -> &'static str {
     match d {
         Decision::Approve => "approve",
@@ -207,6 +224,7 @@ impl Store {
             tx.pragma_update(None, "user_version", 3)?;
             tx.commit()?;
         }
+        self.conn.execute_batch("CREATE TABLE IF NOT EXISTS direct_message_list (agent_id TEXT PRIMARY KEY REFERENCES agents(id));")?;
         Ok(())
     }
 
@@ -328,6 +346,17 @@ impl Store {
     pub fn default_conversation(&self, agent: &AgentId) -> Result<Channel> {
         let id: Option<String> = self.conn.query_row("SELECT id FROM channels WHERE agent_id=?1 AND is_default=1", params![agent.0], |r| r.get(0)).optional()?;
         self.conversations_for_agent(agent)?.into_iter().find(|c| Some(&c.id.0)==id.as_ref()).ok_or_else(||StoreError::NotFound("default conversation".into()))
+    }
+
+    /// DM list membership is independent of creating an agent or its empty default chat.
+    pub fn add_direct_message(&self, agent: &AgentId) -> Result<()> {
+        self.conn.execute("INSERT OR IGNORE INTO direct_message_list (agent_id) VALUES (?1)", params![agent.0])?;
+        Ok(())
+    }
+
+    pub fn direct_message_agents(&self) -> Result<Vec<AgentId>> {
+        let mut stmt = self.conn.prepare("SELECT agent_id FROM direct_message_list ORDER BY rowid")?;
+        Ok(stmt.query_map([], |r| r.get::<_, String>(0).map(AgentId))?.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     pub fn set_agent_archived(&self, id: &AgentId, archived: bool) -> Result<()> {
@@ -791,6 +820,43 @@ impl Store {
         Ok(out)
     }
 
+    /// Literal, case-insensitive search of saved direct message text, newest first.
+    /// Includes archived and retained chats; never reads project conversations.
+    pub fn search_direct_history(&self, agent: &AgentId, query: &str) -> Result<HistorySearch> {
+        let needle = query.trim().to_lowercase();
+        let mut results = Vec::new();
+        if needle.is_empty() { return Ok(HistorySearch { results, has_more: false }); }
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, m.channel_id, c.name, m.role, m.blocks_json
+             FROM messages m JOIN channels c ON c.id = m.channel_id
+             WHERE c.agent_id = ?1 AND c.project_id IS NULL ORDER BY m.ord DESC"
+        )?;
+        let rows = stmt.query_map(params![agent.0], |r| Ok((
+            r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?, r.get::<_, String>(4)?
+        )))?;
+        for row in rows {
+            let (message_id, channel_id, channel_name, role, json) = row?;
+            let blocks = serde_json::from_str::<Vec<Block>>(&json)?;
+            let text = crate::context_menu::message_text(&blocks);
+            let folded = text.to_lowercase();
+            let Some(index) = folded.find(&needle) else { continue };
+            if results.len() == 50 { return Ok(HistorySearch { results, has_more: true }); }
+            // Map the folded byte offset back to the original text before truncation.
+            let mut folded_bytes = 0;
+            let start = text.chars().take_while(|c| {
+                if folded_bytes >= index { return false; }
+                folded_bytes += c.to_lowercase().map(char::len_utf8).sum::<usize>();
+                true
+            }).count().saturating_sub(60);
+            let mut chars = text.chars().skip(start);
+            let excerpt: String = chars.by_ref().take(240).collect();
+            let preview = format!("{}{}{}", if start > 0 { "…" } else { "" }, excerpt, if chars.next().is_some() { "…" } else { "" });
+            results.push(HistoryMatch { channel_id, channel_name, message_id, role, preview });
+        }
+        Ok(HistorySearch { results, has_more: false })
+    }
+
     /// Startup reconciliation. A non-terminal turn whose provider process is not live becomes
     /// `failed`. Its pending approvals become `stale`.
     pub fn reconcile(&self, live_sessions: &HashSet<SessionId>) -> Result<ReconcileReport> {
@@ -1099,6 +1165,75 @@ mod tests {
         f.store.insert_message(&m1).unwrap();
         f.store.insert_message(&m2).unwrap();
         assert_eq!(f.store.messages_for_channel(&f.channel.id).unwrap(), vec![m1, m2]);
+    }
+
+    #[test]
+    fn direct_history_search_is_scoped_literal_and_includes_archived_chats() {
+        let f = fixture();
+        let direct = Channel { id: ChannelId::new(), project_id: None, name: "Old chat".into(),
+            agent_id: f.agent.clone(), workspace_mode: WorkspaceMode::MainCheckout };
+        f.store.insert_channel(&direct).unwrap();
+        f.store.archive_channel(&direct.id).unwrap();
+        let other = AgentId::new();
+        f.store.insert_agent(&other, &f.store.load_agent(&f.agent).unwrap()).unwrap();
+        let other_chat = Channel { id: ChannelId::new(), agent_id: other, ..direct.clone() };
+        f.store.insert_channel(&other_chat).unwrap();
+        for channel in [&direct, &f.channel, &other_chat] {
+            f.store.insert_message(&Message { id: MessageId::new(), channel_id: channel.id.clone(),
+                role: Role::User, blocks: vec![Block::Markdown { text: "Café 100%_ready".into() }] }).unwrap();
+        }
+        let found = f.store.search_direct_history(&f.agent, " CAFÉ ").unwrap();
+        assert_eq!(found.results.len(), 1);
+        assert_eq!(found.results[0].channel_id, direct.id.0);
+        assert_eq!(found.results[0].preview, "Café 100%_ready");
+        assert_eq!(f.store.search_direct_history(&f.agent, "%_").unwrap().results.len(), 1);
+        assert!(f.store.search_direct_history(&f.agent, "' OR 1=1 --").unwrap().results.is_empty());
+        assert!(f.store.search_direct_history(&f.agent, "  ").unwrap().results.is_empty());
+        assert!(f.store.search_direct_history(&AgentId::new(), "Café").unwrap().results.is_empty());
+    }
+
+    #[test]
+    fn direct_history_search_bounds_results_and_centers_unicode_previews() {
+        let f = fixture();
+        let chat = Channel { id: ChannelId::new(), project_id: None, name: "Chat".into(),
+            agent_id: f.agent.clone(), workspace_mode: WorkspaceMode::MainCheckout };
+        f.store.insert_channel(&chat).unwrap();
+        let text = format!("{}İCAFÉ{}", "🙂".repeat(300), "é".repeat(300));
+        let mut last = MessageId::new();
+        for _ in 0..51 {
+            last = MessageId::new();
+            f.store.insert_message(&Message { id: last.clone(), channel_id: chat.id.clone(),
+                role: Role::Agent, blocks: vec![Block::Code { language: None, text: text.clone() }] }).unwrap();
+        }
+        let found = f.store.search_direct_history(&f.agent, "café").unwrap();
+        assert!(found.has_more);
+        assert_eq!(found.results.len(), 50);
+        assert_eq!(found.results[0].message_id, last.0);
+        assert!(found.results[0].preview.contains("İCAFÉ"));
+        assert!(found.results[0].preview.chars().count() <= 242);
+    }
+
+    #[test]
+    fn dm_list_is_explicit_idempotent_and_persists_after_reopening() {
+        let path = std::env::temp_dir().join(format!("discard-dm-list-{}.db", AgentId::new().0));
+        let agent = AgentId::new();
+        {
+            let store = Store::open(&path).unwrap();
+            store.insert_agent(&agent, &AgentConfig {
+                name: "Friend".into(), avatar: None, provider: "codex".into(), model: Some("exact".into()),
+                system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false,
+            }).unwrap();
+            store.ensure_default_conversation(&agent).unwrap();
+            assert!(store.direct_message_agents().unwrap().is_empty());
+            store.add_direct_message(&agent).unwrap();
+            store.add_direct_message(&agent).unwrap();
+            assert_eq!(store.direct_message_agents().unwrap(), vec![agent.clone()]);
+        }
+        {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(store.direct_message_agents().unwrap(), vec![agent]);
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -5,3 +5,4 @@ pub mod codex;
 pub mod fake;
 
 mod conversation;
+mod models;

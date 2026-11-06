@@ -35,6 +35,19 @@ impl AgentConfig {
         Ok(())
     }
 
+    /// Runtime identity and optional personality; the stored personality stays editable on its own.
+    pub fn runtime_system_prompt(&self) -> String {
+        let mut prompt = format!(
+            "Your name is {:?}. You are an AI agent in Discard. Use this name when introducing yourself or answering questions about your identity. The provider and model describe the technology you use, not your name.",
+            self.name
+        );
+        if !self.system_prompt.trim().is_empty() {
+            prompt.push_str("\n\nPersonality and instructions:\n");
+            prompt.push_str(&self.system_prompt);
+        }
+        prompt
+    }
+
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(s)
     }
@@ -94,6 +107,28 @@ mod tests {
             policy,
             plugin_write: false,
         }
+    }
+
+    #[test]
+    fn runtime_prompt_includes_identity_even_without_personality() {
+        let mut config = cfg(ApprovalPolicy::Ask);
+        config.name = "Quinn".into();
+        config.system_prompt.clear();
+        let prompt = config.runtime_system_prompt();
+        assert!(prompt.contains("Your name is \"Quinn\"."));
+        assert!(prompt.contains("AI agent in Discard"));
+        assert!(!prompt.contains("Personality and instructions:"));
+        assert!(config.system_prompt.is_empty());
+    }
+
+    #[test]
+    fn runtime_prompt_preserves_personality_and_quotes_the_name() {
+        let mut config = cfg(ApprovalPolicy::Ask);
+        config.name = "Quinn \"Q\"\nHelper".into();
+        let prompt = config.runtime_system_prompt();
+        assert!(prompt.contains(r#"Your name is "Quinn \"Q\"\nHelper"."#));
+        assert!(prompt.ends_with("Personality and instructions:\nBe brief."));
+        assert_eq!(config.system_prompt, "Be brief.");
     }
 
     #[test]

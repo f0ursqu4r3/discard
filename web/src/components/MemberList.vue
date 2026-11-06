@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Users, Settings } from '@lucide/vue'
+import { Users, UserRound } from '@lucide/vue'
 import { Avatar, AvatarFallback } from './ui/avatar'
 import { Button } from './ui/button'
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from './ui/card'
@@ -64,8 +64,8 @@ const statusColor = computed(
     </CardContent>
     <CardFooter>
       <Button variant="outline" size="sm" class="w-full" @click="emit('settings')">
-        <Settings data-icon="inline-start" />
-        Agent settings
+        <UserRound data-icon="inline-start" />
+        View profile
       </Button>
     </CardFooter>
     <slot />

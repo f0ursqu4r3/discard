@@ -10,7 +10,14 @@
     "frontendDist": "../../web/dist"
   },
   "app": {
-    "windows": [{ "title": "Discard", "width": 1200, "height": 800 }],
+    "windows": [{
+      "title": "Discard",
+      "width": 1200,
+      "height": 800,
+      "titleBarStyle": "Overlay",
+      "hiddenTitle": true,
+      "trafficLightPosition": { "x": 12, "y": 20 }
+    }],
     "security": { "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost" }
   },
   "bundle": { "active": false }

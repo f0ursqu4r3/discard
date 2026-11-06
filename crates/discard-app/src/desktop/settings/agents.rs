@@ -34,7 +34,7 @@ mod tests {
         let value = serde_json::json!({"name":"Human name", "provider":"new", "model":"provider/exact-ID:1", "systemPrompt":"", "policy":"deny", "pluginWrite":false});
         let draft = serde_json::from_value::<Draft>(value).unwrap().into_core(&cfg).unwrap();
         let matrix = CapabilityMatrix { provider: "new".into(), matrix_version: 1, cli_version: "1".into(), capabilities: Capabilities { interactive_approvals: true, tool_call_visibility: true, per_session_mcp: true, session_resume: true, cancellation: true, pre_execution_blocking: true } };
-        let provider = crate::desktop::actions::ProviderInfo { id: "new".into(), matrix, setup: std::sync::Arc::new(std::sync::Mutex::new(Some(discard_core::provider::SetupStatus::Ready))) };
+        let provider = crate::desktop::actions::ProviderInfo { provider: std::sync::Arc::new(discard_providers::claude::ClaudeProvider::new("unused")), id: "new".into(), matrix, setup: std::sync::Arc::new(std::sync::Mutex::new(Some(discard_core::provider::SetupStatus::Ready))) };
         let providers = [provider];
         let chosen = selected_provider(&providers, &draft).unwrap();
         require_connected(chosen).unwrap();

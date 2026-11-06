@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getConversations, type ConversationEntry } from '@/bridge/api'
-import { Bot, FileText, FolderGit2, GitBranch, MessagesSquare, Settings } from '@lucide/vue'
+import { Bot, FileText, FolderGit2, GitBranch, MessagesSquare, Users } from '@lucide/vue'
 import type { MessageDto, SnapshotDto } from '@/bridge/types'
 import type { WorkspacePage } from './types'
 import {
@@ -17,10 +17,10 @@ import {
 } from '../ui/dialog'
 import BrandMark from './BrandMark.vue'
 import MemoryBrowser from '../memory/MemoryBrowser.vue'
+import FriendsList from '../agents/FriendsList.vue'
 import { Button } from '../ui/button'
 import { Badge } from '../ui/badge'
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../ui/card'
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '../ui/tabs'
 import {
   Empty,
   EmptyHeader,
@@ -81,85 +81,12 @@ onUnmounted(() => {
   stops.forEach((stop) => stop())
 })
 
-const dmTab = ref('conversation')
 const branchCount = computed(() =>
   currentProject.value ? props.snapshot.branches.filter((row) => row.kind === 'branch').length : 0,
 )
 </script>
 <template>
-  <div v-if="page === 'direct-messages'" data-ui-id="agent-dm" class="flex min-h-0 flex-1 flex-col">
-    <Tabs v-model="dmTab" class="flex min-h-0 flex-1 flex-col gap-0">
-      <div
-        class="flex h-11 shrink-0 items-center overflow-x-auto border-b border-border/60 px-3 sm:px-5"
-      >
-        <TabsList variant="line">
-          <TabsTrigger value="conversation">Conversation</TabsTrigger>
-          <TabsTrigger value="personality">Personality</TabsTrigger>
-          <TabsTrigger value="memory">Memory</TabsTrigger>
-          <TabsTrigger value="settings">Settings</TabsTrigger>
-        </TabsList>
-      </div>
-      <TabsContent
-        value="conversation"
-        class="m-0 flex min-h-0 flex-1 flex-col overflow-auto overscroll-contain"
-      >
-        <Empty class="m-auto">
-          <EmptyHeader>
-            <EmptyMedia variant="icon"><MessagesSquare /></EmptyMedia>
-            <EmptyTitle>Direct messages with {{ snapshot.agent }}</EmptyTitle>
-            <EmptyDescription>
-              Choose a direct conversation from the navigation. Project history stays in its own
-              conversation.
-            </EmptyDescription>
-          </EmptyHeader>
-          <EmptyContent>
-            <Button variant="outline" @click="emit('action', 'open_agent_settings')">
-              Manage agents
-            </Button>
-          </EmptyContent>
-        </Empty>
-      </TabsContent>
-      <TabsContent value="personality" class="m-0 overflow-auto overscroll-contain p-6">
-        <Card size="sm">
-          <CardHeader>
-            <CardTitle>Personality &amp; role</CardTitle>
-            <CardDescription>Set how {{ snapshot.agent }} approaches their work.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Button variant="outline" @click="emit('action', 'open_agent_settings')">
-              <Settings data-icon="inline-start" />
-              Edit agent instructions
-            </Button>
-          </CardContent>
-        </Card>
-      </TabsContent>
-      <TabsContent value="memory" class="m-0 overflow-auto overscroll-contain p-6">
-        <MemoryBrowser
-          v-if="snapshot.channelId && !snapshot.activeProjectId"
-          :channel-id="snapshot.channelId"
-          :agent-id="snapshot.agentId"
-          :project-id="null"
-          :revision="snapshot.memoryRev"
-          :running="snapshot.turnRunning"
-        />
-        <p v-else>Choose a direct conversation to see its memory.</p>
-      </TabsContent>
-      <TabsContent value="settings" class="m-0 overflow-auto overscroll-contain p-6">
-        <Card size="sm">
-          <CardHeader>
-            <CardTitle>{{ snapshot.agent }}</CardTitle>
-            <CardDescription>Provider and model belong to this agent.</CardDescription>
-          </CardHeader>
-          <CardContent class="flex flex-col items-start gap-4">
-            <Badge variant="secondary">{{ snapshot.provider }}</Badge>
-            <Button variant="outline" @click="emit('action', 'open_agent_settings')">
-              Open agent settings
-            </Button>
-          </CardContent>
-        </Card>
-      </TabsContent>
-    </Tabs>
-  </div>
+  <FriendsList v-if="page === 'direct-messages'" @action="emit('action', $event)" />
   <div
     v-else
     data-ui-id="project-page"
@@ -318,14 +245,24 @@ const branchCount = computed(() =>
     <div v-else-if="page === 'agents'" class="mx-auto flex max-w-3xl flex-col gap-5">
       <div class="flex items-center justify-between gap-4">
         <h2 class="text-xl font-semibold">Project agents</h2>
-        <Button variant="outline" size="sm" @click="emit('action', 'open_agent_settings')">
-          <Settings data-icon="inline-start" />
-          Manage agents
+        <Button variant="outline" size="sm" @click="emit('action', 'show_friends')">
+          <Users data-icon="inline-start" />
+          View agents
         </Button>
       </div>
       <Card v-for="agent in projectAgents" :key="agent.agentId" size="sm">
         <CardHeader>
-          <CardTitle>{{ agent.agent }}</CardTitle>
+          <CardTitle>
+            <Button
+              v-if="!agent.deleted"
+              variant="link"
+              class="h-auto p-0"
+              @click="emit('action', `view_agent_profile:${agent.agentId}`)"
+            >
+              {{ agent.agent }}
+            </Button>
+            <span v-else>{{ agent.agent }}</span>
+          </CardTitle>
           <CardDescription>
             {{ agent.provider }} · {{ agent.model }}
             <span v-if="agent.deleted">· Deleted</span>

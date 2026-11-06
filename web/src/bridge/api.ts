@@ -60,6 +60,8 @@ export interface AgentEntry {
   archived: boolean
 }
 export interface ConversationEntry {
+  inDmList: boolean
+  isDefault: boolean
   workspaceMode: string
   id: string
   name: string
@@ -80,3 +82,17 @@ export const createConversation = (agentId: string, projectId: string | null, na
 
 export const restoreConversation = (channelId: string) =>
   invoke<void>('restore_conversation', { channelId })
+
+export interface HistoryMatch {
+  channelId: string
+  channelName: string
+  messageId: string
+  role: string
+  preview: string
+}
+export interface HistorySearch {
+  results: HistoryMatch[]
+  hasMore: boolean
+}
+export const searchAgentHistory = (agentId: string, query: string) =>
+  invoke<HistorySearch>('search_agent_history', { agentId, query })

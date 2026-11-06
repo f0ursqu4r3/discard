@@ -1,6 +1,7 @@
 import { shallowMount, flushPromises } from '@vue/test-utils'
 import { defineComponent } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import AgentsNavigation from './components/workspace/AgentsNavigation.vue'
 import { beforeEach, afterEach, expect, test, vi } from 'vite-plus/test'
 import fixture from './bridge/fixtures/snapshot.json'
@@ -16,7 +17,7 @@ const mocks = vi.hoisted(() => ({
   run: vi.fn(),
 }))
 const catalogHandlers = new Map<string, Set<() => void>>()
-vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(), isTauri: () => false }))
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async (event: string, handler: () => void) => {
     if (!catalogHandlers.has(event)) catalogHandlers.set(event, new Set())
@@ -34,6 +35,12 @@ vi.mock('./bridge/api', async (original) => ({
 }))
 vi.mock('vue-sonner', () => ({ toast: { error: vi.fn(), success: vi.fn() } }))
 import App from './App.vue'
+import ChannelHeader from './components/ChannelHeader.vue'
+import AgentHistorySearch from './components/agents/AgentHistorySearch.vue'
+import ContextPanel from './components/workspace/ContextPanel.vue'
+import FriendsList from './components/agents/FriendsList.vue'
+import AddAgentDialog from './components/agents/AddAgentDialog.vue'
+import AgentProfileDialog from './components/agents/AgentProfileDialog.vue'
 import Composer from './components/Composer.vue'
 import MessageList from './components/MessageList.vue'
 import NavigationPanel from './components/workspace/NavigationPanel.vue'
@@ -96,7 +103,7 @@ test('fresh startup has contact navigation and no active composer', () => {
   const wrapper = app()
   expect(wrapper.findComponent(NavigationPanel).exists()).toBe(true)
   expect(wrapper.findComponent(Composer).exists()).toBe(false)
-  expect(wrapper.text()).toContain('Choose an agent or conversation')
+  expect(wrapper.findComponent(FriendsList).exists()).toBe(true)
 })
 test('DM new-conversation context stays direct while a sidebar project is selected', () => {
   mocks.store.snapshot = {
@@ -148,7 +155,10 @@ test('model failure offers retry and model settings; failed persistence offers c
     .find((button) => button.text() === 'Choose model')!
     .trigger('click')
   await flushPromises()
-  expect(mocks.run).toHaveBeenCalledWith('open_agent_settings')
+  expect(wrapper.getComponent(AgentProfileDialog).props('agentId')).toBe(
+    mocks.store.snapshot!.agentId,
+  )
+  expect(mocks.run).not.toHaveBeenCalledWith('open_agent_settings')
 })
 
 test('top-level menu creation refreshes the same-context conversation catalog', async () => {
@@ -161,6 +171,8 @@ test('top-level menu creation refreshes the same-context conversation catalog', 
         ? [
             {
               id: 'new-menu-chat',
+              inDmList: true,
+              isDefault: false,
               name: 'New menu discussion',
               agentId: 'a',
               agent: 'Robin',
@@ -213,7 +225,8 @@ test('top-level menu creation refreshes the same-context conversation catalog', 
   await flushPromises()
   expect(mocks.store.refresh).toHaveBeenCalled()
   expect(navigation.props('projectId')).toBeNull()
-  expect(navigation.text()).toContain('New menu discussion')
+  expect(navigation.text()).not.toContain('New menu discussion')
+  expect(navigation.text()).toContain('Robin')
 })
 
 test('memory source and fresh-conversation events open the transcript and keep sidebar selection', async () => {
@@ -334,6 +347,209 @@ test.each([true, false])(
       expect(view.findComponent(MessageList).exists()).toBe(false)
       expect(browser.get('[role="alert"]').text()).toContain('Source conversation is unavailable')
       expect(mocks.store.snapshot?.channelId).toBe('channel')
+    }
+  },
+)
+
+test('Friends opens the add modal and the new agent profile', async () => {
+  const wrapper = app()
+  wrapper.getComponent(NavigationPanel).vm.$emit('action', 'show_friends')
+  await flushPromises()
+  wrapper.getComponent(FriendsList).vm.$emit('action', 'add_agent')
+  await flushPromises()
+  expect(wrapper.getComponent(AddAgentDialog).props('open')).toBe(true)
+  wrapper.getComponent(AddAgentDialog).vm.$emit('created', 'new-friend')
+  await flushPromises()
+  expect(wrapper.getComponent(AgentProfileDialog).props('agentId')).toBe('new-friend')
+})
+test('Message from a profile opens the agent direct conversation', async () => {
+  mocks.store.snapshot = { ...mocks.store.snapshot!, projectId: 'selected-project' }
+  vi.mocked(invoke).mockImplementation(async (name) =>
+    name === 'open_agent_chat' ? 'friend-dm' : undefined,
+  )
+  const wrapper = app()
+  wrapper.getComponent(AgentProfileDialog).vm.$emit('message', 'friend')
+  await flushPromises()
+  expect(invoke).toHaveBeenCalledWith('open_agent_chat', { agentId: 'friend' })
+  expect(invoke).toHaveBeenCalledWith('switch_channel', { channelId: 'friend-dm' })
+  expect(mocks.store.snapshot!.projectId).toBe('selected-project')
+  expect(wrapper.getComponent(AgentProfileDialog).props('agentId')).toBeNull()
+})
+
+test('native profile actions open the named agent and cannot replace an active save', async () => {
+  const wrapper = app()
+  await flushPromises()
+  const handler = vi
+    .mocked(listen)
+    .mock.calls.find((call) => call[0] === 'discard://agent-profile')![1]
+  handler({ event: 'discard://agent-profile', id: 1, payload: 'target-agent' })
+  await flushPromises()
+  expect(wrapper.getComponent(AgentProfileDialog).props('agentId')).toBe('target-agent')
+  wrapper.getComponent(AgentProfileDialog).vm.$emit('busy', true)
+  handler({ event: 'discard://agent-profile', id: 2, payload: 'another-agent' })
+  await flushPromises()
+  expect(wrapper.getComponent(AgentProfileDialog).props('agentId')).toBe('target-agent')
+})
+
+test('history search opens its sidebar and selecting a match targets the exact saved message', async () => {
+  const wrapper = app()
+  wrapper.getComponent(ChannelHeader).vm.$emit('search', 'release')
+  await flushPromises()
+  const results = wrapper.getComponent(AgentHistorySearch)
+  expect(results.props('agentId')).toBe(mocks.store.snapshot!.agentId)
+  expect(results.props('query')).toBe('release')
+  const match = {
+    channelId: 'channel',
+    channelName: 'Chat',
+    messageId: 'old-message',
+    role: 'user',
+    preview: 'Release notes',
+  }
+  results.vm.$emit('select', match)
+  await flushPromises()
+  expect(wrapper.getComponent(MessageList).props('jumpTo')).toEqual(
+    expect.objectContaining({ messageId: 'old-message' }),
+  )
+  wrapper.getComponent(ChannelHeader).vm.$emit('toggleMembers')
+  await flushPromises()
+  // The search sheet was closed by selecting the result. A opens the short profile.
+  expect(wrapper.findComponent(AgentHistorySearch).exists()).toBe(false)
+  expect(wrapper.findComponent(ContextPanel).exists()).toBe(true)
+})
+test('failed history selection does not jump or discard the current transcript', async () => {
+  const wrapper = app()
+  wrapper.getComponent(ChannelHeader).vm.$emit('search', 'query')
+  await flushPromises()
+  vi.mocked(invoke).mockRejectedValueOnce('Conversation is unavailable')
+  wrapper.getComponent(AgentHistorySearch).vm.$emit('select', {
+    channelId: 'missing',
+    channelName: 'Chat',
+    messageId: 'old-message',
+    role: 'user',
+    preview: 'query',
+  })
+  await flushPromises()
+  expect(wrapper.getComponent(MessageList).props('jumpTo')).toBeUndefined()
+  expect(mocks.store.snapshot!.channelId).toBe('channel')
+})
+
+test.each([null, 'project'])(
+  'conversation chrome matches its project context (%s)',
+  (activeProjectId) => {
+    mocks.store.snapshot = {
+      ...mocks.store.snapshot!,
+      activeProjectId,
+      slots: {
+        channel_header: {
+          plugin: 'test-header',
+          element: { tag: 'text', props: {}, children: [{ Text: '# General' }] },
+        },
+      },
+    }
+    const wrapper = app()
+    const header = wrapper.getComponent(ChannelHeader)
+    expect(header.props('channel')).toBe(
+      activeProjectId ? mocks.store.snapshot!.channel : mocks.store.snapshot!.agent,
+    )
+    expect(wrapper.find('[data-ui-id="conversation-tabs"]').exists()).toBe(!!activeProjectId)
+    expect(header.findComponent({ name: 'PluginElement' }).exists()).toBe(!!activeProjectId)
+    expect(wrapper.getComponent(Composer).props('directMessage')).toBe(!activeProjectId)
+    expect(wrapper.findComponent(MessageList).exists()).toBe(true)
+    if (!activeProjectId) expect(header.props('subtitle')).toBeUndefined()
+  },
+)
+
+test.each([false, true])(
+  'window resizing preserves sidebar widths (context=%s)',
+  async (contextVisible) => {
+    let width = 1400
+    const observers = new Map<Element, ResizeObserverCallback>()
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        private callback: ResizeObserverCallback
+        constructor(callback: ResizeObserverCallback) {
+          this.callback = callback
+        }
+        observe(target: Element) {
+          observers.set(target, this.callback)
+        }
+        unobserve(target: Element) {
+          observers.delete(target)
+        }
+        disconnect() {
+          observers.clear()
+        }
+      },
+    )
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: query === '(min-width: 1280px)',
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    )
+    const rect = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(() => ({
+        width,
+        height: 800,
+        top: 0,
+        left: 0,
+        right: width,
+        bottom: 800,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }))
+    mocks.store.snapshot = {
+      ...mocks.store.snapshot!,
+      memberListVisible: contextVisible,
+      panels: { channelList: 240, memberList: 300 },
+    }
+    try {
+      view = shallowMount(App, {
+        attachTo: document.body,
+        global: {
+          renderStubDefaultSlot: true,
+          stubs: {
+            ResizablePanelGroup: false,
+            ResizablePanel: false,
+            SplitterGroup: false,
+            SplitterPanel: false,
+            Primitive: false,
+          },
+        },
+      })
+      await flushPromises()
+      const { SplitterPanel } = await import('reka-ui')
+      const panels = view.findAllComponents(SplitterPanel)
+      const group = view.getComponent({ name: 'ResizablePanelGroup' })
+      const layout = () => group.emitted('layout')!.at(-1)![0] as number[]
+      expect(panels).toHaveLength(contextVisible ? 3 : 2)
+      expect(layout()[0]).toBeCloseTo(312)
+      if (contextVisible) expect(layout()[2]).toBeCloseTo(300)
+      // A user-adjusted width must also survive window changes.
+      panels[0]!.vm.resize(360)
+      await flushPromises()
+      expect(layout()[0]).toBeCloseTo(360)
+      for (const nextWidth of [1800, 1300, 1500]) {
+        width = nextWidth
+        for (const [target, callback] of observers) {
+          callback(
+            [{ target, contentRect: target.getBoundingClientRect() } as ResizeObserverEntry],
+            {} as ResizeObserver,
+          )
+        }
+        await flushPromises()
+        expect(layout()[0]).toBeCloseTo(360)
+        if (contextVisible) expect(layout()[2]).toBeCloseTo(300)
+      }
+    } finally {
+      view?.unmount()
+      view = undefined
+      rect.mockRestore()
     }
   },
 )

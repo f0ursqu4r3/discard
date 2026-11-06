@@ -25,6 +25,8 @@ const agents = [
 const conversations = [
   {
     id: 'dm',
+    inDmList: true,
+    isDefault: true,
     name: 'General',
     agentId: 'a',
     agent: 'Robin',
@@ -35,6 +37,8 @@ const conversations = [
   },
   {
     id: 'kept',
+    inDmList: true,
+    isDefault: true,
     name: 'Kept history',
     agentId: 'gone',
     agent: 'Deleted agent',
@@ -75,16 +79,16 @@ beforeEach(() => {
       if (name === 'create_conversation') return 'created'
     })
 })
-test('lists global agents with shared models and opens their default DM without a project', async () => {
+test('lists only agents opened as DMs and opens their default chat without a project', async () => {
   const view = mount(AgentsNavigation, {
     props: { projectId: null },
     global: { stubs: { CreateChannelDialog: true } },
   })
   await flushPromises()
   expect(view.text()).toContain('Robin')
-  expect(view.text()).toContain('Alex')
-  expect(view.text()).toContain('Kept history')
-  expect(view.text()).toContain('Read only')
+  expect(view.text()).not.toContain('Alex')
+  expect(view.text()).not.toContain('Kept history')
+  expect(view.text()).not.toContain('Read only')
   expect(view.text()).not.toContain('Implementation')
   await view
     .findAll('button')
@@ -93,11 +97,14 @@ test('lists global agents with shared models and opens their default DM without 
   await flushPromises()
   expect(invoke).toHaveBeenCalledWith('open_agent_chat', { agentId: 'a' })
   expect(view.emitted('select')).toEqual([['dm']])
+  expect(view.text()).not.toContain('General')
+  expect(view.text()).not.toContain('Add agent')
+  expect(view.findComponent(CreateChannelDialog).exists()).toBe(false)
   await view
     .findAll('button')
-    .find((b) => b.text().includes('Kept history'))!
+    .find((b) => b.text() === 'Agents')!
     .trigger('click')
-  expect(view.emitted('select')?.at(-1)).toEqual(['kept'])
+  expect(view.emitted('action')).toEqual([['show_friends']])
   view.unmount()
 })
 test('project lists retain multiple conversations and archived histories without selecting another agent', async () => {
@@ -144,7 +151,7 @@ test.each([null, 'project'])(
   },
 )
 
-test('shared conversation notification refreshes a menu-created chat in the same context', async () => {
+test('shared conversation notification adds the agent without listing DM channels', async () => {
   const view = mount(AgentsNavigation, {
     props: { projectId: null },
     global: { stubs: { CreateChannelDialog: true } },
@@ -156,17 +163,42 @@ test('shared conversation notification refreshes a menu-created chat in the same
     if (name === 'get_conversations')
       return [
         ...conversations,
-        { ...conversations[0], id: 'from-menu', name: 'Menu-created discussion' },
+        {
+          ...conversations[0],
+          id: 'from-menu',
+          agentId: 'b',
+          agent: 'Alex',
+          name: 'Menu-created discussion',
+          isDefault: false,
+        },
       ]
   })
   expect(handlers.has('discard://conversations')).toBe(true)
   handlers.get('discard://conversations')!()
   await flushPromises()
-  expect(view.text()).toContain('Menu-created discussion')
-  await view
-    .findAll('button')
-    .find((b) => b.text().includes('Menu-created discussion'))!
-    .trigger('click')
-  expect(view.emitted('select')).toEqual([['from-menu']])
+  expect(view.text()).toContain('Alex')
+  expect(view.text()).not.toContain('Menu-created discussion')
+  view.unmount()
+})
+
+test('adding an agent does not list it as a DM until a chat is opened', async () => {
+  let opened = false
+  vi.mocked(invoke).mockImplementation(async (name) => {
+    if (name === 'settings_agent_get') return agents
+    if (name === 'get_conversations') return [{ ...conversations[0], inDmList: opened }]
+  })
+  const view = mount(AgentsNavigation, {
+    props: { projectId: null },
+    global: { stubs: { CreateChannelDialog: true } },
+  })
+  await flushPromises()
+  expect(view.text()).not.toContain('Robin')
+  expect(view.text()).not.toContain('General')
+  expect(view.text()).toContain('Choose an agent in Agents')
+  opened = true
+  handlers.get('discard://conversations')!()
+  await flushPromises()
+  expect(view.text()).toContain('Robin')
+  expect(view.text()).not.toContain('General')
   view.unmount()
 })

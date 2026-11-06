@@ -65,7 +65,8 @@ pub(crate) fn read_memory_config(spec: &SessionSpec) -> Result<Value, ProviderEr
 
 pub(crate) fn sanitize_catalog(cache: Value, selected: &str) -> Result<(Value, Option<u64>), ProviderError> {
     if cache.get("client_version").and_then(Value::as_str) != Some("0.166.0") {
-        return Err(setup("Codex requires a model cache from supported version 0.166.0"));
+        let actual = cache.get("client_version").and_then(Value::as_str).unwrap_or("unknown");
+        return Err(setup(format!("The Codex model cache was written by version {actual}, but Discard requires 0.166.0. Refresh the model list with Codex 0.166.0, then retry.")));
     }
     let mut models = cache
         .get("models")
@@ -281,7 +282,9 @@ mod tests {
         assert!(sanitize_catalog(json!({"models":[{}]}), "chosen").is_err());
         let mut old = catalog();
         old["client_version"] = json!("0.1.0");
-        assert!(sanitize_catalog(old, "chosen").is_err());
+        let error = sanitize_catalog(old, "chosen").unwrap_err().to_string();
+        assert!(error.contains("written by version 0.1.0"));
+        assert!(error.contains("Refresh the model list with Codex 0.166.0, then retry."));
     }
 
     #[test]

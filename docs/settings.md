@@ -158,7 +158,7 @@ change and names the action. Key changes apply at the next launch. Plugins canno
   **Details** button on the problem line open it on the Plugins page.
 - **One window.** If the window is open, Discard brings it to the front and switches its page. It never opens a
   second window. Closing Settings does not quit the app.
-- **Sidebar.** The sidebar lists ten pages: General, Appearance, Agents, Providers, Plugins, Memory, Workspaces,
+- **Sidebar.** The sidebar lists nine pages: General, Appearance, Providers, Plugins, Memory, Workspaces,
   Keybindings, Logs, Advanced.
 - **Search.** The box above the list filters pages. A page stays if its title or one of its field labels contains the
   text. Case and spaces do not matter, so "rollback" finds "Roll back". "No matching settings" shows when nothing
@@ -194,9 +194,11 @@ From top to bottom:
 Each provider card shows setup status, the install or login command when needed, all capabilities, and hook enforcement.
 Missing capabilities show as "No". **Re-check** runs the setup check again. Discard does not read or store credentials.
 
-### Agents page
+### Agent profiles (main window)
 
-Create agents with a generated editable name, optional avatar, connected provider, exact model ID, and optional personality. Multiple agents can use the same model. Personality stays separate from learned memory. Review the changes before save. A looser permission policy or enabling `plugin.write` requires explicit confirmation. Unsupported choices show the reason.
+Open **Direct Messages → Agents** to find an agent or choose **Add agent**. The add dialog asks for a generated editable name, connected provider, and model. Provider and Model use Select menus. Changing the provider clears the model and loads its available models from the installed CLI. Choose a model before adding the agent. Loading failures offer Retry models. Claude aliases use the resolved model ID when available. Select an agent to open its direct chat. The header profile button toggles a short profile sidebar. Choose **View full profile**, then **Edit profile** to change identity, avatar, model, personality, or tool permissions. Agents do not have a Settings page. **Agents** in the navigation lists all agents. Choose **DM** to open the chat and add the agent to the Direct Messages list. Creating an agent alone does not add it to that list. The list stays saved across restarts. Each response receives the agent's current name together with its personality and memory. A name change applies to the next response; it does not rewrite saved messages. DMs show the agent name, a short-profile toggle, and a compact history search field. Project channel labels and conversation tabs do not appear in DMs. The DM composer stays at the bottom without a footer.
+
+The chat header searches saved direct message text, code, and diffs for the selected agent across its direct conversations, including archived chats. Project conversations are excluded. Search returns the newest 50 matches and asks you to refine the query when more exist. Select a result to open its conversation and highlight the matching message. Multiple agents can use the same model. Personality stays separate from learned memory. A looser permission policy or enabling `plugin.write` requires explicit confirmation. Unsupported choices show the reason.
 
 Saved edits apply without restarting. A running response keeps its original configuration; changes apply to the next response. Archive preserves conversations and memory and supports restoration. Permanent deletion offers separate choices for conversations and private memory. Global and project memory stay saved. Retained deleted-agent conversations remain readable.
 
@@ -243,7 +245,7 @@ Reset settings saves a backup at `settings.toml.bak`. Rebuild memory index reads
 ## Context menus and archive
 
 Right-click a message to copy its text, a code block to copy its code, or a channel row to copy its name or archive it.
-Right-click a diff to copy it, a tool call to copy its input or output, or an agent to copy its name or open Agent Settings. Every project icon has a context menu. It can open Project Settings, create a channel, reveal the folder in Finder, remove the project after confirmation, or copy its name, path, or ID. Opening a menu does not select the project. Settings and channel creation select the target project through the existing idle-agent guard. Copy, Reveal, and Remove use the clicked project's identity.
+Right-click a diff to copy it, a tool call to copy its input or output, or an agent to copy its name or view its profile. Every project icon has a context menu. It can open Project Settings, create a channel, reveal the folder in Finder, remove the project after confirmation, or copy its name, path, or ID. Opening a menu does not select the project. Settings and channel creation select the target project through the existing idle-agent guard. Copy, Reveal, and Remove use the clicked project's identity.
 
 Planned project actions remain visible and disabled with a Soon label. Mute, Notifications, Move to, and Copy submenus remain openable. Missing behavior has TODO comments in the menu model. This rule applies to all new and changed UI actions; see AGENTS.md. The live streaming row has no context menu. Plugin items follow the built-in items and show the plugin name. Project menus also open with Shift+F10 or the Menu key while a project icon has focus.
 
@@ -356,7 +358,7 @@ Discard colors the windows with a Ghostty theme. A plugin theme goes on top.
 `$DISCARD_HOME/state.toml` stores the main window position and size and the channel and member list widths.
 Discard restores bounds that are large enough and visible on a current display. Otherwise it opens the window centered.
 Drag the dividers to resize the lists from 180 to 400 pixels. Each list defaults to 240 pixels.
-Discard saves window changes and panel widths in this file.
+Discard saves window changes and panel widths in this file. Sidebars keep their pixel widths when the window changes size; the chat panel takes the remaining space. At narrow window sizes, navigation and profile panels use the compact layout.
 
 The composer sends with Enter. Shift+Enter inserts a newline.
 Plugin theme tokens `font_scale` and `spacing_scale` adjust text and spacing. Ignore plugin themes disables both tokens.

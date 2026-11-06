@@ -26,7 +26,16 @@ const error = ref(''),
   creating = ref(false)
 const stops: UnlistenFn[] = []
 let disposed = false
-const visible = computed(() => conversations.value.filter((c) => c.projectId === props.projectId))
+const contacts = computed(() =>
+  agents.value.filter((agent) =>
+    conversations.value.some((c) => c.agentId === agent.id && c.projectId === null && c.inDmList),
+  ),
+)
+const visible = computed(() =>
+  props.projectId === null
+    ? []
+    : conversations.value.filter((c) => c.projectId === props.projectId),
+)
 async function reload() {
   try {
     ;[agents.value, conversations.value] = await Promise.all([getAgents(), getConversations()])
@@ -80,16 +89,22 @@ onUnmounted(() => {
       variant="outline"
       size="sm"
       class="justify-start"
-      @click="emit('action', 'open_agent_settings')"
+      @click="emit('action', 'show_friends')"
     >
-      Manage agents
+      Agents
     </Button>
     <template v-if="projectId === null">
-      <h2 class="px-2 pt-4 text-xs font-semibold text-muted-foreground">Agents</h2>
+      <h2 class="px-2 pt-4 text-xs font-semibold text-muted-foreground">Direct Messages</h2>
       <Button
-        v-for="agent in agents"
+        v-for="agent in contacts"
         :key="agent.id"
-        variant="ghost"
+        :variant="
+          conversations.some(
+            (c) => c.id === channelId && c.agentId === agent.id && c.projectId === null,
+          )
+            ? 'secondary'
+            : 'ghost'
+        "
         size="sm"
         class="h-auto justify-start gap-2 py-2"
         :disabled="busy || opening"
@@ -109,11 +124,11 @@ onUnmounted(() => {
           </span>
         </span>
       </Button>
-      <p v-if="!agents.length" class="px-2 py-2 text-xs text-muted-foreground">
-        Create an agent in Manage agents.
+      <p v-if="!contacts.length" class="px-2 py-2 text-xs text-muted-foreground">
+        Choose an agent in Agents and select DM.
       </p>
     </template>
-    <div class="mt-4 flex items-center justify-between px-2">
+    <div v-if="projectId !== null" class="mt-4 flex items-center justify-between px-2">
       <h2 class="text-xs font-semibold text-muted-foreground">Conversations</h2>
       <Button
         variant="ghost"
@@ -142,11 +157,12 @@ onUnmounted(() => {
         </span>
       </span>
     </Button>
-    <p v-if="!visible.length" class="px-2 py-2 text-xs text-muted-foreground">
-      No conversations in {{ projectId === null ? 'direct chats' : 'this project' }}.
+    <p v-if="projectId !== null && !visible.length" class="px-2 py-2 text-xs text-muted-foreground">
+      No conversations in this project.
     </p>
     <p v-if="error" role="alert" class="px-2 py-2 text-xs">{{ error }}</p>
     <CreateChannelDialog
+      v-if="projectId !== null"
       v-model:open="creating"
       :project="project || 'Direct chat'"
       :project-id="projectId"

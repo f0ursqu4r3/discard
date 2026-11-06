@@ -144,8 +144,8 @@ impl Engine {
         let mut snapshot = self.clone();
         snapshot.project_id = channel.project_id;
         snapshot.provider = provider;
+        snapshot.system_prompt = Some(config.runtime_system_prompt());
         snapshot.model = config.model;
-        snapshot.system_prompt = Some(config.system_prompt);
         snapshot.policy = config.policy;
         snapshot.plugin_write = false;
         Ok(snapshot)

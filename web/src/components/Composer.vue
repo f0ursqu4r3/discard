@@ -1,36 +1,51 @@
 <script setup lang="ts">
-defineOptions({ name: 'MessageComposer' })
-import { computed, ref } from 'vue'
-import { Send, Square, AtSign } from '@lucide/vue'
-import { InputGroup, InputGroupAddon, InputGroupTextarea } from './ui/input-group'
-import { Button } from './ui/button'
-import { maySend, mayStop } from './composer'
+defineOptions({ name: 'MessageComposer' });
+import { computed, ref } from 'vue';
+import { Send, Square, AtSign } from '@lucide/vue';
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupTextarea,
+} from './ui/input-group';
+import { Button } from './ui/button';
+import { maySend, mayStop } from './composer';
 const props = defineProps<{
-  archived: boolean
-  busy: boolean
-  running: boolean
-  channel: string
-  agent?: string
-  draft?: string
-}>()
-const emit = defineEmits<{ send: [text: string]; stop: []; 'update:draft': [text: string] }>()
-const localDraft = ref('')
+  archived: boolean;
+  busy: boolean;
+  running: boolean;
+  channel: string;
+  directMessage?: boolean;
+  agent?: string;
+  draft?: string;
+}>();
+const emit = defineEmits<{
+  send: [text: string];
+  stop: [];
+  'update:draft': [text: string];
+}>();
+const placeholder = computed(() =>
+  props.directMessage
+    ? `Message ${props.agent || 'agent'}`
+    : `Message #${props.channel}`
+);
+const localDraft = ref('');
 const text = computed({
   get: () => props.draft ?? localDraft.value,
   set: (value) => {
-    localDraft.value = value
-    emit('update:draft', value)
+    localDraft.value = value;
+    emit('update:draft', value);
   },
-})
+});
 function send() {
-  if (props.running || !maySend(props.archived || props.busy, text.value)) return
-  emit('send', text.value.trim())
-  if (props.draft === undefined) text.value = ''
+  if (props.running || !maySend(props.archived || props.busy, text.value))
+    return;
+  emit('send', text.value.trim());
+  if (props.draft === undefined) text.value = '';
 }
 function keydown(event: KeyboardEvent) {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
-    event.preventDefault()
-    send()
+    event.preventDefault();
+    send();
   }
 }
 </script>
@@ -38,9 +53,12 @@ function keydown(event: KeyboardEvent) {
   <section
     data-ui-id="message-composer"
     aria-label="Message composer"
-    class="shrink-0 px-3 pb-3 pt-2 sm:px-5"
+    class="mt-auto shrink-0 px-3 pt-2 pb-3"
   >
-    <p v-if="agent" class="mb-1.5 truncate text-xs text-muted-foreground">
+    <p
+      v-if="agent && !directMessage"
+      class="mb-1.5 truncate text-xs text-muted-foreground"
+    >
       Message {{ agent }} in #{{ channel }}
     </p>
     <InputGroup class="rounded-lg">
@@ -50,8 +68,8 @@ function keydown(event: KeyboardEvent) {
         class="max-h-40 min-h-12 py-3"
         :rows="1"
         :disabled="archived || busy"
-        :aria-label="`Message #${channel}`"
-        :placeholder="`Message #${channel}`"
+        :aria-label="placeholder"
+        :placeholder="placeholder"
         @keydown="keydown"
       />
       <InputGroupAddon align="inline-end" class="self-end pb-2">
@@ -79,9 +97,16 @@ function keydown(event: KeyboardEvent) {
         </Button>
       </InputGroupAddon>
     </InputGroup>
-    <div class="mt-2 flex min-w-0 items-center justify-between gap-3 text-xs text-muted-foreground">
-      <span class="truncate">{{ archived ? 'Channel archived' : `#${channel}` }}</span>
-      <span class="hidden shrink-0 sm:inline">Enter to send · Shift + Enter for new line</span>
+    <div
+      v-if="!directMessage"
+      class="mt-2 flex min-w-0 items-center justify-between gap-3 text-xs text-muted-foreground"
+    >
+      <span class="truncate">{{
+        archived ? 'Channel archived' : `#${channel}`
+      }}</span>
+      <span class="hidden shrink-0 sm:inline"
+        >Enter to send · Shift + Enter for new line</span
+      >
     </div>
   </section>
 </template>

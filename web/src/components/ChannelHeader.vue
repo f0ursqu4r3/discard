@@ -1,17 +1,42 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { PanelRight, PanelLeft, Hash, AtSign } from '@lucide/vue'
+import { computed, ref, watch } from 'vue'
+import { PanelRight, PanelLeft, Hash, AtSign, UserRound, Search } from '@lucide/vue'
+import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from './ui/input-group'
 import { Button } from './ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
-const props = defineProps<{
-  channel: string
-  memberListVisible: boolean
-  subtitle?: string
-  compact?: boolean
-  directMessage?: boolean
-}>()
-const emit = defineEmits<{ toggleMembers: []; toggleNavigation: [] }>()
-const label = computed(() => (props.memberListVisible ? 'Hide member list' : 'Show member list'))
+const props = withDefaults(
+  defineProps<{
+    channel: string
+    memberListVisible: boolean
+    subtitle?: string
+    compact?: boolean
+    directMessage?: boolean
+    agentName?: string
+    agentId?: string
+    sidebarAvailable?: boolean
+  }>(),
+  { sidebarAvailable: true },
+)
+const emit = defineEmits<{ toggleMembers: []; toggleNavigation: []; search: [query: string] }>()
+const query = ref('')
+watch(
+  () => props.agentId || props.agentName,
+  () => {
+    query.value = ''
+  },
+)
+const label = computed(() =>
+  props.directMessage
+    ? props.memberListVisible
+      ? 'Hide short profile'
+      : 'Show short profile'
+    : props.memberListVisible
+      ? 'Hide member list'
+      : 'Show member list',
+)
+function search() {
+  if (query.value.trim()) emit('search', query.value.trim())
+}
 </script>
 <template>
   <header
@@ -46,21 +71,48 @@ const label = computed(() => (props.memberListVisible ? 'Hide member list' : 'Sh
       </slot>
     </div>
     <div class="flex items-center px-2">
-      <TooltipProvider>
+      <TooltipProvider v-if="sidebarAvailable !== false">
         <Tooltip>
           <TooltipTrigger as-child>
             <Button
               variant="ghost"
               size="icon-sm"
               :aria-label="label"
+              :aria-pressed="memberListVisible"
               @click="emit('toggleMembers')"
             >
-              <PanelRight />
+              <UserRound v-if="directMessage" />
+              <PanelRight v-else />
             </Button>
           </TooltipTrigger>
           <TooltipContent>{{ label }}</TooltipContent>
         </Tooltip>
       </TooltipProvider>
+      <form
+        v-if="directMessage && agentName"
+        role="search"
+        class="flex items-center gap-1"
+        @submit.prevent="search"
+      >
+        <InputGroup class="h-8 w-28 sm:w-44">
+          <InputGroupInput
+            v-model="query"
+            class="h-full"
+            :aria-label="`Search history with ${agentName}`"
+            placeholder="Search history"
+          />
+          <InputGroupAddon align="inline-end">
+            <InputGroupButton
+              type="submit"
+              size="icon-xs"
+              aria-label="Search history"
+              :disabled="!query.trim()"
+            >
+              <Search />
+            </InputGroupButton>
+          </InputGroupAddon>
+        </InputGroup>
+      </form>
     </div>
   </header>
 </template>

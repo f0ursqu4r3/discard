@@ -83,3 +83,15 @@ test('approval decisions in a live transcript include the originating channel', 
   await approve.trigger('click')
   expect(decideApproval).toHaveBeenCalledWith('second-channel', 'approval-2', 'approve')
 })
+
+test('long notices wrap inside their inset alert and preserve the full error', () => {
+  const error = 'Codex setup failed: ' + '/a-long-cache-path'.repeat(40)
+  const notices = mount(Notices, { props: { banners, notice: error, archived: false } })
+  for (const alert of notices.findAll('[role="alert"]')) {
+    expect(alert.classes()).toContain('w-auto')
+    expect(alert.classes()).not.toContain('w-full')
+  }
+  const description = notices.get('[data-slot="alert-description"]')
+  expect(description.text()).toBe(error)
+  expect(description.classes()).toContain('[overflow-wrap:anywhere]')
+})

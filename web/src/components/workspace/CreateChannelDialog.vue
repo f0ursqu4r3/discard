@@ -94,7 +94,9 @@ async function submit() {
             {{ agent.name }} · {{ agent.provider }} · {{ agent.model }}
           </option>
         </select>
-        <p v-if="!agents.length">Create or restore an agent in Manage agents first.</p>
+        <p v-if="!agents.length">
+          Add an agent from Friends, or open an archived profile to restore it.
+        </p>
         <p v-if="error" role="alert">{{ error }}</p>
       </form>
       <DialogFooter>

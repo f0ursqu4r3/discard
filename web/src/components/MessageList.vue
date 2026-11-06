@@ -12,6 +12,7 @@ defineProps<{
   prompts?: PromptDto[]
   memoryRevision?: number
   conversationId: string
+  jumpTo?: { messageId: string; request: number }
   position?: TranscriptPosition
 }>()
 const emit = defineEmits<{ savePosition: [id: string, position: TranscriptPosition] }>()

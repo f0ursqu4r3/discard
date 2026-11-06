@@ -226,6 +226,32 @@ async fn each_turn_refreshes_personality_memory_model_and_retains_only_own_histo
 }
 
 #[tokio::test]
+async fn agent_identity_reaches_each_turn_and_renames_preserve_history() {
+    let mut rig = Rig::new(vec![Step::text("Hello"), Step::idle()]).await;
+    rig.edit(|c| {
+        c.name = "Quinn".into();
+        c.system_prompt.clear();
+    });
+    rig.commands.send(Command::Send("What is your name?".into())).unwrap();
+    rig.done().await;
+    rig.edit(|c| {
+        c.name = "Robin".into();
+        c.system_prompt = "Be concise.".into();
+    });
+    rig.commands.send(Command::Send("What is your name now?".into())).unwrap();
+    rig.done().await;
+    let specs = rig.probe.specs.lock().unwrap().clone();
+    let first = specs[0].system_prompt.as_deref().unwrap();
+    let second = specs[1].system_prompt.as_deref().unwrap();
+    assert!(first.contains("Your name is \"Quinn\"."));
+    assert!(second.contains("Your name is \"Robin\"."));
+    assert!(!second.contains("Your name is \"Quinn\"."));
+    assert!(second.contains("Be concise."));
+    assert!(rig.probe.sent.lock().unwrap()[1].contains("What is your name?"));
+    rig.close().await;
+}
+
+#[tokio::test]
 async fn archive_and_unavailable_provider_prevent_new_turn_without_fallback() {
     let mut rig = Rig::new(vec![Step::text("ok"), Step::idle()]).await;
     rig.edit(|c| c.provider = "missing".into());

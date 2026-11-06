@@ -9,7 +9,9 @@ vi.mock('@/bridge/api', () => ({
   runAction: vi.fn(),
   contextMenu: vi.fn(() => []),
   getConversations: vi.fn(async () => []),
+  getAgents: vi.fn(async () => []),
 }))
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
 const snapshot = snapshotFixture as SnapshotDto
 const messages: MessageDto[] = [
   {
@@ -24,9 +26,9 @@ test('DM view cannot display or send into the project conversation', async () =>
   const view = mount(WorkspacePage, { props: { page: 'direct-messages', snapshot, messages } })
   expect(view.text()).not.toContain('Private project conversation')
   expect(view.find('textarea').exists()).toBe(false)
-  expect(view.text()).toContain('Choose a direct conversation from the navigation')
+  expect(view.text()).toContain('Agents')
   await view.get('button:not([role="tab"])').trigger('click')
-  expect(view.emitted('action')).toEqual([['open_agent_settings']])
+  expect(view.emitted('action')).toEqual([['add_agent']])
 })
 
 test('DM profile hides project-specific branch and plugin content', () => {

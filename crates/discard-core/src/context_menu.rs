@@ -28,7 +28,7 @@ pub fn context_menu(target: &ContextTarget, ctx: &MenuContext) -> Vec<MenuEntry>
     let mut entries = match target {
         ContextTarget::DiffBlock { .. } => vec![entry("Copy Diff", Action::CopyDiff, true)],
         ContextTarget::ToolCall { has_output, .. } => vec![entry("Copy Tool Input", Action::CopyToolInput, true),entry("Copy Tool Output", Action::CopyToolOutput, *has_output)],
-        ContextTarget::Agent { .. } => vec![entry("Copy Agent Name", Action::CopyAgentName, true),entry("Agent Settings…", Action::OpenAgentSettings, true)],
+        ContextTarget::Agent { .. } => vec![entry("Copy Agent Name", Action::CopyAgentName, true),entry("View Profile", Action::OpenAgentSettings, true)],
         ContextTarget::Server { .. } => vec![entry("Copy Project Name", Action::CopyProjectName, true),entry("Copy Project Path", Action::CopyProjectPath, true),entry("Workspace Settings…", Action::OpenWorkspaceSettings, true)],
         ContextTarget::Message { has_text, .. } => vec![entry("Copy Message Text", Action::CopyMessageText, *has_text)],
         ContextTarget::CodeBlock { .. } => vec![entry("Copy Code", Action::CopyCode, true)],

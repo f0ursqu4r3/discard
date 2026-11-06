@@ -95,7 +95,7 @@ impl Action {
             Self::CopyAgentName => "Copy Agent Name",
             Self::CopyProjectName => "Copy Project Name",
             Self::CopyProjectPath => "Copy Project Path",
-            Self::OpenAgentSettings => "Agent Settings",
+            Self::OpenAgentSettings => "Agent Profile",
             Self::OpenWorkspaceSettings => "Workspace Settings",
         }
     }

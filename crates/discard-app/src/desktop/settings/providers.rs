@@ -20,6 +20,13 @@ pub fn settings_providers(context: tauri::State<'_, super::SettingsContext>) -> 
 }
 
 #[tauri::command]
+pub async fn settings_provider_models(context: tauri::State<'_, super::SettingsContext>, provider: String) -> Result<Vec<discard_core::provider::ModelInfo>, String> {
+    let info = context.providers.iter().find(|info| info.id == provider).ok_or("Unknown provider")?;
+    let provider = info.provider.clone();
+    provider.models().await.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn settings_recheck_provider(context: tauri::State<'_, super::SettingsContext>, id: String) -> Result<(), String> {
     if !context.providers.iter().any(|provider| provider.id == id) { return Err("Provider is unavailable".into()); }
     (context.recheck)(&id);

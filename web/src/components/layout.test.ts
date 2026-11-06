@@ -213,6 +213,12 @@ test('DM entry opens contacts while project navigation remains available', async
     props: { project: 'Discard', unread: true, pendingApprovals: 0, directMessages: true },
   })
   const dm = rail.get('[data-ui-id="direct-messages-button"]')
+  expect(rail.get('[data-ui-id="dm-selection-pill"]').attributes('style')).toContain('* 12)')
+  expect(rail.find('[data-ui-id="project-selection-pill"]').exists()).toBe(false)
+  await rail.setProps({ directMessages: false })
+  expect(rail.get('[data-ui-id="dm-selection-pill"]').attributes('style')).toContain('* 0)')
+  await rail.setProps({ directMessages: true })
+
   expect(dm.attributes('disabled')).toBeUndefined()
   await dm.trigger('click')
   expect(rail.emitted('directMessages')).toHaveLength(1)
@@ -240,4 +246,16 @@ test('project rail keeps separate entries and selects by project ID', async () =
   await rail.get('[aria-label="Import project"]').trigger('click')
   expect(rail.emitted('addProject')).toHaveLength(1)
   expect(rail.findAll('[data-ui-id="project-selection-pill"]')).toHaveLength(1)
+})
+
+test('DM navigation omits the project header and channel controls', async () => {
+  const { shallowMount } = await import('@vue/test-utils')
+  const { default: ChannelList } = await import('./ChannelList.vue')
+  const nav = shallowMount(ChannelList, {
+    props: { page: 'direct-messages', projectId: 'selected-project', branches: [] },
+    global: { renderStubDefaultSlot: true },
+  })
+  expect(nav.find('[data-ui-id="project-header"]').exists()).toBe(false)
+  expect(nav.find('[data-ui-id="project-navigation"]').exists()).toBe(false)
+  expect(nav.getComponent({ name: 'AgentsNavigation' }).props('projectId')).toBeNull()
 })

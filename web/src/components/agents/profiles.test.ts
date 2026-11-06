@@ -1,7 +1,10 @@
 import { beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import { invoke } from '@tauri-apps/api/core'
-import Agents from './pages/Agents.vue'
+import AgentProfileEditor from './AgentProfileEditor.vue'
+import AgentProfileDialog from './AgentProfileDialog.vue'
+import AddAgentDialog from './AddAgentDialog.vue'
+import { Select } from '@/components/ui/select'
 const original = {
   id: 'a',
   name: 'Robin',
@@ -27,6 +30,11 @@ beforeEach(() => {
           { id: 'claude', setup: 'Ready' },
           { id: 'codex', setup: 'Ready' },
         ]
+      if (name === 'settings_provider_models')
+        return [
+          { id: 'same-model', name: 'Same model', description: '' },
+          { id: 'unavailable', name: 'Unavailable', description: '' },
+        ]
       if (name === 'settings_agent_defaults')
         return { ...original, name: 'Alex', avatar: null, provider: '', model: '' }
       if (name === 'settings_agent_review')
@@ -51,13 +59,9 @@ beforeEach(() => {
       return undefined
     })
 })
+const dialogOptions = { global: { stubs: { DialogContent: { template: '<div><slot /></div>' } } } }
 async function editor() {
-  const view = mount(Agents)
-  await flushPromises()
-  await view
-    .findAll('button')
-    .find((b) => b.text().includes('Robin'))!
-    .trigger('click')
+  const view = mount(AgentProfileEditor, { props: { agent: { ...original } } })
   await flushPromises()
   return view
 }
@@ -87,17 +91,13 @@ test('edits identity, exact model, optional personality and avatar without resta
   expect(view.text()).not.toContain('Relaunch')
 })
 test('creates with a generated editable name and requires an explicit model', async () => {
-  const view = mount(Agents)
+  const view = mount(AddAgentDialog, { props: { open: true }, ...dialogOptions })
   await flushPromises()
-  await view
-    .findAll('button')
-    .find((b) => b.text() === 'Create agent')!
-    .trigger('click')
-  await flushPromises()
-  expect((view.get('#agent-name').element as HTMLInputElement).value).toBe('Alex')
+  expect((view.get('#new-agent-name').element as HTMLInputElement).value).toBe('Alex')
   expect(view.get('button[type="submit"]').attributes('disabled')).toBeDefined()
-  await view.get('#agent-name').setValue('Sam')
-  await view.get('#agent-model').setValue('same-model')
+  await view.get('#new-agent-name').setValue('Sam')
+  view.findAllComponents(Select)[1]!.vm.$emit('update:modelValue', 'same-model')
+  await flushPromises()
   await view.get('form').trigger('submit')
   await flushPromises()
   expect(invoke).toHaveBeenCalledWith('settings_agent_create', {
@@ -117,6 +117,7 @@ test('archive and restore preserve editable data; delete choices are independent
     .trigger('click')
   await flushPromises()
   expect(invoke).toHaveBeenCalledWith('settings_agent_archive', { id: 'a', archived: true })
+  await view.setProps({ agent: { ...original, archived: true } })
   await view
     .findAll('button')
     .find((b) => b.text() === 'Restore agent')!
@@ -148,4 +149,63 @@ test('failed save keeps the unsaved draft and shows the real error', async () =>
   await flushPromises()
   expect(view.get('[role="alert"]').text()).toBe('Model is unavailable')
   expect((view.get('#agent-model').element as HTMLInputElement).value).toBe('unsaved-model')
+})
+
+test('a profile opens in view mode and edits only after Edit profile', async () => {
+  const view = mount(AgentProfileDialog, { props: { agentId: 'a' }, ...dialogOptions })
+  await flushPromises()
+  expect(view.text()).toContain('Robin')
+  expect(view.find('form').exists()).toBe(false)
+  await view
+    .findAll('button')
+    .find((b) => b.text() === 'Edit profile')!
+    .trigger('click')
+  await flushPromises()
+  await view.get('#agent-name').setValue('River')
+  await flushPromises()
+  await view.get('form').trigger('submit')
+  await flushPromises()
+  expect(view.find('form').exists()).toBe(false)
+  expect(view.text()).toContain('River')
+  expect(view.text()).toContain('Saved. Changes apply to the next response.')
+  await view
+    .findAll('button')
+    .find((b) => b.text() === 'Message')!
+    .trigger('click')
+  expect(view.emitted('message')).toEqual([['a']])
+  view.unmount()
+})
+test('failed creation keeps the entered name and model', async () => {
+  const view = mount(AddAgentDialog, { props: { open: true }, ...dialogOptions })
+  await flushPromises()
+  await view.get('#new-agent-name').setValue('River')
+  view.findAllComponents(Select)[1]!.vm.$emit('update:modelValue', 'unavailable')
+  await flushPromises()
+  vi.mocked(invoke).mockRejectedValueOnce('Model is unavailable')
+  await view.get('form').trigger('submit')
+  await flushPromises()
+  expect(view.text()).toContain('Model is unavailable')
+  expect((view.get('#new-agent-name').element as HTMLInputElement).value).toBe('River')
+  expect(view.emitted('created')).toBeUndefined()
+  view.unmount()
+})
+test('permission expansion still requires confirmation in the profile', async () => {
+  const view = await editor()
+  await view.get('#agent-model').setValue('exact/new-model')
+  await flushPromises()
+  vi.mocked(invoke).mockRejectedValueOnce('Confirmation is required')
+  await view.get('form').trigger('submit')
+  await flushPromises()
+  expect(view.emitted('saved')).toBeUndefined()
+  await view
+    .findAll('button')
+    .find((b) => b.text() === 'Confirm and save')!
+    .trigger('click')
+  await flushPromises()
+  expect(invoke).toHaveBeenCalledWith(
+    'settings_agent_save',
+    expect.objectContaining({ id: 'a', confirmed: true }),
+  )
+  expect(view.emitted('saved')).toHaveLength(1)
+  view.unmount()
 })

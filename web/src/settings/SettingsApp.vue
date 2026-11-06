@@ -7,7 +7,6 @@ import { Button } from '@/components/ui/button'
 import General from './pages/General.vue'
 import Appearance from './pages/Appearance.vue'
 import Providers from './pages/Providers.vue'
-import Agents from './pages/Agents.vue'
 import Workspaces from './pages/Workspaces.vue'
 import Memory from './pages/Memory.vue'
 import Advanced from './pages/Advanced.vue'
@@ -21,7 +20,11 @@ import type { SnapshotDto } from '@/bridge/types'
 type Entry = { title: string; available: boolean }
 const query = ref('')
 const entries = ref<Entry[]>([])
-const page = ref(location.hash.split('/')[2] || 'general')
+const page = ref(settingsPage(location.hash))
+function settingsPage(route: string) {
+  const name = route.split('/')[2] || 'general'
+  return name === 'agents' ? 'general' : name
+}
 const stops: UnlistenFn[] = []
 let searchId = 0
 async function search() {
@@ -44,8 +47,8 @@ onMounted(async () => {
   const snapshot = await getSnapshot()
   if (snapshot?.theme) applyTheme(snapshot.theme, document.documentElement)
   function openRoute(route: string) {
-    page.value = route.split('/')[2] || 'general'
-    location.hash = route
+    page.value = settingsPage(route)
+    location.hash = `/settings/${page.value}`
   }
   stops.push(await listen<string>('discard://settings-page', (event) => openRoute(event.payload)))
   const route = await invoke<string | null>('settings_current_page')
@@ -81,7 +84,6 @@ onUnmounted(() => stops.forEach((stop) => stop()))
       <General v-if="page === 'general'" />
       <Appearance v-else-if="page === 'appearance'" />
       <Providers v-else-if="page === 'providers'" />
-      <Agents v-else-if="page === 'agents'" />
       <Workspaces v-else-if="page === 'workspaces'" />
       <Memory v-else-if="page === 'memory'" />
       <Advanced v-else-if="page === 'advanced'" />

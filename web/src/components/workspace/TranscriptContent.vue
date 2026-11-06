@@ -30,6 +30,7 @@ const props = defineProps<{
   prompts?: PromptDto[]
   memoryRevision?: number
   conversationId: string
+  jumpTo?: { messageId: string; request: number }
   position?: TranscriptPosition
 }>()
 const memory = useMemory(
@@ -45,6 +46,20 @@ const emit = defineEmits<{
 const host = ref<HTMLElement | null>(null)
 const scroller = useMessageScrollerContext()
 let restoreFrame = 0
+watch(
+  () => props.jumpTo,
+  async (jump) => {
+    if (!jump) return
+    await nextTick()
+    cancelAnimationFrame(restoreFrame)
+    restoreFrame = requestAnimationFrame(() => {
+      scroller.userScrollIntent()
+      scroller.scrollToMessage(jump.messageId, { align: 'center', behavior: 'auto' })
+      scroller.syncAfterScroll()
+    })
+  },
+  { immediate: true, flush: 'post' },
+)
 const scrollable = useMessageScrollerScrollable()
 const visibility = useMessageScrollerVisibility()
 const liveMessage = computed<MessageDto>(() => ({
@@ -74,7 +89,7 @@ watch([scrollable, visibility, () => props.messages.at(-1)?.id], read, {
 })
 onMounted(async () => {
   window.addEventListener('focus', read)
-  if (!props.position) return
+  if (!props.position || props.jumpTo) return
   await nextTick()
   restoreFrame = requestAnimationFrame(() => {
     const viewport = host.value?.querySelector<HTMLElement>(
@@ -154,6 +169,8 @@ onUnmounted(() => window.removeEventListener('focus', read))
             v-for="message in messages"
             :key="message.id"
             :message-id="message.id"
+            :data-search-match="message.id === jumpTo?.messageId || undefined"
+            :class="{ 'bg-accent ring-1 ring-inset ring-ring': message.id === jumpTo?.messageId }"
             :scroll-anchor="message.role === 'user'"
           >
             <div

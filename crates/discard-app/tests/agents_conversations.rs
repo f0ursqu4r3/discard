@@ -85,7 +85,9 @@ async fn fresh_navigation_direct_chats_fixed_projects_and_saved_selection_are_in
     assert!(store.lock().unwrap().all_agents().unwrap().is_empty());
     assert!(store.lock().unwrap().list_projects().unwrap().is_empty());
     let agent = store.lock().unwrap().create_agent(&config()).unwrap();
+    assert!(store.lock().unwrap().direct_message_agents().unwrap().is_empty());
     let direct = channels.open_agent(&agent).unwrap();
+    assert_eq!(store.lock().unwrap().direct_message_agents().unwrap(), vec![agent.clone()]);
     assert_eq!(core.active_context(), (agent.clone(), None));
     assert!(!core.snapshot().composer_disabled);
     let project_dir = tempfile::tempdir().unwrap();

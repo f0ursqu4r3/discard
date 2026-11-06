@@ -29,6 +29,8 @@ const entries = computed(
   () => props.projects ?? [{ id: props.projectId ?? '', name: props.project, path: '' }],
 )
 const selected = (id: string) => id === (props.projectId ?? '') && !props.directMessages
+const homeHovered = ref(false)
+const homeFocused = ref(false)
 const hovered = ref<string | null>(null)
 const focused = ref<string | null>(null)
 const emit = defineEmits<{
@@ -50,7 +52,21 @@ const emit = defineEmits<{
         )
       "
     >
-      <div data-ui-id="rail-home" class="flex h-16 shrink-0 items-center justify-center">
+      <div
+        data-ui-id="rail-home"
+        class="relative flex h-16 w-full shrink-0 items-center justify-center"
+        @mouseenter="homeHovered = true"
+        @mouseleave="homeHovered = false"
+        @focusin="homeFocused = true"
+        @focusout="homeFocused = false"
+      >
+        <span
+          data-ui-id="dm-selection-pill"
+          class="pointer-events-none absolute left-0 w-1 rounded-r-full bg-foreground transition-[height] duration-150 motion-reduce:transition-none"
+          :style="{
+            height: `calc(var(--spacing) * ${serverPillHeight(directMessages, homeHovered || homeFocused, false, compact ? 10 : 12)})`,
+          }"
+        />
         <Tooltip>
           <TooltipTrigger as-child>
             <Button

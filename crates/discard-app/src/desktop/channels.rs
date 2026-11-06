@@ -83,6 +83,11 @@ impl Channels {
         else { self.core.clear_branch_source(); }
         self.core.clear_slots();
         self.core.refresh_branches(self.core.request_branch_refresh());
+        if channel.project_id.is_none() {
+            if let Err(error) = self.store.lock().unwrap_or_else(|e| e.into_inner()).add_direct_message(&channel.agent_id) {
+                self.core.append_channel_notice(id, format!("Chat opened, but could not save it to Direct Messages: {error}"));
+            }
+        }
         // Selection succeeded. Report a restart failure in the retained transcript so
         // callers still open that history through the shared conversation-opened event.
         if restart && let Err(error) = self.start_mode(&channel, true) {

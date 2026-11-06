@@ -57,3 +57,21 @@ test('IME confirmation does not send a message', async () => {
   await composer.get('textarea').trigger('keydown', { key: 'Enter', isComposing: true })
   expect(composer.emitted('send')).toBeUndefined()
 })
+
+test('DM composer names the agent and has no channel labels or footer', () => {
+  const composer = mount(Composer, {
+    props: {
+      archived: false,
+      busy: false,
+      running: false,
+      channel: 'General',
+      agent: 'Quinn',
+      directMessage: true,
+    },
+  })
+  expect(composer.get('textarea').attributes('placeholder')).toBe('Message Quinn')
+  expect(composer.get('textarea').attributes('aria-label')).toBe('Message Quinn')
+  expect(composer.text()).not.toContain('General')
+  expect(composer.text()).not.toContain('Enter to send')
+  expect(composer.element.lastElementChild?.getAttribute('data-slot')).toBe('input-group')
+})

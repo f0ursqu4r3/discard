@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { isTauri } from '@tauri-apps/api/core'
 import { useMediaQuery } from '@vueuse/core'
 import { ScanEye, LoaderCircle, GitPullRequest, ListChecks } from '@lucide/vue'
 import { toast } from 'vue-sonner'
@@ -21,7 +22,9 @@ import {
   removeProject,
   revealProject,
   restoreConversation,
+  openAgentChat,
   type ProjectEntry,
+  type HistoryMatch,
 } from './bridge/api'
 import ChannelList from './components/ChannelList.vue'
 import ChannelHeader from './components/ChannelHeader.vue'
@@ -47,9 +50,15 @@ import ContextPanel from './components/workspace/ContextPanel.vue'
 import WorkspacePageView from './components/workspace/WorkspacePage.vue'
 import BrandMark from './components/workspace/BrandMark.vue'
 import UiInspector from './components/workspace/UiInspector.vue'
+import FriendsList from './components/agents/FriendsList.vue'
+import AddAgentDialog from './components/agents/AddAgentDialog.vue'
+import AgentHistorySearch from './components/agents/AgentHistorySearch.vue'
+import AgentProfileDialog from './components/agents/AgentProfileDialog.vue'
 import type { WorkspacePage } from './components/workspace/types'
 import type { ProjectMenuAction } from './components/project-menu'
 import type { TranscriptPosition } from './components/workspace/transcript'
+// Match the macOS overlay in tauri.conf.json; browser previews keep their normal inset.
+const integratedTitlebar = isTauri() && /mac/i.test(navigator.platform)
 const store = useStore()
 const projects = ref<ProjectEntry[]>([])
 async function refreshProjects() {
@@ -66,19 +75,38 @@ useWebShortcuts()
 const drafts = reactive<Record<string, string>>({})
 const transcriptPositions = reactive<Record<string, TranscriptPosition>>({})
 const page = ref<WorkspacePage>('conversation')
+const addAgentOpen = ref(false),
+  profileId = ref<string | null>(null),
+  profileBusy = ref(false)
 const conversationTab = ref('conversation')
+const sidebarMode = ref<'profile' | 'search'>('profile')
+const historyQuery = ref(''),
+  historyRevision = ref(0),
+  profileRequest = ref(0)
+const searchAgent = ref<{ id: string; name: string } | null>(null)
+const messageJump = ref<{ channelId: string; messageId: string; request: number } | null>(null)
+let jumpRequest = 0
+
 const navigationPage = computed<WorkspacePage>(() =>
   page.value === 'conversation' && !store.snapshot?.activeProjectId
     ? 'direct-messages'
     : page.value,
 )
 let stopConversationOpened: UnlistenFn | undefined
+let stopAgentProfile: UnlistenFn | undefined
 let disposed = false
 onMounted(async () => {
   try {
     const stop = await listen('discard://conversation-opened', () => navigate('conversation'))
     if (disposed) stop()
     else stopConversationOpened = stop
+    const stopProfile = await listen<string>('discard://agent-profile', (event) => {
+      if (profileBusy.value) return
+      if (event.payload) profileId.value = event.payload
+      else navigate('direct-messages')
+    })
+    if (disposed) stopProfile()
+    else stopAgentProfile = stopProfile
   } catch (error) {
     toast.error(String(error))
   }
@@ -86,6 +114,7 @@ onMounted(async () => {
 onUnmounted(() => {
   disposed = true
   stopConversationOpened?.()
+  stopAgentProfile?.()
 })
 const newChannelOpen = ref(false),
   switching = ref(false),
@@ -95,16 +124,26 @@ const isWide = useMediaQuery('(min-width: 1280px)')
 const isCompact = useMediaQuery('(max-width: 639px)')
 const navigationOpen = ref(false),
   contextOpen = ref(false)
-const showContextPanel = computed(() => isWide.value && !!store.snapshot?.memberListVisible)
+const showContextPanel = computed(
+  () =>
+    isWide.value &&
+    page.value !== 'direct-messages' &&
+    !!store.snapshot?.channelId &&
+    !!store.snapshot?.memberListVisible,
+)
 const railWidth = computed(
   () => 72 * (store.snapshot?.theme.spacingScale ?? 1) * (store.snapshot?.theme.fontScale ?? 1),
 )
 const currentLayout = ref<number[]>([])
 const heading = computed(() =>
   page.value === 'conversation'
-    ? store.snapshot?.channel
+    ? store.snapshot?.channelId
+      ? store.snapshot.activeProjectId
+        ? store.snapshot.channel
+        : store.snapshot.agent
+      : 'Agents'
     : page.value === 'direct-messages'
-      ? store.snapshot?.agent
+      ? 'Agents'
       : {
           overview: 'Project overview',
           agents: 'Project agents',
@@ -130,11 +169,47 @@ const tools = computed(() =>
 )
 function navigate(value: WorkspacePage) {
   page.value = value
+  if (value === 'direct-messages') contextOpen.value = false
   navigationOpen.value = false
   if (value === 'conversation') conversationTab.value = 'conversation'
 }
+function openProviderConnections() {
+  addAgentOpen.value = false
+  void action('open_provider_settings')
+}
 async function action(id: string) {
   try {
+    if (id === 'add_agent') {
+      addAgentOpen.value = true
+      return
+    }
+    if (id === 'show_friends') {
+      navigate('direct-messages')
+      return
+    }
+    if (id === 'open_agent_settings' || id.startsWith('view_agent_profile:')) {
+      if (profileBusy.value) return
+      const agentId = id.startsWith('view_agent_profile:')
+        ? id.slice('view_agent_profile:'.length)
+        : store.snapshot?.agentId
+      if (agentId) profileId.value = agentId
+      else navigate('direct-messages')
+      return
+    }
+    if (id.startsWith('message_agent:')) {
+      if (switching.value) return
+      switching.value = true
+      try {
+        const channelId = await openAgentChat(id.slice('message_agent:'.length))
+        await switchChannel(channelId)
+        await store.refresh()
+        profileId.value = null
+        navigate('conversation')
+      } finally {
+        switching.value = false
+      }
+      return
+    }
     if (id === 'import_project' || id === 'change_project_folder') {
       await chooseProjectFolder(id === 'change_project_folder')
       await store.refresh()
@@ -194,7 +269,47 @@ async function projectAction(id: ProjectMenuAction, project: ProjectEntry) {
     switching.value = false
   }
 }
+async function searchHistory(query: string) {
+  const snapshot = store.snapshot
+  if (!snapshot?.agentId || snapshot.activeProjectId || !query.trim()) return
+  searchAgent.value = { id: snapshot.agentId, name: snapshot.agent }
+  historyQuery.value = query.trim()
+  historyRevision.value++
+  sidebarMode.value = 'search'
+  try {
+    if (isWide.value) await setMemberListVisible(true)
+    else contextOpen.value = true
+  } catch (error) {
+    toast.error(String(error))
+  }
+}
+async function selectHistoryMatch(match: HistoryMatch) {
+  if (switching.value) return
+  switching.value = true
+  try {
+    if (store.snapshot?.channelId !== match.channelId) await switchChannel(match.channelId)
+    await store.refresh()
+    await nextTick()
+    messageJump.value = {
+      channelId: match.channelId,
+      messageId: match.messageId,
+      request: ++jumpRequest,
+    }
+    navigate('conversation')
+    if (!isWide.value) contextOpen.value = false
+  } catch (error) {
+    toast.error('Could not open message', { description: String(error) })
+  } finally {
+    switching.value = false
+  }
+}
 async function toggleMembers() {
+  profileRequest.value++
+  if (sidebarMode.value === 'search' && (showContextPanel.value || contextOpen.value)) {
+    sidebarMode.value = 'profile'
+    return
+  }
+  sidebarMode.value = 'profile'
   if (!isWide.value) {
     contextOpen.value = !contextOpen.value
     return
@@ -335,6 +450,9 @@ watch(
   () => store.snapshot?.channelId,
   () => {
     conversationTab.value = 'conversation'
+    messageJump.value = null
+    if (searchAgent.value?.id !== store.snapshot?.agentId || store.snapshot?.activeProjectId)
+      sidebarMode.value = 'profile'
   },
 )
 </script>
@@ -344,9 +462,14 @@ watch(
     data-ui-id="app-shell"
     class="flex h-dvh flex-col overflow-hidden bg-canvas text-sm text-foreground"
   >
-    <header data-ui-id="app-toolbar" class="flex h-9 shrink-0 items-center gap-2 px-3">
-      <BrandMark class="size-4" />
-      <span class="text-xs font-semibold">Discard</span>
+    <header
+      data-ui-id="app-toolbar"
+      data-tauri-drag-region
+      class="flex h-9 shrink-0 select-none items-center gap-2 pr-3"
+      :class="integratedTitlebar ? 'pl-[88px]' : 'pl-3'"
+    >
+      <BrandMark class="pointer-events-none size-4 shrink-0" />
+      <span class="pointer-events-none text-xs font-semibold">Discard</span>
       <span
         class="pointer-events-none mx-auto hidden truncate text-xs text-muted-foreground sm:block"
       >
@@ -355,7 +478,7 @@ watch(
       </span>
       <span
         v-if="store.snapshot?.turnRunning"
-        class="ml-auto flex items-center gap-1.5 text-xs text-muted-foreground"
+        class="pointer-events-none ml-auto flex items-center gap-1.5 text-xs text-muted-foreground"
       >
         <LoaderCircle class="size-3 motion-safe:animate-spin" />
         Working
@@ -426,7 +549,8 @@ watch(
             @keyup="savePanels"
           />
         </template>
-        <ResizablePanel :order="2" :min-size="isCompact ? 0 : 320" size-unit="px">
+        <!-- The chat takes window size changes; sidebars keep their pixel widths. -->
+        <ResizablePanel :order="2" :min-size="0" size-unit="%">
           <section
             data-ui-id="main-panel"
             class="flex h-full min-w-0 flex-col overflow-hidden rounded-xl border border-border/60 bg-workspace"
@@ -434,24 +558,35 @@ watch(
             <ChannelHeader
               :channel="heading || ''"
               :subtitle="
-                store.snapshot.activeProjectId
+                store.snapshot.activeProjectId && page !== 'direct-messages'
                   ? projects.find((p) => p.id === store.snapshot?.activeProjectId)?.name
-                  : 'Direct chat'
+                  : undefined
               "
-              :direct-message="!store.snapshot.activeProjectId"
+              :direct-message="page === 'direct-messages' || !store.snapshot.activeProjectId"
               :compact="isCompact"
-              :member-list-visible="showContextPanel || contextOpen"
+              :agent-id="store.snapshot.agentId"
+              :sidebar-available="page !== 'direct-messages' && !!store.snapshot.channelId"
+              :agent-name="
+                page === 'conversation' && store.snapshot.agentId ? store.snapshot.agent : undefined
+              "
+              @search="searchHistory"
+              :member-list-visible="(showContextPanel || contextOpen) && sidebarMode === 'profile'"
               @toggle-members="toggleMembers"
               @toggle-navigation="navigationOpen = true"
             >
               <PluginElement
-                v-if="page === 'conversation' && store.snapshot.slots.channel_header"
+                v-if="
+                  page === 'conversation' &&
+                  store.snapshot.activeProjectId &&
+                  store.snapshot.slots.channel_header
+                "
                 :element="store.snapshot.slots.channel_header.element"
                 :plugin="store.snapshot.slots.channel_header.plugin"
               />
             </ChannelHeader>
             <template v-if="page === 'conversation' && store.snapshot.channelId">
               <Tabs
+                v-if="store.snapshot.activeProjectId"
                 v-model="conversationTab"
                 data-ui-id="conversation-tabs"
                 class="flex h-11 shrink-0 flex-row items-center justify-start overflow-x-auto border-b border-border/60 px-3 sm:px-5"
@@ -469,10 +604,13 @@ watch(
               </Tabs>
               <MessageList
                 :conversation-id="store.snapshot.channelId"
+                :jump-to="
+                  messageJump?.channelId === store.snapshot.channelId ? messageJump : undefined
+                "
                 :memory-revision="store.snapshot.memoryRev"
                 :position="transcriptPositions[store.snapshot.channelId]"
                 @save-position="(id, position) => (transcriptPositions[id] = position)"
-                v-if="conversationTab === 'conversation'"
+                v-if="!store.snapshot.activeProjectId || conversationTab === 'conversation'"
                 :key="store.snapshot.channelId"
                 :messages="store.history"
                 :live="store.snapshot.liveBlocks"
@@ -544,18 +682,12 @@ watch(
                 </Empty>
               </div>
             </template>
-            <div
+            <FriendsList
               v-else-if="
                 page === 'direct-messages' || (page === 'conversation' && !store.snapshot.channelId)
               "
-              class="flex flex-1 flex-col items-center justify-center gap-3 p-6"
-            >
-              <p>Choose an agent or conversation in the navigation.</p>
-              <Button @click="action('open_agent_settings')">Manage agents</Button>
-              <Button variant="outline" @click="action('import_project')">
-                Import project folder
-              </Button>
-            </div>
+              @action="action"
+            />
             <WorkspacePageView
               v-else
               :page="page"
@@ -568,7 +700,12 @@ watch(
               data-ui-id="protected-notices"
               class="max-h-64 shrink-0 overflow-auto overscroll-contain"
             >
-              <template v-if="page !== 'conversation' || conversationTab !== 'conversation'">
+              <template
+                v-if="
+                  page !== 'conversation' ||
+                  (store.snapshot.activeProjectId && conversationTab !== 'conversation')
+                "
+              >
                 <ApprovalCard
                   :channel-id="store.snapshot.channelId"
                   v-for="prompt in store.snapshot.prompts.filter((p) => p.view === 'pending')"
@@ -608,7 +745,7 @@ watch(
                 v-if="store.snapshot.composerDisabled && store.snapshot.channelId"
                 class="px-5 py-2 text-xs text-muted-foreground"
               >
-                Read only. You can restore archived agents in Manage agents. Deleted agents cannot
+                Read only. You can restore archived agents from their profile. Deleted agents cannot
                 send messages.
               </p>
               <Notices
@@ -629,6 +766,7 @@ watch(
                 :key="store.snapshot.channelId"
                 v-model:draft="drafts[store.snapshot.channelId]"
                 :channel="store.snapshot.channel"
+                :direct-message="!store.snapshot.activeProjectId"
                 :agent="store.snapshot.agent"
                 :archived="store.snapshot.composerDisabled || store.snapshot.archived"
                 :busy="
@@ -660,8 +798,19 @@ watch(
             :max-size="400"
           >
             <div class="h-full overflow-hidden rounded-xl border border-border/60">
+              <AgentHistorySearch
+                v-if="sidebarMode === 'search' && searchAgent"
+                :agent-id="searchAgent.id"
+                :agent-name="searchAgent.name"
+                :query="historyQuery"
+                :revision="historyRevision"
+                :busy="switching"
+                @select="selectHistoryMatch"
+              />
               <ContextPanel
-                :direct-message="!store.snapshot.activeProjectId"
+                v-else
+                :profile-request="profileRequest"
+                :direct-message="page === 'direct-messages' || !store.snapshot.activeProjectId"
                 :snapshot="store.snapshot"
                 @action="action"
                 @approvals="navigate('conversation')"
@@ -724,9 +873,20 @@ watch(
           <Button variant="ghost" class="shrink-0" @click="contextOpen = false">
             Close context
           </Button>
+          <AgentHistorySearch
+            v-if="sidebarMode === 'search' && searchAgent"
+            :agent-id="searchAgent.id"
+            :agent-name="searchAgent.name"
+            :query="historyQuery"
+            :revision="historyRevision"
+            :busy="switching"
+            @select="selectHistoryMatch"
+          />
           <ContextPanel
+            v-else
+            :profile-request="profileRequest"
             class="min-h-0 flex-1"
-            :direct-message="!store.snapshot.activeProjectId"
+            :direct-message="page === 'direct-messages' || !store.snapshot.activeProjectId"
             :snapshot="store.snapshot"
             @action="action"
             @approvals="
@@ -743,6 +903,22 @@ watch(
       <LoaderCircle class="size-4 motion-safe:animate-spin" />
       Opening workspace…
     </div>
+    <AddAgentDialog
+      v-model:open="addAgentOpen"
+      @created="
+        (id) => {
+          profileId = id
+          navigate('direct-messages')
+        }
+      "
+      @connections="openProviderConnections"
+    />
+    <AgentProfileDialog
+      :agent-id="profileId"
+      @busy="profileBusy = $event"
+      @close="profileId = null"
+      @message="action(`message_agent:${$event}`)"
+    />
     <UiInspector v-if="inspector" @close="inspector = false" />
     <Toaster
       :theme="store.snapshot?.theme.mode === 'light' ? 'light' : 'dark'"

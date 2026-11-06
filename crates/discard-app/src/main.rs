@@ -133,7 +133,7 @@ fn run_app(
     for id in discard_core::bootstrap::PROVIDERS {
         let provider = provider_for(id)?;
         let setup = Arc::new(Mutex::new(None));
-        providers.push(ProviderInfo { id: (*id).into(), matrix: provider.capabilities().clone(), setup: setup.clone() });
+        providers.push(ProviderInfo { provider: provider.clone(), id: (*id).into(), matrix: provider.capabilities().clone(), setup: setup.clone() });
         provider_checks.push(((*id).to_string(), provider, setup));
     }
     let handle = runtime.handle().clone();
@@ -220,7 +220,7 @@ fn run_app(
                 observer: Some(Arc::new(plugin_events::PluginEvents::with_context(manager.clone(), Some((channel.agent_id.clone(), channel.project_id.clone()))))),
                 channel_name: channel.name.clone(), provider, channel_id: channel.id.clone(), session_id,
                 cwd: project_dir.clone(), model: agent.model.clone(),
-                system_prompt: Some(agent.system_prompt.clone()).filter(|p| !p.is_empty()), policy: agent.policy,
+                system_prompt: Some(agent.runtime_system_prompt()), policy: agent.policy,
             };
             handle.spawn(engine.run(commands_rx, updates_tx));
             Ok((CoreInit { state: UiState::new(channel.id.clone(), history), commands: commands_tx,
