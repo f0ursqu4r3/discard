@@ -4,5 +4,6 @@ pub mod claude;
 pub mod codex;
 pub mod fake;
 
+mod attachments;
 mod conversation;
 mod models;

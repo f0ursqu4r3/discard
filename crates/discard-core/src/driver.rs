@@ -78,6 +78,16 @@ pub async fn run_turn(
     ctx: TurnContext<'_>,
     session: &mut dyn ProviderSession,
     user_text: &str,
+    inputs: TurnInputs,
+) -> Result<(Turn, TurnOutcome), DriverError> {
+    run_turn_with_images(ctx, session, user_text, &[], inputs).await
+}
+
+pub async fn run_turn_with_images(
+    ctx: TurnContext<'_>,
+    session: &mut dyn ProviderSession,
+    user_text: &str,
+    images: &[crate::attachments::Attachment],
     mut inputs: TurnInputs,
 ) -> Result<(Turn, TurnOutcome), DriverError> {
     let TurnContext { store, sequencer, session_id, policy_name, updates } = ctx;
@@ -86,7 +96,7 @@ pub async fn run_turn(
     set_state(store, &mut turn, TurnState::Running)?;
     info!(session = %session_id, turn = %turn.id, "turn started");
 
-    if let Err(e) = session.send_user_message(user_text).await {
+    if let Err(e) = session.send_user_message_with_images(user_text, images).await {
         set_state(store, &mut turn, TurnState::Failed)?;
         return Err(e.into());
     }

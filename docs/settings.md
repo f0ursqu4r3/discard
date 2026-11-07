@@ -18,6 +18,9 @@ confirm_while_working = true      # ask before Quit or Safe Mode while a turn ru
 theme_source = "default"          # default, ghostty, or custom
 theme = "light:Catppuccin Latte,dark:Catppuccin Mocha"   # used when theme_source is "custom"
 ignore_plugin_themes = false      # true: plugin theme tokens have no effect
+mini_project_rail = false         # true: 48 px rail at the default scale
+message_density = "comfortable"  # comfortable or compact
+show_message_avatars = true       # false: remove the avatar column
 
 [keybindings]
 zoom = "cmd-shift-k"
@@ -31,6 +34,9 @@ zoom = "cmd-shift-k"
 | `appearance.theme_source` | `"default"`, `"ghostty"`, or `"custom"` | `"default"` |
 | `appearance.theme` | A Ghostty `theme` value: `Name` or `light:X,dark:Y` | `"light:Catppuccin Latte,dark:Catppuccin Mocha"` |
 | `appearance.ignore_plugin_themes` | `true` or `false` | `false` |
+| `appearance.mini_project_rail` | `true` or `false` | `false` |
+| `appearance.message_density` | `"comfortable"` or `"compact"` | `"comfortable"` |
+| `appearance.show_message_avatars` | `true` or `false` | `true` |
 | `keybindings.<action>` | Shortcut string, or an empty string to unbind an optional action | Action default |
 
 Discard never creates the file at startup. It creates the file on the first change you make in the Settings window.
@@ -175,7 +181,21 @@ change and names the action. Key changes apply at the next launch. Plugins canno
 
 ### Appearance page
 
+Layout preferences apply to all conversations. Changes save automatically and update the main window.
+The defaults preserve the existing appearance. Hand edits to these keys also apply without a restart.
+
 From top to bottom:
+
+- **Mini project rail.** Uses a 48 px rail with 32 px icons at the default scale. The default rail stays
+  72 px wide, or 52 px in the narrow window layout. Tooltips, selection markers, and unread and approval
+  indicators stay visible. Plugin font and spacing scales still apply.
+- **Message density.** Comfortable keeps the existing spacing. Compact reduces row padding, block spacing,
+  and gaps between messages. It keeps text size and author names unchanged. It applies to saved messages,
+  streaming replies, and system notes.
+- **Show message avatars.** On by default. Turn it off to remove the avatar column. Author names remain
+  at the start of each message group.
+- **Live preview.** A sample rail and conversation use the same components as the main window. The preview
+  reflects all three preferences and the active theme. Preview controls do not perform actions.
 
 - **Theme source.** Default, Ghostty, or Custom. A line under the buttons says what each one does.
 - **Themes.** Shown only for Custom. Pick a light theme and a dark theme from searchable lists. Discard switches

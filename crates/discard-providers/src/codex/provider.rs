@@ -511,9 +511,13 @@ impl ProviderSession for CodexSession {
     }
 
     async fn send_user_message(&mut self, text: &str) -> Result<(), ProviderError> {
+        self.send_user_message_with_images(text, &[]).await
+    }
+    async fn send_user_message_with_images(&mut self, text: &str, images: &[discard_core::attachments::Attachment]) -> Result<(), ProviderError> {
         self.next_id += 1;
+        let input = crate::attachments::codex_input(text, images)?;
         let mut request = json!({"jsonrpc": "2.0", "id": self.next_id, "method": "turn/start",
-            "params": {"threadId": self.thread_id, "input": [{"type": "text", "text": text}]}});
+            "params": {"threadId": self.thread_id, "input": input}});
         if let Some(effort) = &self.reasoning_effort { request["params"]["effort"] = json!(effort); }
         write_line(&self.stdin, &request).await
     }

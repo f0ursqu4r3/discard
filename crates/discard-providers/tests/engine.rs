@@ -136,6 +136,20 @@ async fn a_turn_streams_updates_and_persists_both_messages() {
 }
 
 #[tokio::test]
+async fn attachments_are_persisted_and_sent_without_requiring_message_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.txt");
+    std::fs::write(&path, "The release date is Friday.").unwrap();
+    let attachments = discard_core::attachments::import_files(dir.path(), &[path]).unwrap();
+    let mut rig = start(FakeProvider::new(vec![Step::text("Read it"), Step::idle()]), ApprovalPolicy::Ask);
+    rig.commands.send(Command::SendAttachments { text: String::new(), attachments: attachments.clone() }).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(matches!(updates.last(), Some(Update::TurnFinished(TurnOutcome::Completed))));
+    assert_eq!(rig.messages()[0].blocks, discard_core::attachments::blocks("", &attachments));
+    assert!(rig.probe.sent.lock().unwrap()[0].contains("The release date is Friday."));
+}
+
+#[tokio::test]
 async fn builder_turns_reload_saved_reasoning_and_can_clear_it() {
     let mut rig = start(FakeProvider::new(vec![Step::text("done"), Step::idle()]), ApprovalPolicy::Ask);
     for effort in [Some("high"), Some("low"), None] {

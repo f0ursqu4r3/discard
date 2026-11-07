@@ -2,7 +2,7 @@
 
 use crate::approval::{ApprovalState, Decider, Decision};
 use crate::capability::{ApprovalPolicy, HookKind, HookMode};
-use crate::driver::{DecisionMsg, TurnContext, TurnInputs, run_turn};
+use crate::driver::{DecisionMsg, TurnContext, TurnInputs, run_turn_with_images};
 use crate::event::{EventKind, Sequencer, SessionId};
 use crate::observer::{self, EventObserver};
 use crate::model::{AgentId, Block, ChannelId, Message, MessageId, ProjectId, Role, WorkspaceMode};
@@ -164,7 +164,7 @@ impl Engine {
         Ok(())
     }
 
-    async fn conversation_input(&self, current: &str, history: &[Message], system: &str, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) -> Result<String, crate::conversation_context::ContextError> {
+    async fn conversation_input(&self, current: &str, history: &[Message], system: &str, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) -> Result<(String, Vec<crate::attachments::Attachment>), crate::conversation_context::ContextError> {
         use crate::conversation_context as context;
         let topic = crate::driver::lock(&self.store).channel_topic(&self.channel_id).map_err(|e| e.to_string())?;
         let current = if topic.text.is_empty() { current.to_owned() } else {
@@ -211,7 +211,13 @@ impl Engine {
             if summarized { self.marker("Older messages were summarized. The full conversation remains saved.".into(), updates)?; }
             send(updates, Update::Notice("This response uses a summary of older messages. The full conversation remains saved.".into()));
         }
-        Ok(input)
+        // Replay IDs identify chunks as <message-id>:part:<index>. Keep images while any chunk remains.
+        let retained: std::collections::HashSet<_> = remaining.iter()
+            .filter_map(|(id, _)| id.0.rsplit_once(":part:").map(|(message_id, _)| message_id)).collect();
+        let images = history.iter().filter(|message| retained.contains(message.id.0.as_str()))
+            .flat_map(|message| &message.blocks)
+            .filter_map(|block| match block { Block::Attachment { attachment } if attachment.is_image() => Some(attachment.clone()), _ => None }).collect();
+        Ok((input, images))
     }
 
     async fn summarize(&self, prompt: &str, commands: &mut mpsc::UnboundedReceiver<Command>) -> Result<String, crate::conversation_context::ContextError> {
@@ -241,8 +247,10 @@ impl Engine {
         }
         while let Some(command) = commands.recv().await {
             // Decisions and cancels have no meaning without a running turn.
-            if let Command::Send(text) = command {
-                self.turn(&mut sequencer, text, &mut commands, &updates).await;
+            match command {
+                Command::Send(text) => self.turn(&mut sequencer, text, Vec::new(), &mut commands, &updates).await,
+                Command::SendAttachments { text, attachments } => self.turn(&mut sequencer, text, attachments, &mut commands, &updates).await,
+                _ => {}
             }
         }
     }
@@ -271,6 +279,7 @@ impl Engine {
         &self,
         sequencer: &mut Sequencer,
         text: String,
+        attachments: Vec<crate::attachments::Attachment>,
         commands: &mut mpsc::UnboundedReceiver<Command>,
         updates: &mpsc::UnboundedSender<Update>,
     ) {
@@ -292,13 +301,13 @@ impl Engine {
             }
         };
         send(updates, Update::Responding(author.clone()));
-        snapshot.turn_snapshot(&author, sequencer, text, commands, updates).await;
+        snapshot.turn_snapshot(&author, sequencer, text, attachments, commands, updates).await;
     }
 
-    async fn turn_snapshot(&self, author: &crate::model::MessageAuthor, sequencer: &mut Sequencer, text: String, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) {
+    async fn turn_snapshot(&self, author: &crate::model::MessageAuthor, sequencer: &mut Sequencer, text: String, attachments: Vec<crate::attachments::Attachment>, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) {
         let history = crate::driver::lock(&self.store).messages_for_channel(&self.channel_id);
         let previous_changes = self.memory.as_ref().map(|m| m.changes(&self.channel_id)).transpose();
-        if let Err(error) = self.store_message(Role::User, vec![Block::Markdown { text: text.clone() }], None) {
+        if let Err(error) = self.store_message(Role::User, crate::attachments::blocks(&text, &attachments), None) {
             send(updates, Update::Error(format!("{error}. Retry after resolving the storage error.")));
             self.finish(updates, crate::driver::TurnOutcome::Failed);
             return;
@@ -378,9 +387,10 @@ impl Engine {
             token: p.token.clone(),
         });
 
-        let input = if self.mode == crate::provider::SessionMode::Conversation {
+        let request_text = crate::attachments::prompt(&text, &attachments);
+        let (input, previous_images) = if self.mode == crate::provider::SessionMode::Conversation {
             let history = match history { Ok(h) => h, Err(e) => { send(updates, Update::Error(e.to_string())); self.finish(updates, crate::driver::TurnOutcome::Failed); return; } };
-            match self.conversation_input(&text, &history, prepared.as_ref().map(|p| p.system_prompt.as_str()).unwrap_or(""), commands, updates).await {
+            match self.conversation_input(&request_text, &history, prepared.as_ref().map(|p| p.system_prompt.as_str()).unwrap_or(""), commands, updates).await {
                 Ok(input) => input,
                 Err(crate::conversation_context::ContextError::Cancelled) => {
                     send(updates, Update::Notice("History summary cancelled. The saved summary is unchanged.".into()));
@@ -388,7 +398,15 @@ impl Engine {
                 }
                 Err(error) => { send(updates, Update::Error(error.to_string())); self.finish(updates, crate::driver::TurnOutcome::Failed); return; }
             }
-        } else { text.clone() };
+        } else { (request_text, Vec::new()) };
+        let mut images = previous_images;
+        images.extend(attachments.iter().filter(|file| file.is_image()).cloned());
+        let mut seen_images = std::collections::HashSet::new();
+        images.retain(|image| seen_images.insert(image.id.clone()));
+        if images.iter().map(|file| file.size).sum::<u64>() > crate::attachments::MAX_TOTAL_BYTES {
+            send(updates, Update::Error("Image history exceeds 20 MB. Start a new conversation or use smaller images.".into()));
+            self.finish(updates, crate::driver::TurnOutcome::Failed); return;
+        }
         let resume_handle = if self.mode == crate::provider::SessionMode::Coding { crate::driver::lock(&self.store).resume_handle(&self.session_id).ok().flatten() } else { None };
         let spec = SessionSpec {
             reasoning_effort: self.reasoning_effort.clone(),
@@ -426,7 +444,7 @@ impl Engine {
             policy_name: policy_name(self.policy),
             updates: events_tx,
         };
-        let driver = run_turn(ctx, &mut *session, &input, TurnInputs { decisions: decisions_rx, cancel: cancel_rx });
+        let driver = run_turn_with_images(ctx, &mut *session, &input, &images, TurnInputs { decisions: decisions_rx, cancel: cancel_rx });
 
         let mut timeline = Timeline::new();
         // Tool events need a provider that shows tool calls. Without it they are never sent.
@@ -485,7 +503,7 @@ impl Engine {
                         Some(Command::Cancel) => {
                             let _ = cancel_tx.send(());
                         }
-                        Some(Command::Send(_)) => send(
+                        Some(Command::Send(_) | Command::SendAttachments { .. }) => send(
                             updates,
                             Update::Error("A turn is already running. Wait for it to finish or cancel it.".into()),
                         ),

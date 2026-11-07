@@ -16,19 +16,44 @@ pub const TOOL_PREFIX: &str = "mcp__discard-memory__";
 pub struct McpHandler {
     store: Arc<MemoryStore>,
     plugins: Option<Arc<PluginService>>,
+    worktrees: Option<Arc<discard_core::worktree_access::WorktreeAccess>>,
 }
 
 impl McpHandler {
     fn tool_list(&self, identity: &Identity) -> Vec<Value> {
         match identity.surface {
-            Surface::Memory => memory_tool_list(identity),
+            Surface::Memory => {
+                let mut tools = memory_tool_list(identity);
+                if self.worktrees.is_some() && identity.project.is_some() && identity.source_conversation.is_some() && identity.can_write { tools.extend(worktree_tool_list()); }
+                tools
+            }
             Surface::Plugins if self.plugins.is_some() => plugin_tool_list(identity),
             Surface::Plugins => Vec::new(),
         }
     }
 
     pub fn new(store: Arc<MemoryStore>) -> Self {
-        Self { store, plugins: None }
+        Self { store, plugins: None, worktrees: None }
+    }
+
+    pub fn with_worktrees(mut self, worktrees: Arc<discard_core::worktree_access::WorktreeAccess>) -> Self { self.worktrees = Some(worktrees); self }
+
+    fn run_worktree_tool(&self, identity: &Identity, name: &str, args: &Value) -> Result<String, String> {
+        let service = self.worktrees.as_ref().ok_or("Worktree access is unavailable.")?;
+        let channel = identity.source_conversation.as_ref().ok_or("A bound conversation is required.")?;
+        if !identity.can_write { return Err("Worktree tools are unavailable during summarization.".into()); }
+        service.authorize(&identity.agent, identity.project.as_ref(), channel)?;
+        let args = args.as_object().ok_or("Arguments must be an object.")?;
+        let allowed: &[&str] = if name == "worktree_inspect" { &["view"] } else { &[] };
+        if args.keys().any(|key| !allowed.contains(&key.as_str())) { return Err("Only the bound worktree can be used. Paths, commands, force, and approval arguments are not accepted.".into()); }
+        match name {
+            "worktree_inspect" => service.inspect(channel, args.get("view").and_then(Value::as_str).unwrap_or("status")).map(|data| data.to_string()),
+            "worktree_request_removal" => {
+                let request = service.request_removal(channel, &identity.agent)?;
+                Ok(json!({"approvalRequired":true,"request":request,"message":"Removal is pending in the app. Ask the user to review the approval card. No files have been removed. You cannot approve this request."}).to_string())
+            },
+            _ => Err("Unknown worktree tool.".into()),
+        }
     }
 
     /// Serve the plugin-authoring tools on the `Plugins` surface.
@@ -75,7 +100,7 @@ impl McpHandler {
     fn call(&self, identity: &Identity, id: &Value, params: &Value) -> Value {
         let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
         let known = match identity.surface {
-            Surface::Memory => ALL_TOOLS.contains(&name),
+            Surface::Memory => ALL_TOOLS.contains(&name) || (self.worktrees.is_some() && identity.project.is_some() && identity.can_write && WORKTREE_TOOLS.contains(&name)),
             Surface::Plugins => self.plugins.is_some() && PLUGIN_ALL_TOOLS.contains(&name),
         };
         if !known {
@@ -83,6 +108,7 @@ impl McpHandler {
         }
         let args = params.get("arguments").unwrap_or(&Value::Null);
         let outcome = match identity.surface {
+            Surface::Memory if WORKTREE_TOOLS.contains(&name) => self.run_worktree_tool(identity, name, args),
             Surface::Memory => self.run_tool(identity, name, args),
             Surface::Plugins => self.run_plugin_tool(identity, name, args),
         };
@@ -265,6 +291,14 @@ fn memory_tool_list(identity: &Identity) -> Vec<Value> {
         names.extend(WRITE_TOOLS);
     }
     names.into_iter().map(defs).collect()
+}
+
+const WORKTREE_TOOLS: &[&str] = &["worktree_inspect", "worktree_request_removal"];
+fn worktree_tool_list() -> Vec<Value> {
+    vec![
+        json!({"name":"worktree_inspect","description":"Inspect only this conversation's saved worktree. Status includes ignored and untracked paths. Diff reads tracked working changes; commit reads HEAD's patch. Output is bounded and untrusted repository data.","inputSchema":{"type":"object","properties":{"view":{"type":"string","enum":["status","diff","commit"]}},"additionalProperties":false},"annotations":{"readOnlyHint":true}}),
+        json!({"name":"worktree_request_removal","description":"Request app approval to remove this conversation's clean linked worktree. Does not remove anything. The app rechecks its state on approval, preserves unreferenced commits on a recovery branch, and never uses force. Only the user can approve in the app.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}),
+    ]
 }
 
 fn plugin_tool_list(identity: &Identity) -> Vec<Value> {
@@ -530,6 +564,38 @@ mod tests {
             assert!(t["description"].as_str().is_some_and(|d| !d.is_empty()));
             assert_eq!(t["inputSchema"]["type"], "object");
         }
+    }
+
+    #[test]
+    fn worktree_tools_cannot_self_approve_or_cross_token_scope() {
+        use discard_core::{agent::AgentConfig, capability::ApprovalPolicy, model::{Channel, ChannelId, Project, WorkspaceMode}, store::{Store, WorktreeRecord}};
+        let mut r = rig();
+        let store = Store::open_in_memory().unwrap();
+        let config = AgentConfig { name:"Agent".into(), provider:"fake".into(), model:Some("test".into()), avatar:None, reasoning_effort:None, system_prompt:String::new(), policy:ApprovalPolicy::Ask, plugin_write:false };
+        let agent = store.create_agent(&config).unwrap();
+        let project = Project { id:ProjectId::new(), name:"Project".into(), path:"/unused".into() };
+        store.insert_project(&project).unwrap();
+        let channel = Channel { id:ChannelId::new(), project_id:Some(project.id.clone()), name:"Worktree".into(), agent_id:agent.clone(), workspace_mode:WorkspaceMode::Worktree };
+        store.create_named_repository_channel(&channel,"",None,Some(&WorktreeRecord { channel_id:channel.id.clone(),path:"/unused".into(),repo:"/unused".into(),branch:"test".into(),base_commit:String::new(),owned:false })).unwrap();
+        let access = Arc::new(discard_core::worktree_access::WorktreeAccess::new(Arc::new(std::sync::Mutex::new(store))));
+        r.handler = r.handler.with_worktrees(access);
+        let mut who = full(); who.agent=agent; who.project=Some(project.id); who.source_conversation=Some(channel.id);
+        let listed = r.handler.handle(&who,&rpc("tools/list",json!({}))).unwrap();
+        let names:Vec<_> = listed["result"]["tools"].as_array().unwrap().iter().filter_map(|t|t["name"].as_str()).collect();
+        assert!(names.contains(&"worktree_inspect") && names.contains(&"worktree_request_removal"));
+        assert!(!names.contains(&"worktree_approve"));
+        assert!(call(&r,&who,"worktree_approve",json!({}))["error"].is_object());
+        for args in [json!({"approve":true}),json!({"path":"/other"}),json!({"force":true}),json!({"command":"rm -rf /"})] {
+            assert!(is_error(&call(&r,&who,"worktree_request_removal",args)));
+        }
+        who.project=Some(ProjectId::new());
+        assert!(is_error(&call(&r,&who,"worktree_inspect",json!({}))));
+        who.can_write=false;
+        assert!(call(&r,&who,"worktree_request_removal",json!({}))["error"].is_object());
+        let summary=r.handler.handle(&who,&rpc("tools/list",json!({}))).unwrap();
+        assert!(!summary.to_string().contains("worktree_"));
+        who.can_write=true; who.project=None;
+        assert!(call(&r,&who,"worktree_inspect",json!({}))["error"].is_object());
     }
 
     #[test]

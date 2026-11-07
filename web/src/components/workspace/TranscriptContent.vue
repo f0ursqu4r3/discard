@@ -16,6 +16,8 @@ import {
 } from '../ui/message-scroller'
 import { Empty, EmptyHeader, EmptyMedia, EmptyTitle } from '../ui/empty'
 import MessageRow from '../MessageRow.vue'
+import { useAppearance } from '@/bridge/appearance'
+import WorktreeApprovals from './WorktreeApprovals.vue'
 import MemoryResponse from '../memory/MemoryResponse.vue'
 import MemoryCaptureStatus from '../memory/MemoryCaptureStatus.vue'
 import { useMemory } from '../memory/useMemory'
@@ -32,9 +34,11 @@ const props = defineProps<{
   prompts?: PromptDto[]
   memoryRevision?: number
   conversationId: string
+  projectId?: string | null
   jumpTo?: { messageId: string; request: number }
   position?: TranscriptPosition
 }>()
+const appearance = useAppearance()
 const memory = useMemory(
   () => props.conversationId || null,
   () => !!props.conversationId,
@@ -171,7 +175,10 @@ onUnmounted(() => window.removeEventListener('focus', read))
         class="outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
         :preserve-scroll-on-prepend="true"
       >
-        <MessageScrollerContent class="gap-1 py-2">
+        <MessageScrollerContent
+          class="py-2"
+          :class="appearance.messageDensity === 'compact' ? 'gap-0' : 'gap-1'"
+        >
           <MessageScrollerItem
             class="[content-visibility:visible]"
             v-for="message in messages"
@@ -220,6 +227,7 @@ onUnmounted(() => window.removeEventListener('focus', read))
               :show-cursor="running"
             />
           </MessageScrollerItem>
+          <WorktreeApprovals v-if="projectId" :channel-id="conversationId" :running="running" />
           <Empty v-if="!messages.length && !hasLiveRow(running, live.length)" class="m-auto">
             <EmptyHeader>
               <EmptyMedia variant="icon"><MessageSquare /></EmptyMedia>

@@ -1,57 +1,75 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { serverPillHeight } from './layout'
-import { MessagesSquare, Plus } from '@lucide/vue'
-import { Badge } from './ui/badge'
-import { Button } from './ui/button'
-import { Separator } from './ui/separator'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
-import ProjectContextMenu from './ProjectContextMenu.vue'
-import type { ProjectMenuAction } from './project-menu'
-import type { ProjectEntry } from '../bridge/api'
-import type { ChannelDto } from '../bridge/types'
-import ProjectAvatar from './workspace/ProjectAvatar.vue'
-import { cn } from '@/lib/utils'
+import { computed, ref } from 'vue';
+import { useAppearance } from '@/bridge/appearance';
+import { serverPillHeight } from './layout';
+import { MessagesSquare, Plus } from '@lucide/vue';
+import { Badge } from './ui/badge';
+import { Button } from './ui/button';
+import { Separator } from './ui/separator';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from './ui/tooltip';
+import ProjectContextMenu from './ProjectContextMenu.vue';
+import type { ProjectMenuAction } from './project-menu';
+import type { ProjectEntry } from '../bridge/api';
+import type { ChannelDto } from '../bridge/types';
+import ProjectAvatar from './workspace/ProjectAvatar.vue';
+import { cn } from '@/lib/utils';
 const props = withDefaults(
   defineProps<{
-    projects?: import('@/bridge/api').ProjectEntry[]
-    projectId?: string
-    channels?: ChannelDto[]
-    project: string
-    unread: boolean
-    pendingApprovals: number
-    reviewCount?: number
-    directMessages?: boolean
-    compact?: boolean
-    busy?: boolean
+    projects?: import('@/bridge/api').ProjectEntry[];
+    projectId?: string;
+    channels?: ChannelDto[];
+    project: string;
+    unread: boolean;
+    pendingApprovals: number;
+    reviewCount?: number;
+    directMessages?: boolean;
+    compact?: boolean;
+    busy?: boolean;
   }>(),
-  { directMessages: false, compact: false },
-)
+  { directMessages: false, compact: false }
+);
+const appearance = useAppearance();
+const mini = computed(() => appearance.value.miniProjectRail);
 const entries = computed(
-  () => props.projects ?? [{ id: props.projectId ?? '', name: props.project, path: '' }],
-)
-const selected = (id: string) => id === (props.projectId ?? '') && !props.directMessages
+  () =>
+    props.projects ?? [
+      { id: props.projectId ?? '', name: props.project, path: '' },
+    ]
+);
+const selected = (id: string) =>
+  id === (props.projectId ?? '') && !props.directMessages;
 const projectUnread = (id: string) =>
-  props.channels?.some((channel) => channel.projectId === id && channel.unread) ??
-  (id === (props.projectId ?? '') && props.unread)
+  props.channels?.some(
+    (channel) => channel.projectId === id && channel.unread
+  ) ??
+  (id === (props.projectId ?? '') && props.unread);
 const projectApprovals = (id: string) =>
   props.channels?.reduce(
-    (total, channel) => total + (channel.projectId === id ? channel.pendingApprovals : 0),
-    0,
-  ) ?? (id === (props.projectId ?? '') ? props.pendingApprovals : 0)
+    (total, channel) =>
+      total + (channel.projectId === id ? channel.pendingApprovals : 0),
+    0
+  ) ?? (id === (props.projectId ?? '') ? props.pendingApprovals : 0);
 const directUnread = computed(
-  () => props.channels?.some((channel) => channel.projectId === null && channel.unread) ?? false,
-)
-const homeHovered = ref(false)
-const homeFocused = ref(false)
-const hovered = ref<string | null>(null)
-const focused = ref<string | null>(null)
+  () =>
+    props.channels?.some(
+      (channel) => channel.projectId === null && channel.unread
+    ) ?? false
+);
+const homeHovered = ref(false);
+const homeFocused = ref(false);
+const hovered = ref<string | null>(null);
+const focused = ref<string | null>(null);
 const emit = defineEmits<{
-  project: [id?: string]
-  directMessages: []
-  addProject: []
-  projectAction: [action: ProjectMenuAction, project: ProjectEntry]
-}>()
+  project: [id?: string];
+  directMessages: [];
+  addProject: [];
+  projectAction: [action: ProjectMenuAction, project: ProjectEntry];
+}>();
 </script>
 <template>
   <TooltipProvider>
@@ -61,13 +79,13 @@ const emit = defineEmits<{
       :class="
         cn(
           'flex h-full shrink-0 flex-col items-center border-r border-border/60 bg-canvas',
-          compact ? 'w-13' : 'w-18',
+          mini ? 'w-12' : compact ? 'w-13' : 'w-18'
         )
       "
     >
       <div
         data-ui-id="rail-home"
-        class="relative flex h-16 w-full shrink-0 items-center justify-center"
+        class="relative flex my-2 w-full shrink-0 items-center justify-center"
         @mouseenter="homeHovered = true"
         @mouseleave="homeHovered = false"
         @focusin="homeFocused = true"
@@ -77,7 +95,7 @@ const emit = defineEmits<{
           data-ui-id="dm-selection-pill"
           class="pointer-events-none absolute left-0 w-1 rounded-r-full bg-foreground transition-[height] duration-150 motion-reduce:transition-none"
           :style="{
-            height: `calc(var(--spacing) * ${serverPillHeight(directMessages, homeHovered || homeFocused, directUnread, compact ? 10 : 12)})`,
+            height: `calc(var(--spacing) * ${serverPillHeight(directMessages, homeHovered || homeFocused, directUnread, mini ? 8 : compact ? 10 : 12)})`,
           }"
         />
         <Tooltip>
@@ -86,7 +104,12 @@ const emit = defineEmits<{
               data-ui-id="direct-messages-button"
               @click="emit('directMessages')"
               :variant="directMessages ? 'default' : 'secondary'"
-              :class="cn('rounded-xl', compact ? 'size-9' : 'size-12')"
+              :class="
+                cn(
+                  'rounded-xl',
+                  mini ? 'size-8 rounded-[25%] border-0 p-0' : compact ? 'size-9' : 'size-12'
+                )
+              "
               aria-label="Direct messages"
               :aria-description="directUnread ? 'Unread messages' : undefined"
               :aria-current="directMessages ? 'page' : undefined"
@@ -97,15 +120,17 @@ const emit = defineEmits<{
           <TooltipContent side="right">Direct messages</TooltipContent>
         </Tooltip>
       </div>
-      <Separator class="max-w-8" />
+      <Separator :class="mini ? 'max-w-6' : 'max-w-8'" />
       <div
-        class="flex min-h-0 w-full flex-1 flex-col items-center gap-3 overflow-x-hidden overflow-y-auto overscroll-contain py-3"
+        class="flex min-h-0 w-full flex-1 flex-col items-center gap-2 overflow-x-hidden overflow-y-auto overscroll-contain py-2"
       >
         <div v-for="entry in entries" :key="entry.id" class="w-full">
           <ProjectContextMenu
             :project="entry"
             :busy="busy"
-            @action="(action, project) => emit('projectAction', action, project)"
+            @action="
+              (action, project) => emit('projectAction', action, project)
+            "
           >
             <div
               @mouseenter="hovered = entry.id"
@@ -115,7 +140,7 @@ const emit = defineEmits<{
               :class="
                 cn(
                   'group relative flex items-center justify-center',
-                  compact ? 'h-10 w-full' : 'h-12 w-full',
+                  mini ? 'h-8 w-full' : compact ? 'h-10 w-full' : 'h-12 w-full'
                 )
               "
             >
@@ -127,25 +152,31 @@ const emit = defineEmits<{
                 "
                 class="pointer-events-none absolute left-0 w-1 rounded-r-full bg-foreground transition-[height] duration-150 motion-reduce:transition-none"
                 :style="{
-                  height: `calc(var(--spacing) * ${serverPillHeight(selected(entry.id), hovered === entry.id || focused === entry.id, projectUnread(entry.id), compact ? 10 : 12)})`,
+                  height: `calc(var(--spacing) * ${serverPillHeight(selected(entry.id), hovered === entry.id || focused === entry.id, projectUnread(entry.id), mini ? 8 : compact ? 10 : 12)})`,
                 }"
               />
               <Tooltip>
                 <TooltipTrigger as-child>
                   <Button
                     :aria-label="entry.name"
-                    :aria-description="projectUnread(entry.id) ? 'Unread messages' : undefined"
+                    :aria-description="
+                      projectUnread(entry.id) ? 'Unread messages' : undefined
+                    "
                     :aria-current="selected(entry.id) ? 'page' : undefined"
                     variant="ghost"
                     :class="
                       cn(
                         'relative rounded-[25%] border-0 p-0 hover:brightness-110',
-                        compact ? 'size-9' : 'size-12',
+                        mini ? 'size-8 rounded-[25%] border-0 p-0' : compact ? 'size-9' : 'size-12'
                       )
                     "
                     @click="emit('project', entry.id)"
                   >
-                    <ProjectAvatar :name="entry.name" :avatar="entry.avatar" class="size-full" />
+                    <ProjectAvatar
+                      :name="entry.name"
+                      :avatar="entry.avatar"
+                      class="size-full"
+                    />
                     <Badge
                       v-if="projectApprovals(entry.id) > 0"
                       data-testid="approval-badge"
@@ -155,17 +186,24 @@ const emit = defineEmits<{
                     </Badge>
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent side="right">{{ entry.name }} · {{ entry.path }}</TooltipContent>
+                <TooltipContent side="right">
+                  {{ entry.name }} · {{ entry.path }}
+                </TooltipContent>
               </Tooltip>
             </div>
           </ProjectContextMenu>
         </div>
-        <Separator class="max-w-8" />
+        <Separator :class="mini ? 'max-w-6' : 'max-w-8'" />
         <Tooltip>
           <TooltipTrigger as-child>
             <Button
               variant="secondary"
-              :class="cn('rounded-xl', compact ? 'size-9' : 'size-12')"
+              :class="
+                cn(
+                  'rounded-xl',
+                  mini ? 'size-8 rounded-[25%] border-0 p-0' : compact ? 'size-9' : 'size-12'
+                )
+              "
               aria-label="Import project"
               @click="emit('addProject')"
             >

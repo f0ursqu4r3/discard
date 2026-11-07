@@ -14,6 +14,7 @@ defineProps<{
   prompts?: PromptDto[]
   memoryRevision?: number
   conversationId: string
+  projectId?: string | null
   jumpTo?: { messageId: string; request: number }
   position?: TranscriptPosition
 }>()

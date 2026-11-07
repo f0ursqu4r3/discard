@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod attachments;
 pub mod channels;
 pub mod core;
 pub mod dto;
@@ -60,6 +61,7 @@ pub struct DesktopConfig {
     pub providers: Vec<actions::ProviderInfo>,
     pub recheck: actions::Recheck,
     pub memory: Arc<discard_core::memory::MemoryStore>,
+    pub worktree_access: Arc<discard_core::worktree_access::WorktreeAccess>,
 }
 pub fn run(
     init: CoreInit,
@@ -111,6 +113,7 @@ pub fn run(
         .plugin(tauri_plugin_dialog::init())
         .manage(core.clone())
         .manage(channels)
+        .manage(config.worktree_access)
         .manage(actions.clone())
         .manage(windows::SettingsRoute::default())
         .manage(settings::SettingsContext { home: data_dir.clone(), plugins: plugins.clone(), providers: config.providers, recheck: config.recheck, store: config.store, memory: config.memory, core: core.clone(), load_report: config.load_report, trusted_reviews: Mutex::new(std::collections::HashSet::new()), logs: Mutex::new(settings::logs::LogState::open(&data_dir)) })
@@ -232,6 +235,11 @@ pub fn run(
             commands::create_channel, commands::switch_channel, commands::open_branch_channel,
             commands::get_history,
             commands::send_message,
+            attachments::choose_attachments,
+            attachments::import_attachments,
+            attachments::attachment_preview,
+            commands::get_worktree_requests,
+            commands::decide_worktree_removal,
             commands::decide_approval,
             commands::cancel_turn,
             commands::set_panels,

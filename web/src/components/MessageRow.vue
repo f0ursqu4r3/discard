@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import type { MessageDto, PromptDto } from '../bridge/types'
 import { Avatar, AvatarFallback } from './ui/avatar'
+import { Marker, MarkerContent, MarkerIcon } from './ui/marker'
+import { Info } from '@lucide/vue'
 import AgentAvatar from './agents/AgentAvatar.vue'
 import { Button } from './ui/button'
 import BlockView from './BlockView.vue'
 import ContextMenuHost from './ContextMenuHost.vue'
 import { runAction } from '../bridge/api'
 import { computed } from 'vue'
+import { useAppearance } from '@/bridge/appearance'
 import { serverInitials } from './layout'
 const props = defineProps<{
   channelId: string
@@ -15,13 +18,27 @@ const props = defineProps<{
   agentAvatar?: string | null
   prompts?: PromptDto[]
   showCursor?: boolean
+  preview?: boolean
 }>()
+const appearance = useAppearance()
+const compact = computed(() => appearance.value.messageDensity === 'compact')
+// Runtime system notes are plain text. Keep other block types on the full renderer.
+const systemNote = computed(
+  () =>
+    props.message.role === 'system' &&
+    props.message.blocks.every((block) => block.type === 'markdown'),
+)
+const systemText = computed(() =>
+  props.message.blocks
+    .flatMap((block) => (block.type === 'markdown' ? [block.text] : []))
+    .join('\n'),
+)
 const authorName = computed(() => props.message.author?.name ?? props.agent ?? 'Agent')
 const authorAvatar = computed(() =>
   props.message.author ? props.message.author.avatar : props.agentAvatar,
 )
 const target = computed(() =>
-  props.message.id === 'live'
+  props.preview || props.message.id === 'live'
     ? null
     : {
         type: 'message' as const,
@@ -37,11 +54,24 @@ async function copy() {
 </script>
 <template>
   <ContextMenuHost :target="target">
-    <article
+    <Marker
+      v-if="systemNote"
+      as="article"
       :data-ui-id="`message-${message.id}`"
-      class="group relative flex gap-3 px-3 py-2 text-xs leading-6 hover:bg-muted/30 sm:px-6"
+      aria-label="System note"
+      class="px-3 sm:px-6"
+      :class="compact ? 'py-1' : 'py-2'"
     >
-      <div class="w-9 shrink-0">
+      <MarkerIcon><Info /></MarkerIcon>
+      <MarkerContent class="whitespace-pre-wrap">{{ systemText }}</MarkerContent>
+    </Marker>
+    <article
+      v-else
+      :data-ui-id="`message-${message.id}`"
+      class="group relative flex gap-3 px-3 text-sm leading-relaxed hover:bg-muted/30 sm:px-6"
+      :class="compact ? 'py-1' : 'py-2'"
+    >
+      <div v-if="appearance.showMessageAvatars" data-testid="message-avatar" class="w-9 shrink-0">
         <AgentAvatar
           v-if="!message.continuesGroup && message.role === 'agent'"
           :name="authorName"
@@ -54,7 +84,7 @@ async function copy() {
           </AvatarFallback>
         </Avatar>
       </div>
-      <div class="flex min-w-0 flex-1 flex-col gap-1">
+      <div class="flex min-w-0 flex-1 flex-col" :class="compact ? 'gap-0' : 'gap-1'">
         <div
           v-if="!message.continuesGroup"
           data-testid="message-identity"

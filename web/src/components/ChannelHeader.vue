@@ -32,8 +32,8 @@ const label = computed(() =>
       ? 'Hide short profile'
       : 'Show short profile'
     : props.memberListVisible
-      ? 'Hide member list'
-      : 'Show member list',
+      ? 'Hide project context'
+      : 'Show project context',
 )
 function search() {
   if (query.value.trim()) emit('search', query.value.trim())

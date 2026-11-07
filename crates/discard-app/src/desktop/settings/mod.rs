@@ -48,7 +48,14 @@ pub struct GeneralPatch { pub default_provider: Option<String>, pub confirm_whil
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AppearancePatch { pub theme_source: Option<String>, pub theme: Option<String>, pub ignore_plugin_themes: Option<bool> }
+pub struct AppearancePatch {
+    pub theme_source: Option<String>,
+    pub theme: Option<String>,
+    pub ignore_plugin_themes: Option<bool>,
+    pub mini_project_rail: Option<bool>,
+    pub message_density: Option<String>,
+    pub show_message_avatars: Option<bool>,
+}
 
 #[tauri::command]
 pub fn settings_get(app: tauri::AppHandle, context: tauri::State<'_, SettingsContext>, page: String, actions: tauri::State<'_, std::sync::Arc<super::actions::DesktopActions>>) -> Result<serde_json::Value, String> {
@@ -90,6 +97,12 @@ pub fn settings_set_appearance(app: tauri::AppHandle, actions: tauri::State<'_, 
     if let Some(value) = patch.theme_source { changes.push(Change::ThemeSource(ThemeSource::from_setting(&value).ok_or_else(|| "invalid theme source".to_string())?)); }
     if let Some(value) = patch.theme { changes.push(Change::Theme(value)); }
     if let Some(value) = patch.ignore_plugin_themes { changes.push(Change::IgnorePluginThemes(value)); }
+    if let Some(value) = patch.mini_project_rail { changes.push(Change::MiniProjectRail(value)); }
+    if let Some(value) = patch.show_message_avatars { changes.push(Change::ShowMessageAvatars(value)); }
+    if let Some(value) = patch.message_density {
+        changes.push(Change::MessageDensity(discard_core::settings::MessageDensity::from_setting(&value)
+            .ok_or_else(|| "invalid message density".to_string())?));
+    }
     apply_one(&mut actions.settings.lock().unwrap_or_else(|e| e.into_inner()), changes)?;
     let _ = app.emit("discard://settings", ());
     Ok(())
@@ -123,7 +136,7 @@ fn appearance_data(app: &tauri::AppHandle, context: &SettingsContext, settings: 
     let config = configs.into_iter().find(|p| p.is_file()).map_or_else(|| "No Ghostty config found".into(), |p| p.display().to_string());
     let names: Vec<_> = dirs.list().into_iter().map(|(name, origin)| (name, match origin { Origin::Yours => "Yours", Origin::Ghostty => "Ghostty", Origin::Bundled => "Bundled" })).collect();
     let palette: Vec<_> = swatches(&resolved.colors).into_iter().map(|(name, color)| (name, color.to_hex())).collect();
-    serde_json::json!({"themeSource": settings.theme_source.as_str(), "theme": settings.theme, "ignorePluginThemes": settings.ignore_plugin_themes, "single": matches!(spec, ThemeSpec::Single(_)), "light": spec.name_for(Appearance::Light), "dark": spec.name_for(Appearance::Dark), "activeName": resolved.theme_name, "origin": origin, "file": file, "config": config, "themes": names, "swatches": palette, "problems": super::problems::theme_problem_lines(&resolved.problems), "overrides": context.plugins.theme_sources() })
+    serde_json::json!({"miniProjectRail": settings.mini_project_rail, "messageDensity": settings.message_density.as_str(), "showMessageAvatars": settings.show_message_avatars, "themeSource": settings.theme_source.as_str(), "theme": settings.theme, "ignorePluginThemes": settings.ignore_plugin_themes, "single": matches!(spec, ThemeSpec::Single(_)), "light": spec.name_for(Appearance::Light), "dark": spec.name_for(Appearance::Dark), "activeName": resolved.theme_name, "origin": origin, "file": file, "config": config, "themes": names, "swatches": palette, "problems": super::problems::theme_problem_lines(&resolved.problems), "overrides": context.plugins.theme_sources() })
 }
 
 #[tauri::command]

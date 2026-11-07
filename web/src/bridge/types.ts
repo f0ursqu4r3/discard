@@ -1,4 +1,12 @@
+export interface AttachmentDto {
+  id: string
+  name: string
+  mediaType: string
+  size: number
+  text: string | null
+}
 export type BlockDto =
+  | { type: 'attachment'; attachment: AttachmentDto }
   | { type: 'markdown' | 'diff'; text: string }
   | { type: 'code'; language: string | null; text: string }
   | { type: 'tool_call'; call_id: string; name: string; input: unknown; output: string | null }

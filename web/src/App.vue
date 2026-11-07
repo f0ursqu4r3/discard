@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { useAppearanceSettings } from '@/bridge/appearance'
 import { isTauri } from '@tauri-apps/api/core'
 import { useMediaQuery } from '@vueuse/core'
 import { ScanEye, LoaderCircle, GitPullRequest, ListChecks } from '@lucide/vue'
@@ -64,6 +65,7 @@ import type { TranscriptPosition } from './components/workspace/transcript'
 // Match the macOS overlay in tauri.conf.json; browser previews keep their normal inset.
 const integratedTitlebar = isTauri() && /mac/i.test(navigator.platform)
 const store = useStore()
+const mainPanel = ref<HTMLElement | null>(null)
 const agentAvatar = useAgentAvatar(() => store.snapshot?.agentId)
 const projects = ref<ProjectEntry[]>([])
 const projectChannels = ref<ProjectChannelDto[]>([])
@@ -122,6 +124,7 @@ watch(
 )
 useWebShortcuts()
 const drafts = reactive<Record<string, string>>({})
+const attachmentDrafts = reactive<Record<string, import('./bridge/types').AttachmentDto[]>>({})
 const transcriptPositions = reactive<Record<string, TranscriptPosition>>({})
 const page = ref<WorkspacePage>('conversation')
 const lastDirectMessageKey = 'discard:last-direct-message'
@@ -210,8 +213,14 @@ const archivedLegacy = computed(
     projectChannels.value.find((channel) => channel.id === store.snapshot?.channelId)?.kind ===
     'archived_legacy',
 )
+const appearance = useAppearanceSettings((error) => {
+  store.error = error
+})
 const railWidth = computed(
-  () => 72 * (store.snapshot?.theme.spacingScale ?? 1) * (store.snapshot?.theme.fontScale ?? 1),
+  () =>
+    (appearance.value.miniProjectRail ? 48 : 72) *
+    (store.snapshot?.theme.spacingScale ?? 1) *
+    (store.snapshot?.theme.fontScale ?? 1),
 )
 const currentLayout = ref<number[]>([])
 const heading = computed(() =>
@@ -462,13 +471,19 @@ async function savePanels() {
 function resizeFinished(dragging: boolean) {
   if (!dragging) void savePanels()
 }
-async function send(text: string) {
+async function send(text: string, attachments: import('./bridge/types').AttachmentDto[] = []) {
   const id = store.snapshot?.channelId
   if (!id || switching.value || sending.value) return
   sending.value = true
   try {
-    await sendMessage(id, text)
+    await sendMessage(
+      id,
+      text,
+      attachments.map((file) => file.id),
+    )
     if (drafts[id]?.trim() === text) drafts[id] = ''
+    const sentIds = new Set(attachments.map((file) => file.id))
+    attachmentDrafts[id] = (attachmentDrafts[id] ?? []).filter((file) => !sentIds.has(file.id))
   } catch (error) {
     toast.error('Message was not sent', { description: String(error) })
   } finally {
@@ -698,8 +713,9 @@ watch(
         <!-- The chat takes window size changes; sidebars keep their pixel widths. -->
         <ResizablePanel :order="2" :min-size="0" size-unit="%">
           <section
+            ref="mainPanel"
             data-ui-id="main-panel"
-            class="flex h-full min-w-0 flex-col overflow-hidden rounded-xl border border-border/60 bg-workspace"
+            class="relative flex h-full min-w-0 flex-col overflow-hidden rounded-xl border border-border/60 bg-workspace"
           >
             <ChannelHeader
               :conversation="page === 'conversation' && !!store.snapshot.channelId"
@@ -754,6 +770,7 @@ watch(
               </Tabs>
               <MessageList
                 :conversation-id="store.snapshot.channelId"
+                :project-id="store.snapshot.activeProjectId"
                 :jump-to="
                   messageJump?.channelId === store.snapshot.channelId ? messageJump : undefined
                 "
@@ -940,7 +957,10 @@ watch(
               </p>
               <Composer
                 :key="store.snapshot.channelId"
+                :drop-target="mainPanel"
                 v-model:draft="drafts[store.snapshot.channelId]"
+                :attachments="attachmentDrafts[store.snapshot.channelId] ?? []"
+                @update:attachments="attachmentDrafts[store.snapshot.channelId] = $event"
                 :channel="store.snapshot.channel"
                 :direct-message="!store.snapshot.activeProjectId"
                 :project-id="store.snapshot.activeProjectId"

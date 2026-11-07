@@ -426,6 +426,9 @@ impl Channels {
         Ok(channel.id.0)
     }
     pub fn send_message(&self, channel: &str, text: String) -> Result<(), String> {
+        self.send_with_attachments(channel, text, Vec::new())
+    }
+    pub fn send_with_attachments(&self, channel: &str, text: String, attachments: Vec<discard_core::attachments::Attachment>) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let recipient = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -434,7 +437,7 @@ impl Channels {
             let config = store.load_agent(&id).map_err(|e| e.to_string())?;
             Some(discard_core::model::MessageAuthor { agent_id: id, name: config.name, provider: config.provider, avatar: config.avatar })
         };
-        self.core.send_to_agent(Some(channel), text, recipient)
+        self.core.send_to_agent_with_attachments(Some(channel), text, recipient, attachments)
     }
 
     pub fn open_branch(&self, key: &str) -> Result<String, String> {

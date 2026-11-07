@@ -46,6 +46,7 @@ pub struct Probe {
     pub responses: Arc<Mutex<Vec<(ApprovalId, Decision)>>>,
     pub cancelled: Arc<AtomicBool>,
     pub sent: Arc<Mutex<Vec<String>>>,
+    pub images: Arc<Mutex<Vec<Vec<discard_core::attachments::Attachment>>>>,
 }
 
 pub struct FakeProvider {
@@ -149,6 +150,10 @@ impl ProviderSession for FakeSession {
         self.probe.sent.lock().expect("probe lock").push(text.to_string());
         self.started = true;
         Ok(())
+    }
+    async fn send_user_message_with_images(&mut self, text: &str, images: &[discard_core::attachments::Attachment]) -> Result<(), ProviderError> {
+        self.probe.images.lock().expect("probe lock").push(images.to_vec());
+        self.send_user_message(text).await
     }
     async fn next_event(&mut self) -> Option<RawEvent> {
         if !self.started {

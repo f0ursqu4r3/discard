@@ -4,7 +4,7 @@ use discard_core::provider::{ProviderError, SessionSpec};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-pub(crate) const MEMORY_TOOLS: &[&str] = &["memory_search", "memory_list", "memory_read", "memory_save", "memory_edit", "memory_forget"];
+pub(crate) const MEMORY_TOOLS: &[&str] = &["memory_search", "memory_list", "memory_read", "memory_save", "memory_edit", "memory_forget", "worktree_inspect", "worktree_request_removal"];
 
 pub(crate) fn setup(message: impl Into<String>) -> ProviderError {
     ProviderError::Setup(format!("conversation mode: {}", message.into()))

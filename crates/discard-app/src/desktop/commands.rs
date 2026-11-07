@@ -13,8 +13,41 @@ pub fn get_history(core: State<'_, Arc<AppCore>>) -> HistoryDto {
     core.history_snapshot()
 }
 #[tauri::command]
-pub fn send_message(channels: State<'_, Arc<super::channels::Channels>>, channel_id: String, text: String) -> Result<(), String> {
-    channels.send_message(&channel_id, text)
+pub fn send_message(channels: State<'_, Arc<super::channels::Channels>>, context: State<'_, super::settings::SettingsContext>, channel_id: String, text: String, attachment_ids: Option<Vec<String>>) -> Result<(), String> {
+    let attachments = discard_core::attachments::load_all(&context.home, &attachment_ids.unwrap_or_default())?;
+    channels.send_with_attachments(&channel_id, text, attachments)
+}
+
+#[tauri::command]
+pub fn get_worktree_requests(access: State<'_, Arc<discard_core::worktree_access::WorktreeAccess>>, channel_id: String) -> Vec<discard_core::worktree_access::RemovalRequest> {
+    access.requests(&discard_core::model::ChannelId(channel_id))
+}
+
+#[tauri::command]
+pub async fn decide_worktree_removal(
+    access: State<'_, Arc<discard_core::worktree_access::WorktreeAccess>>,
+    channels: State<'_, Arc<super::channels::Channels>>,
+    core: State<'_, Arc<AppCore>>,
+    channel_id: String, request_id: String, approve: bool,
+) -> Result<discard_core::worktree_access::RemovalRequest, String> {
+    let access = access.inner().clone();
+    let store = channels.store.clone();
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let channel = discard_core::model::ChannelId(channel_id);
+        if approve { core.begin_project_change().map_err(|_| "Wait for active responses and archive operations to finish before removing a worktree.".to_string())?; }
+        let decision = access.decide(&channel, &request_id, approve);
+        if approve { core.end_project_change(); }
+        let request = decision?;
+        let message = discard_core::model::Message {
+            id: discard_core::model::MessageId::new(), channel_id: channel.clone(), role: discard_core::model::Role::System,
+            blocks: vec![discard_core::model::Block::Markdown { text: request.result.clone().unwrap_or_else(|| request.state.clone()) }],
+        };
+        store.lock().unwrap_or_else(|e| e.into_inner()).insert_message(&message).map_err(|e| format!("Action status: {}. Could not save its transcript note: {e}", request.state))?;
+        core.apply_channel(&channel.0, discard_core::ui_state::Update::ConversationMarker(message));
+        core.refresh_branches(core.request_branch_refresh());
+        Ok(request)
+    }).await.map_err(|e| e.to_string())?
 }
 #[tauri::command]
 pub fn decide_approval(core: State<'_, Arc<AppCore>>, channel_id: String, approval_id: String, decision: String) {

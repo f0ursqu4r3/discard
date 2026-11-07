@@ -68,3 +68,15 @@ There is no button for archiving yet. The function and its tests exist in `disca
 - Worktrees are a git feature. A project that is not a git repository uses the main checkout.
 - Submodules and sparse checkouts are not handled specially.
 - Discard does not merge or delete the worktree branches. Use git for that.
+
+## Conversation worktree tools
+
+Project conversations with a saved worktree binding expose `worktree_inspect` and `worktree_request_removal` through the scoped Discard MCP server. The tools use the token's conversation and project. They accept no path, shell command, force flag, or approval argument. Direct chats and summary tokens cannot use these tools.
+
+Inspection reads status (including ignored and untracked paths), tracked working changes, or the current commit patch. Each Git command has a ten-second limit and a 32 KiB output limit. Incomplete inspection fails closed. Hooks, external diff programs, text conversion, and interactive Git prompts are disabled.
+
+Removal creates an app approval card. The request does not remove files. Only the user can approve or deny it in the app. Approval is single-use, expires after ten minutes, and is cancelled by an app restart. Pending cards are session state; completed decisions are saved as system notes in the conversation.
+
+Before removal, Discard waits for app responses and archive operations to finish, resolves the saved binding again, and compares the current Git state with the approved snapshot. Main checkouts, locked worktrees, dirty files, untracked files, ignored files, and submodule configurations block removal. Git runs without `--force`. If no local branch or tag contains the commit, the card includes creation of a recovery branch under `discard/retained-worktrees/`. Discard creates that branch before removal. A failed removal can leave this recovery branch in place; the result reports it.
+
+The app serializes these tool operations. External Git processes are not controlled by Discard. Git performs its own final removal checks. Removing a worktree keeps the conversation history available.

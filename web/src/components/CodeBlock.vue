@@ -31,7 +31,13 @@ const lines = useHighlightedCode(
         <CodeBlockCopyButton :value="text" />
       </CodeBlockActions>
     </CodeBlockHeader>
-    <CodeBlockContent>
+    <CodeBlockContent
+      :wrap="
+        ['sh', 'bash', 'zsh', 'shell', 'shellscript', 'powershell', 'ps1'].includes(
+          (language || '').toLowerCase(),
+        )
+      "
+    >
       <CodeBlockLine v-for="(line, index) in lines" :key="index">
         <CodeBlockToken v-for="(token, tokenIndex) in line" :key="tokenIndex" :token="token" />
       </CodeBlockLine>

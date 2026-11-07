@@ -86,3 +86,9 @@ An explicit mention overrides the project default for that response. Discard add
 Unknown names, duplicate names, and more than one recipient produce an error before sending. Mentions in code, blockquotes, email addresses, topics, old messages, and model output do not route a response. Mentions do not create agents or start concurrent responses.
 
 New replies store their author ID, name, provider, and avatar. The transcript and live response use this author, and model history includes it. Older replies without author metadata retain the channel identity as a display fallback.
+
+## Scoped actions and response presentation
+
+Conversation mode retains its empty provider working directory and disabled native shell tools. The scoped Discard MCP server can also expose worktree inspection and removal requests when the app starts it with the worktree service. Calls bind to the authenticated source conversation. The agent can request removal, but it cannot approve it. The app rechecks the worktree and executes removal only after a user approval. Summary tokens cannot use these tools. See [worktree tools](../worktrees.md#conversation-worktree-tools).
+
+The response prompt leads with the current answer or next action, limits repeated snapshot facts and warnings, and distinguishes pending approval from confirmed completion. Agent personality and user instructions can still set the desired detail. Message prose and code blocks use the same base text size. Paragraph and code-block spacing separate explanations from commands.

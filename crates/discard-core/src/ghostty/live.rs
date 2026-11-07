@@ -105,7 +105,7 @@ mod tests {
         AppearanceSettings {
             theme_source: ThemeSource::Custom,
             theme: theme.to_string(),
-            ignore_plugin_themes: false,
+            ..AppearanceSettings::default()
         }
     }
 

@@ -1,6 +1,7 @@
 //! Headless core of Discard: events, turn and approval state machines,
 //! policy, storage, and the provider trait. No GUI dependency.
 
+pub mod attachments;
 pub mod action;
 pub mod context_menu;
 pub mod provider_page;
@@ -42,3 +43,4 @@ pub mod memory_items;
 pub mod mentions;
 pub mod conversation_context;
 pub mod worktree_context;
+pub mod worktree_access;

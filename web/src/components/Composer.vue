@@ -1,11 +1,19 @@
 <script setup lang="ts">
 defineOptions({ name: 'MessageComposer' })
-import { computed, nextTick, ref, useId, watch } from 'vue'
-import { getAgents, getProjectMembers, type AgentEntry } from '../bridge/api'
+import { computed, nextTick, onUnmounted, ref, useId, watch } from 'vue'
+import { useEventListener, useTextareaAutosize } from '@vueuse/core'
+import {
+  chooseAttachments,
+  importAttachmentFiles,
+  getAgents,
+  getProjectMembers,
+  type AgentEntry,
+} from '../bridge/api'
 import { mentionQuery, mentionToken } from './mentions'
-import { Send, Square, AtSign } from '@lucide/vue'
-import { InputGroup, InputGroupAddon, InputGroupTextarea } from './ui/input-group'
-import { Button } from './ui/button'
+import AttachmentCard from './AttachmentCard.vue'
+import type { AttachmentDto } from '../bridge/types'
+import { Send, Square, AtSign, Paperclip, LoaderCircle } from '@lucide/vue'
+import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from './ui/input-group'
 import { maySend, mayStop } from './composer'
 const props = defineProps<{
   archived: boolean
@@ -16,15 +24,119 @@ const props = defineProps<{
   projectId?: string | null
   agent?: string
   draft?: string
+  attachments?: AttachmentDto[]
+  dropTarget?: HTMLElement | null
 }>()
 const emit = defineEmits<{
-  send: [text: string]
+  send: [text: string, attachments?: AttachmentDto[]]
   stop: []
   'update:draft': [text: string]
+  'update:attachments': [attachments: AttachmentDto[]]
 }>()
 const placeholder = computed(() =>
   props.directMessage ? `Message ${props.agent || 'agent'}` : `Message #${props.channel}`,
 )
+const localAttachments = ref<AttachmentDto[]>([])
+const importing = ref(false)
+const attachmentError = ref('')
+let disposed = false
+onUnmounted(() => {
+  disposed = true
+})
+const files = computed({
+  get: () => props.attachments ?? localAttachments.value,
+  set: (value: AttachmentDto[]) => {
+    localAttachments.value = value
+    emit('update:attachments', value)
+  },
+})
+const canAttach = computed(() => !props.archived && !props.busy && !importing.value)
+async function addAttachments(importFiles: () => Promise<AttachmentDto[]>) {
+  if (props.archived || props.busy || importing.value) return
+  importing.value = true
+  attachmentError.value = ''
+  try {
+    const added = await importFiles()
+    if (disposed || !added.length) return
+    if (files.value.length + added.length > 8) throw new Error('Attach up to 8 files per message.')
+    if ([...files.value, ...added].reduce((total, file) => total + file.size, 0) > 20 * 1024 * 1024)
+      throw new Error('Attachments must total 20 MB or less.')
+    files.value = [...files.value, ...added]
+  } catch (error) {
+    if (!disposed) attachmentError.value = String(error)
+  } finally {
+    if (!disposed) importing.value = false
+  }
+}
+function attach() {
+  void addAttachments(chooseAttachments)
+}
+function importFiles(incoming: File[]) {
+  if (!incoming.length) return
+  void addAttachments(async () => {
+    if (files.value.length + incoming.length > 8)
+      throw new Error('Attach up to 8 files per message.')
+    if (
+      [...files.value, ...incoming].reduce((total, file) => total + file.size, 0) >
+      20 * 1024 * 1024
+    )
+      throw new Error('Attachments must total 20 MB or less.')
+    return importAttachmentFiles(incoming)
+  })
+}
+const dragDepth = ref(0)
+const dragging = computed(() => dragDepth.value > 0 && canAttach.value)
+function hasFiles(event: DragEvent) {
+  return Array.from(event.dataTransfer?.types ?? []).includes('Files')
+}
+function dragEnter(event: DragEvent) {
+  if (!hasFiles(event)) return
+  event.preventDefault()
+  dragDepth.value++
+}
+function dragOver(event: DragEvent) {
+  if (!hasFiles(event)) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = canAttach.value ? 'copy' : 'none'
+}
+function dragLeave(event: DragEvent) {
+  if (hasFiles(event)) dragDepth.value = Math.max(0, dragDepth.value - 1)
+}
+function dropFiles(event: DragEvent) {
+  dragDepth.value = 0
+  if (!hasFiles(event)) return
+  event.preventDefault()
+  event.stopPropagation()
+  if (!canAttach.value) return
+  const items = Array.from(event.dataTransfer?.items ?? [])
+  if (items.some((item) => item.webkitGetAsEntry?.()?.isDirectory)) {
+    attachmentError.value = 'Attach files individually. Folders are not supported.'
+    return
+  }
+  importFiles(Array.from(event.dataTransfer?.files ?? []))
+}
+function pasteImages(event: ClipboardEvent) {
+  const clipboard = event.clipboardData
+  if (!clipboard) return
+  const images = Array.from(clipboard.files).filter((file) => file.type.startsWith('image/'))
+  if (!images.length) return
+  event.preventDefault()
+  importFiles(images)
+}
+// Prevent file drops outside the active drop target from navigating away from the app.
+useEventListener(window, 'dragover', (event: DragEvent) => {
+  if (!hasFiles(event) || event.defaultPrevented) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'none'
+})
+useEventListener(window, 'drop', (event: DragEvent) => {
+  if (hasFiles(event)) event.preventDefault()
+  dragDepth.value = 0
+})
+function removeAttachment(id: string) {
+  files.value = files.value.filter((file) => file.id !== id)
+  attachmentError.value = ''
+}
 const localDraft = ref('')
 const text = computed({
   get: () => props.draft ?? localDraft.value,
@@ -34,6 +146,17 @@ const text = computed({
   },
 })
 const host = ref<HTMLElement | null>(null)
+const dropZone = computed(() => props.dropTarget ?? host.value)
+useEventListener(dropZone, 'dragenter', dragEnter)
+useEventListener(dropZone, 'dragover', dragOver)
+useEventListener(dropZone, 'dragleave', dragLeave)
+useEventListener(dropZone, 'drop', dropFiles)
+// Measure on mount, draft changes, and width changes; do not depend on WebKit's
+// first content-sizing layout being refreshed by a pointer interaction.
+useTextareaAutosize({
+  element: computed(() => host.value?.querySelector('textarea') ?? null),
+  input: text,
+})
 const caret = ref(0)
 const dismissed = ref(false)
 const agents = ref<AgentEntry[]>([])
@@ -152,8 +275,14 @@ function blur(event: FocusEvent) {
   if (!host.value?.contains(event.relatedTarget as Node | null)) dismissed.value = true
 }
 function send() {
-  if (props.running || !maySend(props.archived || props.busy, text.value)) return
-  emit('send', text.value.trim())
+  if (
+    props.running ||
+    !maySend(props.archived || props.busy || importing.value, text.value, files.value.length)
+  )
+    return
+  if (files.value.length) emit('send', text.value.trim(), [...files.value])
+  else emit('send', text.value.trim())
+  if (props.attachments === undefined) files.value = []
   if (props.draft === undefined) text.value = ''
 }
 function keydown(event: KeyboardEvent) {
@@ -205,7 +334,9 @@ function keydown(event: KeyboardEvent) {
     >
       <p class="px-2 py-1 text-xs text-muted-foreground">Mention one agent</p>
       <p v-if="loading" role="status" class="px-2 py-2 text-sm">Loading agents…</p>
-      <p v-else-if="loadError" role="status" class="px-2 py-2 text-sm">{{ loadError }}</p>
+      <p v-else-if="loadError" role="status" class="px-2 py-2 text-sm">
+        {{ loadError }}
+      </p>
       <p v-else-if="!candidates.length" role="status" class="px-2 py-2 text-sm">
         No matching agents
       </p>
@@ -240,60 +371,104 @@ function keydown(event: KeyboardEvent) {
         </button>
       </div>
     </div>
-    <InputGroup class="rounded-lg">
-      <InputGroupTextarea
-        v-model="text"
-        data-ui-id="composer-input"
-        class="max-h-40 min-h-12 py-3"
-        :rows="1"
-        :disabled="archived || busy"
-        :aria-label="placeholder"
-        :placeholder="placeholder"
-        :aria-expanded="!!query"
-        :aria-controls="query ? listId : undefined"
-        :aria-activedescendant="activeId"
-        aria-autocomplete="list"
-        @input="updateCaret"
-        @click="updateCaret"
-        @keyup.left="updateCaret"
-        @keyup.right="updateCaret"
-        @keyup.home="updateCaret"
-        @keyup.end="updateCaret"
-        @keydown="keydown"
-      />
-      <InputGroupAddon align="inline-end" class="self-end pb-2">
-        <Button
-          size="icon-sm"
-          variant="ghost"
-          aria-label="Mention an agent"
-          :disabled="archived || busy || directMessage"
-          :title="directMessage ? 'Mentions are available in project channels' : 'Mention an agent'"
-          @click="insertMention"
+    <p v-if="attachmentError" role="alert" class="mb-2 text-sm text-destructive">
+      {{ attachmentError }}
+    </p>
+    <InputGroup
+      class="relative h-auto flex-col items-stretch gap-2 rounded-lg p-2"
+      :class="dragging ? 'border-primary ring-2 ring-primary/30' : ''"
+    >
+      <Teleport v-if="dragging" :to="dropTarget ?? 'body'" :disabled="!dropTarget">
+        <div
+          role="status"
+          class="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-background/90 text-sm font-medium text-primary"
         >
-          <AtSign aria-hidden="true" class="size-4 text-muted-foreground" />
-        </Button>
-        <Button
-          v-if="mayStop(running)"
-          data-ui-id="composer-stop"
-          size="sm"
-          variant="destructive"
-          @click="emit('stop')"
-        >
-          <Square data-icon="inline-start" />
-          Stop
-        </Button>
-        <Button
-          v-else
-          data-ui-id="composer-send"
-          size="icon-sm"
-          :disabled="!maySend(archived || busy, text)"
-          aria-label="Send message"
-          @click="send"
-        >
-          <Send />
-          <span class="sr-only">Send</span>
-        </Button>
-      </InputGroupAddon>
+          Drop files to attach
+        </div>
+      </Teleport>
+      <div v-if="files.length" aria-label="Attachments" class="flex gap-2 overflow-x-auto pb-1">
+        <AttachmentCard
+          v-for="file in files"
+          :key="file.id"
+          :attachment="file"
+          removable
+          :disabled="busy || archived || importing"
+          @remove="removeAttachment"
+        />
+      </div>
+      <div class="flex min-w-0 items-end gap-2">
+        <InputGroupAddon align="inline-start" class="shrink-0 p-0 has-[>button]:ml-0">
+          <InputGroupButton
+            size="icon-sm"
+            aria-label="Attach files"
+            title="Attach files"
+            :disabled="archived || busy || importing || files.length >= 8"
+            :aria-busy="importing"
+            @click="attach"
+          >
+            <LoaderCircle v-if="importing" class="motion-safe:animate-spin" />
+            <Paperclip v-else />
+          </InputGroupButton>
+        </InputGroupAddon>
+        <InputGroupTextarea
+          v-model="text"
+          data-ui-id="composer-input"
+          class="h-8 max-h-40 min-h-8 min-w-0 field-sizing-fixed overflow-y-auto px-1 py-1.5 leading-5"
+          :rows="1"
+          :disabled="archived || busy"
+          :aria-label="placeholder"
+          :placeholder="placeholder"
+          :aria-expanded="!!query"
+          :aria-controls="query ? listId : undefined"
+          :aria-activedescendant="activeId"
+          aria-autocomplete="list"
+          @input="updateCaret"
+          @paste="pasteImages"
+          @click="updateCaret"
+          @keyup.left="updateCaret"
+          @keyup.right="updateCaret"
+          @keyup.home="updateCaret"
+          @keyup.end="updateCaret"
+          @keydown="keydown"
+        />
+        <InputGroupAddon align="inline-end" class="shrink-0 gap-1 p-0 has-[>button]:mr-0">
+          <InputGroupButton
+            size="icon-sm"
+            variant="ghost"
+            aria-label="Mention an agent"
+            :disabled="archived || busy || directMessage"
+            :title="
+              directMessage ? 'Mentions are available in project channels' : 'Mention an agent'
+            "
+            @click="insertMention"
+          >
+            <AtSign aria-hidden="true" class="size-4 text-muted-foreground" />
+          </InputGroupButton>
+          <InputGroupButton
+            v-if="mayStop(running)"
+            data-ui-id="composer-stop"
+            size="sm"
+            class="h-8"
+            variant="destructive"
+            @click="emit('stop')"
+          >
+            <Square data-icon="inline-start" />
+            Stop
+          </InputGroupButton>
+          <InputGroupButton
+            v-else
+            data-ui-id="composer-send"
+            size="icon-sm"
+            variant="default"
+            :disabled="!maySend(archived || busy || importing, text, files.length)"
+            aria-label="Send message"
+            @click="send"
+          >
+            <Send />
+            <span class="sr-only">Send</span>
+          </InputGroupButton>
+        </InputGroupAddon>
+      </div>
     </InputGroup>
     <p v-if="archived && !directMessage" class="mt-2 text-xs text-muted-foreground">
       Channel archived

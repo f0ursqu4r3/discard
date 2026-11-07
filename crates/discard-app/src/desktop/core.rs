@@ -799,7 +799,10 @@ impl AppCore {
         self.send_to_agent(channel, text, None)
     }
     pub fn send_to_agent(&self, channel: Option<&str>, text: String, recipient: Option<discard_core::model::MessageAuthor>) -> Result<(), String> {
-        if text.trim().is_empty() {
+        self.send_to_agent_with_attachments(channel, text, recipient, Vec::new())
+    }
+    pub fn send_to_agent_with_attachments(&self, channel: Option<&str>, text: String, recipient: Option<discard_core::model::MessageAuthor>, attachments: Vec<discard_core::attachments::Attachment>) -> Result<(), String> {
+        if text.trim().is_empty() && attachments.is_empty() {
             return Ok(());
         }
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -810,9 +813,10 @@ impl AppCore {
         if recipient.as_ref().is_some_and(|agent| s.changing_agents.contains(&agent.agent_id.0)) {
             return Err("The mentioned agent is being updated. Try again.".into());
         }
-        if s.active.commands.send(Command::Send(text.clone())).is_ok() {
+        let command = if attachments.is_empty() { Command::Send(text.clone()) } else { Command::SendAttachments { text: text.clone(), attachments: attachments.clone() } };
+        if s.active.commands.send(command).is_ok() {
             s.active.new_anchor = None;
-            s.active.ui.user_sent(&text);
+            s.active.ui.user_sent_with_attachments(&text, &attachments);
             if let Some(author) = recipient { s.active.ui.apply(Update::Responding(author)); }
             s.rev += 1;
             s.history_rev += 1;

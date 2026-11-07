@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
+  AttachmentDto,
   ChannelDetailsDto,
   ChannelMemberDto,
   ChannelTopicDto,
@@ -9,8 +10,34 @@ import type {
 } from './types'
 export const getSnapshot = () => invoke<SnapshotDto>('get_snapshot')
 export const getHistory = () => invoke<HistoryDto>('get_history')
-export const sendMessage = (channelId: string, text: string) =>
-  invoke<void>('send_message', { channelId, text })
+export const sendMessage = (channelId: string, text: string, attachmentIds: string[] = []) =>
+  invoke<void>('send_message', {
+    channelId,
+    text,
+    ...(attachmentIds.length ? { attachmentIds } : {}),
+  })
+export const chooseAttachments = () => invoke<AttachmentDto[]>('choose_attachments')
+export async function importAttachmentFiles(files: File[]): Promise<AttachmentDto[]> {
+  if (files.length > 8) throw new Error('Attach up to 8 files per message.')
+  if (files.some((file) => file.size > 5 * 1024 * 1024))
+    throw new Error('Each attachment must be 5 MB or smaller.')
+  if (files.reduce((total, file) => total + file.size, 0) > 20 * 1024 * 1024)
+    throw new Error('Attachments must total 20 MB or less.')
+  const uploads = await Promise.all(
+    files.map(
+      (file) =>
+        new Promise<{ name: string; data: string }>((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload = () =>
+            resolve({ name: file.name, data: String(reader.result).split(',')[1] ?? '' })
+          reader.onerror = reader.onabort = () => reject(new Error(`Could not read ${file.name}.`))
+          reader.readAsDataURL(file)
+        }),
+    ),
+  )
+  return invoke<AttachmentDto[]>('import_attachments', { files: uploads })
+}
+export const attachmentPreview = (id: string) => invoke<string>('attachment_preview', { id })
 export const decideApproval = (channelId: string, approvalId: string, decision: string) =>
   invoke<void>('decide_approval', { channelId, approvalId, decision })
 export const cancelTurn = (channelId: string) => invoke<void>('cancel_turn', { channelId })
@@ -142,3 +169,16 @@ export interface HistorySearch {
 }
 export const searchAgentHistory = (agentId: string, query: string) =>
   invoke<HistorySearch>('search_agent_history', { agentId, query })
+
+export interface WorktreeRemovalRequest {
+  id: string
+  channelId: string
+  agentId: string
+  state: 'pending' | 'running' | 'completed' | 'denied' | 'failed' | 'expired'
+  result: string | null
+  inspection: { path: string; head: string; recoveryBranch: string | null }
+}
+export const getWorktreeRequests = (channelId: string) =>
+  invoke<WorktreeRemovalRequest[]>('get_worktree_requests', { channelId })
+export const decideWorktreeRemoval = (channelId: string, requestId: string, approve: boolean) =>
+  invoke<WorktreeRemovalRequest>('decide_worktree_removal', { channelId, requestId, approve })

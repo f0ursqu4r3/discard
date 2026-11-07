@@ -152,7 +152,9 @@ test('model-change and context-summary system notices stay visible in history', 
       ],
     },
   })
-  expect(view.text()).toContain('System')
+  expect(view.findAll('[data-slot="marker"]')).toHaveLength(2)
+  expect(view.find('[data-testid="message-identity"]').exists()).toBe(false)
+  expect(view.find('[data-slot="avatar"]').exists()).toBe(false)
   expect(view.text()).toContain('Model changed from old to exact-model.')
   expect(view.text()).toContain('Older messages use a saved context summary.')
 })

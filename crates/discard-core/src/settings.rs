@@ -26,6 +26,30 @@ pub struct AppearanceSettings {
     /// A Ghostty `theme` value. Used when `theme_source` is `custom`.
     pub theme: String,
     pub ignore_plugin_themes: bool,
+    pub mini_project_rail: bool,
+    pub message_density: MessageDensity,
+    pub show_message_avatars: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageDensity {
+    Comfortable,
+    Compact,
+}
+impl MessageDensity {
+    pub fn from_setting(value: &str) -> Option<Self> {
+        match value {
+            "comfortable" => Some(Self::Comfortable),
+            "compact" => Some(Self::Compact),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Comfortable => "comfortable",
+            Self::Compact => "compact",
+        }
+    }
 }
 
 impl Default for AppearanceSettings {
@@ -34,6 +58,9 @@ impl Default for AppearanceSettings {
             theme_source: ThemeSource::Default,
             theme: DEFAULT_THEME.to_string(),
             ignore_plugin_themes: false,
+            mini_project_rail: false,
+            message_density: MessageDensity::Comfortable,
+            show_message_avatars: true,
         }
     }
 }
@@ -72,6 +99,9 @@ pub enum Change {
     /// A Ghostty `theme` value: `Name` or `light:X,dark:Y`.
     Theme(String),
     IgnorePluginThemes(bool),
+    MiniProjectRail(bool),
+    MessageDensity(MessageDensity),
+    ShowMessageAvatars(bool),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -395,6 +425,23 @@ fn evaluate(doc: &DocumentMut) -> (Settings, Vec<SettingsIssue>) {
                         None => issue("appearance.theme", "must be a string".to_string()),
                     }
                 }
+                for (key, target) in [
+                    ("mini_project_rail", &mut settings.appearance.mini_project_rail),
+                    ("show_message_avatars", &mut settings.appearance.show_message_avatars),
+                ] {
+                    if let Some(item) = appearance.get(key) {
+                        match item.as_bool() {
+                            Some(on) => *target = on,
+                            None => issue(&format!("appearance.{key}"), "must be true or false".to_string()),
+                        }
+                    }
+                }
+                if let Some(item) = appearance.get("message_density") {
+                    match item.as_str().and_then(MessageDensity::from_setting) {
+                        Some(density) => settings.appearance.message_density = density,
+                        None => issue("appearance.message_density", "must be \"comfortable\" or \"compact\"".to_string()),
+                    }
+                }
                 if let Some(item) = appearance.get("ignore_plugin_themes") {
                     match item.as_bool() {
                         Some(on) => settings.appearance.ignore_plugin_themes = on,
@@ -453,6 +500,9 @@ fn edit_doc(doc: &mut DocumentMut, change: Change) {
         }
         Change::Theme(value) => ("appearance", "theme", Value::from(value.trim())),
         Change::IgnorePluginThemes(on) => ("appearance", "ignore_plugin_themes", Value::from(on)),
+        Change::MiniProjectRail(on) => ("appearance", "mini_project_rail", Value::from(on)),
+        Change::MessageDensity(density) => ("appearance", "message_density", Value::from(density.as_str())),
+        Change::ShowMessageAvatars(on) => ("appearance", "show_message_avatars", Value::from(on)),
     };
     set_in_table(doc, table, key, new_value);
 }
@@ -711,6 +761,50 @@ mod tests {
         assert_eq!(a.theme_source, ThemeSource::Default);
         assert_eq!(a.theme, DEFAULT_THEME);
         assert!(!a.ignore_plugin_themes);
+    }
+
+    #[test]
+    fn message_layout_settings_keep_defaults_and_survive_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        fs::write(&path, "[appearance]\ntheme = \"Nord\" # keep\n").unwrap();
+        let mut store = SettingsStore::open(&path);
+        let a = &store.settings().appearance;
+        assert!(!a.mini_project_rail);
+        assert_eq!(a.message_density, MessageDensity::Comfortable);
+        assert!(a.show_message_avatars);
+
+        store.apply(Change::MiniProjectRail(true)).unwrap();
+        store.apply(Change::MessageDensity(MessageDensity::Compact)).unwrap();
+        store.apply(Change::ShowMessageAvatars(false)).unwrap();
+        let reopened = SettingsStore::open(&path);
+        let a = &reopened.settings().appearance;
+        assert!(a.mini_project_rail);
+        assert_eq!(a.message_density, MessageDensity::Compact);
+        assert!(!a.show_message_avatars);
+        assert_eq!(a.theme, "Nord");
+        assert!(fs::read_to_string(&path).unwrap().contains("# keep"));
+        assert!(reopened.issues().is_empty());
+
+        store.apply(Change::MiniProjectRail(false)).unwrap();
+        store.apply(Change::MessageDensity(MessageDensity::Comfortable)).unwrap();
+        store.apply(Change::ShowMessageAvatars(true)).unwrap();
+        assert_eq!(SettingsStore::open(&path).settings(), store.settings());
+    }
+
+    #[test]
+    fn invalid_message_layout_settings_fall_back_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        fs::write(&path, "[appearance]\nmini_project_rail = \"yes\"\nmessage_density = \"tiny\"\nshow_message_avatars = 0\ntheme = \"Nord\"\n").unwrap();
+        let store = SettingsStore::open(&path);
+        let a = &store.settings().appearance;
+        assert!(!a.mini_project_rail);
+        assert_eq!(a.message_density, MessageDensity::Comfortable);
+        assert!(a.show_message_avatars);
+        assert_eq!(a.theme, "Nord");
+        assert_eq!(store.issues().len(), 3);
+        assert_eq!(MessageDensity::from_setting("tiny"), None);
     }
 
     #[test]

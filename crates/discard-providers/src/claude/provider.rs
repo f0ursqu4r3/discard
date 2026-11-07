@@ -348,6 +348,11 @@ impl ProviderSession for ClaudeSession {
     async fn send_user_message(&mut self, text: &str) -> Result<(), ProviderError> {
         self.write_line(&json!({"type": "user", "message": {"role": "user", "content": text}})).await
     }
+    async fn send_user_message_with_images(&mut self, text: &str, images: &[discard_core::attachments::Attachment]) -> Result<(), ProviderError> {
+        if images.is_empty() { return self.send_user_message(text).await; }
+        let content = crate::attachments::claude_content(text, images)?;
+        self.write_line(&json!({"type": "user", "message": {"role": "user", "content": content}})).await
+    }
 
     /// Cancel-safe: this only awaits a channel receive.
     async fn next_event(&mut self) -> Option<RawEvent> {
@@ -484,7 +489,7 @@ mod tests {
             let allowed = args.iter().position(|arg| arg == "--allowedTools").expect("scoped memory permission list");
             assert_eq!(
                 args[allowed + 1],
-                "mcp__discard-memory__memory_search,mcp__discard-memory__memory_list,mcp__discard-memory__memory_read,mcp__discard-memory__memory_save,mcp__discard-memory__memory_edit,mcp__discard-memory__memory_forget"
+                "mcp__discard-memory__memory_search,mcp__discard-memory__memory_list,mcp__discard-memory__memory_read,mcp__discard-memory__memory_save,mcp__discard-memory__memory_edit,mcp__discard-memory__memory_forget,mcp__discard-memory__worktree_inspect,mcp__discard-memory__worktree_request_removal"
             );
             assert!(args.windows(2).any(|pair| pair == ["--tools", ""]));
         }

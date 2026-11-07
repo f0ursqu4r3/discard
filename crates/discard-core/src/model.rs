@@ -133,6 +133,7 @@ pub struct Channel {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Block {
+    Attachment { attachment: crate::attachments::Attachment },
     Markdown {
         text: String,
     },

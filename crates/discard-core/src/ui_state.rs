@@ -36,6 +36,7 @@ pub fn new_divider_anchor(messages: &[Message], last_read: Option<&str>, anchor:
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Send(String),
+    SendAttachments { text: String, attachments: Vec<crate::attachments::Attachment> },
     Decide { approval_id: ApprovalId, decision: Decision },
     Cancel,
 }
@@ -84,11 +85,14 @@ impl UiState {
     pub fn channel_id(&self) -> &ChannelId { &self.channel_id }
 
     pub fn user_sent(&mut self, text: &str) {
+        self.user_sent_with_attachments(text, &[]);
+    }
+    pub fn user_sent_with_attachments(&mut self, text: &str, attachments: &[crate::attachments::Attachment]) {
         self.history.push(Message {
             id: MessageId::new(),
             channel_id: self.channel_id.clone(),
             role: Role::User,
-            blocks: vec![Block::Markdown { text: text.to_string() }],
+            blocks: crate::attachments::blocks(text, attachments),
         });
         self.live = Timeline::new();
         self.turn_running = true;

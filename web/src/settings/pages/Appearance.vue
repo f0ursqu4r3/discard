@@ -4,6 +4,8 @@ import { onMounted, onUnmounted, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Button } from '@/components/ui/button'
+import AppearancePreview from '../AppearancePreview.vue'
+import { defaultAppearance, type AppearancePreferences } from '@/bridge/appearance'
 import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 import {
@@ -16,7 +18,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 
-type Appearance = {
+type Appearance = AppearancePreferences & {
   themeSource: string
   theme: string
   ignorePluginThemes: boolean
@@ -34,18 +36,25 @@ type Appearance = {
 }
 const value = ref<Appearance | null>(null)
 const error = ref('')
+const saving = ref(false)
+let reloadId = 0
 const themeSearch = ref('')
 let stop: UnlistenFn | undefined
 async function reload() {
-  value.value = await invoke<Appearance>('settings_get', { page: 'appearance' })
+  const id = ++reloadId
+  const next = await invoke<Appearance>('settings_get', { page: 'appearance' })
+  if (id === reloadId) value.value = { ...defaultAppearance, ...next }
 }
 async function run(command: string, args: Record<string, unknown>) {
+  saving.value = true
   try {
     await invoke(command, args)
     error.value = ''
     await reload()
   } catch (e) {
     error.value = String(e)
+  } finally {
+    saving.value = false
   }
 }
 function patch(change: Record<string, unknown>) {
@@ -78,6 +87,64 @@ onUnmounted(() => stop?.())
     >
       {{ error }}
     </p>
+    <section class="space-y-4" aria-label="Layout and messages">
+      <h2 class="font-semibold">Layout and messages</h2>
+      <div class="flex items-center justify-between gap-4">
+        <div>
+          <label for="mini-project-rail" class="font-medium">Mini project rail</label>
+          <p id="mini-project-rail-help" class="text-sm text-muted-foreground">
+            Use a 48 px rail with smaller icons at the default scale.
+          </p>
+        </div>
+        <Switch
+          id="mini-project-rail"
+          aria-describedby="mini-project-rail-help"
+          :model-value="value.miniProjectRail"
+          :disabled="saving"
+          @update:model-value="patch({ miniProjectRail: $event })"
+        />
+      </div>
+      <div class="flex items-center justify-between gap-4">
+        <div>
+          <label for="message-density" class="font-medium">Message density</label>
+          <p id="message-density-help" class="text-sm text-muted-foreground">
+            Compact reduces spacing and keeps the same text size.
+          </p>
+        </div>
+        <Select
+          :model-value="value.messageDensity"
+          :disabled="saving"
+          @update:model-value="patch({ messageDensity: String($event) })"
+        >
+          <SelectTrigger id="message-density" aria-describedby="message-density-help" class="w-40">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="comfortable">Comfortable</SelectItem>
+            <SelectItem value="compact">Compact</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <div class="flex items-center justify-between gap-4">
+        <div>
+          <label for="show-message-avatars" class="font-medium">Show message avatars</label>
+          <p id="show-message-avatars-help" class="text-sm text-muted-foreground">
+            Hide avatars to give messages more room. Author names stay visible.
+          </p>
+        </div>
+        <Switch
+          id="show-message-avatars"
+          aria-describedby="show-message-avatars-help"
+          :model-value="value.showMessageAvatars"
+          :disabled="saving"
+          @update:model-value="patch({ showMessageAvatars: $event })"
+        />
+      </div>
+      <AppearancePreview :preferences="value" />
+      <p class="text-sm text-muted-foreground">
+        Changes apply to all conversations and are saved automatically.
+      </p>
+    </section>
     <section class="space-y-2">
       <h2 class="font-semibold">Theme source</h2>
       <div class="flex gap-2">

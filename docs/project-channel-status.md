@@ -33,4 +33,4 @@ These items are later implementation slices:
 - Descendant cancellation, restart reconciliation, paused-task recovery, and branch lifecycle detection.
 - Provider-cache-aware input and context retrieval that retains required evidence.
 
-The current main-agent setting assigns the general channel's responder. It does not schedule specialists. The conversation flow does not create, switch, or mutate branch worktrees, and the app does not claim full task orchestration or recovery.
+The current main-agent setting assigns the general channel's responder. It does not schedule specialists. Conversation tools can inspect a bound worktree and request app-approved removal. They do not expose general shell access, and the app does not claim full task orchestration or recovery.

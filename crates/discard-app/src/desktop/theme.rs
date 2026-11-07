@@ -480,7 +480,7 @@ mod tests {
         let settings = AppearanceSettings {
             theme_source: discard_core::ghostty::resolve::ThemeSource::Custom,
             theme: "Nope".to_string(),
-            ignore_plugin_themes: false,
+            ..AppearanceSettings::default()
         };
         let s = state(&settings, Appearance::Dark, ThemeOverrides::default());
         assert_eq!(s.problems().len(), 1);

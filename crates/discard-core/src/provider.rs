@@ -91,6 +91,11 @@ pub trait ProviderSession: Send {
     fn resume_handle(&self) -> Option<String>;
     /// Send one user message and begin a turn.
     async fn send_user_message(&mut self, text: &str) -> Result<(), ProviderError>;
+    /// Supply image content without enabling file-reading tools in conversation mode.
+    async fn send_user_message_with_images(&mut self, text: &str, images: &[crate::attachments::Attachment]) -> Result<(), ProviderError> {
+        if !images.is_empty() { return Err(ProviderError::Setup("This provider does not support image attachments.".into())); }
+        self.send_user_message(text).await
+    }
     /// Next normalized event. `None` means the provider process exited or the stream closed.
     async fn next_event(&mut self) -> Option<RawEvent>;
     /// Answer a pending approval request.

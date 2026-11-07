@@ -177,10 +177,12 @@ fn run_app(
         "user plugins loaded"
     );
 
-    let memory = runtime.block_on(MemoryRuntime::start_with_plugins(
+    let worktree_access = Arc::new(discard_core::worktree_access::WorktreeAccess::new(store.clone()));
+    let memory = runtime.block_on(MemoryRuntime::start_with_services(
         Arc::clone(&memory_store),
         &data_dir.join("run"),
         Some(Arc::clone(&plugins)),
+        Some(worktree_access.clone()),
     ))?;
 
     let git_workspace = Arc::new(GitWorkspace::new(&data_dir.join("worktrees"), Arc::clone(&store)));
@@ -241,7 +243,7 @@ fn run_app(
         let (_, updates) = mpsc::unbounded_channel();
         (CoreInit { state: UiState::new(discard_core::model::ChannelId(String::new()), vec![]), commands, project: String::new(), channel: String::new(), agent: String::new(), provider: String::new() }, updates)
     };
-    desktop::run(init, updates_rx, runtime.handle().clone(), settings, plugins, data_dir.to_path_buf(), desktop::DesktopConfig { startup_channel, sidebar_project, load_report, workspace: git_workspace, store, relaunch, providers, recheck, memory: memory_store, launcher, on_ready })?;
+    desktop::run(init, updates_rx, runtime.handle().clone(), settings, plugins, data_dir.to_path_buf(), desktop::DesktopConfig { startup_channel, sidebar_project, load_report, workspace: git_workspace, store, relaunch, providers, recheck, memory: memory_store, worktree_access, launcher, on_ready })?;
     Ok(())
 }
 

@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import type { BlockDto } from '../bridge/types'
 import SafeMarkdown from './SafeMarkdown.vue'
+import AttachmentCard from './AttachmentCard.vue'
 import CodeBlock from './CodeBlock.vue'
 import DiffBlock from './DiffBlock.vue'
 import ToolCallBlock from './ToolCallBlock.vue'
@@ -47,7 +48,8 @@ const approval = computed(() => {
 </script>
 <template>
   <ContextMenuHost :target="target">
-    <SafeMarkdown v-if="block.type === 'markdown'" :text="block.text" />
+    <AttachmentCard v-if="block.type === 'attachment'" :attachment="block.attachment" />
+    <SafeMarkdown v-else-if="block.type === 'markdown'" :text="block.text" />
     <DiffBlock
       v-else-if="
         block.type === 'diff' ||

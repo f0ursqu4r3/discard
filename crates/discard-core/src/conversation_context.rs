@@ -152,7 +152,7 @@ pub async fn summarize(
                 },
                 command = commands.recv() => match command {
                     Some(Command::Cancel) | None => return Err(ContextError::Cancelled),
-                    Some(Command::Send(_)) => return Err("A response is already running. Send your request again after it finishes.".into()),
+                    Some(Command::Send(_) | Command::SendAttachments { .. }) => return Err("A response is already running. Send your request again after it finishes.".into()),
                     _ => {},
                 },
             }

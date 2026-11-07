@@ -137,6 +137,24 @@ impl Rig {
 }
 
 #[tokio::test]
+async fn image_attachments_reach_conversation_turns_and_followup_history() {
+    let mut rig = Rig::new(vec![Step::text("I can see it"), Step::idle()]).await;
+    let image = discard_core::attachments::Attachment {
+        id: "retained-image".into(), name: "diagram.png".into(), media_type: "image/png".into(),
+        size: 100, path: rig._dir.path().join("image.png"), text: None,
+    };
+    rig.commands.send(Command::SendAttachments { text: "Describe this".into(), attachments: vec![image.clone()] }).unwrap();
+    let updates = rig.done().await;
+    assert!(!updates.iter().any(|u| matches!(u, Update::Error(_))), "{updates:?}");
+    assert_eq!(rig.probe.images.lock().unwrap()[0], vec![image.clone()]);
+    rig.commands.send(Command::Send("What color is it?".into())).unwrap();
+    let updates = rig.done().await;
+    assert!(!updates.iter().any(|u| matches!(u, Update::Error(_))), "{updates:?}");
+    assert_eq!(rig.probe.images.lock().unwrap()[1], vec![image]);
+    assert!(rig.probe.sent.lock().unwrap()[1].contains("diagram.png"));
+}
+
+#[tokio::test]
 async fn each_turn_refreshes_personality_memory_model_and_retains_only_own_history() {
     let mut rig = Rig::new(vec![Step::text("answer one"), Step::idle()]).await;
     let item = rig
