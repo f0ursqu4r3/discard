@@ -19,6 +19,7 @@ import ProjectAvatar from './ProjectAvatar.vue'
 import ProjectIdentitySettings from './ProjectIdentitySettings.vue'
 import MemoryBrowser from '../memory/MemoryBrowser.vue'
 import FriendsList from '../agents/FriendsList.vue'
+import AgentAvatar from '../agents/AgentAvatar.vue'
 import { Button } from '../ui/button'
 import { Badge } from '../ui/badge'
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../ui/card'
@@ -262,23 +263,26 @@ const branchCount = computed(() => props.snapshot.branches.filter((row) => !row.
         </Button>
       </div>
       <Card v-for="agent in projectAgents" :key="agent.agentId" size="sm">
-        <CardHeader>
-          <CardTitle>
-            <Button
-              v-if="!agent.deleted"
-              variant="link"
-              class="h-auto p-0"
-              @click="emit('action', `view_agent_profile:${agent.agentId}`)"
-            >
-              {{ agent.agent }}
-            </Button>
-            <span v-else>{{ agent.agent }}</span>
-          </CardTitle>
-          <CardDescription>
-            {{ agent.provider }} · {{ agent.model }}
-            <span v-if="agent.deleted">· Deleted</span>
-            <span v-else-if="agent.agentArchived">· Archived</span>
-          </CardDescription>
+        <CardHeader class="flex items-center gap-3">
+          <AgentAvatar :name="agent.agent" :avatar="agent.avatar" class="size-10 shrink-0" />
+          <div class="min-w-0">
+            <CardTitle>
+              <Button
+                v-if="!agent.deleted"
+                variant="link"
+                class="h-auto p-0"
+                @click="emit('action', `view_agent_profile:${agent.agentId}`)"
+              >
+                {{ agent.agent }}
+              </Button>
+              <span v-else>{{ agent.agent }}</span>
+            </CardTitle>
+            <CardDescription>
+              {{ agent.provider }} · {{ agent.model }}
+              <span v-if="agent.deleted">· Deleted</span>
+              <span v-else-if="agent.agentArchived">· Archived</span>
+            </CardDescription>
+          </div>
         </CardHeader>
       </Card>
       <p v-if="!projectAgents.length">No agents have conversations in this project.</p>

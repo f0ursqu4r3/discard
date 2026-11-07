@@ -1,3 +1,33 @@
+import type { MessageDto } from '../bridge/types'
+
+/** Display times and date boundaries in the viewer's local time zone. */
+export function messageTime(message: MessageDto): Date | null {
+  if (message.createdAt == null) return null
+  const date = new Date(message.createdAt)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+export function messageDateLabel(date: Date): string {
+  return date.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })
+}
+
+export function messagePresentation(message: MessageDto, previous?: MessageDto) {
+  const date = messageTime(message)
+  const previousDate = previous && messageTime(previous)
+  const startsDate =
+    !!date && (!previousDate || date.toDateString() !== previousDate.toDateString())
+  const continuesGroup =
+    !!previous &&
+    message.continuesGroup &&
+    message.role === previous.role &&
+    message.author?.agentId === previous.author?.agentId &&
+    !startsDate &&
+    !!date &&
+    !!previousDate &&
+    Math.floor(date.getTime() / 60_000) === Math.floor(previousDate.getTime() / 60_000)
+  return { date, startsDate, continuesGroup }
+}
+
 /** Whether a streaming reply has a visible row. */
 export function hasLiveRow(_running: boolean, blocks: number): boolean {
   return blocks > 0

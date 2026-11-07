@@ -15,8 +15,20 @@ import {
   Plus,
 } from '@lucide/vue';
 import NavigationContextMenu from './NavigationContextMenu.vue';
+import SidebarWorktree from './SidebarWorktree.vue';
+import {
+  branchActions,
+  channelRowClass,
+  groupBranchRows,
+} from './branch-navigation';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from './ui/tooltip';
 import {
   Collapsible,
   CollapsibleContent,
@@ -146,25 +158,9 @@ const repositoryGroups = computed(() =>
     ]
   ).map((repository) => ({
     ...repository,
-    groups: [
-      {
-        id: 'branches',
-        label: 'Branches',
-        icon: Hash,
-        rows: props.branches.filter(
-          (row) => (row.repository ?? '') === repository.id && !row.detached
-        ),
-      },
-      {
-        id: 'worktrees',
-        label: 'Worktrees',
-        icon: Monitor,
-        rows: props.branches.filter(
-          (row) =>
-            (row.repository ?? '') === repository.id && row.kind !== 'branch'
-        ),
-      },
-    ],
+    ...groupBranchRows(
+      props.branches.filter((row) => (row.repository ?? '') === repository.id)
+    ),
   }))
 );
 function sectionKey(repository: string, section: string) {
@@ -352,7 +348,8 @@ const approvals = computed(
             :disabled="busy"
             :class="
               cn(
-                'mt-3 flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring',
+                channelRowClass,
+                'mt-3',
                 generalChannel?.id === channelId && page === 'conversation'
                   ? 'bg-sidebar-accent text-sidebar-accent-foreground'
                   : 'text-muted-foreground'
@@ -425,97 +422,189 @@ const approvals = computed(
             :class="repositoryGroups.length > 1 ? 'pl-3' : ''"
           >
             <Collapsible
-              v-for="group in repository.groups"
-              :key="group.id"
-              :open="sections[sectionKey(repository.id, group.id)] !== false"
+              :open="sections[sectionKey(repository.id, 'branches')] !== false"
               @update:open="
-                sections[sectionKey(repository.id, group.id)] = $event
+                sections[sectionKey(repository.id, 'branches')] = $event
               "
-              :data-ui-id="`${group.id}-list`"
-              :class="
-                repositoryGroups.length > 1
-                  ? 'mt-2 first:mt-0'
-                  : 'mt-5 first:mt-0'
+              data-ui-id="branches-list"
+              :class="repositoryGroups.length > 1 ? 'mt-2' : ''"
+            >
+              <div class="flex items-center gap-1">
+                <CollapsibleTrigger as-child>
+                  <button
+                    type="button"
+                    data-ui-id="branches-toggle"
+                    class="flex h-7 min-w-0 flex-1 items-center gap-1 px-1 text-left text-xs font-semibold outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <component
+                      :is="
+                        sections[sectionKey(repository.id, 'branches')] !==
+                        false
+                          ? ChevronDown
+                          : ChevronRight
+                      "
+                      class="size-3 shrink-0 text-muted-foreground"
+                    />
+                    Branch channels
+                    <span
+                      class="ml-1 font-normal tabular-nums text-muted-foreground"
+                    >
+                      {{ repository.branches.length }}
+                    </span>
+                  </button>
+                </CollapsibleTrigger>
+                <TooltipProvider :delay-duration="500" :skip-delay-duration="0">
+                  <Tooltip>
+                    <TooltipTrigger as-child>
+                      <span
+                        class="inline-flex"
+                        tabindex="0"
+                        aria-disabled="true"
+                        :aria-label="`${branchActions.create.label} — Soon`"
+                      >
+                        <Button
+                          disabled
+                          variant="ghost"
+                          size="icon-xs"
+                          :aria-label="`${branchActions.create.label} — Soon`"
+                          ><Plus aria-hidden="true"
+                        /></Button>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {{ branchActions.create.label }} · Soon
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
+              <!-- <p
+                data-ui-id="worktree-count"
+                class="mb-2 px-4 text-xs text-muted-foreground"
+              >
+                {{ repository.worktreeCount }}
+                {{ repository.worktreeCount === 1 ? 'worktree' : 'worktrees' }}
+              </p> -->
+              <CollapsibleContent class="flex flex-col gap-0.5">
+                <div
+                  v-for="branch in repository.branches"
+                  :key="branch.row.key"
+                  data-ui-id="branch-group"
+                  :data-branch-key="branch.row.key"
+                  class="min-w-0"
+                >
+                  <NavigationContextMenu
+                    kind="branch"
+                    :name="branch.row.label"
+                    :id="branch.row.key"
+                    :busy="busy || !projectId"
+                    @open="emit('openBranch', branch.row.key)"
+                  >
+                    <Button
+                      variant="ghost"
+                      :data-ui-id="`branches-row-${branch.row.key}`"
+                      :aria-current="
+                        branch.row.current && page === 'conversation'
+                          ? 'page'
+                          : undefined
+                      "
+                      :disabled="busy || !projectId"
+                      :title="branch.row.label"
+                      :class="
+                        cn(
+                          channelRowClass,
+                          branch.worktrees.length && 'font-medium',
+                          branch.row.current && page === 'conversation'
+                            ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                            : branch.worktrees.length
+                              ? 'text-sidebar-foreground'
+                              : 'text-muted-foreground'
+                        )
+                      "
+                      @click="emit('openBranch', branch.row.key)"
+                    >
+                      <Hash class="size-4 shrink-0" aria-hidden="true" />
+                      <span class="min-w-0 flex-1 truncate">
+                        {{ branch.row.label }}
+                      </span>
+                      <span
+                        v-if="rowUnread(branch.row)"
+                        data-ui-id="channel-unread-pip"
+                        role="img"
+                        aria-label="Unread messages"
+                        class="size-2 shrink-0 rounded-full bg-sidebar-foreground"
+                      />
+                    </Button>
+                  </NavigationContextMenu>
+                  <SidebarWorktree
+                    v-for="worktree in branch.worktrees"
+                    :key="worktree.worktree ?? worktree.key"
+                    :row="worktree"
+                    :busy="busy || !projectId"
+                    :unread="rowUnread(worktree)"
+                    @open="emit('openBranch', $event)"
+                  />
+                </div>
+                <p
+                  v-if="!repository.branches.length"
+                  class="px-2 py-1 text-xs text-muted-foreground"
+                >
+                  No branches found
+                </p>
+              </CollapsibleContent>
+            </Collapsible>
+            <Collapsible
+              v-if="repository.detached.length"
+              :open="sections[sectionKey(repository.id, 'worktrees')] !== false"
+              @update:open="
+                sections[sectionKey(repository.id, 'worktrees')] = $event
               "
+              data-ui-id="detached-worktrees-list"
+              class="mt-3"
             >
               <CollapsibleTrigger as-child>
                 <button
-                  :data-ui-id="`${group.id}-toggle`"
-                  class="flex h-7 w-full items-center gap-1 px-1 text-xs font-semibold text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                  type="button"
+                  data-ui-id="detached-worktrees-toggle"
+                  class="flex h-7 w-full items-center gap-1 px-1 text-left text-xs font-semibold text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <component
                     :is="
-                      sections[sectionKey(repository.id, group.id)] !== false
+                      sections[sectionKey(repository.id, 'worktrees')] !== false
                         ? ChevronDown
                         : ChevronRight
                     "
                     class="size-3"
                   />
-                  {{ group.label }}
-                  <span class="ml-1 font-normal tabular-nums">{{
-                    group.rows.length
-                  }}</span>
+                  Detached worktrees
+                  <span class="ml-1 font-normal tabular-nums">
+                    {{ repository.detached.length }}
+                  </span>
                 </button>
               </CollapsibleTrigger>
-              <CollapsibleContent class="flex flex-col gap-0.5">
-                <NavigationContextMenu
-                  v-for="row in group.rows"
-                  :key="row.key"
-                  :kind="group.id === 'worktrees' ? 'worktree' : 'branch'"
-                  :name="row.label"
-                  :id="row.key"
-                  :path="group.id === 'worktrees' ? row.worktree : undefined"
+              <CollapsibleContent>
+                <SidebarWorktree
+                  v-for="row in repository.detached"
+                  :key="row.worktree ?? row.key"
+                  :row="row"
                   :busy="busy || !projectId"
-                  @open="emit('openBranch', row.key)"
-                >
-                  <button
-                    type="button"
-                    :data-ui-id="`${group.id}-row-${row.key}`"
-                    :aria-current="
-                      row.current && page === 'conversation'
-                        ? 'page'
-                        : undefined
-                    "
-                    :disabled="busy || !projectId"
-                    :title="
-                      row.detached
-                        ? `${row.label} — detached HEAD${row.worktree ? ` · ${row.worktree}` : ''}`
-                        : row.label
-                    "
-                    :class="
-                      cn(
-                        'flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring',
-                        row.current && page === 'conversation'
-                          ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                          : 'text-muted-foreground'
-                      )
-                    "
-                    @click="emit('openBranch', row.key)"
-                  >
-                    <component :is="group.icon" class="size-4 shrink-0" />
-                    <span class="min-w-0 flex-1 truncate">{{ row.label }}</span>
-                    <span
-                      v-if="rowUnread(row)"
-                      data-ui-id="channel-unread-pip"
-                      role="img"
-                      aria-label="Unread messages"
-                      class="size-2 shrink-0 rounded-full bg-sidebar-foreground"
-                    />
-                    <span
-                      v-if="group.id === 'worktrees'"
-                      class="size-1.5 shrink-0 rounded-full bg-success"
-                      aria-label="Worktree available"
-                    />
-                  </button>
-                </NavigationContextMenu>
-                <p
-                  v-if="!group.rows.length"
-                  class="px-2 py-1 text-xs text-muted-foreground"
-                >
-                  No {{ group.label.toLowerCase() }} found
-                </p>
+                  :selected="row.current && page === 'conversation'"
+                  :unread="rowUnread(row)"
+                  @open="emit('openBranch', $event)"
+                />
               </CollapsibleContent>
             </Collapsible>
+            <!-- <Button
+              disabled
+              variant="ghost"
+              size="sm"
+              class="mt-3 w-full justify-start gap-2 px-2 text-muted-foreground"
+            >
+              <Monitor class="size-4 shrink-0" aria-hidden="true" />
+              <span class="min-w-0 truncate">
+                {{ branchActions.manage.label }}
+              </span>
+              <span class="ml-auto text-[10px]">Soon</span>
+            </Button> -->
           </CollapsibleContent>
         </Collapsible>
         <Collapsible
@@ -526,6 +615,7 @@ const approvals = computed(
         >
           <CollapsibleTrigger as-child>
             <button
+              type="button"
               data-ui-id="saved-channel-toggle"
               class="flex h-7 w-full items-center gap-1 px-1 text-xs font-semibold text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
@@ -546,17 +636,17 @@ const approvals = computed(
               :busy="busy"
               @open="emit('selectChannel', channel.id)"
             >
-              <button
-                type="button"
+              <Button
+                variant="ghost"
                 :data-ui-id="`saved-channel-${channel.id}`"
                 :disabled="busy"
                 class="flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-xs text-muted-foreground outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"
                 @click="emit('selectChannel', channel.id)"
               >
                 <Hash class="size-4 shrink-0" />
-                <span class="min-w-0 flex-1 truncate">{{
-                  channel.branch ?? channel.name
-                }}</span>
+                <span class="min-w-0 flex-1 truncate">
+                  {{ channel.branch ?? channel.name }}
+                </span>
                 <span
                   v-if="unreadChannelIds.has(channel.id)"
                   data-ui-id="channel-unread-pip"
@@ -573,7 +663,7 @@ const approvals = computed(
                         : 'Channel'
                   }}
                 </span>
-              </button>
+              </Button>
             </NavigationContextMenu>
           </CollapsibleContent>
         </Collapsible>

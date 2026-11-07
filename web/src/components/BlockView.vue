@@ -16,6 +16,7 @@ const props = defineProps<{
   prompts?: PromptDto[]
   messageId?: string
   index?: number
+  inline?: boolean
 }>()
 const target = computed<ContextTargetDto | null>(() => {
   const block = props.block
@@ -49,7 +50,7 @@ const approval = computed(() => {
 <template>
   <ContextMenuHost :target="target">
     <AttachmentCard v-if="block.type === 'attachment'" :attachment="block.attachment" />
-    <SafeMarkdown v-else-if="block.type === 'markdown'" :text="block.text" />
+    <SafeMarkdown v-else-if="block.type === 'markdown'" :text="block.text" :inline="inline" />
     <DiffBlock
       v-else-if="
         block.type === 'diff' ||

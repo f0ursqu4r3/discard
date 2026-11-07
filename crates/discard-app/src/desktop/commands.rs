@@ -275,7 +275,7 @@ pub fn get_conversations(context: State<'_, super::settings::SettingsContext>) -
         let agent_archived = store.agent_archived(&channel.agent_id).ok();
         let is_default = store.default_conversation(&channel.agent_id).map(|c| c.id == channel.id).unwrap_or(false);
         let in_dm_list = channel.project_id.is_none() && direct_messages.contains(&channel.agent_id);
-        Ok(serde_json::json!({"inDmList":in_dm_list,"isDefault":is_default,"id":channel.id.0,"name":channel.name,"agentId":channel.agent_id.0,"agent":agent.name,"provider":agent.provider,"model":agent.model,"projectId":channel.project_id.map(|p|p.0),"workspaceMode":channel.workspace_mode.as_str(),"archived":archived,"agentArchived":agent_archived == Some(true),"deleted":agent_archived.is_none()}))
+        Ok(serde_json::json!({"inDmList":in_dm_list,"isDefault":is_default,"id":channel.id.0,"name":channel.name,"agentId":channel.agent_id.0,"agent":agent.name,"avatar":agent.avatar,"provider":agent.provider,"model":agent.model,"projectId":channel.project_id.map(|p|p.0),"workspaceMode":channel.workspace_mode.as_str(),"archived":archived,"agentArchived":agent_archived == Some(true),"deleted":agent_archived.is_none()}))
     }).collect()
 }
 

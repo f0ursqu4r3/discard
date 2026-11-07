@@ -9,7 +9,20 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from './ui/context-menu'
-const props = defineProps<{ target: ContextTargetDto | null }>()
+const props = defineProps<{ target: ContextTargetDto | null; quoteEnabled?: boolean }>()
+const emit = defineEmits<{ quote: [] }>()
+const quoted = ref(false)
+function quote() {
+  if (!props.quoteEnabled) return
+  quoted.value = true
+}
+function closeAutoFocus(event: Event) {
+  if (!quoted.value) return
+  event.preventDefault()
+  quoted.value = false
+  // Wait for the menu's focus trap to close before focusing the composer.
+  if (props.quoteEnabled) emit('quote')
+}
 const entries = ref<MenuEntryDto[]>([])
 function load() {
   if (props.target)
@@ -31,7 +44,7 @@ async function select(entry: MenuEntryDto) {
     <ContextMenuTrigger as-child>
       <div @contextmenu.stop="load"><slot /></div>
     </ContextMenuTrigger>
-    <ContextMenuContent>
+    <ContextMenuContent @close-auto-focus="closeAutoFocus">
       <template v-for="(entry, index) in entries" :key="index">
         <ContextMenuSeparator v-if="entry.kind === 'separator'" />
         <ContextMenuItem
@@ -42,6 +55,18 @@ async function select(entry: MenuEntryDto) {
           {{ entry.label }}
         </ContextMenuItem>
       </template>
+      <ContextMenuItem
+        v-if="target.type === 'message' && quoteEnabled !== undefined"
+        :disabled="!quoteEnabled"
+        @select="quote"
+      >
+        Quote
+      </ContextMenuItem>
+      <!-- TODO: Open a clarification thread with channel history through this source message. -->
+      <ContextMenuItem v-if="target.type === 'message'" disabled>
+        Start thread
+        <span class="ml-auto text-xs text-muted-foreground">Soon</span>
+      </ContextMenuItem>
     </ContextMenuContent>
   </ContextMenu>
   <slot v-else />

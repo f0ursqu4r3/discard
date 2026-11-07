@@ -18,6 +18,8 @@ export interface MessageAuthorDto {
   avatar: string | null
 }
 export interface MessageDto {
+  /** Unix milliseconds; absent for messages without a recorded creation time. */
+  createdAt?: number | null
   author?: MessageAuthorDto | null
   id: string
   role: string

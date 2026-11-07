@@ -22,7 +22,7 @@ import MemoryResponse from '../memory/MemoryResponse.vue'
 import MemoryCaptureStatus from '../memory/MemoryCaptureStatus.vue'
 import { useMemory } from '../memory/useMemory'
 import { Button } from '../ui/button'
-import { hasLiveRow, rowCount } from '../messages'
+import { hasLiveRow, rowCount, messagePresentation, messageDateLabel } from '../messages'
 const props = defineProps<{
   messages: MessageDto[]
   live: BlockDto[]
@@ -37,6 +37,7 @@ const props = defineProps<{
   projectId?: string | null
   jumpTo?: { messageId: string; request: number }
   position?: TranscriptPosition
+  quoteDisabled?: boolean
 }>()
 const appearance = useAppearance()
 const memory = useMemory(
@@ -48,6 +49,7 @@ watch([() => props.messages.at(-1)?.id, () => props.running, () => props.memoryR
 })
 const emit = defineEmits<{
   savePosition: [id: string, position: TranscriptPosition]
+  quote: [message: MessageDto]
 }>()
 const host = ref<HTMLElement | null>(null)
 const scroller = useMessageScrollerContext()
@@ -71,8 +73,23 @@ watch(
 )
 const scrollable = useMessageScrollerScrollable()
 const visibility = useMessageScrollerVisibility()
+const historyRows = computed(() =>
+  props.messages.map((message, index) => {
+    const presentation = messagePresentation(message, props.messages[index - 1])
+    return { message: { ...message, continuesGroup: presentation.continuesGroup }, ...presentation }
+  }),
+)
+const liveStartedAt = ref<number | null>(null)
+watch(
+  [() => props.conversationId, () => hasLiveRow(props.running, props.live.length)],
+  ([, visible]) => {
+    liveStartedAt.value = visible ? Date.now() : null
+  },
+  { immediate: true, flush: 'sync' },
+)
 const liveMessage = computed<MessageDto>(() => ({
   id: 'live',
+  createdAt: liveStartedAt.value,
   role: 'agent',
   blocks: props.live,
   author: props.liveAuthor,
@@ -80,6 +97,9 @@ const liveMessage = computed<MessageDto>(() => ({
     props.messages.at(-1)?.role === 'agent' &&
     props.messages.at(-1)?.author?.agentId === props.liveAuthor?.agentId,
 }))
+const livePresentation = computed(() =>
+  messagePresentation(liveMessage.value, props.messages.at(-1)),
+)
 let lastRead: string | undefined
 function read() {
   const last = props.messages.at(-1)
@@ -181,7 +201,7 @@ onUnmounted(() => window.removeEventListener('focus', read))
         >
           <MessageScrollerItem
             class="[content-visibility:visible]"
-            v-for="message in messages"
+            v-for="{ message, date, startsDate } in historyRows"
             :key="message.id"
             :message-id="message.id"
             :data-search-match="message.id === jumpTo?.messageId || undefined"
@@ -190,6 +210,17 @@ onUnmounted(() => window.removeEventListener('focus', read))
             }"
             :scroll-anchor="message.role === 'user'"
           >
+            <div
+              v-if="startsDate && date"
+              data-testid="date-divider"
+              role="separator"
+              :aria-label="messageDateLabel(date)"
+              class="my-4 flex items-center gap-3 px-3 text-xs font-semibold text-muted-foreground sm:px-6"
+            >
+              <span class="flex-1 border-t border-border" />
+              <time :datetime="date.toLocaleDateString('en-CA')">{{ messageDateLabel(date) }}</time>
+              <span class="flex-1 border-t border-border" />
+            </div>
             <div
               v-if="message.id === newAnchorId"
               data-testid="new-divider"
@@ -202,6 +233,8 @@ onUnmounted(() => window.removeEventListener('focus', read))
             <MessageRow
               :channel-id="conversationId"
               :message="message"
+              :quote-disabled="quoteDisabled"
+              @quote="emit('quote', $event)"
               :agent="agent"
               :agent-avatar="agentAvatar"
               :prompts="prompts"
@@ -218,9 +251,22 @@ onUnmounted(() => window.removeEventListener('focus', read))
             v-if="hasLiveRow(running, live.length)"
             message-id="streaming-reply"
           >
+            <div
+              v-if="livePresentation.startsDate && livePresentation.date"
+              data-testid="date-divider"
+              role="separator"
+              :aria-label="messageDateLabel(livePresentation.date)"
+              class="my-4 flex items-center gap-3 px-3 text-xs font-semibold text-muted-foreground sm:px-6"
+            >
+              <span class="flex-1 border-t border-border" />
+              <time :datetime="livePresentation.date.toLocaleDateString('en-CA')">
+                {{ messageDateLabel(livePresentation.date) }}
+              </time>
+              <span class="flex-1 border-t border-border" />
+            </div>
             <MessageRow
               :channel-id="conversationId"
-              :message="liveMessage"
+              :message="{ ...liveMessage, continuesGroup: livePresentation.continuesGroup }"
               :agent="agent"
               :agent-avatar="agentAvatar"
               :prompts="prompts"

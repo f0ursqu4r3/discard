@@ -4,17 +4,95 @@ import MessageRow from './MessageRow.vue'
 import DiffBlock from './DiffBlock.vue'
 import ToolCallBlock from './ToolCallBlock.vue'
 import MessageList from './MessageList.vue'
-import { hasLiveRow, thinkingLine } from './messages'
+import { hasLiveRow, thinkingLine, messagePresentation } from './messages'
+import type { MessageDto } from '../bridge/types'
 
-test('continued messages hide their identity', () => {
+test('continued messages repeat their identity and leave the timestamp gutter empty', () => {
   const row = mount(MessageRow, {
     props: {
       channelId: 'channel',
       message: { id: 'a', role: 'agent', blocks: [], continuesGroup: true },
     },
   })
-  expect(row.find('[data-testid="message-identity"]').exists()).toBe(false)
+  expect(row.get('[data-testid="message-identity"]').text()).toBe('Agent')
+  expect(row.get('[data-testid="message-time-gutter"]').text()).toBe('')
 })
+test('timestamps restart for a new author, minute, or local date', () => {
+  const message: MessageDto = {
+    id: 'a',
+    role: 'agent',
+    blocks: [],
+    continuesGroup: true,
+    createdAt: new Date(2026, 10, 6, 23, 59, 10).getTime(),
+    author: { agentId: 'one', name: 'One', provider: 'test', avatar: null },
+  }
+  expect(messagePresentation(message)).toMatchObject({ startsDate: true, continuesGroup: false })
+  expect(
+    messagePresentation({ ...message, createdAt: message.createdAt! + 10_000 }, message),
+  ).toMatchObject({ startsDate: false, continuesGroup: true })
+  expect(
+    messagePresentation({ ...message, author: { ...message.author!, agentId: 'two' } }, message)
+      .continuesGroup,
+  ).toBe(false)
+  expect(
+    messagePresentation({ ...message, createdAt: message.createdAt! + 60_000 }, message),
+  ).toMatchObject({ startsDate: true, continuesGroup: false })
+  expect(
+    messagePresentation({ ...message, createdAt: message.createdAt! - 60_000 }, message),
+  ).toMatchObject({ startsDate: false, continuesGroup: false })
+  expect(messagePresentation({ ...message, createdAt: null }, message).date).toBeNull()
+  expect(messagePresentation({ ...message, createdAt: NaN }, message).date).toBeNull()
+})
+
+test('date dividers precede messages and the unread marker across midnight', () => {
+  const before = new Date(2026, 10, 6, 23, 59, 10).getTime()
+  const list = mount(MessageList, {
+    props: {
+      conversationId: 'channel',
+      live: [],
+      running: false,
+      newAnchorId: 'c',
+      messages: [
+        {
+          id: 'a',
+          role: 'user',
+          blocks: [{ type: 'markdown', text: 'First' }],
+          continuesGroup: false,
+          createdAt: before,
+        },
+        {
+          id: 'b',
+          role: 'user',
+          blocks: [{ type: 'markdown', text: 'Second' }],
+          continuesGroup: true,
+          createdAt: before + 10_000,
+        },
+        {
+          id: 'c',
+          role: 'user',
+          blocks: [{ type: 'markdown', text: 'Next day' }],
+          continuesGroup: true,
+          createdAt: before + 60_000,
+        },
+      ],
+    },
+  })
+  expect(list.findAll('[data-testid="date-divider"]')).toHaveLength(2)
+  expect(list.findAll('[data-testid="message-timestamp"]')).toHaveLength(2)
+  expect(list.findAll('[data-testid="message-identity"]').map((item) => item.text())).toEqual([
+    'You',
+    'You',
+    'You',
+  ])
+  const last = list.get('[data-message-id="c"]')
+  const markers = last.findAll('[data-testid="date-divider"], [data-testid="new-divider"], article')
+  expect(markers.map((item) => item.attributes('data-testid') ?? item.element.tagName)).toEqual([
+    'date-divider',
+    'new-divider',
+    'ARTICLE',
+  ])
+})
+
 test('diff lines have their matching types', () => {
   const diff = mount(DiffBlock, { props: { text: '+added\n-removed\n@@ change' } })
   expect(diff.find('[data-diff="added"]').text()).toBe('+added')
@@ -24,11 +102,56 @@ test('diff lines have their matching types', () => {
 test('long tool output can be expanded', async () => {
   const output = Array.from({ length: 21 }, (_, i) => `line ${i}`).join('\n')
   const block = mount(ToolCallBlock, { props: { name: 'shell', input: {}, output } })
-  expect(block.text()).toContain('shell')
+  expect(block.text()).toContain('Shell')
   expect(block.text()).not.toContain('line 20')
   await block.get('button').trigger('click')
   expect(block.text()).toContain('line 20')
 })
+test('tool details hide raw data until opened and preserve the complete input', async () => {
+  const name = 'mcp__discard-memory__memory_search'
+  const input = { limit: 10, query: 'wikijs', scope: 'project' }
+  const block = mount(ToolCallBlock, { props: { name, input, output: 'no matches' } })
+  const trigger = block.get('button')
+  expect(trigger.text()).toContain('Memory search')
+  expect(trigger.text()).toContain('wikijs')
+  expect(trigger.text()).not.toContain('mcp__')
+  expect(trigger.attributes('aria-expanded')).toBe('false')
+  expect(block.text()).not.toContain('no matches')
+  await trigger.trigger('click')
+  expect(trigger.attributes('aria-expanded')).toBe('true')
+  expect(block.text()).toContain(name)
+  expect(block.get('[aria-label="Tool input"]').text()).toBe(JSON.stringify(input, null, 2))
+  expect(block.get('[aria-label="Tool output"]').text()).toBe('no matches')
+  await trigger.trigger('click')
+  expect(trigger.attributes('aria-expanded')).toBe('false')
+})
+
+test('tool results distinguish missing and empty output without claiming success', async () => {
+  const block = mount(ToolCallBlock, {
+    props: { name: 'shell', input: {}, output: null },
+  })
+  expect(block.get('button').text()).toContain('Awaiting result')
+  expect(block.get('button').text()).not.toContain('{}')
+  await block.get('button').trigger('click')
+  expect(block.text()).toContain('No result received yet.')
+  await block.setProps({ output: '' })
+  expect(block.get('button').text()).toContain('Returned')
+  expect(block.text()).toContain('No output.')
+  await block.setProps({ output: 'Error: permission denied' })
+  expect(block.get('[aria-label="Tool output"]').text()).toBe('Error: permission denied')
+  expect(block.get('button').text()).not.toContain('Success')
+})
+
+test('expanded tool output retains diff rendering', async () => {
+  const block = mount(ToolCallBlock, {
+    props: { name: 'apply_patch', input: {}, output: '@@ -1 +1 @@\n-old\n+new' },
+  })
+  expect(block.findComponent(DiffBlock).exists()).toBe(false)
+  await block.get('button').trigger('click')
+  expect(block.find('[data-diff="added"]').text()).toBe('+new')
+  expect(block.find('[data-diff="removed"]').text()).toBe('-old')
+})
+
 test('new divider is before its message', () => {
   const list = mount(MessageList, {
     props: {

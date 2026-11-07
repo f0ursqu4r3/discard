@@ -49,6 +49,29 @@ test('a parent-owned draft survives a composer remount', async () => {
   expect((host.get('textarea').element as HTMLTextAreaElement).value).toBe('Unsent message')
 })
 
+test('focusEnd places the cursor after an inserted quote without sending', async () => {
+  const composer = mount(Composer, {
+    attachTo: document.body,
+    props: {
+      archived: false,
+      busy: false,
+      running: false,
+      channel: 'general',
+      draft: '> Quoted message\n\n',
+    },
+  })
+  try {
+    await composer.vm.focusEnd()
+    const input = composer.get('textarea').element
+    expect(document.activeElement).toBe(input)
+    expect(input.selectionStart).toBe(input.value.length)
+    expect(input.selectionEnd).toBe(input.value.length)
+    expect(composer.emitted('send')).toBeUndefined()
+  } finally {
+    composer.unmount()
+  }
+})
+
 test('IME confirmation does not send a message', async () => {
   const composer = mount(Composer, {
     props: { archived: false, busy: false, running: false, channel: 'general' },

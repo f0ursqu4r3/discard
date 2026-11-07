@@ -7,7 +7,7 @@ Goal: make the main window look and feel closer to the Discord desktop client. T
 ## Ground rules
 
 - Main window only (`crates/discard-ui/src/view.rs`). Do not change the Settings window.
-- UI only. Do not change the engine, SQLite, or the `Message` type. `Message` has no timestamp, so show none.
+- UI only. Do not change the engine, SQLite, or the `Message` type. The desktop bridge recovers UTC creation times from persisted UUIDv7 message IDs. Show timestamps and date dividers in the device's local time zone. Leave timestamps blank when the ID has no valid creation time.
 - One project, one channel, one agent exist today. Do not fake more. Extra servers or channels, if drawn at all, show greyed with a "Soon" tag and no handler. Use the existing "Soon" list in `crates/discard-core/src/action.rs`.
 - Every color, radius, and spacing value comes from a theme token (`cx.theme()`, `self.space(..)`). No hard-coded colors. Plugin themes and the Appearance page must still work.
 - Use no Discord logo, icon, font, or other asset. Use the layout idea only.
@@ -31,7 +31,7 @@ Implement only the surface named in the task prompt. Each surface is one reviewa
 ### Surface 1 — Message rows
 
 File: `view.rs` (`message_row`, `live_row`, `render_block`).
-- Group consecutive messages from the same role: the first shows avatar and name, later ones show only the blocks, aligned with the text column. Put the grouping logic in a pure function with tests.
+- Align messages as grouped timestamp, bold name, and inline text. Repeat the name for every message. Group consecutive messages from the same role and author within the same minute and local date. Show the timestamp and optional avatar at the start of each group. Add date dividers at the first visible date and each local date change. Put the grouping logic in a pure function with tests.
 - Hover state on a row (subtle background token).
 - A hover toolbar at the row's top-right. It reuses actions the context menu already has (for example Copy message). It adds no new actions. Route clicks through `dispatch::run` or the existing context-menu handlers.
 - Clearer typed blocks: code and diff blocks get a header line with the language and a copy button (existing copy action); tool-call blocks get a left accent bar and a compact header. Keep `with_menu` context menus working.

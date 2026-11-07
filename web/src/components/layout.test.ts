@@ -42,7 +42,7 @@ describe('server rail', () => {
   })
 })
 
-test('Git branches and worktrees populate separate lists and open their branch', async () => {
+test('Git worktrees nest under their branch and keep their navigation action', async () => {
   const list = mount(ChannelList, {
     props: {
       projectId: 'project',
@@ -115,7 +115,8 @@ test('saved conversations stay behind Git navigation while approvals remain acce
   })
   expect(list.find('[data-ui-id="channel-list"]').exists()).toBe(false)
   expect(list.find('[data-ui-id="branches-toggle"]').exists()).toBe(true)
-  expect(list.find('[data-ui-id="worktrees-toggle"]').exists()).toBe(true)
+  expect(list.find('[data-ui-id="worktrees-toggle"]').exists()).toBe(false)
+  expect(list.get('[data-ui-id="worktree-count"]').text()).toBe('0 worktrees')
   expect(list.get('[data-ui-id="nav-approvals"]').text()).toContain('2')
   await list.get('[data-ui-id="nav-approvals"]').trigger('click')
   expect(list.emitted('approvals')).toHaveLength(1)

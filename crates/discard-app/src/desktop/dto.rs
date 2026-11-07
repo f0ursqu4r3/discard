@@ -84,6 +84,8 @@ pub struct MessageDto {
     pub role: String,
     pub blocks: Vec<BlockDto>,
     pub continues_group: bool,
+    /// Creation time in Unix milliseconds, recovered from the persisted UUIDv7 ID.
+    pub created_at: Option<u64>,
     pub author: Option<discard_core::model::MessageAuthor>,
 }
 #[derive(Serialize, Clone, PartialEq, Debug)]
@@ -216,6 +218,13 @@ pub fn history_dto_with_authors(
         let author_id = author.as_ref().map(|a| a.agent_id.clone());
         let dto = MessageDto {
             id: message.id.0.clone(),
+            created_at: uuid::Uuid::parse_str(&message.id.0).ok()
+                .filter(|id| id.get_version_num() == 7)
+                .and_then(|id| id.get_timestamp())
+                .map(|timestamp| {
+                    let (seconds, nanos) = timestamp.to_unix();
+                    seconds * 1000 + u64::from(nanos) / 1_000_000
+                }),
             role: message.role.as_str().into(),
             blocks: message.blocks.clone(),
             continues_group: continues_group(previous, message.role) && previous_author == author_id,
@@ -325,6 +334,25 @@ mod tests {
         assert_eq!(rows.iter().map(|m| m.continues_group).collect::<Vec<_>>(), [false, false, true]);
         assert_eq!(rows[0].author.as_ref().unwrap().name, "Quinn");
         assert_eq!(rows[1].author.as_ref().unwrap().name, "Jordan");
+    }
+
+    #[test]
+    fn history_exposes_uuid_v7_creation_time_without_inventing_legacy_dates() {
+        let messages: Vec<_> = [
+            "01890f3e-4c00-7000-8000-000000000000",
+            "01890f3e-4c00-4000-8000-000000000000",
+            "legacy-message",
+        ].into_iter().map(|id| Message {
+            id: MessageId(id.into()),
+            channel_id: ChannelId::new(),
+            role: Role::User,
+            blocks: vec![],
+        }).collect();
+        let rows = history_dto(&messages);
+        assert_eq!(rows[0].created_at, Some(0x0189_0f3e_4c00));
+        assert_eq!(rows[1].created_at, None);
+        assert_eq!(rows[2].created_at, None);
+        assert_eq!(serde_json::to_value(&rows[0]).unwrap()["createdAt"], 0x0189_0f3e_4c00u64);
     }
 
     #[test]

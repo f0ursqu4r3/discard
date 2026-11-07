@@ -17,8 +17,12 @@ defineProps<{
   projectId?: string | null
   jumpTo?: { messageId: string; request: number }
   position?: TranscriptPosition
+  quoteDisabled?: boolean
 }>()
-const emit = defineEmits<{ savePosition: [id: string, position: TranscriptPosition] }>()
+const emit = defineEmits<{
+  savePosition: [id: string, position: TranscriptPosition]
+  quote: [message: MessageDto]
+}>()
 </script>
 <template>
   <MessageScrollerProvider
@@ -28,6 +32,7 @@ const emit = defineEmits<{ savePosition: [id: string, position: TranscriptPositi
   >
     <TranscriptContent
       v-bind="$props"
+      @quote="emit('quote', $event)"
       @save-position="(id, position) => emit('savePosition', id, position)"
     />
   </MessageScrollerProvider>

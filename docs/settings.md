@@ -193,9 +193,25 @@ From top to bottom:
   and gaps between messages. It keeps text size and author names unchanged. It applies to saved messages,
   streaming replies, and system notes.
 - **Show message avatars.** On by default. Turn it off to remove the avatar column. Author names remain
-  at the start of each message group.
+  at the start of every message, on the same line as its text.
 - **Live preview.** A sample rail and conversation use the same components as the main window. The preview
   reflects all three preferences and the active theme. Preview controls do not perform actions.
+
+Messages reserve a left column for grouped timestamps. A new author or minute starts a new group.
+Date dividers mark the first visible date and each date change. Saved message IDs retain UTC creation
+times; the bridge exposes them as Unix milliseconds. The UI uses the device's time zone and locale
+for timestamps and date dividers, including daylight saving time. Messages without a valid saved time
+leave the timestamp blank.
+
+Saved messages show Copy, Quote, and a disabled **Start thread — Soon** action on hover or keyboard focus.
+The icon toolbar aligns with the message's top-right corner. Tooltips appear after 500 ms.
+Quote appends editable Markdown and a link to the source message to the current draft. It preserves
+existing draft text and attachments, focuses the composer, and does not send. Source links open the
+original conversation and highlight the message. Quote is also available in the message context menu.
+It is disabled when the composer is unavailable or the message has no text.
+The message context menu also shows the disabled thread action. Planned threads are for clarifying
+questions. They will inherit channel history through the source message, including that message.
+Thread questions and replies will stay separate from the main channel. Thread creation is not implemented.
 
 - **Theme source.** Default, Ghostty, or Custom. A line under the buttons says what each one does.
 - **Themes.** Shown only for Custom. Pick a light theme and a dark theme from searchable lists. Discard switches

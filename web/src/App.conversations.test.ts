@@ -91,6 +91,64 @@ function app() {
   })
   return view
 }
+test('quoting appends to the draft without sending and keeps attachments', async () => {
+  const source: MessageDto = {
+    id: 'source',
+    role: 'user',
+    continuesGroup: false,
+    blocks: [{ type: 'markdown', text: 'Original question' }],
+  }
+  mocks.store.history = [source]
+  const wrapper = app()
+  const composer = wrapper.getComponent(Composer)
+  composer.vm.$emit('update:draft', 'Unsent reply')
+  const attachments = [
+    { id: 'file', name: 'note.txt', mediaType: 'text/plain', size: 1, text: 'a' },
+  ]
+  composer.vm.$emit('update:attachments', attachments)
+  wrapper.getComponent(MessageList).vm.$emit('quote', source)
+  await flushPromises()
+  expect(composer.props('draft')).toContain(
+    'Unsent reply\n\n> [Message from You](#discard-message/channel/source)',
+  )
+  expect(composer.props('draft')).toContain('> Original question\n\n')
+  expect(composer.props('attachments')).toEqual(attachments)
+  expect(mocks.send).not.toHaveBeenCalled()
+  composer.vm.$emit('update:draft', 'Edited quote and reply')
+  await flushPromises()
+  composer.vm.$emit('send', 'Edited quote and reply', attachments)
+  await flushPromises()
+  expect(mocks.send).toHaveBeenCalledWith('channel', 'Edited quote and reply', ['file'])
+})
+
+test('a disabled composer rejects quote requests', async () => {
+  const source: MessageDto = {
+    id: 'source',
+    role: 'user',
+    continuesGroup: false,
+    blocks: [{ type: 'markdown', text: 'Question' }],
+  }
+  mocks.store.history = [source]
+  mocks.store.snapshot = { ...mocks.store.snapshot!, composerDisabled: true }
+  const wrapper = app()
+  expect(wrapper.getComponent(MessageList).props('quoteDisabled')).toBe(true)
+  wrapper.getComponent(MessageList).vm.$emit('quote', source)
+  await flushPromises()
+  expect(wrapper.getComponent(Composer).props('draft')).toBeUndefined()
+  expect(mocks.send).not.toHaveBeenCalled()
+})
+
+test('a quote source reference opens the original message', async () => {
+  const wrapper = app()
+  const link = document.createElement('a')
+  link.href = '#discard-message/channel/source'
+  wrapper.get('[data-ui-id="main-panel"]').element.append(link)
+  await wrapper.get('a').trigger('click')
+  await flushPromises()
+  expect(wrapper.getComponent(MessageList).props('jumpTo')).toMatchObject({ messageId: 'source' })
+  expect(mocks.send).not.toHaveBeenCalled()
+})
+
 test('a valid DM opens with no project and uses contact navigation', () => {
   const wrapper = app()
   expect(wrapper.find('[data-ui-id="main-panel"]').exists()).toBe(true)
@@ -443,7 +501,7 @@ test('model failure offers retry and model settings; failed persistence offers c
     .find((button) => button.text() === 'Retry last message')!
     .trigger('click')
   await flushPromises()
-  expect(mocks.send).toHaveBeenCalledWith('channel', 'Question')
+  expect(mocks.send).toHaveBeenCalledWith('channel', 'Question', [])
   await buttons()
     .find((button) => button.text() === 'Choose model')!
     .trigger('click')

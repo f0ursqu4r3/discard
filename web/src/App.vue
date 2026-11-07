@@ -29,7 +29,8 @@ import {
   type ProjectEntry,
   type HistoryMatch,
 } from './bridge/api'
-import type { ProjectChannelDto } from './bridge/types'
+import { appendQuote, quoteMessage, parseMessageSource } from './components/quote'
+import type { MessageDto, ProjectChannelDto } from './bridge/types'
 import ChannelList from './components/ChannelList.vue'
 import ChannelHeader from './components/ChannelHeader.vue'
 import MessageList from './components/MessageList.vue'
@@ -123,6 +124,7 @@ watch(
   { immediate: true },
 )
 useWebShortcuts()
+const composer = ref<InstanceType<typeof Composer> | null>(null)
 const drafts = reactive<Record<string, string>>({})
 const attachmentDrafts = reactive<Record<string, import('./bridge/types').AttachmentDto[]>>({})
 const transcriptPositions = reactive<Record<string, TranscriptPosition>>({})
@@ -411,7 +413,7 @@ async function searchHistory(query: string) {
     toast.error(String(error))
   }
 }
-async function selectHistoryMatch(match: HistoryMatch) {
+async function selectHistoryMatch(match: Pick<HistoryMatch, 'channelId' | 'messageId'>) {
   if (switching.value) return
   switching.value = true
   try {
@@ -470,6 +472,34 @@ async function savePanels() {
 }
 function resizeFinished(dragging: boolean) {
   if (!dragging) void savePanels()
+}
+const quoteDisabled = computed(
+  () =>
+    !store.snapshot?.channelId ||
+    store.snapshot.composerDisabled ||
+    store.snapshot.archived ||
+    switching.value ||
+    sending.value ||
+    store.snapshot.archiveBusy ||
+    !!store.snapshot.banners.archive,
+)
+function quote(message: MessageDto) {
+  const snapshot = store.snapshot
+  if (!snapshot || quoteDisabled.value) return
+  const source = store.history.find((item) => item.id === message.id)
+  if (!source) return
+  const quoted = quoteMessage(source, snapshot.channelId, snapshot.agent)
+  if (!quoted) return
+  drafts[snapshot.channelId] = appendQuote(drafts[snapshot.channelId] ?? '', quoted)
+  void composer.value?.focusEnd?.()
+}
+function openMessageSource(event: MouseEvent) {
+  const anchor = event.target instanceof Element ? event.target.closest('a') : null
+  const source = parseMessageSource(anchor?.getAttribute('href') ?? '')
+  if (!source) return
+  event.preventDefault()
+  conversationTab.value = 'conversation'
+  void selectHistoryMatch(source)
 }
 async function send(text: string, attachments: import('./bridge/types').AttachmentDto[] = []) {
   const id = store.snapshot?.channelId
@@ -714,6 +744,7 @@ watch(
         <ResizablePanel :order="2" :min-size="0" size-unit="%">
           <section
             ref="mainPanel"
+            @click="openMessageSource"
             data-ui-id="main-panel"
             class="relative flex h-full min-w-0 flex-col overflow-hidden rounded-xl border border-border/60 bg-workspace"
           >
@@ -780,6 +811,8 @@ watch(
                 v-if="!store.snapshot.activeProjectId || conversationTab === 'conversation'"
                 :key="store.snapshot.channelId"
                 :messages="store.history"
+                :quote-disabled="quoteDisabled"
+                @quote="quote"
                 :live="store.snapshot.liveBlocks"
                 :live-author="store.snapshot.responder"
                 :running="store.snapshot.turnRunning"
@@ -956,6 +989,7 @@ watch(
                 }}
               </p>
               <Composer
+                ref="composer"
                 :key="store.snapshot.channelId"
                 :drop-target="mainPanel"
                 v-model:draft="drafts[store.snapshot.channelId]"

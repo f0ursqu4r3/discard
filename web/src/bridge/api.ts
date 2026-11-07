@@ -133,6 +133,7 @@ export interface AgentEntry {
   archived: boolean
 }
 export interface ConversationEntry {
+  avatar?: string | null
   inDmList: boolean
   isDefault: boolean
   workspaceMode: string
