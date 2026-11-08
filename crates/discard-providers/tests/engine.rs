@@ -249,6 +249,7 @@ async fn missing_login_tells_the_user_the_command_to_run() {
         .with_setup(SetupStatus::NotLoggedIn { login_command: "claude auth login".into() });
     let mut rig = start(provider, ApprovalPolicy::Ask);
     rig.commands.send(Command::Send("hello".into())).unwrap();
+    assert!(matches!(rig.next().await, Update::Responding(_)));
     let Update::SetupNeeded(text) = rig.next().await else { panic!("expected SetupNeeded") };
     assert!(text.contains("claude auth login"), "{text}");
     assert!(rig.probe.started_with.lock().unwrap().is_empty(), "no session may start");
@@ -291,9 +292,11 @@ fn _uses(_: ApprovalId) {}
 
 // ---- memory integration ----
 
+type PreparedCalls = Vec<(AgentId, Option<ProjectId>, Option<String>)>;
+
 struct FakeMemory {
     fail: bool,
-    prepared: Mutex<Vec<(AgentId, Option<ProjectId>, Option<String>)>>,
+    prepared: Mutex<PreparedCalls>,
     finished: Mutex<Vec<String>>,
 }
 

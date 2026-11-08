@@ -174,7 +174,7 @@ test.each([{ busy: true }, { archived: true }])(
   async (state) => {
     const view = mount(Composer, { props: { ...props, ...state } })
     await flushPromises()
-  view.element.dispatchEvent(transferEvent('drop', [clipboardImage()]))
+    view.element.dispatchEvent(transferEvent('drop', [clipboardImage()]))
     view.get('textarea').element.dispatchEvent(transferEvent('paste', [clipboardImage()]))
     await flushPromises()
     expect(api.importAttachmentFiles).not.toHaveBeenCalled()

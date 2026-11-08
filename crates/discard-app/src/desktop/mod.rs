@@ -85,9 +85,8 @@ pub fn run(
     }
     (config.on_ready)(&core);
     let channels = Arc::new(channels::Channels::new(core.clone(), config.store.clone(), runtime.clone(), config.launcher));
-    if config.startup_channel.is_none() {
-        if let Err(error) = channels.restore() { core.notice(format!("Could not restore conversation: {error}")); }
-    }
+    if config.startup_channel.is_none()
+        && let Err(error) = channels.restore() { core.notice(format!("Could not restore conversation: {error}")); }
     core.refresh_branches(core.request_branch_refresh());
     let actions = Arc::new(actions::DesktopActions { settings: settings.clone(), workspace: config.workspace, relaunch: config.relaunch, exiting: AtomicBool::new(false) });
     let refresh_core = core.clone();

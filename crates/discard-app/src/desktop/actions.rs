@@ -52,7 +52,7 @@ fn archive_for(core: Arc<AppCore>, actions: &DesktopActions, force: bool, channe
 }
 /// Run a core action. Copy results return to the webview for the Web Clipboard API.
 pub fn run(app: &AppHandle, core: &Arc<AppCore>, actions: &DesktopActions, action: Action, target: Option<ContextTarget>) -> Option<String> {
-    if let Some(ContextTarget::Channel { id }) = &target { if id != &core.active_channel_id() { return None; } }
+    if let Some(ContextTarget::Channel { id }) = &target && id != &core.active_channel_id() { return None; }
     let ctx = core.menu_context();
     match plan::plan_targeted(action, target.is_some(), ctx.turn_running, ctx.archived) {
         plan::TargetedPlan::Copy => return target.as_ref().and_then(|target| core.resolve_copy(target, action)),

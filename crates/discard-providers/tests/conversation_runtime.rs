@@ -848,13 +848,14 @@ async fn facts_follow_request_relevance_but_all_preferences_and_instructions_rem
         .send(Command::Send("Which Rust compiler?".into()))
         .unwrap();
     rig.done().await;
-    let specs = rig.probe.specs.lock().unwrap();
-    let system = specs[0].system_prompt.as_ref().unwrap();
-    assert!(system.contains("Preferred compiler is Rust"));
-    assert!(!system.contains("Garden flowers"));
-    assert!(system.contains("Use short sentences"));
-    assert!(system.contains("Keep decisions explicit"));
-    drop(specs);
+    {
+        let specs = rig.probe.specs.lock().unwrap();
+        let system = specs[0].system_prompt.as_ref().unwrap();
+        assert!(system.contains("Preferred compiler is Rust"));
+        assert!(!system.contains("Garden flowers"));
+        assert!(system.contains("Use short sentences"));
+        assert!(system.contains("Keep decisions explicit"));
+    }
     rig.close().await;
 }
 

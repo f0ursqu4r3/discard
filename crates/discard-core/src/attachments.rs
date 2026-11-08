@@ -275,7 +275,7 @@ mod tests {
         let original = dir.path().join("notes.txt");
         fs::write(&original, "Important notes").unwrap();
         let home = dir.path().join("home");
-        let files = import_files(&home, &[original.clone()]).unwrap();
+        let files = import_files(&home, std::slice::from_ref(&original)).unwrap();
         fs::remove_file(original).unwrap();
         let saved = load(&home, &files[0].id).unwrap();
         assert_eq!(saved.text.as_deref(), Some("Important notes"));

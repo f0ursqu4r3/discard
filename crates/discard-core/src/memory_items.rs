@@ -166,12 +166,14 @@ pub struct MemoryProposal {
     pub resolved: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[expect(clippy::large_enum_variant, reason = "Keep the existing memory API.")]
 pub enum SaveOutcome {
     Saved(MemoryItem),
     Proposed(MemoryProposal),
 }
 /// Pollable saved/proposed records. Stable keys allow consumers to deduplicate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[expect(clippy::large_enum_variant, reason = "Keep the existing memory API.")]
 pub enum MemoryChange {
     Saved { key: String, item: MemoryItem },
     Proposed(MemoryProposal),
@@ -269,13 +271,11 @@ impl MemoryStore {
         let mut ids = vec![];
         for e in entries {
             let e = e.map_err(io_err)?;
-            if e.file_type().map_err(io_err)?.is_file() {
-                if let Some(id) = e.file_name().to_str().and_then(|s| s.strip_suffix(".md")) {
-                    if uuid::Uuid::parse_str(id).is_ok() {
+            if e.file_type().map_err(io_err)?.is_file()
+                && let Some(id) = e.file_name().to_str().and_then(|s| s.strip_suffix(".md"))
+                    && uuid::Uuid::parse_str(id).is_ok() {
                         ids.push(id.into());
                     }
-                }
-            }
         }
         ids.sort();
         Ok(ids)
@@ -349,6 +349,7 @@ impl MemoryStore {
         }
         Ok(())
     }
+    #[expect(clippy::too_many_arguments, reason = "Keep the existing memory API.")]
     fn create_item_locked(
         &self,
         id: Option<&str>,
@@ -362,11 +363,10 @@ impl MemoryStore {
     ) -> Result<MemoryItem> {
         self.resolve(scope, "check.md")?;
         if origin == MutationOrigin::Automatic {
-            if let Some(source) = source {
-                if self.capture_paused(source)? {
+            if let Some(source) = source
+                && self.capture_paused(source)? {
                     return Err(MemoryError::CapturePaused);
                 }
-            }
             let hash = version_of(content.trim());
             if self.all_items()?.iter().any(|i| {
                 i.recapture_suppression
@@ -379,7 +379,7 @@ impl MemoryStore {
                 return Err(MemoryError::ApprovalRequired);
             }
         }
-        if self.list_items(&[scope.clone()])?.len() >= crate::memory::MAX_FILES_PER_SCOPE {
+        if self.list_items(std::slice::from_ref(scope))?.len() >= crate::memory::MAX_FILES_PER_SCOPE {
             return Err(MemoryError::TooManyFiles);
         }
         let at = now();
@@ -871,11 +871,9 @@ impl MemoryStore {
     ) -> Result<MemoryProposal> {
         if let ProposalAction::Update { content, .. } | ProposalAction::Create { content, .. } =
             &action
-        {
-            if content.len() > MAX_FILE_BYTES {
+            && content.len() > MAX_FILE_BYTES {
                 return Err(MemoryError::TooLarge);
             }
-        }
         let proposal = MemoryProposal {
             id: uuid::Uuid::new_v4().to_string(),
             agent: agent.clone(),
@@ -945,7 +943,7 @@ impl MemoryStore {
             if !p.resolved
                 && !self.all_items()?.iter().any(|i| {
                     i.proposal_id.as_ref() == Some(&p.id)
-                        || i.approved_snapshots.iter().any(|s| &s.proposal_id == &p.id)
+                        || i.approved_snapshots.iter().any(|s| s.proposal_id == p.id)
                 })
             {
                 out.push(p);

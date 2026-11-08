@@ -278,7 +278,8 @@ impl Store {
                 legacy.push(row?);
             }
             drop(stmt);
-            let mut groups: std::collections::HashMap<(String, String), Vec<(String, bool, i64)>> =
+            type ChannelGroups = std::collections::HashMap<(String, String), Vec<(String, bool, i64)>>;
+            let mut groups: ChannelGroups =
                 std::collections::HashMap::new();
             for (id, project, name, archived, branch, session_ord) in legacy {
                 let (kind, key) = if let Some(branch) = branch {
@@ -2043,15 +2044,13 @@ impl Store {
         if let MemoryChange::Saved { item, .. } = change
             && item.origin == crate::memory_items::MutationOrigin::Approved
             && let Some(proposal_id) = &item.proposal_id
-        {
-            if let Some((id, _)) = self
+            && let Some((id, _)) = self
                 .response_memory(channel)?
                 .into_iter()
                 .find(|(_, c)| matches!(c,MemoryChange::Proposed(p) if &p.id==proposal_id))
             {
                 target = id;
             }
-        }
         let key = match change {
             MemoryChange::Saved { key, .. } => key.clone(),
             MemoryChange::Proposed(p) => p.id.clone(),
@@ -3391,6 +3390,7 @@ mod agent_lifecycle_tests {
     }
 
     #[test]
+    #[expect(clippy::redundant_pattern_matching, reason = "Preserve the existing behavioral assertions.")]
     fn topic_compare_and_set_history_and_branch_retirement_preserve_identity() {
         let f = channel_fixture();
         assert_eq!(
@@ -3487,6 +3487,7 @@ mod agent_lifecycle_tests {
     }
 
     #[test]
+    #[expect(clippy::bool_assert_comparison, reason = "Preserve the existing behavioral assertions.")]
     fn v3_migration_collapses_duplicate_channels_without_losing_messages() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("v3.db");

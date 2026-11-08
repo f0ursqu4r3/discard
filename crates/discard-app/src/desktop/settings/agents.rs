@@ -118,7 +118,7 @@ pub fn settings_agent_save(app: tauri::AppHandle, context: tauri::State<'_, supe
 }
 fn agents_changed(app: &tauri::AppHandle) { use tauri::Emitter; let _ = app.emit("discard://agents", ()); }
 fn require_connected(provider: &crate::desktop::actions::ProviderInfo) -> Result<(), String> {
-    if !matches!(*provider.setup.lock().unwrap_or_else(|e| e.into_inner()), Some(discard_core::provider::SetupStatus::Ready { .. })) {
+    if !matches!(*provider.setup.lock().unwrap_or_else(|e| e.into_inner()), Some(discard_core::provider::SetupStatus::Ready)) {
         return Err("Connect this provider in CLI connections first.".into());
     }
     Ok(())

@@ -3,6 +3,7 @@ use discard_core::memory_items::{ItemKind, MutationOrigin, SaveOutcome};
 use discard_core::model::{AgentId, ChannelId, ProjectId};
 
 #[test]
+#[expect(clippy::cloned_ref_to_slice_refs, reason = "Preserve the existing behavioral assertions.")]
 fn domains_versions_forget_and_undo_preserve_boundaries() {
     let d = tempfile::tempdir().unwrap();
     let store = MemoryStore::open_in_memory_index(d.path()).unwrap();
@@ -186,6 +187,7 @@ fn both_domain_ids_are_validated_and_cleanup_finds_orphan_domains() {
 }
 
 #[test]
+#[expect(clippy::cloned_ref_to_slice_refs, reason = "Preserve the existing behavioral assertions.")]
 fn reopen_and_index_recovery_never_retrieve_history_or_deleted_items() {
     let d = tempfile::tempdir().unwrap();
     let root = d.path().join("memory");
@@ -248,6 +250,7 @@ fn reopen_and_index_recovery_never_retrieve_history_or_deleted_items() {
 }
 
 #[test]
+#[expect(clippy::cloned_ref_to_slice_refs, reason = "Preserve the existing behavioral assertions.")]
 fn complete_domain_matrix_and_private_cleanup_keep_shared_memory() {
     let d = tempfile::tempdir().unwrap();
     let s = MemoryStore::open_in_memory_index(d.path()).unwrap();
@@ -805,6 +808,7 @@ fn approval_receipts_are_flat_immutable_metadata_and_do_not_enter_retrieval() {
 }
 
 #[test]
+#[expect(clippy::cloned_ref_to_slice_refs, reason = "Preserve the existing behavioral assertions.")]
 fn plugin_aliases_reopen_as_single_versioned_items_and_reject_aba_stale_writes() {
     let dir = tempfile::tempdir().unwrap();
     let scope = Scope::AgentProject(AgentId("a".into()), ProjectId("p".into()));

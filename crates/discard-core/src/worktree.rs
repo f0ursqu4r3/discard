@@ -104,14 +104,13 @@ pub fn discover_repositories(project: &Path) -> Result<Vec<DiscoveredRepository>
     let mut pending = vec![project.clone()];
     let mut found: std::collections::BTreeMap<PathBuf, Vec<PathBuf>> = std::collections::BTreeMap::new();
     while let Some(path) = pending.pop() {
-        if path.join(".git").exists() {
-            if let Ok(common) = git(&path, &["rev-parse", "--path-format=absolute", "--git-common-dir"]) {
+        if path.join(".git").exists()
+            && let Ok(common) = git(&path, &["rev-parse", "--path-format=absolute", "--git-common-dir"]) {
                 let common = PathBuf::from(common);
                 if let Ok(common) = common.canonicalize() {
                     found.entry(common).or_default().push(path.clone());
                 }
             }
-        }
         let entries = match std::fs::read_dir(&path) {
             Ok(entries) => entries,
             Err(error) if path == project => return Err(io_err(error)),
@@ -347,11 +346,10 @@ impl WorktreeManager {
         let lock = self.lock_for(&common);
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
 
-        if let Some(branch) = existing_branch {
-            if let Some(root) = list_branches(&repo)?.into_iter().find(|entry| entry.branch == branch).and_then(|entry| entry.worktree) {
+        if let Some(branch) = existing_branch
+            && let Some(root) = list_branches(&repo)?.into_iter().find(|entry| entry.branch == branch).and_then(|entry| entry.worktree) {
                 return self.recorded(project_dir, &root, branch);
             }
-        }
         let head = git(&repo, &["rev-parse", "--verify", "HEAD"]).map_err(|_| WorktreeError::NoCommits)?;
         let name = format!("{}-{}", Some(slug(channel_name, 24)).filter(|s| !s.is_empty()).unwrap_or_else(|| "channel".into()), short_id(channel_id));
         let branch = existing_branch.map(str::to_owned).unwrap_or_else(|| format!("discard/{name}"));

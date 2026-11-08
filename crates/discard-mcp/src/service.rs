@@ -102,6 +102,7 @@ fn ensure_guide(store: &MemoryStore, agent: &AgentId) -> Result<(), String> {
 }
 
 impl MemoryRuntime {
+    #[expect(clippy::too_many_arguments, reason = "Keep the existing memory API.")]
     fn prepare_scoped(&self, agent: &AgentId, project: Option<&ProjectId>, source: &discard_core::model::ChannelId, base_prompt: Option<&str>, plugin_write: bool, can_write: bool, query: Option<&str>) -> Result<PreparedMemory, String> {
         if plugin_write {
             ensure_guide(&self.store, agent)?;

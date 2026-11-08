@@ -50,18 +50,14 @@ pub(super) fn item_dto(item: &MemoryItem, store: &Store) -> Value {
         "history":item.history.iter().map(|h| json!({"version":h.version,"scope":h.scope.label(),"content":h.content,"deleted":h.deleted,
         "updatedAt":h.updated_at,"origin":h.origin})).collect::<Vec<_>>() })
 }
+type ResponseRecords = (Vec<(discard_core::model::MessageId, MemoryChange)>, Vec<String>);
+
 /// Reconcile durable receipts, and render truthful cards even while SQL writes fail.
 pub(super) fn response_records(
     memory: &MemoryStore,
     store: &Store,
     channel: &ChannelId,
-) -> Result<
-    (
-        Vec<(discard_core::model::MessageId, MemoryChange)>,
-        Vec<String>,
-    ),
-    String,
-> {
+) -> Result<ResponseRecords, String> {
     let approvals = memory.approved_changes(channel).map_err(failure)?;
     let warnings=store.reconcile_response_memory(channel,&approvals).err().map(|e|format!("Memory is approved and saved. Its response notice could not be saved. Reload memory to retry: {e}")).into_iter().collect();
     let mut records = store.response_memory(channel).map_err(failure)?;

@@ -41,7 +41,7 @@ mod tests {
             path,
             text: None,
         };
-        let codex = codex_input("Review", &[attachment.clone()]).unwrap();
+        let codex = codex_input("Review", std::slice::from_ref(&attachment)).unwrap();
         assert_eq!(codex[0]["text"], "Review");
         assert!(codex[1]["text"].as_str().unwrap().contains("diagram.png"));
         assert_eq!(codex[2]["type"], "image");

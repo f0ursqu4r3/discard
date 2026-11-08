@@ -257,7 +257,7 @@ impl MemoryStore {
         self.resolve(scope, "check.md")?;
         let mut out = Vec::new();
         collect(&dir, "", &mut out)?;
-        out.extend(self.list_items(&[scope.clone()])?.into_iter().map(|i| FileInfo { path: i.path(), version: i.version.to_string(), bytes: i.content.len() }));
+        out.extend(self.list_items(std::slice::from_ref(scope))?.into_iter().map(|i| FileInfo { path: i.path(), version: i.version.to_string(), bytes: i.content.len() }));
         out.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(out)
     }

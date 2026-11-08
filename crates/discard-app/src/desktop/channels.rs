@@ -45,11 +45,10 @@ impl Channels {
         Ok(channel.id.0)
     }
     pub fn restore(&self) -> Result<(), String> {
-        if let Some(id) = self.core.saved_conversation() {
-            if self.store.lock().unwrap_or_else(|e| e.into_inner()).load_channel(&ChannelId(id.clone())).is_ok() {
+        if let Some(id) = self.core.saved_conversation()
+            && self.store.lock().unwrap_or_else(|e| e.into_inner()).load_channel(&ChannelId(id.clone())).is_ok() {
                 self.select(&id)?;
             }
-        }
         Ok(())
     }
     fn start(&self, channel: &Channel) -> Result<(), String> { self.start_mode(channel, false) }
@@ -150,9 +149,8 @@ impl Channels {
         let result = (|| {
             self.store.lock().unwrap_or_else(|e| e.into_inner()).set_canonical_project_branch(project, branch, channel_id).map_err(|e| e.to_string())?;
             let updated = self.store.lock().unwrap_or_else(|e| e.into_inner()).load_channel(channel_id).map_err(|e| e.to_string())?;
-            if let Some(previous) = previous.as_ref() {
-                if previous.id != target.id { self.core.channel_read_only(&previous.id.0, true, true); }
-            }
+            if let Some(previous) = previous.as_ref()
+                && previous.id != target.id { self.core.channel_read_only(&previous.id.0, true, true); }
             if self.core.has_channel(&updated.id.0) && self.core.channel_session_closed(&updated.id.0) { self.start_mode(&updated, true)?; }
             else { self.refresh_channel_access(&updated)?; }
             if previous.as_ref().is_some_and(|old| old.id != target.id && self.core.active_channel_id() == old.id.0) {
@@ -463,13 +461,12 @@ impl Channels {
                     if store.channel_archived(&channel.id).map_err(|e| e.to_string())? { continue; }
                     let metadata = store.project_channel_metadata(&channel.id).map_err(|e| e.to_string())?;
                     if !metadata.is_some_and(|metadata| metadata.kind == discard_core::model::ProjectChannelKind::Legacy) { continue; }
-                    if let Some(record) = store.worktree_for(&channel.id).map_err(|e| e.to_string())? {
-                        if row.worktree.as_ref() == Some(&PathBuf::from(&record.path)) && record.branch == branch
-                            && PathBuf::from(&record.repo) == repository.path {
+                    if let Some(record) = store.worktree_for(&channel.id).map_err(|e| e.to_string())?
+                        && row.worktree.as_ref() == Some(&PathBuf::from(&record.path)) && record.branch == branch
+                            && record.repo == repository.path {
                             found = Some(channel);
                             break;
                         }
-                    }
                 }
                 found
             } else {
