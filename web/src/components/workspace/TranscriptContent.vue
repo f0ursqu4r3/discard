@@ -29,6 +29,7 @@ const props = defineProps<{
   liveAuthor?: MessageAuthorDto | null
   running: boolean
   newAnchorId: string | null
+  agentId?: string
   agent?: string
   agentAvatar?: string | null
   prompts?: PromptDto[]
@@ -236,6 +237,7 @@ onUnmounted(() => window.removeEventListener('focus', read))
               :quote-disabled="quoteDisabled"
               @quote="emit('quote', $event)"
               :agent="agent"
+              :agent-id="agentId"
               :agent-avatar="agentAvatar"
               :prompts="prompts"
             />
@@ -268,6 +270,7 @@ onUnmounted(() => window.removeEventListener('focus', read))
               :channel-id="conversationId"
               :message="{ ...liveMessage, continuesGroup: livePresentation.continuesGroup }"
               :agent="agent"
+              :agent-id="agentId"
               :agent-avatar="agentAvatar"
               :prompts="prompts"
               :show-cursor="running"

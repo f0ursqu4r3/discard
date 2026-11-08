@@ -17,6 +17,7 @@ const props = defineProps<{
   messageId?: string
   index?: number
   inline?: boolean
+  running?: boolean
 }>()
 const target = computed<ContextTargetDto | null>(() => {
   const block = props.block
@@ -70,6 +71,8 @@ const approval = computed(() => {
       :name="block.name"
       :input="block.input"
       :output="block.output"
+      :is-error="block.is_error"
+      :running="running"
     />
     <ApprovalCard :channel-id="channelId" v-else-if="approval" :prompt="approval" />
   </ContextMenuHost>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, watch } from 'vue';
+import { computed, reactive, watch } from 'vue'
 import {
   ChevronDown,
   ChevronRight,
@@ -13,91 +13,75 @@ import {
   Boxes,
   ShieldCheck,
   Plus,
-} from '@lucide/vue';
-import NavigationContextMenu from './NavigationContextMenu.vue';
-import SidebarWorktree from './SidebarWorktree.vue';
-import {
-  branchActions,
-  channelRowClass,
-  groupBranchRows,
-} from './branch-navigation';
-import { Button } from './ui/button';
-import { Badge } from './ui/badge';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from './ui/tooltip';
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from './ui/collapsible';
+} from '@lucide/vue'
+import NavigationContextMenu from './NavigationContextMenu.vue'
+import BrailleSpinner from './BrailleSpinner.vue'
+import SidebarWorktree from './SidebarWorktree.vue'
+import { branchActions, channelRowClass, groupBranchRows } from './branch-navigation'
+import { Button } from './ui/button'
+import { Badge } from './ui/badge'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './ui/collapsible'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from './ui/dropdown-menu';
-import { cn } from '@/lib/utils';
+} from './ui/dropdown-menu'
+import { cn } from '@/lib/utils'
 import type {
   BranchRowDto,
   RepositoryDto,
   ChannelDto,
   ContextTargetDto,
   ProjectChannelDto,
-} from '../bridge/types';
-import type { WorkspacePage } from './workspace/types';
+} from '../bridge/types'
+import type { WorkspacePage } from './workspace/types'
 const props = withDefaults(
   defineProps<{
-    projectId?: string;
-    activeProjectId?: string | null;
-    branches: BranchRowDto[];
-    repositories?: RepositoryDto[];
-    repositoriesLoading?: boolean;
-    channels?: ChannelDto[];
-    projectChannels?: ProjectChannelDto[];
-    channelId?: string;
-    project?: string;
-    projectAvatar?: string | null;
-    projectPath?: string;
-    projectDisplayPath?: string;
-    channel?: string;
-    agent?: string;
-    unread?: boolean;
-    pendingApprovals?: number;
-    target?: ContextTargetDto;
-    page?: WorkspacePage;
-    busy?: boolean;
+    projectId?: string
+    activeProjectId?: string | null
+    branches: BranchRowDto[]
+    repositories?: RepositoryDto[]
+    repositoriesLoading?: boolean
+    channels?: ChannelDto[]
+    projectChannels?: ProjectChannelDto[]
+    channelId?: string
+    project?: string
+    projectAvatar?: string | null
+    projectPath?: string
+    projectDisplayPath?: string
+    channel?: string
+    agent?: string
+    unread?: boolean
+    pendingApprovals?: number
+    target?: ContextTargetDto
+    page?: WorkspacePage
+    busy?: boolean
   }>(),
-  { page: 'conversation', channels: () => [], projectChannels: () => [] }
-);
+  { page: 'conversation', channels: () => [], projectChannels: () => [] },
+)
 const emit = defineEmits<{
-  toggleBranch: [key: string];
-  navigate: [page: WorkspacePage];
-  action: [id: string];
-  selectChannel: [id: string];
-  inspectChannel: [id: string];
-  openBranch: [key: string];
-  approvals: [];
-}>();
+  toggleBranch: [key: string]
+  navigate: [page: WorkspacePage]
+  action: [id: string]
+  selectChannel: [id: string]
+  inspectChannel: [id: string]
+  openBranch: [key: string]
+  approvals: []
+}>()
 const generalChannel = computed(() =>
-  props.projectChannels.find(
-    (channel) => channel.kind === 'general' && !channel.archived
-  )
-);
+  props.projectChannels.find((channel) => channel.kind === 'general' && !channel.archived),
+)
 const unreadChannelIds = computed(
   () =>
     new Set(
       props.channels
-        .filter(
-          (channel) => channel.projectId === props.projectId && channel.unread
-        )
-        .map((channel) => channel.id)
-    )
-);
+        .filter((channel) => channel.projectId === props.projectId && channel.unread)
+        .map((channel) => channel.id),
+    ),
+)
 const unreadBranches = computed(
   () =>
     new Set(
@@ -107,13 +91,11 @@ const unreadBranches = computed(
             channel.projectId === props.projectId &&
             channel.kind === 'branch' &&
             !channel.archived &&
-            unreadChannelIds.value.has(channel.id)
+            unreadChannelIds.value.has(channel.id),
         )
-        .map((channel) =>
-          branchIdentity(channel.repository, channel.branch ?? '')
-        )
-    )
-);
+        .map((channel) => branchIdentity(channel.repository, channel.branch ?? '')),
+    ),
+)
 const unreadWorktrees = computed(
   () =>
     new Set(
@@ -124,54 +106,64 @@ const unreadWorktrees = computed(
             !channel.archived &&
             channel.kind === 'legacy' &&
             channel.worktree &&
-            unreadChannelIds.value.has(channel.id)
+            unreadChannelIds.value.has(channel.id),
         )
-        .map((channel) =>
-          JSON.stringify([channel.worktree!.path, channel.worktree!.branch])
-        )
-    )
-);
+        .map((channel) => JSON.stringify([channel.worktree!.path, channel.worktree!.branch])),
+    ),
+)
 function rowUnread(row: BranchRowDto) {
   return row.detached
     ? unreadWorktrees.value.has(JSON.stringify([row.worktree, row.label]))
-    : unreadBranches.value.has(branchIdentity(row.repository, row.label));
+    : unreadBranches.value.has(branchIdentity(row.repository, row.label))
+}
+function runner(channelId: string | undefined) {
+  return props.channels.find((channel) => channel.id === channelId && channel.running)
+}
+function branchRunner(row: BranchRowDto) {
+  const channel = props.projectChannels.find(
+    (channel) =>
+      !channel.archived &&
+      channel.projectId === props.projectId &&
+      (row.detached
+        ? channel.kind === 'legacy' &&
+          channel.worktree?.path === row.worktree &&
+          channel.worktree?.branch === row.label
+        : channel.kind === 'branch' &&
+          branchIdentity(channel.repository, channel.branch ?? '') ===
+            branchIdentity(row.repository, row.label)),
+  )
+  return runner(channel?.id)
 }
 const navigation = [
   { id: 'overview', label: 'Overview', icon: Monitor },
   { id: 'agents', label: 'Agents', icon: Users },
   { id: 'memory', label: 'Memory', icon: Cpu },
   { id: 'artifacts', label: 'Artifacts', icon: FileText },
-] as const;
+] as const
 const sections = reactive<Record<string, boolean>>({
   branches: true,
   worktrees: true,
   integrations: true,
   archived: false,
-});
-const gitBranches = computed(() =>
-  props.branches.filter((row) => !row.detached)
-);
+})
+const gitBranches = computed(() => props.branches.filter((row) => !row.detached))
 const repositoryGroups = computed(() =>
   (
-    props.repositories ?? [
-      { id: '', label: props.project ?? '', path: props.projectPath ?? '' },
-    ]
+    props.repositories ?? [{ id: '', label: props.project ?? '', path: props.projectPath ?? '' }]
   ).map((repository) => ({
     ...repository,
-    ...groupBranchRows(
-      props.branches.filter((row) => (row.repository ?? '') === repository.id)
-    ),
-  }))
-);
+    ...groupBranchRows(props.branches.filter((row) => (row.repository ?? '') === repository.id)),
+  })),
+)
 function sectionKey(repository: string, section: string) {
-  return repository ? JSON.stringify([repository, section]) : section;
+  return repository ? JSON.stringify([repository, section]) : section
 }
 function branchIdentity(repository: string | undefined, branch: string) {
-  return JSON.stringify([repository ?? '', branch]);
+  return JSON.stringify([repository ?? '', branch])
 }
 const savedChannels = computed(() =>
   props.projectChannels.filter((channel) => {
-    if (channel.kind === 'general') return false;
+    if (channel.kind === 'general') return false
     if (
       !channel.archived &&
       channel.kind === 'branch' &&
@@ -179,57 +171,49 @@ const savedChannels = computed(() =>
       gitBranches.value.some(
         (row) =>
           branchIdentity(row.repository, row.label) ===
-          branchIdentity(channel.repository, channel.branch ?? '')
+          branchIdentity(channel.repository, channel.branch ?? ''),
       )
     )
-      return false;
-    return true;
-  })
-);
+      return false
+    return true
+  }),
+)
 watch(
   () => props.projectPath,
   (path) => {
-    for (const key of Object.keys(sections)) delete sections[key];
+    for (const key of Object.keys(sections)) delete sections[key]
     Object.assign(sections, {
       branches: true,
       worktrees: true,
       integrations: true,
       archived: false,
-    });
+    })
     try {
-      const saved: unknown = JSON.parse(
-        localStorage.getItem(`discard:sections:${path}`) ?? '{}'
-      );
+      const saved: unknown = JSON.parse(localStorage.getItem(`discard:sections:${path}`) ?? '{}')
       if (saved && typeof saved === 'object') {
         for (const [key, value] of Object.entries(saved)) {
-          if (typeof value === 'boolean') sections[key] = value;
+          if (typeof value === 'boolean') sections[key] = value
         }
       }
     } catch {
       /* Use the default section state. */
     }
   },
-  { immediate: true }
-);
+  { immediate: true },
+)
 watch(sections, (value) => {
   try {
-    localStorage.setItem(
-      `discard:sections:${props.projectPath}`,
-      JSON.stringify(value)
-    );
+    localStorage.setItem(`discard:sections:${props.projectPath}`, JSON.stringify(value))
   } catch {
     /* Navigation remains usable when storage is unavailable. */
   }
-});
+})
 const approvals = computed(
   () =>
-    props.channels.reduce(
-      (count, channel) => count + channel.pendingApprovals,
-      0
-    ) ||
+    props.channels.reduce((count, channel) => count + channel.pendingApprovals, 0) ||
     props.pendingApprovals ||
-    0
-);
+    0,
+)
 </script>
 <template>
   <nav
@@ -250,23 +234,17 @@ const approvals = computed(
               {{ project }}
             </span>
             <span
-              class="block truncate text-xs text-muted-foreground"
+              class="block truncate font-mono text-xs text-muted-foreground"
               :title="projectPath"
             >
               {{ projectDisplayPath ?? projectPath }}
             </span>
           </span>
-          <ChevronDown
-            class="size-4 shrink-0 text-muted-foreground"
-            aria-hidden="true"
-          />
+          <ChevronDown class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent data-ui-id="project-menu" align="start" class="w-60">
-        <DropdownMenuItem
-          :disabled="!projectId"
-          @select="emit('navigate', 'overview')"
-        >
+        <DropdownMenuItem :disabled="!projectId" @select="emit('navigate', 'overview')">
           <Monitor />
           Project overview
         </DropdownMenuItem>
@@ -281,10 +259,7 @@ const approvals = computed(
           Agents
         </DropdownMenuItem>
         <DropdownMenuSeparator />
-        <DropdownMenuItem
-          :disabled="!projectId"
-          @select="emit('navigate', 'project-settings')"
-        >
+        <DropdownMenuItem :disabled="!projectId" @select="emit('navigate', 'project-settings')">
           <Settings />
           Project settings
         </DropdownMenuItem>
@@ -307,6 +282,7 @@ const approvals = computed(
             :aria-current="page === item.id ? 'page' : undefined"
             size="sm"
             :variant="page === item.id ? 'secondary' : 'ghost'"
+            :class="{ 'nav-active-edge': page === item.id }"
             class="h-8 justify-start gap-2 px-2 font-normal"
             @click="emit('navigate', item.id)"
           >
@@ -316,6 +292,7 @@ const approvals = computed(
           <Button
             data-ui-id="nav-settings"
             :variant="page === 'project-settings' ? 'secondary' : 'ghost'"
+            :class="{ 'nav-active-edge': page === 'project-settings' }"
             :aria-current="page === 'project-settings' ? 'page' : undefined"
             size="sm"
             class="h-8 justify-start gap-2 px-2 font-normal"
@@ -341,9 +318,7 @@ const approvals = computed(
             type="button"
             data-ui-id="project-general-channel"
             :aria-current="
-              generalChannel?.id === channelId && page === 'conversation'
-                ? 'page'
-                : undefined
+              generalChannel?.id === channelId && page === 'conversation' ? 'page' : undefined
             "
             :disabled="busy"
             :class="
@@ -351,8 +326,8 @@ const approvals = computed(
                 channelRowClass,
                 'mt-3',
                 generalChannel?.id === channelId && page === 'conversation'
-                  ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                  : 'text-muted-foreground'
+                  ? 'nav-active-edge bg-sidebar-accent text-sidebar-accent-foreground'
+                  : 'text-muted-foreground',
               )
             "
             @click="
@@ -362,7 +337,12 @@ const approvals = computed(
             "
           >
             <Hash class="size-4 shrink-0" />
-            <span class="min-w-0 flex-1 truncate">general</span>
+            <span class="min-w-0 flex-1 truncate font-mono text-[0.92em]">general</span>
+            <BrailleSpinner
+              v-if="runner(generalChannel?.id)"
+              :agent-id="runner(generalChannel?.id)?.agentId"
+              class="shrink-0"
+            />
             <span
               v-if="generalChannel && unreadChannelIds.has(generalChannel.id)"
               data-ui-id="channel-unread-pip"
@@ -373,17 +353,10 @@ const approvals = computed(
           </button>
         </NavigationContextMenu>
 
-        <p
-          v-if="repositoriesLoading"
-          role="status"
-          class="mt-5 px-2 text-xs text-muted-foreground"
-        >
+        <p v-if="repositoriesLoading" role="status" class="mt-5 px-2 text-xs text-muted-foreground">
           Scanning repositories…
         </p>
-        <p
-          v-else-if="!repositoryGroups.length"
-          class="mt-5 px-2 text-xs text-muted-foreground"
-        >
+        <p v-else-if="!repositoryGroups.length" class="mt-5 px-2 text-xs text-muted-foreground">
           No repositories found
         </p>
         <Collapsible
@@ -393,9 +366,7 @@ const approvals = computed(
             repositoryGroups.length === 1 ||
             sections[sectionKey(repository.id, 'repository')] !== false
           "
-          @update:open="
-            sections[sectionKey(repository.id, 'repository')] = $event
-          "
+          @update:open="sections[sectionKey(repository.id, 'repository')] = $event"
           data-ui-id="repository-section"
           :data-repository-id="repository.id"
           class="mt-5"
@@ -405,7 +376,7 @@ const approvals = computed(
               type="button"
               data-ui-id="repository-toggle"
               :title="repository.path"
-              class="flex h-7 w-full min-w-0 items-center gap-1 px-1 text-xs font-semibold outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              class="section-label flex h-7 w-full min-w-0 items-center px-1 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
               <component
                 :is="
@@ -418,14 +389,10 @@ const approvals = computed(
               <span class="truncate">{{ repository.label }}</span>
             </button>
           </CollapsibleTrigger>
-          <CollapsibleContent
-            :class="repositoryGroups.length > 1 ? 'pl-3' : ''"
-          >
+          <CollapsibleContent :class="repositoryGroups.length > 1 ? 'pl-3' : ''">
             <Collapsible
               :open="sections[sectionKey(repository.id, 'branches')] !== false"
-              @update:open="
-                sections[sectionKey(repository.id, 'branches')] = $event
-              "
+              @update:open="sections[sectionKey(repository.id, 'branches')] = $event"
               data-ui-id="branches-list"
               :class="repositoryGroups.length > 1 ? 'mt-2' : ''"
             >
@@ -434,21 +401,18 @@ const approvals = computed(
                   <button
                     type="button"
                     data-ui-id="branches-toggle"
-                    class="flex h-7 min-w-0 flex-1 items-center gap-1 px-1 text-left text-xs font-semibold outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                    class="section-label flex h-7 min-w-0 flex-1 items-center px-1 text-left outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <component
                       :is="
-                        sections[sectionKey(repository.id, 'branches')] !==
-                        false
+                        sections[sectionKey(repository.id, 'branches')] !== false
                           ? ChevronDown
                           : ChevronRight
                       "
                       class="size-3 shrink-0 text-muted-foreground"
                     />
                     Branch channels
-                    <span
-                      class="ml-1 font-normal tabular-nums text-muted-foreground"
-                    >
+                    <span class="ml-1 font-mono font-normal tabular-nums text-muted-foreground">
                       {{ repository.branches.length }}
                     </span>
                   </button>
@@ -467,19 +431,18 @@ const approvals = computed(
                           variant="ghost"
                           size="icon-xs"
                           :aria-label="`${branchActions.create.label} — Soon`"
-                          ><Plus aria-hidden="true"
-                        /></Button>
+                        >
+                          <Plus aria-hidden="true" />
+                        </Button>
                       </span>
                     </TooltipTrigger>
-                    <TooltipContent>
-                      {{ branchActions.create.label }} · Soon
-                    </TooltipContent>
+                    <TooltipContent>{{ branchActions.create.label }} · Soon</TooltipContent>
                   </Tooltip>
                 </TooltipProvider>
               </div>
               <!-- <p
                 data-ui-id="worktree-count"
-                class="mb-2 px-4 text-xs text-muted-foreground"
+                class="mb-2 px-4 font-mono text-xs text-muted-foreground"
               >
                 {{ repository.worktreeCount }}
                 {{ repository.worktreeCount === 1 ? 'worktree' : 'worktrees' }}
@@ -503,9 +466,7 @@ const approvals = computed(
                       variant="ghost"
                       :data-ui-id="`branches-row-${branch.row.key}`"
                       :aria-current="
-                        branch.row.current && page === 'conversation'
-                          ? 'page'
-                          : undefined
+                        branch.row.current && page === 'conversation' ? 'page' : undefined
                       "
                       :disabled="busy || !projectId"
                       :title="branch.row.label"
@@ -514,18 +475,23 @@ const approvals = computed(
                           channelRowClass,
                           branch.worktrees.length && 'font-medium',
                           branch.row.current && page === 'conversation'
-                            ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                            ? 'nav-active-edge bg-sidebar-accent text-sidebar-accent-foreground'
                             : branch.worktrees.length
                               ? 'text-sidebar-foreground'
-                              : 'text-muted-foreground'
+                              : 'text-muted-foreground',
                         )
                       "
                       @click="emit('openBranch', branch.row.key)"
                     >
                       <Hash class="size-4 shrink-0" aria-hidden="true" />
-                      <span class="min-w-0 flex-1 truncate">
+                      <span class="min-w-0 flex-1 truncate font-mono text-[0.92em]">
                         {{ branch.row.label }}
                       </span>
+                      <BrailleSpinner
+                        v-if="branchRunner(branch.row)"
+                        :agent-id="branchRunner(branch.row)?.agentId"
+                        class="shrink-0"
+                      />
                       <span
                         v-if="rowUnread(branch.row)"
                         data-ui-id="channel-unread-pip"
@@ -536,9 +502,11 @@ const approvals = computed(
                     </Button>
                   </NavigationContextMenu>
                   <SidebarWorktree
-                    v-for="worktree in branch.worktrees"
+                    v-for="(worktree, index) in branch.worktrees"
                     :key="worktree.worktree ?? worktree.key"
                     :row="worktree"
+                    :is-last="index === branch.worktrees.length - 1"
+                    :working-agent-id="branchRunner(worktree)?.agentId"
                     :busy="busy || !projectId"
                     :unread="rowUnread(worktree)"
                     @open="emit('openBranch', $event)"
@@ -555,9 +523,7 @@ const approvals = computed(
             <Collapsible
               v-if="repository.detached.length"
               :open="sections[sectionKey(repository.id, 'worktrees')] !== false"
-              @update:open="
-                sections[sectionKey(repository.id, 'worktrees')] = $event
-              "
+              @update:open="sections[sectionKey(repository.id, 'worktrees')] = $event"
               data-ui-id="detached-worktrees-list"
               class="mt-3"
             >
@@ -565,7 +531,7 @@ const approvals = computed(
                 <button
                   type="button"
                   data-ui-id="detached-worktrees-toggle"
-                  class="flex h-7 w-full items-center gap-1 px-1 text-left text-xs font-semibold text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                  class="section-label flex h-7 w-full items-center px-1 text-left outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <component
                     :is="
@@ -576,7 +542,7 @@ const approvals = computed(
                     class="size-3"
                   />
                   Detached worktrees
-                  <span class="ml-1 font-normal tabular-nums">
+                  <span class="ml-1 font-mono font-normal tabular-nums">
                     {{ repository.detached.length }}
                   </span>
                 </button>
@@ -586,6 +552,7 @@ const approvals = computed(
                   v-for="row in repository.detached"
                   :key="row.worktree ?? row.key"
                   :row="row"
+                  :working-agent-id="branchRunner(row)?.agentId"
                   :busy="busy || !projectId"
                   :selected="row.current && page === 'conversation'"
                   :unread="rowUnread(row)"
@@ -617,12 +584,9 @@ const approvals = computed(
             <button
               type="button"
               data-ui-id="saved-channel-toggle"
-              class="flex h-7 w-full items-center gap-1 px-1 text-xs font-semibold text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              class="section-label flex h-7 w-full items-center px-1 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
-              <component
-                :is="sections.archived ? ChevronDown : ChevronRight"
-                class="size-3"
-              />
+              <component :is="sections.archived ? ChevronDown : ChevronRight" class="size-3" />
               Saved channels
             </button>
           </CollapsibleTrigger>
@@ -639,14 +603,23 @@ const approvals = computed(
               <Button
                 variant="ghost"
                 :data-ui-id="`saved-channel-${channel.id}`"
+                :class="{
+                  'nav-active-edge bg-sidebar-accent':
+                    channel.id === channelId && page === 'conversation',
+                }"
                 :disabled="busy"
                 class="flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-xs text-muted-foreground outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"
                 @click="emit('selectChannel', channel.id)"
               >
                 <Hash class="size-4 shrink-0" />
-                <span class="min-w-0 flex-1 truncate">
+                <span class="min-w-0 flex-1 truncate font-mono text-[0.92em]">
                   {{ channel.branch ?? channel.name }}
                 </span>
+                <BrailleSpinner
+                  v-if="runner(channel.id)"
+                  :agent-id="runner(channel.id)?.agentId"
+                  class="shrink-0"
+                />
                 <span
                   v-if="unreadChannelIds.has(channel.id)"
                   data-ui-id="channel-unread-pip"
@@ -656,11 +629,7 @@ const approvals = computed(
                 />
                 <span class="shrink-0">
                   {{
-                    channel.archived
-                      ? 'History'
-                      : channel.kind === 'legacy'
-                        ? 'Saved'
-                        : 'Channel'
+                    channel.archived ? 'History' : channel.kind === 'legacy' ? 'Saved' : 'Channel'
                   }}
                 </span>
               </Button>
@@ -675,12 +644,9 @@ const approvals = computed(
           <CollapsibleTrigger as-child>
             <button
               data-ui-id="integrations-toggle"
-              class="flex h-7 w-full items-center gap-1 px-1 text-xs font-semibold text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              class="section-label flex h-7 w-full items-center px-1 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
-              <component
-                :is="sections.integrations ? ChevronDown : ChevronRight"
-                class="size-3"
-              />
+              <component :is="sections.integrations ? ChevronDown : ChevronRight" class="size-3" />
               Integrations
             </button>
           </CollapsibleTrigger>
@@ -716,7 +682,7 @@ const approvals = computed(
               Approvals
               <Badge
                 v-if="approvals"
-                class="ml-auto h-4 min-w-4 rounded-full px-1 text-xs tabular-nums"
+                class="ml-auto h-4 min-w-4 font-mono rounded-full px-1 text-xs tabular-nums"
               >
                 {{ approvals }}
               </Badge>

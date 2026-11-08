@@ -66,7 +66,12 @@ function search() {
             class="size-5 shrink-0 text-muted-foreground"
           />
           <div class="min-w-0">
-            <h2 class="truncate text-sm font-semibold">{{ channel }}</h2>
+            <h2
+              class="truncate text-sm font-semibold"
+              :class="{ 'font-mono text-[0.92em]': conversation && !directMessage }"
+            >
+              {{ channel }}
+            </h2>
             <p v-if="subtitle" class="truncate text-xs text-muted-foreground">{{ subtitle }}</p>
           </div>
         </div>

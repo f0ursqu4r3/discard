@@ -9,6 +9,7 @@ pub const MIN_CONTRAST: f64 = 4.5;
 pub const COLOR_TOKENS: &[&str] = &[
     "background", "foreground", "sidebar", "sidebar_foreground", "sidebar_accent", "primary",
     "primary_foreground", "muted", "muted_foreground", "border", "accent", "success", "warning", "danger",
+    "ansi_1", "ansi_2", "ansi_3", "ansi_4", "ansi_5", "ansi_6",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

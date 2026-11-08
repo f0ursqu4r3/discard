@@ -186,3 +186,24 @@ test('detached worktree unread markers use the saved path and commit, then clear
   expect(unread('first')).toBe(false)
   list.unmount()
 })
+
+test('worktree children have ordered tree prefixes and detached worktrees have none', () => {
+  const row = { ...branches[0]!, worktree: '/one' }
+  const list = mount(ChannelList, {
+    props: {
+      ...props,
+      branches: [
+        row,
+        { ...row, key: 'two', kind: 'worktree', worktree: '/two' },
+        { ...row, key: 'detached', detached: true, label: 'abc', worktree: '/detached' },
+      ],
+    },
+  })
+  expect(
+    list.findAll('[data-branch-key] [data-testid="tree-prefix"]').map((prefix) => prefix.text()),
+  ).toEqual(['├', '└'])
+  expect(
+    list.get('[data-ui-id="detached-worktrees-list"]').find('[data-testid="tree-prefix"]').exists(),
+  ).toBe(false)
+  list.unmount()
+})

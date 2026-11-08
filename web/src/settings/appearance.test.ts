@@ -123,7 +123,7 @@ test('updates the real rail and live message from settings events and cleans up 
   expect(view.get('[data-ui-id="project-rail"]').classes()).toContain('w-12')
   expect(view.find('[data-testid="message-avatar"]').exists()).toBe(false)
   expect(view.get('[data-ui-id="message-live"]').classes()).toContain('py-1')
-  expect(view.get('[data-testid="stream-cursor"]').text()).toBe('▍')
+  expect(view.get('[data-testid="stream-cursor"]').classes()).toContain('stream-cursor')
   expect(error).not.toHaveBeenCalled()
   view.unmount()
   expect(stop).toHaveBeenCalledOnce()

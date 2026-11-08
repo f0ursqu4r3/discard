@@ -9,6 +9,7 @@ defineProps<{
   liveAuthor?: MessageAuthorDto | null
   running: boolean
   newAnchorId: string | null
+  agentId?: string
   agent?: string
   agentAvatar?: string | null
   prompts?: PromptDto[]

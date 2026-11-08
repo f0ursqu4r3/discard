@@ -44,6 +44,8 @@ pub struct UiColors {
     pub success: Rgb,
     pub warning: Rgb,
     pub danger: Rgb,
+    /// Palette colors 1 through 6 for identity colors.
+    pub ansi: [Rgb; 6],
     /// Text selection background.
     pub selection: Rgb,
     /// Text caret.
@@ -89,6 +91,7 @@ pub fn map(colors: &ThemeColors) -> UiColors {
         success: palette(2),
         warning: palette(3),
         danger: palette(1),
+        ansi: std::array::from_fn(|n| palette(n + 1)),
         selection: colors
             .selection_background
             .unwrap_or_else(|| toward_foreground(SELECTION_MIX)),
@@ -148,6 +151,13 @@ palette = 8=#999999
         assert_eq!(s[1], ("1".into(), rgb(0x12, 0x34, 0x56)));
         assert_eq!(s[16], ("background".into(), rgb(1, 2, 3)));
         assert_eq!(s[18].1, map(&c).selection);
+    }
+
+    #[test]
+    fn ansi_tokens_come_from_palette_1_to_6() {
+        let ui = map(&colors(bundled::text("Atom One Dark").unwrap()));
+        assert_eq!(ui.ansi[0], rgb(0xe0, 0x6c, 0x75));
+        assert_eq!(ui.ansi[5], rgb(0x56, 0xb6, 0xc2));
     }
 
     #[test]

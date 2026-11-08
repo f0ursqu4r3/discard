@@ -189,3 +189,12 @@ test('duplicate names are disabled and unmatched Enter does not send', async () 
   await composer.get('textarea').trigger('keydown', { key: 'Enter' })
   expect(composer.emitted('send')).toBeUndefined()
 })
+
+test('the placeholder and typed message prose stay sans', () => {
+  const composer = mount(Composer, {
+    props: { archived: false, busy: false, running: false, channel: 'general' },
+  })
+  expect(composer.get('textarea').classes()).not.toContain('placeholder:font-mono')
+  expect(composer.get('textarea').classes()).not.toContain('font-mono')
+  composer.unmount()
+})

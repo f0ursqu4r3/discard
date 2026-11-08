@@ -11,7 +11,7 @@ use discard_lua::theme::{
     ProtectedPalette, Rgb, ThemeOverrides, contrast_ratio, protected_palette, protected_accent, MIN_CONTRAST,
 };
 use std::path::{Path, PathBuf};
-const TOKENS: [&str; 14] = [
+const TOKENS: [&str; 20] = [
     "background",
     "foreground",
     "sidebar",
@@ -26,6 +26,7 @@ const TOKENS: [&str; 14] = [
     "success",
     "warning",
     "danger",
+    "ansi_1", "ansi_2", "ansi_3", "ansi_4", "ansi_5", "ansi_6",
 ];
 const PROTECTED_DEFAULT: ProtectedPalette = ProtectedPalette {
     background: Rgb(0x1e, 0x1e, 0x1e),
@@ -60,6 +61,12 @@ fn token_mut<'a>(ui: &'a mut UiColors, token: &str) -> Option<&'a mut CoreRgb> {
         "success" => &mut ui.success,
         "warning" => &mut ui.warning,
         "danger" => &mut ui.danger,
+        "ansi_1" => &mut ui.ansi[0],
+        "ansi_2" => &mut ui.ansi[1],
+        "ansi_3" => &mut ui.ansi[2],
+        "ansi_4" => &mut ui.ansi[3],
+        "ansi_5" => &mut ui.ansi[4],
+        "ansi_6" => &mut ui.ansi[5],
         _ => return None,
     })
 }
@@ -80,7 +87,7 @@ pub fn layer(ui: &UiColors, overrides: &ThemeOverrides, ignore_plugins: bool) ->
     layered
 }
 
-/// The 14 tokens of `ui` as theme overrides. Protected surfaces read their palette from this,
+/// The color tokens of `ui` as theme overrides. Protected surfaces read their palette from this,
 /// so they keep their contrast clamp against the colors the user actually sees.
 pub fn as_overrides(ui: &UiColors) -> ThemeOverrides {
     let mut overrides = ThemeOverrides::default();
@@ -140,6 +147,7 @@ impl AppearanceState {
         system: Appearance,
         plugin_theme: &ThemeOverrides,
     ) -> bool {
+        let old_font = self.live.resolved().mono_font.clone();
         let live_changed = self.live.update(settings, system);
         let plugins_changed = *plugin_theme != self.plugin_theme
             || settings.ignore_plugin_themes != self.ignore_plugins;
@@ -151,7 +159,8 @@ impl AppearanceState {
         self.ignore_plugins = settings.ignore_plugin_themes;
         let (effective, radius) = compute(&self.live, &self.plugin_theme, self.ignore_plugins);
         let changed =
-            effective != self.effective || radius != self.radius || old_scales != self.scales();
+            effective != self.effective || radius != self.radius || old_scales != self.scales()
+                || old_font != self.live.resolved().mono_font;
         self.effective = effective;
         self.radius = radius;
         changed
@@ -255,6 +264,7 @@ pub fn theme_dto(state: &AppearanceState, _mode: Appearance) -> ThemeDto {
         .into(),
         tokens,
         radius: state.radius(),
+        mono_font: state.live.resolved().mono_font.clone(),
         font_scale,
         spacing_scale,
         protected_bg: palette.background.to_hex(),
@@ -285,6 +295,36 @@ mod tests {
         let (added, removed) = diff_palette(&colors, true);
         assert_eq!(added, to_lua(colors.foreground).to_hex());
         assert_eq!(removed, to_lua(colors.diff_removed).to_hex());
+    }
+
+    #[test]
+    fn a_plugin_ansi_token_overrides_and_an_unset_one_keeps_ghostty() {
+        let base = ui(DARK);
+        let plugin = plugin("ansi_2", "#123456");
+        let layered = layer(&base, &plugin, false);
+        for n in 0..6 {
+            assert_eq!(layered.ansi[n], if n == 1 { CoreRgb { r: 0x12, g: 0x34, b: 0x56 } } else { base.ansi[n] });
+        }
+        assert_eq!(layer(&base, &plugin, true), base);
+    }
+
+    #[test]
+    fn theme_dto_carries_ansi_tokens_and_mono_font() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config");
+        std::fs::write(&path, "font-family = SF Mono\n").unwrap();
+        let settings = AppearanceSettings::default();
+        let live = LiveTheme::new(ThemeDirs::default(), vec![path.clone()], &settings, Appearance::Dark);
+        let mut state = AppearanceState::new(live, &settings, ThemeOverrides::default());
+        let dto = theme_dto(&state, Appearance::Dark);
+        assert_eq!(dto.mono_font.as_deref(), Some("SF Mono"));
+        assert_eq!(serde_json::to_value(&dto).unwrap()["monoFont"], "SF Mono");
+        for n in 1..=6 {
+            assert_eq!(dto.tokens[&format!("ansi_{n}")], state.effective().ansi[n - 1].to_hex());
+        }
+        std::fs::write(path, "font-family = Iosevka Term\n").unwrap();
+        assert!(state.update(&settings, Appearance::Dark, &ThemeOverrides::default()));
+        assert_eq!(theme_dto(&state, Appearance::Dark).mono_font.as_deref(), Some("Iosevka Term"));
     }
 
     #[test]
@@ -340,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn as_overrides_holds_all_14_tokens() {
+    fn as_overrides_holds_all_color_tokens() {
         let base = ui(DARK);
         let overrides = as_overrides(&base);
         assert_eq!(overrides.color("background"), Some(Rgb(0x10, 0x10, 0x10)));
@@ -494,12 +534,12 @@ mod tests {
         )
     }
     #[test]
-    fn theme_dto_carries_all_14_tokens() {
+    fn theme_dto_carries_all_20_tokens() {
         assert_eq!(
             theme_dto(&sample_state(ThemeOverrides::default()), Appearance::Dark)
                 .tokens
                 .len(),
-            14
+            20
         );
     }
     #[test]

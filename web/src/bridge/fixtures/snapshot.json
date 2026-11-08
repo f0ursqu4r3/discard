@@ -51,6 +51,7 @@
     "mode": "dark",
     "tokens": {},
     "radius": null,
+    "monoFont": null,
     "fontScale": 1.0,
     "spacingScale": 1.0,
     "protectedBg": "#000000",

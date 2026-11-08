@@ -3,7 +3,6 @@ import type { PrimitiveProps } from 'reka-ui'
 
 import type { HTMLAttributes } from 'vue'
 import type { ButtonVariants } from '@/components/ui/button'
-import { CheckIcon, CopyIcon } from '@lucide/vue'
 import { useClipboard } from '@vueuse/core'
 import { cn } from 'cn'
 import { Button } from '@/components/ui/button'
@@ -22,7 +21,7 @@ const props = withDefaults(
   {
     as: 'button',
     variant: 'ghost',
-    size: 'icon-xs',
+    size: 'xs',
   },
 )
 
@@ -39,11 +38,10 @@ const { copy, copied } = useClipboard({ copiedDuring: 2000, legacy: true })
     :variant="variant"
     :size="size"
     :aria-label="copied ? 'Copied' : 'Copy'"
-    :class="cn('', props.class)"
+    :class="cn('font-mono text-muted-foreground', props.class)"
     @click="copy(props.value)"
   >
-    <CheckIcon v-if="copied" />
-    <CopyIcon v-else />
+    {{ copied ? 'copied' : 'copy' }}
   </Button>
   <span aria-live="polite" class="sr-only">{{ copied ? 'Copied' : '' }}</span>
 </template>

@@ -264,7 +264,12 @@ const branchCount = computed(() => props.snapshot.branches.filter((row) => !row.
       </div>
       <Card v-for="agent in projectAgents" :key="agent.agentId" size="sm">
         <CardHeader class="flex items-center gap-3">
-          <AgentAvatar :name="agent.agent" :avatar="agent.avatar" class="size-10 shrink-0" />
+          <AgentAvatar
+            :agent-id="agent.agentId"
+            :name="agent.agent"
+            :avatar="agent.avatar"
+            class="size-10 shrink-0"
+          />
           <div class="min-w-0">
             <CardTitle>
               <Button

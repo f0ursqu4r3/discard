@@ -1,6 +1,8 @@
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getAgents } from '@/bridge/api'
+
+export const agentAvatars = shallowRef<Record<string, string | null>>({})
 
 // One subscription per workspace, shared by the transcript and member panel.
 export function useAgentAvatar(agentId: () => string | undefined) {
@@ -17,8 +19,10 @@ export function useAgentAvatar(agentId: () => string | undefined) {
     }
     try {
       const agents = await getAgents()
-      if (!disposed && current === generation)
+      if (!disposed && current === generation) {
+        agentAvatars.value = Object.fromEntries(agents.map((agent) => [agent.id, agent.avatar]))
         avatar.value = agents.find((agent) => agent.id === id)?.avatar ?? null
+      }
     } catch {
       // Identity text remains available when the optional avatar cannot load.
     }

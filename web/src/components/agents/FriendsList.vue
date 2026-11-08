@@ -105,7 +105,12 @@ onUnmounted(() => {
                 )
               "
             >
-              <AgentAvatar :name="agent.name" :avatar="agent.avatar" class="size-10" />
+              <AgentAvatar
+                :agent-id="agent.id"
+                :name="agent.name"
+                :avatar="agent.avatar"
+                class="size-10"
+              />
               <span class="min-w-0">
                 <span class="block truncate font-medium">{{ agent.name }}</span>
                 <span class="block truncate text-sm text-muted-foreground">

@@ -127,6 +127,7 @@ impl AppCore {
                 history_rev: 0,
                 memory_rev: 0,
                 theme: ThemeDto {
+                    mono_font: None,
                     mode: "dark".into(),
                     tokens: BTreeMap::new(),
                     radius: None,

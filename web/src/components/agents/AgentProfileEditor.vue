@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { hashedSlot } from './agent-icon'
 import {
   Select,
   SelectTrigger,
@@ -203,7 +204,12 @@ async function remove() {
         <FieldLabel for="agent-name">Name</FieldLabel>
         <Input id="agent-name" v-model="draft.name" :disabled="busy" required />
       </Field>
-      <AgentIconPicker v-model="draft.avatar" :name="draft.name" :disabled="busy" />
+      <AgentIconPicker
+        :fallback-color="`ansi-${hashedSlot(agent.id)}`"
+        v-model="draft.avatar"
+        :name="draft.name"
+        :disabled="busy"
+      />
       <Field>
         <FieldLabel for="agent-provider">Provider</FieldLabel>
         <Select v-model="draft.provider" :disabled="busy" required>

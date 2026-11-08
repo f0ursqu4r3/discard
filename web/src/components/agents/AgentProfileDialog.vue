@@ -92,7 +92,12 @@ function edit() {
         />
         <div v-else class="flex flex-col gap-5" data-ui-id="agent-profile-view">
           <div class="flex items-center gap-4">
-            <AgentAvatar :name="agent.name" :avatar="agent.avatar" class="size-16" />
+            <AgentAvatar
+              :agent-id="agent.id"
+              :name="agent.name"
+              :avatar="agent.avatar"
+              class="size-16"
+            />
             <div class="min-w-0">
               <h2 class="truncate text-xl font-semibold">{{ agent.name }}</h2>
               <Badge v-if="agent.archived" variant="secondary">Archived</Badge>

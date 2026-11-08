@@ -49,6 +49,7 @@ onUnmounted(() => {
   <section data-ui-id="agent-summary" class="flex min-h-full flex-col gap-5">
     <div class="h-16 shrink-0 rounded-t-lg bg-muted" aria-hidden="true" />
     <AgentAvatar
+      :agent-id="agentId"
       :name="agent?.name || name"
       :avatar="agent?.avatar"
       class="-mt-12 ml-4 size-20 ring-4 ring-card"

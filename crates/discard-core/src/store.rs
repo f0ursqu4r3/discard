@@ -1173,8 +1173,9 @@ impl Store {
             let parts: Vec<_> = value.split(':').collect();
             if parts.len() != 3 || parts[0] != "lucide"
                 || !parts[1].chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-                || parts[2].len() != 7 || !parts[2].starts_with('#')
-                || !parts[2][1..].chars().all(|c| c.is_ascii_hexdigit()) {
+                || !(matches!(parts[2], "ansi-1" | "ansi-2" | "ansi-3" | "ansi-4" | "ansi-5" | "ansi-6")
+                    || (parts[2].len() == 7 && parts[2].starts_with('#')
+                        && parts[2][1..].chars().all(|c| c.is_ascii_hexdigit()))) {
                 return Err(StoreError::Invalid("Choose a valid project icon and color.".into()));
             }
         }
@@ -2271,6 +2272,16 @@ mod tests {
     use crate::event::{EventKind, RawEvent, Sequencer};
     use crate::model::{Block, MessageId, Role, WorkspaceMode};
     use serde_json::json;
+
+    #[test]
+    fn project_profile_accepts_palette_slots() {
+        let f = fixture();
+        f.store.update_project_profile(&f.project.id, "Project", Some("lucide:folder:ansi-4")).unwrap();
+        assert_eq!(f.store.project_avatar(&f.project.id).unwrap().as_deref(), Some("lucide:folder:ansi-4"));
+        for invalid in ["lucide:folder:ansi-0", "lucide:folder:ansi-7"] {
+            assert!(matches!(f.store.update_project_profile(&f.project.id, "Project", Some(invalid)), Err(StoreError::Invalid(_))));
+        }
+    }
 
     struct Fixture {
         store: Store,

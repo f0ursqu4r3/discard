@@ -6,9 +6,12 @@ import { Input } from '@/components/ui/input'
 import { Field, FieldLabel, FieldSet, FieldLegend } from '@/components/ui/field'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import AgentAvatar from './AgentAvatar.vue'
+import { activeTheme } from '@/bridge/theme'
 import ProjectAvatar from '../workspace/ProjectAvatar.vue'
 import {
   defaultIconColor,
+  paletteSlots,
+  resolveColor,
   formatAgentIcon,
   iconComponent,
   iconLabel,
@@ -18,11 +21,19 @@ import {
 } from './agent-icon'
 
 const avatar = defineModel<string | null>({ required: true })
-withDefaults(defineProps<{ name: string; disabled?: boolean; entity?: 'Agent' | 'Project' }>(), {
-  entity: 'Agent',
-})
+const props = withDefaults(
+  defineProps<{
+    name: string
+    disabled?: boolean
+    entity?: 'Agent' | 'Project'
+    fallbackColor?: string
+  }>(),
+  {
+    entity: 'Agent',
+  },
+)
 const appearance = computed(() => parseAgentIcon(avatar.value))
-const color = computed(() => appearance.value?.color ?? defaultIconColor)
+const color = computed(() => appearance.value?.color ?? props.fallbackColor ?? defaultIconColor)
 const open = ref(false),
   query = ref(''),
   page = ref(0)
@@ -33,16 +44,6 @@ const pages = computed(() => Math.max(1, Math.ceil(results.value.length / pageSi
 const visible = computed(() =>
   results.value.slice(page.value * pageSize, (page.value + 1) * pageSize),
 )
-const presets = [
-  ['Blue', '#789cf5'],
-  ['Violet', '#a78bfa'],
-  ['Pink', '#f472b6'],
-  ['Red', '#ef4444'],
-  ['Orange', '#fb923c'],
-  ['Yellow', '#facc15'],
-  ['Green', '#4ade80'],
-  ['Teal', '#2dd4bf'],
-] as const
 watch(query, () => {
   page.value = 0
 })
@@ -71,7 +72,7 @@ function selectColor(value: string | number) {
         <component
           :is="entity === 'Project' ? ProjectAvatar : AgentAvatar"
           :name="name"
-          :avatar="avatar"
+          :avatar="avatar ?? formatAgentIcon(null, color)"
           class="size-14"
         />
         <PopoverTrigger as-child>
@@ -159,22 +160,22 @@ function selectColor(value: string | number) {
       <FieldLabel :for="`${id}-color`">{{ entity }} color</FieldLabel>
       <div class="flex flex-wrap items-center gap-2">
         <Button
-          v-for="[label, value] in presets"
-          :key="value"
+          v-for="{ label, slot } in paletteSlots"
+          :key="slot"
           type="button"
           variant="outline"
           size="icon-sm"
           :aria-label="`Use ${label.toLowerCase()}`"
-          :aria-pressed="color === value"
+          :aria-pressed="color === `ansi-${slot}`"
           :disabled="disabled"
-          @click="selectColor(value)"
+          @click="selectColor(`ansi-${slot}`)"
         >
-          <span class="size-4 rounded-full" :style="{ backgroundColor: value }" />
+          <span class="size-4 rounded-full" :style="{ backgroundColor: `var(--ansi-${slot})` }" />
         </Button>
         <Input
           :id="`${id}-color`"
           type="color"
-          :model-value="color"
+          :model-value="resolveColor(color, activeTheme?.tokens ?? {})"
           :disabled="disabled"
           :aria-label="`Custom ${entity.toLowerCase()} color`"
           class="w-12 p-1"

@@ -10,9 +10,12 @@ import {
 } from '@/bridge/api'
 import { Button } from '../ui/button'
 import { Plus } from '@lucide/vue'
+import BrailleSpinner from '../BrailleSpinner.vue'
+import type { ChannelDto } from '@/bridge/types'
 import AgentAvatar from '@/components/agents/AgentAvatar.vue'
 
 const props = defineProps<{
+  channels?: ChannelDto[]
   projectId: string | null
   project?: string
   channelId?: string
@@ -25,6 +28,10 @@ const error = ref(''),
   opening = ref(false)
 const stops: UnlistenFn[] = []
 let disposed = false
+const working = computed(
+  () =>
+    new Set(props.channels?.filter((channel) => channel.running).map((channel) => channel.agentId)),
+)
 const contacts = computed(() =>
   agents.value.filter((agent) =>
     conversations.value.some((c) => c.agentId === agent.id && c.projectId === null && c.inDmList),
@@ -84,7 +91,7 @@ onUnmounted(() => {
       Agents
     </Button>
     <template v-if="projectId === null">
-      <h2 class="px-2 pt-4 text-xs font-semibold text-muted-foreground">Direct Messages</h2>
+      <h2 class="section-label px-2 pt-4">Direct Messages</h2>
       <Button
         v-for="agent in contacts"
         :key="agent.id"
@@ -97,10 +104,20 @@ onUnmounted(() => {
         "
         size="sm"
         class="h-auto justify-start gap-2 py-2"
+        :class="{
+          'nav-active-edge': conversations.some(
+            (c) => c.id === channelId && c.agentId === agent.id && c.projectId === null,
+          ),
+        }"
         :disabled="busy || opening"
         @click="open(agent.id)"
       >
-        <AgentAvatar :name="agent.name" :avatar="agent.avatar" class="size-7" />
+        <AgentAvatar
+          :agent-id="agent.id"
+          :name="agent.name"
+          :avatar="agent.avatar"
+          class="size-7"
+        />
         <span class="min-w-0 text-left">
           <span class="block truncate">
             {{ agent.name }}
@@ -110,13 +127,19 @@ onUnmounted(() => {
             {{ agent.provider }} · {{ agent.model }}
           </span>
         </span>
+        <BrailleSpinner
+          v-if="working.has(agent.id)"
+          :agent-id="agent.id"
+          :avatar="agent.avatar"
+          class="ml-auto shrink-0"
+        />
       </Button>
       <p v-if="!contacts.length" class="px-2 py-2 text-xs text-muted-foreground">
         Choose an agent in Agents and select DM.
       </p>
     </template>
     <div v-if="projectId !== null" class="mt-4 flex items-center justify-between px-2">
-      <h2 class="text-xs font-semibold text-muted-foreground">Conversations</h2>
+      <h2 class="section-label flex-1">Conversations</h2>
       <!-- TODO: Create project conversations only after branch selection is part of this flow. -->
       <Button variant="ghost" size="sm" disabled>
         <Plus />
@@ -128,19 +151,26 @@ onUnmounted(() => {
       v-for="conversation in visible"
       :key="conversation.id"
       :variant="conversation.id === channelId ? 'secondary' : 'ghost'"
+      :class="{ 'nav-active-edge': conversation.id === channelId }"
       size="sm"
       class="h-auto justify-start py-2 text-left"
       :disabled="busy"
       @click="emit('select', conversation.id)"
     >
       <span class="min-w-0">
-        <span class="block truncate">{{ conversation.name }}</span>
+        <span class="block truncate font-mono text-[0.92em]">{{ conversation.name }}</span>
         <span class="block truncate text-xs text-muted-foreground">
           {{ conversation.agent }}
           <span v-if="conversation.deleted">· Read only</span>
           <span v-else-if="conversation.agentArchived || conversation.archived">· Archived</span>
         </span>
       </span>
+      <BrailleSpinner
+        v-if="channels?.some((channel) => channel.id === conversation.id && channel.running)"
+        :agent-id="conversation.agentId"
+        :avatar="conversation.avatar"
+        class="ml-auto shrink-0"
+      />
     </Button>
     <p v-if="projectId !== null && !visible.length" class="px-2 py-2 text-xs text-muted-foreground">
       No conversations in this project.

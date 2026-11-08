@@ -35,6 +35,8 @@ vi.mock('./bridge/api', async (original) => ({
 }))
 vi.mock('vue-sonner', () => ({ toast: { error: vi.fn(), success: vi.fn() } }))
 import App from './App.vue'
+import StatusLine from './components/StatusLine.vue'
+import BrailleSpinner from './components/BrailleSpinner.vue'
 import { getProjectChannels } from './bridge/api'
 import ChannelHeader from './components/ChannelHeader.vue'
 import AgentHistorySearch from './components/agents/AgentHistorySearch.vue'
@@ -49,6 +51,7 @@ import DirectMessageSidebar from './components/workspace/DirectMessageSidebar.vu
 import ChannelList from './components/ChannelList.vue'
 import MemoryBrowser from './components/memory/MemoryBrowser.vue'
 import { Button } from './components/ui/button'
+import { Tabs } from './components/ui/tabs'
 let view: ReturnType<typeof shallowMount> | undefined
 beforeEach(() => {
   vi.clearAllMocks()
@@ -856,3 +859,160 @@ test.each([false, true])(
     }
   },
 )
+
+test('the Run view preserves result flags, live state, and tool authors', async () => {
+  const { default: ToolCallBlock } = await import('./components/ToolCallBlock.vue')
+  mocks.store.snapshot = {
+    ...mocks.store.snapshot!,
+    activeProjectId: 'p',
+    projectId: 'p',
+    turnRunning: true,
+    responder: {
+      agentId: 'live-agent',
+      name: 'Live',
+      provider: 'claude',
+      avatar: 'lucide:bot:#c678dd',
+    },
+    liveBlocks: [{ type: 'tool_call', call_id: 'live', name: 'Bash', input: {}, output: null }],
+  }
+  mocks.store.history = [
+    {
+      id: 'old',
+      role: 'agent',
+      continuesGroup: false,
+      author: {
+        agentId: 'old-agent',
+        name: 'Old',
+        provider: 'claude',
+        avatar: 'lucide:bot:#61afef',
+      },
+      blocks: [
+        {
+          type: 'tool_call',
+          call_id: 'old',
+          name: 'Bash',
+          input: {},
+          output: 'boom',
+          is_error: true,
+        },
+      ],
+    },
+  ]
+  const wrapper = app()
+  wrapper
+    .findAllComponents(Tabs)
+    .find((tabs) => tabs.attributes('data-ui-id') === 'conversation-tabs')!
+    .vm.$emit('update:modelValue', 'run')
+  await flushPromises()
+  const blocks = wrapper.findAllComponents(ToolCallBlock)
+  expect(blocks).toHaveLength(2)
+  expect(blocks[0]!.props('isError')).toBe(true)
+  expect(blocks[0]!.props('running')).toBe(false)
+  expect(blocks[0]!.attributes('style')).toContain('--agent-color: #61afef')
+  expect(blocks[1]!.props('running')).toBe(true)
+  expect(blocks[1]!.attributes('style')).toContain('--agent-color: #c678dd')
+})
+
+test('status line is a shell footer with current branch and distinct running agents', async () => {
+  mocks.store.snapshot = {
+    ...mocks.store.snapshot!,
+    project: 'discard',
+    turnRunning: true,
+    pendingApprovals: 2,
+    channels: [
+      {
+        projectId: null,
+        name: 'work',
+        provider: 'claude',
+        workspaceMode: 'shared',
+        unread: false,
+        pendingApprovals: 0,
+        id: 'work-1',
+        agentId: 'other',
+        agent: 'Other',
+        running: true,
+      },
+      {
+        projectId: null,
+        name: 'work',
+        provider: 'claude',
+        workspaceMode: 'shared',
+        unread: false,
+        pendingApprovals: 0,
+        id: 'work-2',
+        agentId: 'other',
+        agent: 'Other',
+        running: true,
+      },
+      {
+        projectId: null,
+        name: 'work',
+        provider: 'claude',
+        workspaceMode: 'shared',
+        unread: false,
+        pendingApprovals: 0,
+        id: 'idle',
+        agentId: 'idle',
+        agent: 'Idle',
+        running: false,
+      },
+    ],
+  }
+  const wrapper = app()
+  await flushPromises()
+  const status = wrapper.getComponent(StatusLine)
+  expect(status.element.parentElement?.getAttribute('data-ui-id')).toBe('app-shell')
+  expect(status.props('project')).toBe('discard')
+  expect(status.props('pendingApprovals')).toBe(2)
+  expect(status.props('workingAgents').map((agent) => agent.id)).toEqual([
+    'other',
+    mocks.store.snapshot.agentId,
+  ])
+})
+
+test('opening workspace has a braille spinner and no status line', () => {
+  mocks.store.snapshot = null
+  const wrapper = app()
+  expect(wrapper.findComponent(StatusLine).exists()).toBe(false)
+  expect(wrapper.getComponent(BrailleSpinner).props('label')).toBe('Opening workspace')
+})
+
+test('working indicators follow the actual responder instead of the saved agent', async () => {
+  const responder = {
+    agentId: 'mentioned',
+    name: 'Reviewer',
+    avatar: 'lucide:bot:ansi-5',
+    provider: 'claude',
+  }
+  mocks.store.snapshot = {
+    ...mocks.store.snapshot!,
+    turnRunning: true,
+    responder,
+    activeProjectId: 'project',
+    projectId: 'project',
+    channels: [
+      {
+        id: 'channel',
+        agentId: mocks.store.snapshot!.agentId,
+        agent: 'Saved',
+        projectId: null,
+        name: 'channel',
+        provider: 'claude',
+        workspaceMode: 'shared',
+        running: true,
+        unread: false,
+        pendingApprovals: 0,
+      },
+    ],
+  }
+  const wrapper = app()
+  await flushPromises()
+  expect(wrapper.getComponent(StatusLine).props('workingAgents')).toEqual([
+    { id: responder.agentId, name: responder.name, avatar: responder.avatar },
+  ])
+  expect(wrapper.get('[data-ui-id="channel-activity"]').text()).toContain('Reviewer is working')
+  expect(wrapper.get('[data-ui-id="channel-activity"]').attributes('style')).toContain(
+    '--agent-color: #b294bb',
+  )
+  expect(wrapper.getComponent(MessageList).props('agentId')).toBe(mocks.store.snapshot.agentId)
+})

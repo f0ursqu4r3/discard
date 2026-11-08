@@ -9,7 +9,14 @@ export type BlockDto =
   | { type: 'attachment'; attachment: AttachmentDto }
   | { type: 'markdown' | 'diff'; text: string }
   | { type: 'code'; language: string | null; text: string }
-  | { type: 'tool_call'; call_id: string; name: string; input: unknown; output: string | null }
+  | {
+      type: 'tool_call'
+      call_id: string
+      name: string
+      input: unknown
+      output: string | null
+      is_error?: boolean
+    }
   | { type: 'approval'; approval_id: string; tool: string; summary: string }
 export interface MessageAuthorDto {
   agentId: string
@@ -105,6 +112,7 @@ export interface BranchRowDto {
   worktree?: string | null
 }
 export interface ThemeDto {
+  monoFont?: string | null
   mode: string
   tokens: Record<string, string>
   radius: number | null

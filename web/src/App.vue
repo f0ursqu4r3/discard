@@ -4,7 +4,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { useAppearanceSettings } from '@/bridge/appearance'
 import { isTauri } from '@tauri-apps/api/core'
 import { useMediaQuery } from '@vueuse/core'
-import { ScanEye, LoaderCircle, GitPullRequest, ListChecks } from '@lucide/vue'
+import { ScanEye, GitPullRequest, ListChecks } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 import { useStore } from './bridge/store'
 import { useWebShortcuts } from './bridge/shortcuts'
@@ -39,6 +39,12 @@ import Notices from './components/Notices.vue'
 import ApprovalCard from './components/ApprovalCard.vue'
 import DiffBlock from './components/DiffBlock.vue'
 import ToolCallBlock from './components/ToolCallBlock.vue'
+import BrailleSpinner from './components/BrailleSpinner.vue'
+import StatusLine from './components/StatusLine.vue'
+import { channelBranch } from './components/workspace/channel-branch'
+import { useAgentIdentity } from './components/agents/useAgentIdentity'
+import { agentIdentity } from './components/agents/agent-icon'
+import { activeTheme } from './bridge/theme'
 import { thinkingLine } from './components/messages'
 import { navigationWidth, panelWidths, savePanelWidths } from './components/layout'
 import PluginElement from './plugin/PluginElement.vue'
@@ -59,7 +65,7 @@ import FriendsList from './components/agents/FriendsList.vue'
 import AddAgentDialog from './components/agents/AddAgentDialog.vue'
 import AgentHistorySearch from './components/agents/AgentHistorySearch.vue'
 import AgentProfileDialog from './components/agents/AgentProfileDialog.vue'
-import { useAgentAvatar } from './components/agents/useAgentAvatar'
+import { agentAvatars, useAgentAvatar } from './components/agents/useAgentAvatar'
 import type { WorkspacePage } from './components/workspace/types'
 import type { ProjectMenuAction } from './components/project-menu'
 import type { TranscriptPosition } from './components/workspace/transcript'
@@ -68,8 +74,55 @@ const integratedTitlebar = isTauri() && /mac/i.test(navigator.platform)
 const store = useStore()
 const mainPanel = ref<HTMLElement | null>(null)
 const agentAvatar = useAgentAvatar(() => store.snapshot?.agentId)
+const activeAgent = computed(
+  () =>
+    store.snapshot?.responder ?? {
+      agentId: store.snapshot?.agentId ?? '',
+      name: store.snapshot?.agent ?? '',
+      avatar: agentAvatar.value,
+    },
+)
+const activeAgentIdentity = useAgentIdentity(
+  () => activeAgent.value.agentId,
+  () => activeAgent.value.avatar,
+)
+const workingChannels = computed(() =>
+  (store.snapshot?.channels ?? []).map((channel) =>
+    channel.id === store.snapshot?.channelId && store.snapshot?.turnRunning
+      ? {
+          ...channel,
+          agentId: activeAgent.value.agentId,
+          agent: activeAgent.value.name,
+          running: true,
+        }
+      : channel,
+  ),
+)
 const projects = ref<ProjectEntry[]>([])
 const projectChannels = ref<ProjectChannelDto[]>([])
+const statusBranch = computed(() =>
+  store.snapshot ? channelBranch(store.snapshot, projectChannels.value) : null,
+)
+const workingAgents = computed(() => {
+  const snapshot = store.snapshot
+  if (!snapshot) return []
+  const agents = new Map<string, { id: string; name: string; avatar: string | null }>()
+  for (const channel of workingChannels.value) {
+    if (channel.running)
+      agents.set(channel.agentId, {
+        id: channel.agentId,
+        name: channel.agent,
+        avatar: agentAvatars.value[channel.agentId] ?? null,
+      })
+  }
+  if (snapshot.turnRunning)
+    agents.set(activeAgent.value.agentId, {
+      id: activeAgent.value.agentId,
+      name: activeAgent.value.name,
+      avatar: activeAgent.value.avatar,
+    })
+  return [...agents.values()]
+})
 let projectChannelRequest = 0
 async function refreshProjectChannels(projectId: string | null) {
   const request = ++projectChannelRequest
@@ -251,12 +304,33 @@ const changes = computed(() =>
     ),
   ),
 )
-const tools = computed(() =>
-  [
-    ...store.history.flatMap((message) => message.blocks),
-    ...(store.snapshot?.liveBlocks ?? []),
-  ].filter((block) => block.type === 'tool_call'),
-)
+const tools = computed(() => {
+  const rows = [
+    ...store.history.map((message) => ({
+      blocks: message.blocks,
+      author: message.author,
+      running: false,
+    })),
+    {
+      blocks: store.snapshot?.liveBlocks ?? [],
+      author: store.snapshot?.responder,
+      running: !!store.snapshot?.turnRunning,
+    },
+  ]
+  return rows.flatMap((row) =>
+    row.blocks
+      .filter((block) => block.type === 'tool_call')
+      .map((block) => ({
+        ...block,
+        running: row.running,
+        identity: agentIdentity(
+          row.author ? row.author.avatar : agentAvatar.value,
+          row.author?.agentId ?? store.snapshot?.agentId ?? '',
+          activeTheme.value?.tokens ?? {},
+        ),
+      })),
+  )
+})
 function navigate(value: WorkspacePage) {
   page.value = value
   if (value !== 'conversation') contextOpen.value = false
@@ -667,9 +741,10 @@ watch(
       </span>
       <span
         v-if="store.snapshot?.turnRunning"
+        :style="{ '--agent-color': activeAgentIdentity.mark }"
         class="pointer-events-none ml-auto flex items-center gap-1.5 text-xs text-muted-foreground"
       >
-        <LoaderCircle class="size-3 motion-safe:animate-spin" />
+        <BrailleSpinner />
         Working
       </span>
       <Button
@@ -691,7 +766,7 @@ watch(
         v-if="isCompact"
         class="shrink-0"
         compact
-        :snapshot="store.snapshot"
+        :snapshot="{ ...store.snapshot, channels: workingChannels }"
         :project-channels="projectChannels"
         :page="navigationPage"
         @navigate="navigateFromSidebar"
@@ -788,18 +863,30 @@ watch(
                 data-ui-id="conversation-tabs"
                 class="flex h-11 shrink-0 flex-row items-center justify-start overflow-x-auto border-b border-border/60 px-3 sm:px-5"
               >
-                <TabsList variant="line">
+                <TabsList variant="line" class="*:after:bg-primary">
                   <TabsTrigger value="conversation">Conversation</TabsTrigger>
                   <TabsTrigger value="changes">
                     Changes
-                    <Badge v-if="changes.length" variant="secondary">{{ changes.length }}</Badge>
+                    <Badge v-if="changes.length" variant="secondary" class="font-mono">
+                      {{ changes.length }}
+                    </Badge>
                   </TabsTrigger>
                   <TabsTrigger value="run">Run</TabsTrigger>
                   <!-- TODO: Implement merge review. -->
                   <TabsTrigger value="review" disabled>Merge review · Soon</TabsTrigger>
                 </TabsList>
+                <span
+                  v-if="store.snapshot.turnRunning"
+                  data-ui-id="channel-activity"
+                  class="ml-auto flex shrink-0 items-center gap-1.5 pl-4 font-mono text-xs text-muted-foreground"
+                  :style="{ '--agent-color': activeAgentIdentity.mark }"
+                >
+                  <BrailleSpinner />
+                  {{ activeAgent.name }} is working
+                </span>
               </Tabs>
               <MessageList
+                :agent-id="store.snapshot.agentId"
                 :conversation-id="store.snapshot.channelId"
                 :project-id="store.snapshot.activeProjectId"
                 :jump-to="
@@ -856,6 +943,9 @@ watch(
                     :name="tool.name"
                     :input="tool.input"
                     :output="tool.output"
+                    :is-error="tool.is_error"
+                    :running="tool.running"
+                    :style="{ '--agent-color': tool.identity.mark }"
                   />
                 </div>
                 <Empty v-else>
@@ -981,7 +1071,7 @@ watch(
                 "
                 class="flex items-center gap-2 px-5 py-1 text-xs text-muted-foreground"
               >
-                <LoaderCircle class="size-3 motion-safe:animate-spin" />
+                <BrailleSpinner />
                 {{
                   thinkingLine(store.snapshot.turnRunning, [
                     store.snapshot.responder?.name ?? store.snapshot.agent,
@@ -1065,6 +1155,7 @@ watch(
             Close navigation
           </Button>
           <DirectMessageSidebar
+            :channels="workingChannels"
             v-if="navigationPage === 'direct-messages'"
             class="min-h-0 flex-1"
             :channel-id="store.snapshot.channelId"
@@ -1074,7 +1165,7 @@ watch(
           />
           <ChannelList
             v-else
-            :channels="store.snapshot.channels"
+            :channels="workingChannels"
             :project-channels="projectChannels"
             :channel-id="store.snapshot.channelId"
             class="min-h-0 flex-1"
@@ -1147,9 +1238,16 @@ watch(
       </Sheet>
     </div>
     <div v-else class="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
-      <LoaderCircle class="size-4 motion-safe:animate-spin" />
+      <BrailleSpinner label="Opening workspace" />
       Opening workspace…
     </div>
+    <StatusLine
+      v-if="store.snapshot"
+      :project="store.snapshot.project"
+      :branch="statusBranch"
+      :working-agents="workingAgents"
+      :pending-approvals="store.snapshot.pendingApprovals"
+    />
     <AddAgentDialog
       v-model:open="addAgentOpen"
       @created="

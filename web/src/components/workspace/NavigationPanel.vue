@@ -56,6 +56,7 @@ const emit = defineEmits<{
         @add-project="emit('action', 'import_project')"
       />
       <DirectMessageSidebar
+        :channels="snapshot.channels"
         v-if="!compact && page === 'direct-messages'"
         class="min-w-0 flex-1"
         :channel-id="snapshot.channelId"

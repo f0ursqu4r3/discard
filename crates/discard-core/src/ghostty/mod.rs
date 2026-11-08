@@ -5,6 +5,7 @@ pub mod bundled;
 pub mod color;
 pub mod copy;
 pub mod file;
+pub mod font;
 pub mod live;
 pub mod lookup;
 pub mod map;

@@ -131,6 +131,7 @@ pub struct ThemeDto {
     pub mode: String,
     pub tokens: BTreeMap<String, String>,
     pub radius: Option<f32>,
+    pub mono_font: Option<String>,
     pub font_scale: f32,
     pub spacing_scale: f32,
     pub protected_bg: String,
@@ -285,6 +286,7 @@ fn sample_snapshot() -> SnapshotDto {
             safe_mode: false,
         },
         theme: ThemeDto {
+            mono_font: None,
             mode: "dark".into(),
             tokens: BTreeMap::new(),
             radius: None,

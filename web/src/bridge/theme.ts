@@ -1,7 +1,21 @@
+import { shallowRef, type ShallowRef } from 'vue'
 import type { ThemeDto } from './types'
+import tokenStyles from '../styles/tokens.css?raw'
+
+// Keep fallback colors in one place, including before the first theme arrives.
+export const fallbackTokens: Record<string, string> = Object.fromEntries(
+  [...tokenStyles.matchAll(/--([a-z][a-z0-9-]*):\s*(#[0-9a-f]{6});/gi)].map((match) => [
+    match[1]!.replaceAll('-', '_'),
+    match[2]!,
+  ]),
+)
+export const activeTheme: ShallowRef<ThemeDto | null> = shallowRef(null)
 const appliedTokens = new WeakMap<HTMLElement, Set<string>>()
 
 export function applyTheme(theme: ThemeDto, root: HTMLElement) {
+  activeTheme.value = theme
+  if (theme.monoFont) root.style.setProperty('--mono-family', `"${theme.monoFont}"`)
+  else root.style.removeProperty('--mono-family')
   const tokens = new Set(Object.keys(theme.tokens).map((name) => `--${name.replaceAll('_', '-')}`))
   for (const name of appliedTokens.get(root) ?? []) {
     if (!tokens.has(name)) root.style.removeProperty(name)

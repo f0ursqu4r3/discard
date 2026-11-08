@@ -43,3 +43,7 @@ export function groupBranchRows(rows: BranchRowDto[]) {
   }
   return { branches: [...branches.values()], detached, worktreeCount }
 }
+
+export function treePrefix(isLast: boolean): '├' | '└' {
+  return isLast ? '└' : '├'
+}

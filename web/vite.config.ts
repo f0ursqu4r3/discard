@@ -118,5 +118,5 @@ export default defineConfig({
   },
   plugins: lazyPlugins(() => [vue(), tailwindcss()]),
   resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
-  test: { environment: 'jsdom' },
+  test: { environment: 'jsdom', css: { include: [/tokens\.css\?raw$/] } },
 })

@@ -75,14 +75,16 @@ impl Timeline {
                     name: name.clone(),
                     input: input.clone(),
                     output: None,
+                    is_error: None,
                 });
             }
-            EventKind::ToolCallResult { call_id, output, .. } => {
+            EventKind::ToolCallResult { call_id, output, is_error } => {
                 for block in &mut self.blocks {
-                    if let Block::ToolCall { call_id: id, output: slot, .. } = block
+                    if let Block::ToolCall { call_id: id, output: slot, is_error: flag, .. } = block
                         && id == call_id
                     {
                         *slot = Some(output.clone());
+                        *flag = Some(*is_error);
                     }
                 }
             }
@@ -199,6 +201,33 @@ mod tests {
         let mut t = Timeline::new();
         t.apply(&EventKind::ToolCallResult { call_id: "nope".into(), output: "x".into(), is_error: false });
         assert!(t.blocks().is_empty());
+    }
+
+    #[test]
+    fn tool_result_error_flag_reaches_the_block() {
+        for is_error in [true, false] {
+            let mut t = Timeline::new();
+            t.apply(&EventKind::ToolCallStart { call_id: "c1".into(), name: "Bash".into(), input: json!({}) });
+            t.apply(&EventKind::ToolCallResult { call_id: "c1".into(), output: "boom".into(), is_error });
+            assert!(matches!(&t.blocks()[0], Block::ToolCall { is_error: Some(flag), output: Some(output), .. } if *flag == is_error && output == "boom"));
+            assert_eq!(serde_json::to_value(&t.blocks()[0]).unwrap()["is_error"], is_error);
+        }
+    }
+
+    #[test]
+    fn a_started_tool_call_has_no_error_flag() {
+        let mut t = Timeline::new();
+        t.apply(&EventKind::ToolCallStart { call_id: "c1".into(), name: "Bash".into(), input: json!({}) });
+        assert!(matches!(&t.blocks()[0], Block::ToolCall { is_error: None, .. }));
+        assert!(serde_json::to_value(&t.blocks()[0]).unwrap().get("is_error").is_none());
+    }
+
+    #[test]
+    fn a_stored_tool_call_without_the_flag_deserializes() {
+        let block: Block = serde_json::from_str(
+            r#"{"type":"tool_call","call_id":"c","name":"n","input":null,"output":"x"}"#,
+        ).unwrap();
+        assert!(matches!(block, Block::ToolCall { is_error: None, .. }));
     }
 
     #[test]

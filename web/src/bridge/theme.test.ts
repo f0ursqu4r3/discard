@@ -1,5 +1,5 @@
 import { expect, test } from 'vite-plus/test'
-import { applyTheme } from './theme'
+import { activeTheme, applyTheme } from './theme'
 import type { ThemeDto } from './types'
 test('applyTheme sets every token and toggles dark', () => {
   const tokens = Object.fromEntries(
@@ -81,4 +81,33 @@ test('applies the resolved diff colors', () => {
   applyTheme(theme, root)
   expect(root.style.getPropertyValue('--diff-added')).toBe('#123456')
   expect(root.style.getPropertyValue('--diff-removed-inline')).toBe('#fedcba')
+})
+
+const monoTheme: ThemeDto = {
+  mode: 'dark',
+  tokens: { ansi_4: '#61afef' },
+  monoFont: 'SF Mono',
+  radius: null,
+  fontScale: 1,
+  spacingScale: 1,
+  protectedBg: '#000000',
+  protectedFg: '#ffffff',
+  protectedBorder: '#aaaaaa',
+}
+test('applyTheme sets the mono family and the ansi tokens', () => {
+  const root = document.createElement('div')
+  applyTheme(monoTheme, root)
+  expect(root.style.getPropertyValue('--ansi-4')).toBe('#61afef')
+  expect(root.style.getPropertyValue('--mono-family')).toBe('"SF Mono"')
+})
+test('applyTheme removes the mono family when the theme has none', () => {
+  const root = document.createElement('div')
+  applyTheme(monoTheme, root)
+  root.style.setProperty('--mono-family', '"SF Mono"')
+  applyTheme({ ...monoTheme, monoFont: null }, root)
+  expect(root.style.getPropertyValue('--mono-family')).toBe('')
+})
+test('applyTheme publishes the active theme', () => {
+  applyTheme(monoTheme, document.createElement('div'))
+  expect(activeTheme.value).toBe(monoTheme)
 })

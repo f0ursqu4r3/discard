@@ -1,10 +1,11 @@
 import { mount, flushPromises } from '@vue/test-utils'
 import { expect, test } from 'vite-plus/test'
 import MessageRow from './MessageRow.vue'
+import AgentAvatar from './agents/AgentAvatar.vue'
 import DiffBlock from './DiffBlock.vue'
 import ToolCallBlock from './ToolCallBlock.vue'
 import MessageList from './MessageList.vue'
-import { hasLiveRow, thinkingLine, messagePresentation } from './messages'
+import { parseDiff, hasLiveRow, thinkingLine, messagePresentation } from './messages'
 import type { MessageDto } from '../bridge/types'
 
 test('continued messages repeat their identity and leave the timestamp gutter empty', () => {
@@ -102,7 +103,7 @@ test('diff lines have their matching types', () => {
 test('long tool output can be expanded', async () => {
   const output = Array.from({ length: 21 }, (_, i) => `line ${i}`).join('\n')
   const block = mount(ToolCallBlock, { props: { name: 'shell', input: {}, output } })
-  expect(block.text()).toContain('Shell')
+  expect(block.text()).toContain('shell')
   expect(block.text()).not.toContain('line 20')
   await block.get('button').trigger('click')
   expect(block.text()).toContain('line 20')
@@ -112,7 +113,7 @@ test('tool details hide raw data until opened and preserve the complete input', 
   const input = { limit: 10, query: 'wikijs', scope: 'project' }
   const block = mount(ToolCallBlock, { props: { name, input, output: 'no matches' } })
   const trigger = block.get('button')
-  expect(trigger.text()).toContain('Memory search')
+  expect(trigger.text()).toContain('memory search')
   expect(trigger.text()).toContain('wikijs')
   expect(trigger.text()).not.toContain('mcp__')
   expect(trigger.attributes('aria-expanded')).toBe('false')
@@ -130,16 +131,16 @@ test('tool results distinguish missing and empty output without claiming success
   const block = mount(ToolCallBlock, {
     props: { name: 'shell', input: {}, output: null },
   })
-  expect(block.get('button').text()).toContain('Awaiting result')
+  expect(block.find('[aria-label="Awaiting result"]').exists()).toBe(true)
   expect(block.get('button').text()).not.toContain('{}')
   await block.get('button').trigger('click')
   expect(block.text()).toContain('No result received yet.')
   await block.setProps({ output: '' })
-  expect(block.get('button').text()).toContain('Returned')
+  expect(block.find('[aria-label="Returned"]').exists()).toBe(true)
   expect(block.text()).toContain('No output.')
   await block.setProps({ output: 'Error: permission denied' })
   expect(block.get('[aria-label="Tool output"]').text()).toBe('Error: permission denied')
-  expect(block.get('button').text()).not.toContain('Success')
+  expect(block.find('[aria-label="Succeeded"]').exists()).toBe(false)
 })
 
 test('expanded tool output retains diff rendering', async () => {
@@ -198,9 +199,10 @@ test('row count includes a live row only when present', async () => {
   expect(rowCount(3, true)).toBe(4)
 })
 
-test('diff file headers remain context lines', () => {
+test('diff file headers supply the title without appearing as content lines', () => {
   const diff = mount(DiffBlock, { props: { text: '--- a/file\n+++ b/file\n+added\n-removed' } })
-  expect(diff.findAll('[data-diff="context"]')).toHaveLength(2)
+  expect(diff.get('[data-slot="code-block-title"]').text()).toBe('file')
+  expect(diff.findAll('[data-diff="context"]')).toHaveLength(0)
 })
 test('tool output identifies unified diffs without treating lists as diffs', async () => {
   const { looksLikeUnifiedDiff } = await import('./messages')
@@ -313,4 +315,125 @@ test('saved and live replies use their own author, not the channel default', () 
     'Quinn',
     'Jordan',
   ])
+})
+
+test('parseDiff numbers lines and reads the path', async () => {
+  const { parseDiff } = await import('./messages')
+  const d = parseDiff(
+    '--- a/src/worktree.rs\n+++ b/src/worktree.rs\n@@ -12,3 +12,5 @@\n fn cleanup() {\n-    remove();\n+    if ok {\n+        remove();\n+    }\n }',
+  )
+  expect(d.path).toBe('src/worktree.rs')
+  expect([d.added, d.removed]).toEqual([3, 1])
+  expect(d.lines.map((line) => [line.kind, line.number])).toEqual([
+    ['hunk', null],
+    ['context', 12],
+    ['removed', 13],
+    ['added', 13],
+    ['added', 14],
+    ['added', 15],
+    ['context', 16],
+  ])
+})
+test('parseDiff handles new files, deleted files, and diffs without hunks', async () => {
+  const { parseDiff } = await import('./messages')
+  expect(parseDiff('--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hi').path).toBe('new.txt')
+  expect(parseDiff('--- a/old.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-bye').path).toBe('old.txt')
+  const bare = parseDiff('+a\n-b')
+  expect(bare.lines.every((line) => line.number === null)).toBe(true)
+  expect(bare.path).toBeNull()
+})
+test('agent headers show the provider tag without changing prose to mono', () => {
+  const row = mount(MessageRow, {
+    props: {
+      channelId: 'channel',
+      message: {
+        id: 'agent',
+        role: 'agent',
+        continuesGroup: false,
+        blocks: [{ type: 'markdown', text: 'Normal prose.' }],
+        author: { agentId: 'a', name: 'Builder', avatar: null, provider: 'claude' },
+      },
+    },
+  })
+  expect(row.get('[data-testid="message-agent-tag"]').text()).toBe('[agent · claude]')
+  expect(row.get('article').classes()).not.toContain('font-mono')
+  row.unmount()
+})
+test('user headers have no agent tag', () => {
+  const row = mount(MessageRow, {
+    props: {
+      channelId: 'channel',
+      message: {
+        id: 'user',
+        role: 'user',
+        continuesGroup: false,
+        blocks: [],
+      },
+    },
+  })
+  expect(row.find('[data-testid="message-agent-tag"]').exists()).toBe(false)
+  row.unmount()
+})
+
+test('diff headers show file counts and numbered lines while inline output stays compact', () => {
+  const text = '--- a/file.rs\n+++ b/file.rs\n@@ -2 +2 @@\n-old\n+new'
+  const full = mount(DiffBlock, { props: { text } })
+  expect(full.get('[data-slot="code-block-header"]').text()).toContain('file.rs')
+  expect(full.get('[data-slot="code-block-header"]').text()).toContain('+1')
+  expect(full.get('[data-slot="code-block-header"]').text()).toContain('−1')
+  expect(full.findAll('[data-testid="diff-number"]').map((number) => number.text())).toEqual([
+    '',
+    '2',
+    '2',
+  ])
+  expect(full.get('[data-slot="code-block-copy-button"]').text()).toBe('copy')
+  const inline = mount(DiffBlock, { props: { text, inline: true } })
+  expect(inline.find('[data-slot="code-block-header"]').exists()).toBe(false)
+  expect(inline.find('[data-testid="diff-number"]').exists()).toBe(false)
+  full.unmount()
+  inline.unmount()
+})
+
+test('diff content that resembles file headers keeps its text and line numbers', () => {
+  const diff = parseDiff(
+    '--- a/query.sql\n+++ b/query.sql\n@@ -1,2 +1,2 @@\n--- obsolete comment\n+++ replacement comment\n SELECT 1;\n',
+  )
+  expect(diff.path).toBe('query.sql')
+  expect([diff.added, diff.removed]).toEqual([1, 1])
+  expect(diff.lines.map((line) => [line.text, line.number])).toEqual([
+    ['@@ -1,2 +1,2 @@', null],
+    ['--- obsolete comment', 1],
+    ['+++ replacement comment', 1],
+    [' SELECT 1;', 2],
+  ])
+})
+test('multi-file diffs keep both file boundaries instead of using the last path', () => {
+  const text =
+    'diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old a\n+new a\ndiff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -3 +3 @@\n-old b\n+new b'
+  const diff = parseDiff(text)
+  expect(diff.path).toBeNull()
+  expect([diff.added, diff.removed]).toEqual([2, 2])
+  const view = mount(DiffBlock, { props: { text } })
+  expect(view.text()).toContain('+++ b/a.txt')
+  expect(view.text()).toContain('+++ b/b.txt')
+  expect(diff.lines.filter((line) => line.kind === 'added').map((line) => line.number)).toEqual([
+    1, 3,
+  ])
+  view.unmount()
+})
+test('authorless messages use the channel agent ID for the name and avatar', () => {
+  const view = mount(MessageRow, {
+    props: {
+      channelId: 'channel',
+      agentId: 'agent-b',
+      agent: 'Builder',
+      agentAvatar: null,
+      message: { id: 'old', role: 'agent', blocks: [], continuesGroup: false },
+    },
+  })
+  expect(view.getComponent(AgentAvatar).props('agentId')).toBe('agent-b')
+  expect(view.get('[data-testid="message-identity"]').attributes('style')).toContain(
+    'rgb(181, 189, 104)',
+  )
+  view.unmount()
 })

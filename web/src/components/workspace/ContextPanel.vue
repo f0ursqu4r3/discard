@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { GitBranch, FolderGit2, Hash, Activity, ShieldCheck } from '@lucide/vue'
+import { GitBranch, ShieldCheck } from '@lucide/vue'
 import type { ProjectChannelDto, SnapshotDto } from '@/bridge/types'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../ui/tabs'
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card'
@@ -12,6 +12,7 @@ import MemberList from '../MemberList.vue'
 import MemoryBrowser from '../memory/MemoryBrowser.vue'
 import PluginElement from '@/plugin/PluginElement.vue'
 import ProjectChannelDetails from './ProjectChannelDetails.vue'
+import { channelBranch } from './channel-branch'
 const props = defineProps<{
   snapshot: SnapshotDto
   projectChannels?: ProjectChannelDto[]
@@ -32,11 +33,16 @@ watch(
     tab.value = 'context'
   },
 )
-const channelMetadata = computed(() =>
-  props.projectChannels?.find((channel) => channel.id === props.snapshot.channelId),
-)
-const branch = computed(
-  () => channelMetadata.value?.branch ?? props.snapshot.branches.find((row) => row.current)?.label,
+const branch = computed(() => channelBranch(props.snapshot, props.projectChannels))
+const member = computed(() =>
+  props.snapshot.turnRunning && props.snapshot.responder
+    ? props.snapshot.responder
+    : {
+        agentId: props.snapshot.agentId,
+        name: props.snapshot.agent,
+        provider: props.snapshot.provider,
+        avatar: props.agentAvatar,
+      },
 )
 const generalRunning = computed(() => {
   const general = props.projectChannels?.find((channel) => channel.kind === 'general')
@@ -90,35 +96,27 @@ const generalRunning = computed(() => {
           </CardHeader>
           <CardContent>
             <dl class="flex flex-col gap-3 text-xs">
-              <div class="flex items-center gap-2">
-                <dt class="flex items-center gap-1.5 text-muted-foreground">
-                  <Hash class="size-3" />
-                  Channel
-                </dt>
-                <dd class="ml-auto truncate">{{ snapshot.channel }}</dd>
+              <div class="flex items-baseline font-mono text-xs">
+                <dt class="text-muted-foreground">channel</dt>
+                <span aria-hidden="true" class="kv-leader" />
+                <dd class="text-right truncate">{{ snapshot.channel }}</dd>
               </div>
-              <div v-if="branch" class="flex items-center gap-2">
-                <dt class="flex items-center gap-1.5 text-muted-foreground">
-                  <GitBranch class="size-3" />
-                  Branch
-                </dt>
-                <dd class="ml-auto truncate">{{ branch }}</dd>
+              <div v-if="branch" class="flex items-baseline font-mono text-xs">
+                <dt class="text-muted-foreground">branch</dt>
+                <span aria-hidden="true" class="kv-leader" />
+                <dd class="text-right truncate">{{ branch }}</dd>
               </div>
-              <div class="flex items-center gap-2">
-                <dt class="flex items-center gap-1.5 text-muted-foreground">
-                  <FolderGit2 class="size-3" />
-                  Repository
-                </dt>
-                <dd class="ml-auto min-w-0 truncate" :title="snapshot.projectPath">
+              <div class="flex items-baseline font-mono text-xs">
+                <dt class="text-muted-foreground">repository</dt>
+                <span aria-hidden="true" class="kv-leader" />
+                <dd class="text-right min-w-0 truncate" :title="snapshot.projectPath">
                   {{ snapshot.project }}
                 </dd>
               </div>
-              <div class="flex items-center gap-2">
-                <dt class="flex items-center gap-1.5 text-muted-foreground">
-                  <Activity class="size-3" />
-                  Status
-                </dt>
-                <dd class="ml-auto">
+              <div class="flex items-baseline font-mono text-xs">
+                <dt class="text-muted-foreground">status</dt>
+                <span aria-hidden="true" class="kv-leader" />
+                <dd class="text-right">
                   {{ snapshot.turnRunning ? 'Running' : 'Idle' }}
                 </dd>
               </div>
@@ -126,17 +124,18 @@ const generalRunning = computed(() => {
           </CardContent>
         </Card>
         <MemberList
+          :agent-id="member.agentId"
           v-if="directMessage || !snapshot.slots.member_list"
-          :agent="snapshot.agent"
-          :avatar="agentAvatar"
+          :agent="member.name"
+          :avatar="member.avatar"
           :status="snapshot.agentStatus"
-          :provider="snapshot.provider"
+          :provider="member.provider"
           :target="{
             type: 'agent',
-            id: snapshot.agentId,
-            name: snapshot.agent,
+            id: member.agentId,
+            name: member.name,
           }"
-          @settings="emit('action', 'open_agent_settings')"
+          @settings="emit('action', `view_agent_profile:${member.agentId}`)"
         />
         <div
           v-if="!directMessage && snapshot.slots.member_list"

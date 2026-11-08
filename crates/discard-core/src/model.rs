@@ -149,6 +149,8 @@ pub enum Block {
         name: String,
         input: serde_json::Value,
         output: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
     },
     /// Rendered by Rust. Not overridable by plugins.
     Approval {

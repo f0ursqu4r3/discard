@@ -66,6 +66,7 @@ pub struct ResolvedTheme {
     /// The name of the theme file in use.
     pub theme_name: String,
     pub colors: ThemeColors,
+    pub mono_font: Option<String>,
     pub ui: UiColors,
     pub problems: Vec<ThemeProblem>,
     /// Every file that can change the result, found or not. Poll these.
@@ -90,6 +91,7 @@ pub fn ghostty_config_paths(home: &Path, xdg_config_home: Option<&Path>) -> Vec<
 /// Resolve `request`. Never fails: see [`ResolvedTheme::problems`].
 pub fn resolve(request: &ThemeRequest<'_>) -> ResolvedTheme {
     let mut run = Run::default();
+    for path in request.ghostty_configs { run.watch(path.clone()); }
     let default_spec = ThemeSpec::parse(bundled::DEFAULT_THEME);
 
     let (spec, inline) = match request.source {
@@ -118,6 +120,7 @@ pub fn resolve(request: &ThemeRequest<'_>) -> ResolvedTheme {
     let colors = base.overlaid_with(&inline);
     ResolvedTheme {
         theme_name,
+        mono_font: super::font::mono_font_family(request.ghostty_configs),
         ui: map(&colors),
         colors,
         problems: run.problems,
@@ -295,6 +298,17 @@ mod tests {
                 dirs: &self.dirs,
                 ghostty_configs: &self.configs,
             }
+        }
+    }
+
+    #[test]
+    fn custom_source_still_reads_the_ghostty_font() {
+        let fx = Fixture::new();
+        fs::write(&fx.configs[0], "font-family = SF Mono\n").unwrap();
+        for source in [ThemeSource::Custom, ThemeSource::Default, ThemeSource::Ghostty] {
+            let resolved = resolve(&fx.request(source, "Nord", Appearance::Dark));
+            assert_eq!(resolved.mono_font.as_deref(), Some("SF Mono"));
+            assert!(fx.configs.iter().all(|path| resolved.watched.contains(path)));
         }
     }
 

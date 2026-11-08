@@ -80,3 +80,93 @@ export function summarizeInput(input: unknown): string {
   const chars = Array.from(text)
   return chars.length > 120 ? `${chars.slice(0, 120).join('')}…` : text
 }
+
+/** Read unified diff content and keep old and new line counters separate. */
+export function parseDiff(text: string): {
+  path: string | null
+  added: number
+  removed: number
+  lines: { text: string; kind: 'added' | 'removed' | 'hunk' | 'context'; number: number | null }[]
+} {
+  let path: string | null = null
+  let oldPath: string | null = null
+  let oldNumber: number | null = null,
+    newNumber: number | null = null
+  let oldRemaining = 0,
+    newRemaining = 0
+  let inHunk = false,
+    files = 0
+  let added = 0,
+    removed = 0
+  const lines: ReturnType<typeof parseDiff>['lines'] = []
+  const headers = new Set<(typeof lines)[number]>()
+  const input = text.split('\n')
+  if (input.at(-1) === '') input.pop()
+  for (const textLine of input) {
+    if (textLine.startsWith('diff --git ')) {
+      inHunk = false
+      oldNumber = newNumber = null
+      continue
+    }
+    if (!inHunk && textLine.startsWith('index ')) continue
+    if (!inHunk && (textLine.startsWith('--- ') || textLine.startsWith('+++ '))) {
+      const header = { text: textLine, kind: 'context' as const, number: null }
+      headers.add(header)
+      lines.push(header)
+      if (textLine.startsWith('--- ')) {
+        oldPath = textLine.slice(4).replace(/^a\//, '')
+        oldNumber = newNumber = null
+      } else {
+        const nextPath = textLine.slice(4)
+        path =
+          nextPath === '/dev/null' ? oldPath : nextPath.startsWith('b/') ? nextPath.slice(2) : null
+        files++
+      }
+      continue
+    }
+    const hunk = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(textLine)
+    if (hunk) {
+      oldNumber = Number(hunk[1])
+      newNumber = Number(hunk[3])
+      oldRemaining = Number(hunk[2] ?? 1)
+      newRemaining = Number(hunk[4] ?? 1)
+      inHunk = true
+    }
+    const kind = textLine.startsWith('@@')
+      ? 'hunk'
+      : textLine.startsWith('+')
+        ? 'added'
+        : textLine.startsWith('-')
+          ? 'removed'
+          : 'context'
+    const number =
+      kind === 'hunk' || (kind === 'context' && !textLine.startsWith(' '))
+        ? null
+        : kind === 'removed'
+          ? oldNumber
+          : newNumber
+    lines.push({ text: textLine, kind, number })
+    if (kind === 'added') {
+      added++
+      if (newNumber !== null) newNumber++
+      newRemaining--
+    } else if (kind === 'removed') {
+      removed++
+      if (oldNumber !== null) oldNumber++
+      oldRemaining--
+    } else if (kind === 'context' && textLine.startsWith(' ')) {
+      if (oldNumber !== null) oldNumber++
+      if (newNumber !== null) newNumber++
+      oldRemaining--
+      newRemaining--
+    }
+    if (oldRemaining <= 0 && newRemaining <= 0) inHunk = false
+  }
+  // A multi-file patch keeps its headers so each hunk still identifies its file.
+  return {
+    path: files > 1 ? null : path,
+    added,
+    removed,
+    lines: files > 1 ? lines : lines.filter((line) => !headers.has(line)),
+  }
+}

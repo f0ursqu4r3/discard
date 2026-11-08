@@ -45,7 +45,7 @@ test('worktrees nest under their branches while conversation selection remains s
       'page',
     )
     expect(view.get('[data-ui-id="branches-toggle"]').text()).toContain('Branch channels 3')
-    expect(view.get('[data-ui-id="worktree-count"]').text()).toBe('3 worktrees')
+    expect(view.find('[data-ui-id="worktree-count"]').exists()).toBe(false)
     const main = view.get('[data-branch-key="main"]')
     expect(main.get('[data-ui-id="branches-row-main"]').attributes('aria-current')).toBeUndefined()
     expect(main.get('[data-ui-id="worktrees-row-main"]').text()).toBe('repo Main')
@@ -84,11 +84,10 @@ test('worktrees nest under their branches while conversation selection remains s
 test('a removed worktree disappears without removing its branch channel', async () => {
   const view = mount(ChannelList, { props: { ...props, branches: [branches[1]!] } })
   try {
-    expect(view.get('[data-ui-id="worktree-count"]').text()).toBe('1 worktree')
+    expect(view.find('[data-ui-id="worktree-child"]').exists()).toBe(true)
     await view.setProps({ branches: [{ ...branches[1]!, kind: 'branch', worktree: null }] })
     expect(view.find('[data-ui-id="worktree-child"]').exists()).toBe(false)
     expect(view.get('[data-ui-id="branches-row-feature"]').text()).toBe('feature')
-    expect(view.get('[data-ui-id="worktree-count"]').text()).toBe('0 worktrees')
   } finally {
     view.unmount()
   }
@@ -104,7 +103,7 @@ test('planned sidebar actions are disabled and do not open a conversation', asyn
           button.attributes('aria-label')?.includes('Soon') ||
           button.text().includes('Manage worktrees'),
       )
-    expect(planned).toHaveLength(5)
+    expect(planned).toHaveLength(4)
     for (const button of planned) {
       expect(button.attributes('disabled')).toBeDefined()
       await button.trigger('click')

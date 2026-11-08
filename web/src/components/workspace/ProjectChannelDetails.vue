@@ -269,25 +269,45 @@ function authorName(authorKind: string, authorId: string | null) {
     <CardContent v-if="loading && !details" role="status">Loading channel details…</CardContent>
     <CardContent v-else-if="details" class="flex flex-col gap-4">
       <div class="flex flex-col gap-1 text-xs">
-        <p class="font-semibold">{{ details.channel.name }}</p>
-        <p v-if="details.channel.branch" class="text-muted-foreground">
-          Branch · {{ details.channel.branch }}
-        </p>
-        <p v-else-if="details.channel.kind === 'general'" class="text-muted-foreground">
-          Project-wide channel
-        </p>
-        <p v-else-if="details.channel.kind === 'legacy'" class="text-muted-foreground">
-          Saved workspace channel
-        </p>
-        <p class="text-muted-foreground">
-          {{
-            details.channel.archived
-              ? details.channel.kind === 'archived_legacy'
-                ? 'Archived history'
-                : 'Archived channel'
-              : 'Active channel'
-          }}
-        </p>
+        <dl class="flex flex-col gap-2">
+          <div class="flex items-baseline font-mono text-xs">
+            <dt class="text-muted-foreground">channel</dt>
+            <span aria-hidden="true" class="kv-leader" />
+            <dd class="min-w-0 truncate text-right">{{ details.channel.name }}</dd>
+          </div>
+          <div v-if="details.channel.branch" class="flex items-baseline font-mono text-xs">
+            <dt class="text-muted-foreground">branch</dt>
+            <span aria-hidden="true" class="kv-leader" />
+            <dd class="min-w-0 truncate text-right">{{ details.channel.branch }}</dd>
+          </div>
+          <div
+            v-else-if="details.channel.kind === 'general' || details.channel.kind === 'legacy'"
+            class="flex items-baseline font-mono text-xs"
+          >
+            <dt class="text-muted-foreground">scope</dt>
+            <span aria-hidden="true" class="kv-leader" />
+            <dd class="text-right">
+              {{
+                details.channel.kind === 'general'
+                  ? 'Project-wide channel'
+                  : 'Saved workspace channel'
+              }}
+            </dd>
+          </div>
+          <div class="flex items-baseline font-mono text-xs">
+            <dt class="text-muted-foreground">status</dt>
+            <span aria-hidden="true" class="kv-leader" />
+            <dd class="text-right">
+              {{
+                details.channel.archived
+                  ? details.channel.kind === 'archived_legacy'
+                    ? 'Archived history'
+                    : 'Archived channel'
+                  : 'Active channel'
+              }}
+            </dd>
+          </div>
+        </dl>
         <Button
           v-if="
             details.channel.kind === 'archived_legacy' &&
