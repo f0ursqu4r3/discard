@@ -3,11 +3,13 @@ import { computed } from 'vue'
 import type { ElementDto } from '../bridge/types'
 import { pluginAction } from '../bridge/api'
 import { Button } from '../components/ui/button'
-import { Avatar, AvatarFallback } from '../components/ui/avatar'
+import AgentAvatar from '../components/agents/AgentAvatar.vue'
+import { agentAvatars } from '../components/agents/useAgentAvatar'
+import { useAgentIdentity } from '../components/agents/useAgentIdentity'
+import BrailleSpinner from '../components/BrailleSpinner.vue'
 import { Badge } from '../components/ui/badge'
 import { Separator } from '../components/ui/separator'
 import SafeMarkdown from '../components/SafeMarkdown.vue'
-import { serverInitials } from '../components/layout'
 import { PROP_WHITELIST, clampNumber, colorToken } from './props'
 const props = defineProps<{ element: ElementDto; plugin: string }>()
 const clean = computed(() =>
@@ -21,12 +23,26 @@ function textOf(element: ElementDto): string {
     .join('')
 }
 const text = computed(() => textOf(props.element))
+const agentId = computed(() =>
+  typeof clean.value.agent === 'string' ? clean.value.agent : undefined,
+)
+const avatar = computed(() => {
+  const id = agentId.value
+  if (id === undefined || !Object.hasOwn(agentAvatars.value, id)) return null
+  return agentAvatars.value[id] ?? null
+})
+const avatarName = computed(() => (typeof clean.value.name === 'string' ? clean.value.name : '?'))
+const identity = useAgentIdentity(agentId, avatar)
 const style = computed(() => {
   const p = clean.value
   const result: Record<string, string> = {}
   const size = (value: unknown, name: string) =>
     typeof value === 'number' ? `calc(var(--spacing) * ${clampNumber(name, value) / 4})` : undefined
   if (props.element.tag === 'row' || props.element.tag === 'column') {
+    if (agentId.value !== undefined) {
+      result['--agent-color'] = identity.value.mark
+      result['--agent-text'] = identity.value.text
+    }
     for (const [key, css] of [
       ['gap', 'gap'],
       ['padding', 'padding'],
@@ -40,13 +56,21 @@ const style = computed(() => {
     const bg = colorToken(p.bg)
     if (bg) result.backgroundColor = bg
   }
-  const color = colorToken(p.color)
+  const agentColor =
+    props.element.tag === 'dot'
+      ? 'mark'
+      : ['text', 'row', 'column'].includes(props.element.tag)
+        ? 'text'
+        : undefined
+  const color = colorToken(p.color, agentColor)
   if (color) result[props.element.tag === 'dot' ? 'backgroundColor' : 'color'] = color
   return Object.keys(result).length ? result : undefined
 })
 const classes = computed(() => {
   const p = clean.value
   return [
+    props.element.tag === 'text' && p.variant === 'label' && 'section-label',
+    props.element.tag === 'text' && p.variant === 'mono' && 'font-mono text-[0.92em]',
     p.grow === true && 'flex-1',
     p.height_full === true && 'h-full',
     p.width !== undefined && 'shrink-0',
@@ -104,21 +128,27 @@ function action() {
     {{ text }}
   </Button>
   <div v-else-if="element.tag === 'avatar'" data-plugin-tag="avatar" class="relative inline-flex">
-    <Avatar :class="clean.size === 'small' ? 'size-6' : clean.size === 'large' ? 'size-10' : ''">
-      <AvatarFallback>
-        {{ serverInitials(typeof clean.name === 'string' ? clean.name : '?') }}
-      </AvatarFallback>
-    </Avatar>
+    <AgentAvatar
+      :agent-id="agentId ?? avatarName"
+      :name="avatarName"
+      :avatar="avatar"
+      :class="clean.size === 'small' ? 'size-6' : clean.size === 'large' ? 'size-10' : ''"
+    />
     <span
       v-if="colorToken(clean.status)"
       class="absolute -bottom-1 -right-1 size-2 rounded-full border-2 border-sidebar"
       :style="{ backgroundColor: colorToken(clean.status) }"
     />
   </div>
-  <Badge v-else-if="element.tag === 'badge'" data-plugin-tag="badge">
+  <Badge v-else-if="element.tag === 'badge'" data-plugin-tag="badge" class="font-mono tabular-nums">
     {{ typeof clean.count === 'number' ? Math.floor(clampNumber('count', clean.count)) : 0 }}
   </Badge>
   <Separator v-else-if="element.tag === 'divider'" data-plugin-tag="divider" />
+  <BrailleSpinner
+    v-else-if="element.tag === 'spinner'"
+    data-plugin-tag="spinner"
+    :label="typeof clean.label === 'string' ? clean.label : undefined"
+  />
   <div v-else-if="element.tag === 'spacer'" data-plugin-tag="spacer" class="flex-1" />
   <div
     v-else-if="element.tag === 'dot'"

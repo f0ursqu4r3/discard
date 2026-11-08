@@ -192,7 +192,7 @@ impl UiState {
             "channel": labels.channel,
             "pending_approvals": self.pending_approvals(),
             "turn_running": self.turn_running,
-            "agent": { "name": labels.agent_name, "provider": labels.provider, "status": status },
+            "agent": { "id": labels.agent_id, "name": labels.agent_name, "provider": labels.provider, "status": status },
         })
     }
 }
@@ -202,6 +202,7 @@ impl UiState {
 pub struct SlotLabels {
     pub project: String,
     pub channel: String,
+    pub agent_id: String,
     pub agent_name: String,
     pub provider: String,
 }
@@ -374,13 +375,13 @@ mod tests {
     #[test]
     fn slot_state_describes_the_channel_agent_and_pending_approvals() {
         let mut s = state();
-        let labels = SlotLabels { project: "demo".into(), channel: "general".into(), agent_name: "Claude".into(), provider: "claude".into() };
+        let labels = SlotLabels { project: "demo".into(), channel: "general".into(), agent_id: "agent-claude".into(), agent_name: "Claude".into(), provider: "claude".into() };
         assert_eq!(
             s.slot_state(&labels),
             serde_json::json!({
                 "project": "demo", "channel": "general", "pending_approvals": 0,
                 "turn_running": false,
-                "agent": { "name": "Claude", "provider": "claude", "status": "idle" },
+                "agent": { "id": "agent-claude", "name": "Claude", "provider": "claude", "status": "idle" },
             })
         );
         s.user_sent("hi");

@@ -21,6 +21,8 @@ export const PROP_WHITELIST = new Set([
   'name',
   'status',
   'count',
+  'agent',
+  'label',
 ])
 const colors = new Set([
   'background',
@@ -37,6 +39,12 @@ const colors = new Set([
   'success',
   'warning',
   'danger',
+  'ansi_1',
+  'ansi_2',
+  'ansi_3',
+  'ansi_4',
+  'ansi_5',
+  'ansi_6',
 ])
 /** Clamp a numeric property before using it in a style. */
 export function clampNumber(name: string, value: number): number {
@@ -44,7 +52,11 @@ export function clampNumber(name: string, value: number): number {
   return Math.max(0, Math.min(name === 'count' ? 9999 : 400, value))
 }
 /** Map a known color token to a CSS variable. */
-export function colorToken(value: unknown): string | undefined {
+export function colorToken(value: unknown, agent?: 'text' | 'mark'): string | undefined {
+  if (value === 'agent' && agent)
+    return agent === 'mark'
+      ? 'var(--agent-color, var(--primary))'
+      : 'var(--agent-text, var(--primary))'
   return typeof value === 'string' && colors.has(value)
     ? `var(--${value.replaceAll('_', '-')})`
     : undefined

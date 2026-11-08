@@ -24,7 +24,7 @@ mod tests {
     fn state(pending: u64, status: &str) -> serde_json::Value {
         json!({
             "project": "demo", "channel": "general", "pending_approvals": pending,
-            "agent": { "name": "Claude", "provider": "claude", "status": status },
+            "agent": { "id": "agent-claude", "name": "Claude", "provider": "claude", "status": status },
         })
     }
 
@@ -58,6 +58,8 @@ mod tests {
         let mut t = Vec::new();
         texts(&r.element, &mut t);
         assert_eq!(t, ["# general"]);
+        let Node::Element(name) = &r.element.children[0] else { panic!() };
+        assert_eq!(name.props.get("variant"), Some(&Prop::Text("mono".into())));
     }
 
     #[test]
@@ -73,7 +75,7 @@ mod tests {
     }
 
     #[test]
-    fn the_member_list_shows_the_agent_with_a_status_dot_color() {
+    fn the_member_list_shows_agent_identity_and_a_spinner_or_status_dot() {
         let mut m = manager();
         for (status, label, color) in [
             ("working", "Working · claude", "success"),
@@ -86,11 +88,28 @@ mod tests {
             let mut t = Vec::new();
             texts(&r.element, &mut t);
             assert!(t.contains(&"Claude".to_string()) && t.contains(&label.to_string()), "{t:?}");
+            assert_eq!(r.element.props.get("agent"), Some(&Prop::Text("agent-claude".into())));
+            let Node::Element(heading) = &r.element.children[0] else { panic!() };
+            assert_eq!(heading.children, [Node::Text("Agents".into())]);
+            assert_eq!(heading.props.get("variant"), Some(&Prop::Text("label".into())));
             let Node::Element(row) = &r.element.children[1] else { panic!() };
             let Node::Element(avatar) = &row.children[0] else { panic!() };
             assert_eq!(avatar.tag, Tag::Avatar);
-            assert_eq!(avatar.props.get("status"), Some(&Prop::Text(color.into())));
+            assert_eq!(avatar.props.get("agent"), Some(&Prop::Text("agent-claude".into())));
+            if status == "working" {
+                assert_eq!(avatar.props.get("status"), None);
+                assert_eq!(row.children.len(), 3);
+                let Node::Element(spinner) = &row.children[2] else { panic!() };
+                assert_eq!(spinner.tag, Tag::Spinner);
+            } else {
+                assert_eq!(avatar.props.get("status"), Some(&Prop::Text(color.into())));
+                assert_eq!(row.children.len(), 2);
+            }
             let Node::Element(column) = &row.children[1] else { panic!() };
+            assert_eq!(column.props.get("grow"), Some(&Prop::Bool(true)));
+            let Node::Element(name) = &column.children[0] else { panic!() };
+            assert_eq!(name.props.get("color"), Some(&Prop::Text("agent".into())));
+            assert_eq!(name.props.get("weight"), Some(&Prop::Text("semibold".into())));
             let Node::Element(line) = &column.children[1] else { panic!() };
             assert!(line.children.iter().all(|node| !matches!(node, Node::Element(e) if e.tag == Tag::Dot)));
         }

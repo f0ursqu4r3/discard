@@ -184,6 +184,24 @@ test('DM view cannot display or send into the project conversation', async () =>
   expect(view.emitted('action')).toEqual([['add_agent']])
 })
 
+test('project context frames the plugin member list as a card', () => {
+  const withSlot: SnapshotDto = {
+    ...snapshot,
+    slots: {
+      ...snapshot.slots,
+      member_list: {
+        plugin: 'default-ui',
+        element: { tag: 'text', props: { variant: 'label' }, children: [{ Text: 'Agents' }] },
+      },
+    },
+  }
+  const view = mount(ContextPanel, { props: { snapshot: withSlot } })
+  const slot = view.get('[data-ui-id="context-plugin-slot"]')
+  expect(slot.attributes('data-slot')).toBe('card')
+  expect(slot.find('[data-slot="card-content"]').text()).toBe('Agents')
+  expect(view.find('[data-ui-id="project-members"]').exists()).toBe(false)
+})
+
 test('DM profile hides project-specific branch and plugin content', () => {
   const view = mount(ContextPanel, { props: { snapshot, directMessage: true } })
   expect(view.find('[data-ui-id="branch-context"]').exists()).toBe(false)

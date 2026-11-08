@@ -21,7 +21,7 @@ pub const FUNCTIONS: &[ApiFn] = &[
     ApiFn {
         name: "slot",
         signature: "(name: string, render: (state: any) -> Element) -> ()",
-        doc: "Draw a part of the window. `render` gets the current state and returns an element tree. Slots: `channel_header`, `member_list`. The last plugin to register a slot wins.",
+        doc: "Draw a part of the window. `render` gets the current state and returns an element tree. Slots: `channel_header`, `member_list`. Discard draws `member_list` inside a card in the context panel, so return only the card's content, without a background or border. The last plugin to register a slot wins.",
         capability: Some("ui"),
     },
     ApiFn {
@@ -83,7 +83,21 @@ pub const NAMESPACES: &[ApiNamespace] = &[
 
 pub const CONSTANTS: &[(&str, &str, &str)] = &[("api_version", "string", "The plugin API version this Discard implements.")];
 
-pub const SLOT_STATE_DOC: &str = "`state` for the built-in slots: `{ project: string, channel: string, pending_approvals: number, turn_running: boolean, agent: { name: string, provider: string, status: \"idle\" | \"working\" | \"awaiting_approval\" | \"offline\" } }`.";
+pub const SLOT_STATE_DOC: &str = "`state` for the built-in slots: `{ project: string, channel: string, pending_approvals: number, turn_running: boolean, agent: { id: string, name: string, provider: string, status: \"idle\" | \"working\" | \"awaiting_approval\" | \"offline\" } }`. `state.agent.id` is the active conversation agent's stored ID. Pass this string to `agent` on `row`, `column`, or `avatar` to use that agent's identity.";
+
+const TEXT_COLOR_DOC: &str = "Text color from the element color tokens. `agent` uses the nearest agent container's readable identity text color (`--agent-text`), or `primary` outside one.";
+
+fn color_tokens_doc() -> String {
+    format!("Theme color tokens: {}. Element color tokens are these theme tokens plus `agent`. Use `agent` only for `color` on `text`, `row`, `column`, or `dot`; it is not a theme token and cannot be set with `discard.theme`. `bg` and avatar `status` accept only theme color tokens.", COLOR_TOKENS.join(", "))
+}
+
+/// Tag descriptions shared by the Luau and markdown references.
+pub fn tag_doc(tag: Tag) -> &'static str {
+    match tag {
+        Tag::Spinner => "Show the app's shared braille spinner. It uses the nearest agent container's identity mark color (`--agent-color`), or `primary` outside one. It shows a static frame under reduced motion. It accepts only `label` and needs no children.",
+        _ => "",
+    }
+}
 
 /// Element props by tag: (tag, [(prop, type, description)]).
 pub fn tag_props(tag: Tag) -> &'static [(&'static str, &'static str, &'static str)] {
@@ -96,8 +110,9 @@ pub fn tag_props(tag: Tag) -> &'static [(&'static str, &'static str, &'static st
         ("grow", "boolean", "Fill the remaining space."),
         ("height_full", "boolean", "Fill the parent's height."),
         ("align", "\"start\" | \"center\" | \"end\"", "Cross-axis alignment."),
-        ("bg", "color token", "Background color, by theme token name."),
-        ("color", "color token", "Text color, by theme token name."),
+        ("bg", "color token", "Background color from the theme color tokens; `agent` is not accepted."),
+        ("color", "color token", TEXT_COLOR_DOC),
+        ("agent", "string", "Agent ID, normally `state.agent.id`. Set the identity for descendants: `--agent-color` is the agent's readable mark color and `--agent-text` is its readable text color. Colors use the stored avatar from the shared agent catalog and follow the active theme. An unknown ID gets a stable hashed palette color. A nested agent container overrides the inherited identity."),
         ("border_top", "boolean", "Draw a border."),
         ("border_bottom", "boolean", "Draw a border."),
         ("border_left", "boolean", "Draw a border."),
@@ -108,17 +123,24 @@ pub fn tag_props(tag: Tag) -> &'static [(&'static str, &'static str, &'static st
         Tag::Text => &[
             ("size", "\"xs\" | \"sm\" | \"lg\"", "Text size."),
             ("weight", "\"semibold\" | \"bold\"", "Font weight."),
-            ("color", "color token", "Text color."),
+            ("color", "color token", TEXT_COLOR_DOC),
+            ("variant", "\"label\" | \"mono\"", "Text style. `label` uses the shared `section-label` utility: mono uppercase text with a dashed rule. `mono` uses the mono font at 0.92em, like channel and branch names. Omit it for plain text. Unknown values are ignored. Text remains plain text for every variant."),
         ],
         Tag::Markdown => &[],
         Tag::Button => &[
             ("on_click", "string", "The id of an action registered with `discard.action`."),
             ("variant", "\"primary\" | \"danger\" | \"success\" | \"outline\"", "Button style."),
         ],
-        Tag::Avatar => &[("name", "string", "Name used for the initials."), ("size", "\"small\" | \"large\"", "Avatar size."), ("status", "color token", "Presence dot color, by theme token name. The ring uses the sidebar color, so use it in sidebar slots.")],
+        Tag::Avatar => &[
+            ("name", "string", "Name used for the initials. Without `agent`, this name is also the hash key for the identity color."),
+            ("agent", "string", "Agent ID, normally `state.agent.id`. Draw that agent's stored icon or image and identity color from the shared agent avatar catalog. An unknown ID gets a stable hashed palette color and initials from `name`. Without this prop, draw initials and hash `name` for the color; container identity does not select an avatar."),
+            ("size", "\"small\" | \"large\"", "Avatar size."),
+            ("status", "color token", "Presence dot color from the theme color tokens; `agent` is not accepted. Omit it to hide the dot. The ring uses the sidebar color, so use it in sidebar slots."),
+        ],
         Tag::Badge => &[("count", "number", "The number to show.")],
         Tag::Divider | Tag::Spacer => &[],
-        Tag::Dot => &[("color", "color token", "Dot color.")],
+        Tag::Dot => &[("color", "color token", "Dot color from the element color tokens. `agent` uses the nearest agent container's readable identity mark color (`--agent-color`), or `primary` outside one.")],
+        Tag::Spinner => &[("label", "string", "Accessible name for the spinner, such as `\"Syncing\"`. Defaults to `\"Working\"`. Supply plain text that describes the current activity; it is not shown as visible text.")],
     }
 }
 
@@ -129,9 +151,16 @@ pub fn luau_types() -> String {
     out.push_str(&format!("export type Tag = {tags}\n"));
     out.push_str("-- An element is `{ tag, prop = value, child, child, ... }`. Children are elements or strings.\n");
     out.push_str("export type Element = { [number]: any, [string]: any }\n\n");
-    out.push_str("-- Avatar properties:\n");
-    for (prop, ty, doc) in tag_props(Tag::Avatar) {
-        out.push_str(&format!("-- {prop}: {ty} — {doc}\n"));
+    out.push_str(&format!("-- {SLOT_STATE_DOC}\n-- {}\n\n", color_tokens_doc()));
+    for tag in Tag::ALL {
+        out.push_str(&format!("-- {} properties:\n", tag.name()));
+        if !tag_doc(tag).is_empty() {
+            out.push_str(&format!("-- {}\n", tag_doc(tag)));
+        }
+        for (prop, ty, doc) in tag_props(tag) {
+            out.push_str(&format!("-- {prop}: {ty} — {doc}\n"));
+        }
+        out.push('\n');
     }
     out.push('\n');
     out.push_str("declare discard: {\n");
@@ -173,8 +202,12 @@ pub fn markdown() -> String {
     }
     out.push_str(&format!("## State\n\n{SLOT_STATE_DOC}\n\n## Elements\n\n"));
     out.push_str("An element is a table: the tag first, then properties by name, then children. Children are elements or strings.\n\n");
+    out.push_str(&format!("{}\n\n", color_tokens_doc()));
     for tag in Tag::ALL {
         out.push_str(&format!("### `{}`\n\n", tag.name()));
+        if !tag_doc(tag).is_empty() {
+            out.push_str(&format!("{}\n\n", tag_doc(tag)));
+        }
         let props = tag_props(tag);
         if props.is_empty() {
             out.push_str("No properties.\n\n");
@@ -184,7 +217,7 @@ pub fn markdown() -> String {
         }
         out.push('\n');
     }
-    out.push_str(&format!("## Theme tokens\n\nColor tokens: {}.\n\n", COLOR_TOKENS.join(", ")));
+    out.push_str("## Theme tokens\n\nUse the theme color tokens listed under Elements. `agent` is an element color only.\n\n");
     out.push_str("## Limits\n\nEach call has a CPU budget (about 250 ms) and the plugin has a memory cap. A plugin that exceeds a limit is stopped. A tree may have at most 2000 nodes and 32 levels.\n");
     out
 }
@@ -337,6 +370,27 @@ mod tests {
         assert!(markdown().contains("`status` (color token)"));
         assert!(markdown().contains("The ring uses the sidebar color, so use it in sidebar slots."));
         assert!(luau_types().contains("status: color token"));
+    }
+
+    #[test]
+    fn generated_docs_cover_element_identity_variants_spinner_and_slot_agent_id() {
+        let (types, docs) = (luau_types(), markdown());
+        for output in [&types, &docs] {
+            for text in ["spinner", "agent.id", "section-label", "ansi_1", "ansi_6", "reduced motion", "Working"] {
+                assert!(output.contains(text), "missing {text}");
+            }
+            for tag in Tag::ALL {
+                for (_, _, description) in tag_props(tag) {
+                    assert!(output.contains(description), "missing {} property: {description}", tag.name());
+                }
+            }
+            assert!(output.contains(SLOT_STATE_DOC));
+        }
+        for tag in [Tag::Row, Tag::Column, Tag::Avatar] {
+            assert!(tag_props(tag).iter().any(|(name, _, _)| *name == "agent"));
+        }
+        assert!(tag_props(Tag::Text).iter().any(|(name, _, _)| *name == "variant"));
+        assert_eq!(API_VERSION, "1");
     }
 
     #[test]

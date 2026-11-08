@@ -17,7 +17,7 @@ local STATUS_COLOR = {
 discard.slot("channel_header", function(state)
   local children = {
     "row", gap = 12, align = "center", padding_x = 16, padding_y = 12,
-    { "text", "# " .. state.channel, weight = "bold" },
+    { "text", "# " .. state.channel, weight = "bold", variant = "mono" },
     { "spacer" },
   }
   if state.pending_approvals > 0 then
@@ -33,21 +33,29 @@ end)
 discard.slot("member_list", function(state)
   local agent = state.agent
   local status = agent.status
-  return {
-    "column", gap = 8, padding = 12, grow = true, height_full = true, border_left = true,
-    bg = "sidebar", color = "sidebar_foreground",
-    { "text", "AGENTS", size = "xs", color = "muted_foreground" },
+  local avatar = { "avatar", name = agent.name, agent = agent.id }
+  if status ~= "working" then
+    avatar.status = STATUS_COLOR[status] or "border"
+  end
+  local row = {
+    "row", gap = 12, align = "center",
+    avatar,
     {
-      "row", gap = 8, align = "center",
-      { "avatar", name = agent.name, size = "small", status = STATUS_COLOR[status] or "border" },
+      "column", grow = true,
+      { "text", agent.name, color = "agent", weight = "semibold", size = "xs" },
       {
-        "column",
-        { "text", agent.name },
-        {
-          "row", gap = 4, align = "center",
-          { "text", (STATUS_LABEL[status] or status) .. " · " .. agent.provider, size = "xs", color = "muted_foreground" },
-        },
+        "row", gap = 4, align = "center",
+        { "text", (STATUS_LABEL[status] or status) .. " · " .. agent.provider, size = "xs", color = "muted_foreground" },
       },
     },
+  }
+  if status == "working" then
+    row[#row + 1] = { "spinner" }
+  end
+  -- The app draws the card frame around this slot, so the slot draws only its content.
+  return {
+    "column", gap = 16, agent = agent.id,
+    { "text", "Agents", variant = "label" },
+    row,
   }
 end)

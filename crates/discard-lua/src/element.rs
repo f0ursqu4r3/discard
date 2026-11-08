@@ -22,12 +22,13 @@ pub enum Tag {
     Divider,
     Spacer,
     Dot,
+    Spinner,
 }
 
 impl Tag {
     /// Every tag, in documentation order.
-    pub const ALL: [Tag; 10] =
-        [Tag::Row, Tag::Column, Tag::Text, Tag::Markdown, Tag::Button, Tag::Avatar, Tag::Badge, Tag::Divider, Tag::Spacer, Tag::Dot];
+    pub const ALL: [Tag; 11] =
+        [Tag::Row, Tag::Column, Tag::Text, Tag::Markdown, Tag::Button, Tag::Avatar, Tag::Badge, Tag::Divider, Tag::Spacer, Tag::Dot, Tag::Spinner];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -41,6 +42,7 @@ impl Tag {
             Tag::Divider => "divider",
             Tag::Spacer => "spacer",
             Tag::Dot => "dot",
+            Tag::Spinner => "spinner",
         }
     }
 
@@ -56,6 +58,7 @@ impl Tag {
             "divider" => Tag::Divider,
             "spacer" => Tag::Spacer,
             "dot" => Tag::Dot,
+            "spinner" => Tag::Spinner,
             _ => return None,
         })
     }
@@ -207,6 +210,14 @@ mod tests {
         let Node::Element(inner) = &e.children[0] else { panic!() };
         assert_eq!(inner.tag, Tag::Text);
         assert_eq!(inner.children, vec![Node::Text("hi".into())]);
+    }
+
+    #[test]
+    fn spinner_parses_its_accessible_label() {
+        let e = eval(r#"return { "spinner", label = "Syncing" }"#).unwrap();
+        assert_eq!(e.tag, Tag::Spinner);
+        assert_eq!(e.props["label"], Prop::Text("Syncing".into()));
+        assert!(e.children.is_empty());
     }
 
     #[test]

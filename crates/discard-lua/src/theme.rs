@@ -242,6 +242,13 @@ mod tests {
     }
 
     #[test]
+    fn agent_is_an_element_color_not_a_theme_token() {
+        let mut theme = ThemeOverrides::default();
+        assert!(!COLOR_TOKENS.contains(&"agent"));
+        assert_eq!(theme.set_color("agent", "#112233"), Err(ThemeError::UnknownToken("agent".into())));
+    }
+
+    #[test]
     fn merge_lets_later_overrides_win_per_token() {
         let (mut a, mut b) = (ThemeOverrides::default(), ThemeOverrides::default());
         a.set_color("primary", "#111111").unwrap();

@@ -137,16 +137,19 @@ const generalRunning = computed(() => {
           }"
           @settings="emit('action', `view_agent_profile:${member.agentId}`)"
         />
-        <div
+        <Card
           v-if="!directMessage && snapshot.slots.member_list"
           data-ui-id="context-plugin-slot"
+          size="sm"
           class="max-h-96 overflow-auto overscroll-contain"
         >
-          <PluginElement
-            :element="snapshot.slots.member_list.element"
-            :plugin="snapshot.slots.member_list.plugin"
-          />
-        </div>
+          <CardContent>
+            <PluginElement
+              :element="snapshot.slots.member_list.element"
+              :plugin="snapshot.slots.member_list.plugin"
+            />
+          </CardContent>
+        </Card>
         <Card v-if="!directMessage" data-ui-id="review-queue" size="sm">
           <CardHeader>
             <CardTitle class="flex items-center gap-2 text-sm">

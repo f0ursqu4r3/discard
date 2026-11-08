@@ -179,6 +179,23 @@ fn test_reports_what_the_draft_would_do_without_installing() {
 }
 
 #[test]
+fn test_supplies_the_documented_agent_id_to_plugin_slots() {
+    let r = rig();
+    let init = r#"discard.slot("member_list", function(state)
+        assert(type(state.agent.id) == "string" and #state.agent.id > 0, "missing agent ID")
+        return { "column", agent = state.agent.id,
+            { "avatar", agent = state.agent.id, name = state.agent.name },
+            { "text", state.agent.name, color = "agent", variant = "mono" },
+            { "spinner", label = "Syncing" },
+        }
+    end)"#;
+    let created = call(&r, &writer(), "plugin_create", json!({"name": "warm", "files": {"plugin.toml": MANIFEST, "init.lua": init}}));
+    assert!(!is_error(&created), "{created}");
+    let report = text(&call(&r, &writer(), "plugin_test", json!({"name": "warm"})));
+    assert!(report.contains("Slot `member_list`: rendered OK"), "{report}");
+}
+
+#[test]
 fn test_shows_load_and_render_errors_so_the_agent_can_fix_them() {
     let r = rig();
     call(&r, &writer(), "plugin_create", json!({"name": "broken", "files": {"plugin.toml": MANIFEST.replace("warm", "broken"), "init.lua": "this is not lua"}}));

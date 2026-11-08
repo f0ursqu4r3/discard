@@ -394,7 +394,7 @@ fn describe_service(e: ServiceError) -> String {
     }
 }
 
-const SAMPLE_STATE: &str = r#"{"project":"sample","channel":"general","pending_approvals":0,"turn_running":false,"agent":{"name":"Agent","provider":"claude","status":"idle"}}"#;
+const SAMPLE_STATE: &str = r#"{"project":"sample","channel":"general","pending_approvals":0,"turn_running":false,"agent":{"id":"sample-agent","name":"Agent","provider":"claude","status":"idle"}}"#;
 
 impl McpHandler {
     fn run_plugin_tool(&self, identity: &Identity, name: &str, args: &Value) -> Result<String, String> {

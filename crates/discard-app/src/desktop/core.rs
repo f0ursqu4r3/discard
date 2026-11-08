@@ -396,6 +396,7 @@ impl AppCore {
             let labels = SlotLabels {
                 project: state.active.project_name.clone(),
                 channel: state.active.channel.clone(),
+                agent_id: state.active.agent_id.clone(),
                 agent_name: state.active.agent.clone(),
                 provider: state.active.provider.clone(),
             };
