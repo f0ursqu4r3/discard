@@ -174,6 +174,11 @@ impl Engine {
             Some(snapshot) => format!("{snapshot}\n\n{current}"),
             None => current,
         };
+        let project = crate::project_context::ProjectContext::for_channel(&crate::driver::lock(&self.store), &self.channel_id)?;
+        let current = if let Some(project) = project {
+            let snapshot = tokio::task::spawn_blocking(move || project.prompt()).await.map_err(|e| e.to_string())?;
+            format!("{snapshot}\n\n{current}")
+        } else { current };
         let budget = context::input_budget(self.provider.model_context_window(self.model.as_deref().unwrap_or("")));
         context::required_fits(system, &current, budget)?;
         let mut state = crate::driver::lock(&self.store).conversation_context(&self.channel_id).map_err(|e| e.to_string())?;

@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terminal mix</title>
+<style>
+  /* Atom One Dark through Discard's Ghostty token mapping (map.rs). */
+  :root {
+    --bg: #21252b; --canvas: #292e34; --muted: #2c3037; --accent: #32363d; --border: #3a3e46;
+    --fg: #abb2bf; --dim: #747a84; --hi: color-mix(in srgb, var(--fg) 72%, white);
+    --primary: #61afef; --pfg: #21252b;
+    --red: #e06c75; --green: #98c379; --yellow: #e5c07b; --blue: #61afef; --mag: #c678dd; --cyan: #56b6c2;
+    --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --mono: 'SF Mono', ui-monospace, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #16181c; color: #c9ccd2; font-family: var(--sans); }
+  .intro { max-width: 1360px; margin: 0 auto; padding: 22px 24px 10px; }
+  .intro h1 { font-size: 20px; margin: 0 0 4px; color: #eceef1; }
+  .intro p { margin: 0; color: #8b919b; font-size: 13.5px; line-height: 1.5; }
+  .bar { max-width: 1360px; margin: 0 auto; padding: 8px 24px 14px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .chip { font: 500 12px var(--sans); color: #8b919b; background: #1f2227; border: 1px solid #343840; border-radius: 999px; padding: 5px 11px 5px 9px; cursor: pointer; display: inline-flex; gap: 6px; align-items: center; }
+  .chip::before { content: ''; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid #5a606a; }
+  .chip.on { color: #e6e8eb; border-color: #61afef66; background: #61afef14; }
+  .chip.on::before { background: #61afef; border-color: #61afef; }
+  .preset { font: 600 12px var(--sans); color: #c9ccd2; background: #2a2e35; border: 1px solid #3a3e46; border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+  .preset:hover, .chip:hover { border-color: #61afef; }
+  .sep { width: 1px; height: 20px; background: #343840; margin: 0 6px; }
+  .stage { margin: 0 auto; overflow: hidden; }
+  .scaler { width: 1360px; height: 860px; transform-origin: top left; }
+  .legend { max-width: 1360px; margin: 0 auto; padding: 18px 24px 40px; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px 28px; font-size: 13px; line-height: 1.5; color: #8b919b; }
+  .legend b { color: #e6e8eb; font-weight: 600; }
+
+  /* ── window ───────────────────────────────────── */
+  .win { --r: 10px; width: 1360px; height: 860px; background: var(--canvas); color: var(--fg); font: 13px/1.5 var(--sans);
+         display: grid; grid-template-rows: 34px minmax(0, 1fr); border-radius: 12px; overflow: hidden; box-shadow: 0 30px 80px rgba(0,0,0,.5), 0 0 0 1px #000; }
+  .win.f-sbar { grid-template-rows: 34px minmax(0, 1fr) 24px; }
+  .win.f-sharp { --r: 5px; }
+  .i { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  .row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .trunc { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dimt { color: var(--dim); }
+
+  /* feature gates */
+  .win:not(.f-mono) .on-mono, .win.f-mono .off-mono,
+  .win:not(.f-live) .on-live, .win.f-live .off-live,
+  .win:not(.f-tool) .on-tool, .win.f-tool .off-tool,
+  .win:not(.f-tree) .on-tree, .win.f-tree .off-tree,
+  .win:not(.f-kv) .on-kv, .win.f-kv .off-kv,
+  .win:not(.f-sharp) .on-sharp, .win.f-sharp .off-sharp,
+  .win:not(.f-sbar) .sbar { display: none !important; }
+  .f-mono .m { font-family: var(--mono); font-size: .92em; letter-spacing: -.01em; }
+
+  /* agent identity */
+  .a-u { --ac: var(--yellow); } .a-c { --ac: var(--blue); } .a-b { --ac: var(--mag); } .a-t { --ac: var(--green); }
+  .av { width: 36px; height: 36px; border-radius: 50%; background: var(--muted); color: var(--primary); border: 1px solid var(--border); display: grid; place-items: center; font-size: 12px; font-weight: 600; flex: none; }
+  .f-ansi .av { border-radius: var(--r); background: color-mix(in srgb, var(--ac) 15%, var(--bg)); color: var(--ac); border-color: color-mix(in srgb, var(--ac) 40%, transparent); font-family: var(--mono); }
+  .f-ansi .who { color: var(--ac); }
+  .spin { color: var(--primary); font-family: var(--mono); }
+  .f-ansi .spin { color: var(--ac); }
+  .cur { display: inline-block; width: .55em; height: 1.1em; background: var(--fg); vertical-align: -.2em; margin-left: 2px; animation: blink 1.05s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .cur { animation: none; } }
+
+  /* title bar */
+  .title { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 0 14px; font-size: 12.5px; }
+  .title .app { font-weight: 600; color: var(--hi); }
+  .title .app .i { color: var(--primary); }
+  .title .mid { color: var(--dim); }
+  .title .end { justify-self: end; color: var(--dim); gap: 14px; }
+
+  /* shell */
+  .shell { display: grid; grid-template-columns: 304px minmax(0, 1fr) 296px; gap: 6px; padding: 0 6px 6px; min-height: 0; }
+  .pane { background: var(--bg); border: 1px solid var(--border); border-radius: var(--r); min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+
+  /* left */
+  .left { display: grid; grid-template-columns: 72px 1fr; }
+  .rail { border-right: 1px solid var(--border); display: flex; flex-direction: column; align-items: center; padding-top: 10px; gap: 10px; }
+  .ri { width: 44px; height: 44px; border-radius: calc(var(--r) + 4px); background: var(--muted); display: grid; place-items: center; color: var(--fg); position: relative; }
+  .ri.on { background: var(--primary); color: var(--pfg); }
+  .ri.on::before { content: ''; position: absolute; left: -15px; top: 6px; bottom: 6px; width: 4px; border-radius: 0 4px 4px 0; background: var(--hi); }
+  .ri .badge { position: absolute; right: -4px; top: -4px; min-width: 17px; height: 17px; border-radius: 9px; background: var(--yellow); color: var(--pfg); font-size: 10px; font-weight: 700; display: grid; place-items: center; border: 2px solid var(--bg); }
+  .rsep { width: 28px; height: 1px; background: var(--border); }
+  .chan { display: flex; flex-direction: column; min-width: 0; }
+  .proj { padding: 12px 12px 12px 14px; border-bottom: 1px solid var(--border); }
+  .proj .pi { width: 32px; height: 32px; border-radius: var(--r); background: var(--muted); display: grid; place-items: center; color: var(--primary); }
+  .proj b { color: var(--hi); font-size: 14px; display: block; line-height: 1.2; }
+  .proj small { color: var(--dim); font-size: 12px; }
+  .nav { padding: 8px 8px 0; flex: 1; overflow: hidden; }
+  .it { padding: 5px 8px; border-radius: calc(var(--r) * .6); color: var(--fg); display: flex; gap: 8px; align-items: center; min-width: 0; }
+  .it.big { font-weight: 500; color: var(--hi); }
+  .it.on { background: var(--accent); color: var(--hi); }
+  .f-sharp .it.on { box-shadow: inset 2px 0 0 var(--primary); }
+  .it .end { margin-left: auto; }
+  .it .cnt { background: var(--yellow); color: var(--pfg); font-size: 10.5px; font-weight: 700; border-radius: 8px; padding: 0 6px; }
+  .lbl { color: var(--dim); font-size: 12.5px; font-weight: 600; padding: 12px 8px 4px; display: flex; align-items: center; gap: 6px; }
+  .lbl .i { width: 12px; height: 12px; }
+  .f-sharp .lbl { font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; font-weight: 500; }
+  .f-sharp .lbl::after { content: ''; flex: 1; border-top: 1px dashed var(--border); }
+  .tg { font-family: var(--mono); color: color-mix(in srgb, var(--dim) 75%, transparent); font-size: 12px; letter-spacing: -.05em; width: 18px; flex: none; }
+  .tree .it { padding-left: 14px; }
+  .tree .sub { padding-left: 28px; }
+  .f-tree .tree .sub { padding-left: 16px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+  .me { margin-top: auto; border-top: 1px solid var(--border); padding: 10px 12px; }
+  .me .av { width: 32px; height: 32px; font-size: 12px; }
+  .me b { display: block; color: var(--hi); font-size: 13px; line-height: 1.2; }
+  .me small { color: var(--dim); font-size: 12px; }
+
+  /* main */
+  .head { height: 64px; padding: 0 16px 0 18px; border-bottom: 1px solid var(--border); flex: none; }
+  .head .hash { color: var(--dim); font-size: 22px; font-weight: 300; }
+  .head b { color: var(--hi); font-size: 15px; display: block; line-height: 1.2; }
+  .head small { color: var(--dim); font-size: 12px; }
+  .tabs { height: 44px; border-bottom: 1px solid var(--border); padding: 0 18px; gap: 4px; flex: none; }
+  .tab { padding: 0 10px; height: 44px; display: flex; align-items: center; gap: 6px; color: var(--fg); font-size: 14px; border-bottom: 2px solid transparent; }
+  .tab.on { color: var(--hi); border-bottom-color: var(--hi); font-weight: 500; }
+  .f-sharp .tab.on { border-bottom-color: var(--primary); }
+  .tab .n { background: var(--accent); border-radius: 6px; padding: 0 6px; font-size: 11px; }
+  .tabs .live { margin-left: auto; font-size: 12px; color: var(--dim); }
+  .msgs { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; gap: 18px; padding: 16px 22px 10px; }
+  .msg { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 14px; }
+  .meta { display: flex; gap: 8px; align-items: baseline; margin-bottom: 2px; }
+  .who { font-weight: 600; color: var(--hi); }
+  .pill { background: var(--accent); color: var(--fg); font-size: 11px; font-weight: 500; padding: 1px 7px; border-radius: 6px; }
+  .tag { color: var(--dim); font-size: 12px; }
+  .t { color: var(--dim); font-size: 11.5px; }
+  .body { color: var(--fg); }
+  .body p { margin: 0 0 6px; }
+  .body ul { margin: 0 0 4px; padding-left: 20px; }
+  .body li { margin: 2px 0; }
+  .f-mono .body ul { list-style: none; padding-left: 4px; }
+  .f-mono .body li::before { content: '– '; color: var(--dim); font-family: var(--mono); }
+
+  /* tool call: today = card, terminal = prompt line */
+  .tool { margin: 8px 0 4px; border: 1px solid var(--border); border-radius: var(--r); padding: 10px 12px; font-family: var(--mono); font-size: 12px; max-width: 720px; }
+  .tool .cmd { display: flex; gap: 8px; align-items: center; color: var(--hi); }
+  .tool .verb { font-family: var(--sans); font-weight: 600; font-size: 13px; }
+  .tool .arg { color: var(--fg); }
+  .tool .out { color: var(--fg); margin-top: 6px; white-space: pre; }
+  .tool .ok { margin-left: auto; color: var(--green); }
+  .f-tool .tool { border: none; border-left: 2px solid color-mix(in srgb, var(--ac, var(--primary)) 70%, transparent); border-radius: 0; background: color-mix(in srgb, var(--canvas) 55%, var(--bg)); padding: 6px 12px; }
+  .f-tool .tool .verb { font-family: var(--mono); font-weight: 500; font-size: 12px; }
+  .f-tool .tool .out { color: var(--dim); margin-top: 2px; }
+  .f-tool .tool .pr { color: var(--ac, var(--primary)); }
+
+  /* diff */
+  .diff { margin: 8px 0 4px; border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; max-width: 720px; font-family: var(--mono); font-size: 12px; }
+  .diff .dh { display: flex; align-items: center; gap: 10px; padding: 8px 12px; font-family: var(--sans); font-size: 12px; color: var(--fg); }
+  .diff .dh .cp { margin-left: auto; font-weight: 500; color: var(--fg); font-size: 13px; }
+  .diff .ln { display: grid; grid-template-columns: 0 18px 1fr; padding: 0 12px; white-space: pre; line-height: 1.4; color: var(--fg); }
+  .diff .ln .g { visibility: hidden; color: var(--dim); }
+  .diff .body2 { padding: 2px 0 10px; }
+  .diff .ln.full > span:last-child { grid-column: 2 / -1; }
+  .f-tool .diff .dh { font-family: var(--mono); background: var(--muted); border-bottom: 1px solid var(--border); padding: 6px 12px; }
+  .f-tool .diff .dh .cp { font-size: 12px; color: var(--dim); }
+  .f-tool .diff .ln { grid-template-columns: 30px 16px 1fr; padding: 0 12px 0 0; }
+  .f-tool .diff .ln .g { visibility: visible; text-align: right; padding-right: 10px; opacity: .7; }
+  .f-tool .diff .ln.add { background: color-mix(in srgb, var(--green) 11%, transparent); }
+  .f-tool .diff .ln.del { background: color-mix(in srgb, var(--red) 11%, transparent); }
+  .f-tool .diff .ln.add .s { color: var(--green); }
+  .f-tool .diff .ln.del .s { color: var(--red); }
+  .f-tool .diff .ln.hunk { color: var(--cyan); background: color-mix(in srgb, var(--cyan) 6%, transparent); }
+  .f-tool .diff .body2 { padding: 4px 0; }
+
+  /* composer */
+  .compwrap { padding: 4px 20px 12px; flex: none; }
+  .compwrap .hint { color: var(--dim); font-size: 12px; padding: 0 2px 6px; }
+  .comp { border: 1px solid var(--border); border-radius: var(--r); background: var(--muted); padding: 0 8px 0 12px; height: 46px; display: flex; align-items: center; gap: 10px; color: var(--dim); font-size: 14px; }
+  .comp .p { color: var(--primary); font-family: var(--mono); font-size: 15px; }
+  .comp .end { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .comp .send { width: 30px; height: 30px; border-radius: calc(var(--r) * .7); background: var(--primary); color: var(--pfg); display: grid; place-items: center; }
+  .foot { display: flex; justify-content: space-between; color: var(--dim); font-size: 12px; padding: 7px 2px 0; }
+
+  /* right */
+  .seg { margin: 10px 10px 4px; background: var(--muted); border-radius: var(--r); padding: 3px; display: grid; grid-template-columns: repeat(3, 1fr); text-align: center; font-size: 14px; }
+  .seg span { padding: 5px 0; border-radius: calc(var(--r) * .7); color: var(--fg); }
+  .seg span.on { background: var(--accent); color: var(--hi); font-weight: 600; box-shadow: 0 0 0 1px var(--border) inset; }
+  .card { margin: 8px 10px 0; border: 1px solid var(--border); border-radius: var(--r); padding: 12px 14px; }
+  .card h4 { margin: 0 0 8px; font-size: 14px; color: var(--hi); font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .card h4 .st { margin-left: auto; font-size: 11.5px; background: var(--accent); padding: 1px 8px; border-radius: 6px; font-weight: 600; }
+  .kv { display: flex; align-items: center; justify-content: space-between; padding: 3px 0; font-size: 12.5px; }
+  .kv .k { color: var(--dim); display: flex; align-items: center; gap: 7px; }
+  .kv .k .i { width: 13px; height: 13px; }
+  .kv .v { color: var(--hi); }
+  .f-kv .kv { font-family: var(--mono); font-size: 12px; justify-content: flex-start; }
+  .f-kv .kv .lead { flex: 1; margin: 0 6px; border-bottom: 1px dotted color-mix(in srgb, var(--dim) 60%, transparent); transform: translateY(-4px); }
+  .mem { display: flex; gap: 10px; align-items: center; padding: 5px 0; }
+  .mem .av { width: 32px; height: 32px; font-size: 11px; }
+  .mem b { display: block; color: var(--hi); font-size: 13px; line-height: 1.2; font-weight: 600; }
+  .mem small { color: var(--dim); font-size: 12px; }
+  .mem .end { margin-left: auto; }
+  .btn { margin-top: 8px; border: 1px solid var(--border); border-radius: calc(var(--r) * .7); text-align: center; padding: 6px; font-weight: 500; color: var(--hi); display: flex; justify-content: center; gap: 8px; align-items: center; }
+  .rq { font-size: 12.5px; }
+  .rq .row { padding: 6px 8px; border-radius: calc(var(--r) * .6); background: color-mix(in srgb, var(--yellow) 8%, transparent); border: 1px solid color-mix(in srgb, var(--yellow) 30%, transparent); }
+
+  /* status line */
+  .sbar { display: flex; align-items: center; gap: 16px; padding: 0 12px 0 0; font-family: var(--mono); font-size: 11.5px; color: var(--dim); background: var(--bg); border-top: 1px solid var(--border); }
+  .sbar .mode { height: 100%; display: flex; align-items: center; padding: 0 10px; background: var(--primary); color: var(--pfg); font-weight: 700; letter-spacing: .04em; }
+  .sbar .warn { color: var(--yellow); }
+  .sbar .push { margin-left: auto; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2M15 20v2M2 15h2M2 9h2M20 15h2M20 9h2M9 2v2M9 20v2"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
+  <symbol id="i-hash" viewBox="0 0 24 24"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/></symbol>
+  <symbol id="i-branch" viewBox="0 0 24 24"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-msgs" viewBox="0 0 24 24"><path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><path d="M12 22v-5M9 8V2M15 8V2M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8z"/></symbol>
+  <symbol id="i-term" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6M12 19h8"/></symbol>
+  <symbol id="i-at" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/></symbol>
+  <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/></symbol>
+  <symbol id="i-hex" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></symbol>
+  <symbol id="i-act" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></symbol>
+</svg>
+
+<div class="intro">
+  <h1>Terminal, mixed into today's Discard</h1>
+  <p>Today's layout and controls stay. Each terminal piece is a switch: turn one off to see today's version of that part. "Today" turns them all off. Shown in your Atom One Dark theme; mono text uses SF Mono, the font in your Ghostty config.</p>
+</div>
+
+<div class="bar" id="bar">
+  <button class="preset" data-choice="preset-mix" id="p-mix">Full mix</button>
+  <button class="preset" data-choice="preset-today" id="p-today">Today</button>
+  <span class="sep"></span>
+  <button class="chip on" data-f="mono" data-choice="toggle-mono">Mono structure</button>
+  <button class="chip on" data-f="ansi" data-choice="toggle-ansi">Agent colors</button>
+  <button class="chip on" data-f="live" data-choice="toggle-live">Spinners + cursor</button>
+  <button class="chip on" data-f="tool" data-choice="toggle-tool">Terminal tool calls + diffs</button>
+  <button class="chip on" data-f="tree" data-choice="toggle-tree">Branch tree</button>
+  <button class="chip on" data-f="kv" data-choice="toggle-kv">Dotted key-values</button>
+  <button class="chip on" data-f="sharp" data-choice="toggle-sharp">Sharper corners + rules</button>
+  <button class="chip on" data-f="sbar" data-choice="toggle-sbar">Status line</button>
+</div>
+
+<div class="stage" id="stage"><div class="scaler" id="scaler">
+<div class="win f-mono f-ansi f-live f-tool f-tree f-kv f-sharp f-sbar" id="win">
+
+  <div class="title">
+    <div class="row app"><svg class="i"><use href="#i-hex"/></svg>Discard</div>
+    <div class="mid"><span class="m">feat/agent-harness</span> — agent workspace</div>
+    <div class="row end"><svg class="i"><use href="#i-act"/></svg><svg class="i"><use href="#i-gear"/></svg></div>
+  </div>
+
+  <div class="shell">
+    <!-- left -->
+    <div class="pane left">
+      <div class="rail">
+        <div class="ri"><svg class="i" style="width:18px;height:18px"><use href="#i-msgs"/></svg></div>
+        <div class="rsep"></div>
+        <div class="ri on"><svg class="i" style="width:20px;height:20px"><use href="#i-hex"/></svg><span class="badge">1</span></div>
+        <div class="ri m" style="font-weight:600">ir</div>
+        <div class="rsep"></div>
+        <div class="ri"><svg class="i"><use href="#i-plus"/></svg></div>
+      </div>
+      <div class="chan">
+        <div class="proj row">
+          <div class="pi"><svg class="i" style="width:18px;height:18px"><use href="#i-hex"/></svg></div>
+          <div style="min-width:0"><b>Discard</b><small class="m">~/git/personal/discard</small></div>
+          <svg class="i dimt" style="margin-left:auto"><use href="#i-chev"/></svg>
+        </div>
+        <div class="nav">
+          <div class="it big"><svg class="i"><use href="#i-monitor"/></svg>Overview</div>
+          <div class="it big"><svg class="i"><use href="#i-users"/></svg>Agents</div>
+          <div class="it big"><svg class="i"><use href="#i-cpu"/></svg>Memory</div>
+          <div class="it big"><svg class="i"><use href="#i-file"/></svg>Artifacts</div>
+          <div class="it big"><svg class="i"><use href="#i-gear"/></svg>Settings</div>
+
+          <div class="lbl"><svg class="i off-sharp"><use href="#i-chev"/></svg>Channels</div>
+          <div class="it on"><svg class="i"><use href="#i-hash"/></svg><span class="m trunc">feat/agent-harness</span></div>
+
+          <div class="lbl"><svg class="i off-sharp"><use href="#i-chev"/></svg>Branches &amp; worktrees</div>
+          <div class="tree">
+            <div class="it"><svg class="i off-tree"><use href="#i-chev"/></svg><svg class="i"><use href="#i-folder"/></svg><span class="m">main</span></div>
+            <div class="it sub a-b"><span class="tg on-tree">├─</span><svg class="i off-tree"><use href="#i-branch"/></svg><span class="m trunc">feat/agent-harness</span><span class="end"><span class="spin on-live">⠹</span><span class="dot off-live"></span></span></div>
+            <div class="it sub"><span class="tg on-tree">└─</span><svg class="i off-tree"><use href="#i-branch"/></svg><span class="m trunc">fix/worktree-cleanup</span></div>
+          </div>
+
+          <div class="lbl"><svg class="i off-sharp"><use href="#i-chev"/></svg>Integrations</div>
+          <div class="it big"><svg class="i"><use href="#i-term"/></svg>CLI connections</div>
+          <div class="it big"><svg class="i"><use href="#i-plug"/></svg>Lua plugins</div>
+          <div class="it big"><svg class="i"><use href="#i-shield"/></svg>Approvals<span class="end cnt">1</span></div>
+        </div>
+        <div class="me row">
+          <div class="av a-u">Y</div>
+          <div><b>You</b><small>Local workspace</small></div>
+          <svg class="i dimt" style="margin-left:auto"><use href="#i-gear"/></svg>
+        </div>
+      </div>
+    </div>
+
+    <!-- main -->
+    <div class="pane">
+      <div class="head row">
+        <span class="hash">#</span>
+        <div style="min-width:0"><b class="m">feat/agent-harness</b><small class="m">~/git/personal/discard</small></div>
+        <svg class="i dimt" style="margin-left:auto;width:18px;height:18px"><use href="#i-panel"/></svg>
+      </div>
+      <div class="tabs row">
+        <div class="tab on">Conversation</div>
+        <div class="tab">Changes <span class="n m">1</span></div>
+        <div class="tab">Run</div>
+        <div class="tab">Merge review</div>
+        <div class="live m a-b on-live"><span class="spin">⠹</span> builder is running tests</div>
+      </div>
+
+      <div class="msgs">
+        <div class="msg a-u">
+          <div class="av">YO</div>
+          <div>
+            <div class="meta"><span class="who">You</span><span class="t m">10:14</span></div>
+            <div class="body">Pick up the agent harness from yesterday. Keep the session adapter out of the UI layer, and test worktree cleanup before changing it.</div>
+          </div>
+        </div>
+
+        <div class="msg a-c">
+          <div class="av">CO</div>
+          <div>
+            <div class="meta"><span class="who">Coordinator</span><span class="pill off-mono">Agent</span><span class="tag m on-mono">[agent · claude]</span><span class="t m">10:15</span></div>
+            <div class="body">
+              <p>I'll check the worktree lifecycle and the session adapter, then update the cleanup path.</p>
+              <ul><li>Read the existing session boundaries</li><li>Verify that active worktrees are kept</li><li>Run the focused cleanup tests</li></ul>
+              <div class="tool">
+                <div class="cmd"><span class="pr on-tool">$</span><span class="off-tool dimt">&gt;_</span><span class="verb"><span class="on-tool">read</span><span class="off-tool">Read</span></span><span class="arg">crates/discard-core/src/worktree.rs</span><span class="ok on-tool">✓ 0.4s</span></div>
+                <div class="out">Worktree ownership is stored on the channel.
+An active session keeps its worktree until archive is confirmed.</div>
+              </div>
+              <p style="margin-top:12px">The cleanup guard belongs in the workspace layer. Here is the proposed change:</p>
+              <div class="diff">
+                <div class="dh"><span class="off-tool">Diff</span><span class="on-tool">src/worktree.rs</span><span class="on-tool" style="color:var(--green)">+3</span><span class="on-tool" style="color:var(--red)">−1</span><span class="cp"><span class="off-tool">Copy</span><span class="on-tool">copy</span></span></div>
+                <div class="body2">
+                  <div class="ln full off-tool"><span class="g"></span><span>--- a/src/worktree.rs</span></div>
+                  <div class="ln full off-tool"><span class="g"></span><span>+++ b/src/worktree.rs</span></div>
+                  <div class="ln full hunk"><span class="g"></span><span>@@ -12,3 +12,5 @@</span></div>
+                  <div class="ln"><span class="g">12</span><span class="s"> </span><span>fn cleanup(worktree: &amp;Worktree) {</span></div>
+                  <div class="ln del"><span class="g">13</span><span class="s">-</span><span>    remove(worktree.path());</span></div>
+                  <div class="ln add"><span class="g">13</span><span class="s">+</span><span>    if !worktree.has_active_session() {</span></div>
+                  <div class="ln add"><span class="g">14</span><span class="s">+</span><span>        remove(worktree.path());</span></div>
+                  <div class="ln add"><span class="g">15</span><span class="s">+</span><span>    }</span></div>
+                  <div class="ln"><span class="g">16</span><span class="s"> </span><span>}</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="msg a-b">
+          <div class="av">BU</div>
+          <div>
+            <div class="meta"><span class="who">Builder</span><span class="pill off-mono">Agent</span><span class="tag m on-mono">[agent · codex]</span><span class="t m">10:16</span></div>
+            <div class="body">
+              <div class="tool" style="margin-top:2px">
+                <div class="cmd"><span class="pr on-tool">$</span><span class="off-tool dimt">&gt;_</span><span class="verb"><span class="on-tool">run</span><span class="off-tool">Run</span></span><span class="arg">cargo test -p discard-core worktree</span><span class="ok on-tool" style="color:var(--dim)"><span class="spin on-live">⠹</span> 12s</span></div>
+                <div class="out">running 14 tests</div>
+              </div>
+              <p style="margin-top:8px">Running the focused cleanup tests before I touch the guard<span class="cur on-live"></span></p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="compwrap">
+        <div class="hint">Message Coordinator in <span class="m">#feat/agent-harness</span></div>
+        <div class="comp">
+          <span class="p on-mono">›</span>
+          <span>Message <span class="m">#feat/agent-harness</span></span>
+          <span class="end"><svg class="i" style="width:17px;height:17px"><use href="#i-at"/></svg><span class="send"><svg class="i"><use href="#i-send"/></svg></span></span>
+        </div>
+        <div class="foot"><span class="m">#feat/agent-harness</span><span class="m"><span class="on-mono">⏎ send · ⇧⏎ new line</span><span class="off-mono">Enter to send · Shift + Enter for new line</span></span></div>
+      </div>
+    </div>
+
+    <!-- right -->
+    <div class="pane">
+      <div class="seg"><span class="on">Context</span><span>Tasks</span><span>Artifacts</span></div>
+      <div class="card">
+        <h4><svg class="i"><use href="#i-branch"/></svg><span class="m">feat/agent-harness</span><span class="st">Active</span></h4>
+        <div class="kv"><span class="k"><svg class="i off-kv"><use href="#i-hash"/></svg>Channel</span><span class="lead on-kv"></span><span class="v m">feat/agent-harness</span></div>
+        <div class="kv"><span class="k"><svg class="i off-kv"><use href="#i-branch"/></svg>Branch</span><span class="lead on-kv"></span><span class="v m">feat/agent-harness</span></div>
+        <div class="kv"><span class="k"><svg class="i off-kv"><use href="#i-folder"/></svg>Worktree</span><span class="lead on-kv"></span><span class="v m">wt/agent-harness</span></div>
+        <div class="kv"><span class="k"><svg class="i off-kv"><use href="#i-act"/></svg>Upstream</span><span class="lead on-kv"></span><span class="v m">↑3 ↓0</span></div>
+        <div class="kv"><span class="k"><svg class="i off-kv"><use href="#i-act"/></svg>Status</span><span class="lead on-kv"></span><span class="v m">Running</span></div>
+      </div>
+      <div class="card">
+        <h4><svg class="i"><use href="#i-users"/></svg>Members</h4>
+        <div class="mem a-c"><div class="av">CO</div><div><b>Coordinator</b><small><span class="m">idle · claude</span></small></div><span class="end"><span class="dot" style="background:var(--dim)"></span></span></div>
+        <div class="mem a-b"><div class="av">BU</div><div><b>Builder</b><small><span class="m">running tests · codex</span></small></div><span class="end"><span class="spin on-live">⠹</span><span class="dot off-live"></span></span></div>
+        <div class="mem a-t"><div class="av">TE</div><div><b>Tester</b><small><span class="m">idle · claude</span></small></div><span class="end"><span class="dot" style="background:var(--dim)"></span></span></div>
+        <div class="btn"><svg class="i"><use href="#i-gear"/></svg>Agent settings</div>
+      </div>
+      <div class="card rq">
+        <h4><svg class="i"><use href="#i-shield"/></svg>Review queue</h4>
+        <div class="row"><span style="color:var(--yellow)">▲</span><span class="trunc">Builder wants to run <span class="m">cargo test</span></span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sbar">
+    <span class="mode">DISCARD</span>
+    <span>⎇ feat/agent-harness ↑3</span>
+    <span class="a-b"><span class="spin on-live">⠹</span><span class="off-live">●</span> builder 00:42</span>
+    <span>● coordinator idle</span>
+    <span class="push warn">▲ 1 approval</span>
+    <span>claude ✓ codex ✓</span>
+  </div>
+</div>
+</div></div>
+
+<div class="legend">
+  <div><b>Mono structure.</b> Names, paths, branches, timestamps, and hints use your terminal font. Message text stays in the system font.</div>
+  <div><b>Agent colors.</b> Each agent gets one ANSI color from the palette for its name, avatar tile, and spinner.</div>
+  <div><b>Spinners + cursor.</b> A braille spinner marks work in progress. A block cursor ends a streaming message.</div>
+  <div><b>Terminal tool calls + diffs.</b> Tool calls read as a <code>$</code> prompt with a result and time. Diffs get line numbers and tinted lines.</div>
+  <div><b>Branch tree.</b> Branches and worktrees draw as a tree with box characters.</div>
+  <div><b>Dotted key-values.</b> The Context panel lists facts like <code>branch ····· value</code>.</div>
+  <div><b>Sharper corners + rules.</b> Radius drops from 10 to 5. Section labels become small caps with a dashed rule. The active item gets an accent edge.</div>
+  <div><b>Status line.</b> A tmux-style bar under the window: project, branch, running agents, approvals, CLI connections.</div>
+</div>
+
+<script>
+  const win = document.getElementById('win');
+  const chips = [...document.querySelectorAll('.chip')];
+  function report() {
+    const on = chips.filter(c => c.classList.contains('on')).map(c => c.dataset.f);
+    if (window.brainstorm) window.brainstorm.send({ type: 'state', on });
+  }
+  chips.forEach(c => c.addEventListener('click', () => {
+    const f = c.dataset.f; const on = !c.classList.contains('on');
+    c.classList.toggle('on', on); win.classList.toggle('f-' + f, on); report();
+  }));
+  function preset(all) {
+    chips.forEach(c => { c.classList.toggle('on', all); win.classList.toggle('f-' + c.dataset.f, all); }); report();
+  }
+  function fit() {
+    const w = Math.min(window.innerWidth - 48, 1360); const s = Math.min(1, w / 1360);
+    document.getElementById('scaler').style.transform = `scale(${s})`;
+    const st = document.getElementById('stage'); st.style.width = (1360 * s) + 'px'; st.style.height = (860 * s) + 'px';
+  }
+  document.getElementById('p-mix').addEventListener('click', () => preset(true));
+  document.getElementById('p-today').addEventListener('click', () => preset(false));
+  addEventListener('resize', fit); fit();
+  const frames = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+  if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    let i = 0; setInterval(() => { i = (i + 1) % frames.length; document.querySelectorAll('.spin').forEach(s => s.textContent = frames[i]); }, 90);
+  }
+</script>
+</body>
+</html>

@@ -43,4 +43,5 @@ pub mod memory_items;
 pub mod mentions;
 pub mod conversation_context;
 pub mod worktree_context;
+pub mod project_context;
 pub mod worktree_access;

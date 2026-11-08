@@ -40,7 +40,7 @@ pub struct WorktreeAccess {
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> { mutex.lock().unwrap_or_else(|e| e.into_inner()) }
 
 // Arguments are app-owned. No shell, hooks, external diff, network, or force option.
-fn git(directory: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git(directory: &Path, args: &[&str]) -> Result<String, String> {
     let mut child = Command::new("git").current_dir(directory)
         .args(["--no-pager", "--no-optional-locks", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"])
         .args(args).env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
@@ -75,6 +75,20 @@ impl WorktreeAccess {
         if store.channel_archived(channel).map_err(|e| e.to_string())? || store.agent_archived(agent).map_err(|e| e.to_string())? { return Err("This agent or channel is archived.".into()); }
         if store.worktree_for(channel).map_err(|e| e.to_string())?.is_none() { return Err("This channel has no saved worktree binding.".into()); }
         Ok(())
+    }
+
+    /// Resolve file access from the token's conversation and project on every call.
+    pub fn project_context(&self, agent: &AgentId, project: Option<&ProjectId>, channel: &ChannelId) -> Result<crate::project_context::ProjectContext, String> {
+        let store = lock(&self.store);
+        let actual = store.load_channel(channel).map_err(|e| e.to_string())?;
+        if project.is_none() || actual.project_id.as_ref() != project {
+            return Err("Project tools require this conversation's project binding.".into());
+        }
+        if store.agent_archived(agent).map_err(|e| e.to_string())? {
+            return Err("This agent is archived.".into());
+        }
+        crate::project_context::ProjectContext::for_channel(&store, channel)?
+            .ok_or("This conversation has no project.".into())
     }
     fn inspect_bound(&self, channel: &ChannelId) -> Result<Inspection, String> {
         let record = {

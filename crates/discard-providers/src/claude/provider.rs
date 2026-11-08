@@ -489,7 +489,7 @@ mod tests {
             let allowed = args.iter().position(|arg| arg == "--allowedTools").expect("scoped memory permission list");
             assert_eq!(
                 args[allowed + 1],
-                "mcp__discard-memory__memory_search,mcp__discard-memory__memory_list,mcp__discard-memory__memory_read,mcp__discard-memory__memory_save,mcp__discard-memory__memory_edit,mcp__discard-memory__memory_forget,mcp__discard-memory__worktree_inspect,mcp__discard-memory__worktree_request_removal"
+                "mcp__discard-memory__memory_search,mcp__discard-memory__memory_list,mcp__discard-memory__memory_read,mcp__discard-memory__memory_save,mcp__discard-memory__memory_edit,mcp__discard-memory__memory_forget,mcp__discard-memory__worktree_inspect,mcp__discard-memory__worktree_request_removal,mcp__discard-memory__project_list_files,mcp__discard-memory__project_read_file,mcp__discard-memory__project_search"
             );
             assert!(args.windows(2).any(|pair| pair == ["--tools", ""]));
         }

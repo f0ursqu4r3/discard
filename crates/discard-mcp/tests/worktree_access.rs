@@ -50,3 +50,29 @@ async fn scoped_http_tool_requests_removal_but_only_app_approval_executes_it() {
     for token in [&prepared.token,&summary.token,&next.token] {runtime.finish(token);}
     runtime.shutdown().await;
 }
+
+#[tokio::test]
+async fn general_channel_runtime_exposes_project_files_without_worktree_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("project"); std::fs::create_dir(&repo).unwrap();
+    std::fs::write(repo.join("README.md"), "Project overview").unwrap();
+    let store = Store::open_in_memory().unwrap();
+    let agent = store.create_agent(&AgentConfig { name:"Agent".into(),provider:"fake".into(),model:Some("test".into()),avatar:None,reasoning_effort:None,system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false }).unwrap();
+    let project = store.import_project_folder(&repo).unwrap();
+    let channel = store.ensure_project_general_channel(&project.id, &agent).unwrap();
+    let access = Arc::new(WorktreeAccess::new(Arc::new(Mutex::new(store))));
+    let memory = Arc::new(MemoryStore::open_in_memory_index(&dir.path().join("memory")).unwrap());
+    let runtime = MemoryRuntime::start_with_services(memory, &dir.path().join("runtime"), None, Some(access)).await.unwrap();
+    let prepared = runtime.prepare_turn(&agent, Some(&project.id), &channel.id, None, false, "What is this project?").unwrap();
+    assert!(prepared.system_prompt.contains("project_read_file"));
+    assert!(!prepared.system_prompt.contains("Worktree access:"));
+    let config: Value = serde_json::from_slice(&std::fs::read(&prepared.mcp_config).unwrap()).unwrap();
+    let listing = call(&config, "project_list_files").await;
+    assert_eq!(listing["result"]["isError"], false, "{listing}");
+    assert!(listing.to_string().contains("README.md"));
+    let summary = runtime.prepare_summary(&agent, Some(&project.id), &channel.id).unwrap();
+    let summary_config: Value = serde_json::from_slice(&std::fs::read(&summary.mcp_config).unwrap()).unwrap();
+    assert!(call(&summary_config, "project_list_files").await["error"].is_object());
+    for token in [&prepared.token, &summary.token] { runtime.finish(token); }
+    runtime.shutdown().await;
+}

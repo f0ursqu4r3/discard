@@ -312,6 +312,57 @@ async fn worktree_facts_reach_each_reply_without_entering_history_or_direct_chat
 }
 
 #[tokio::test]
+async fn general_project_context_reaches_followups_without_polluting_history() {
+    let mut rig = Rig::new(vec![Step::text("direct answer"), Step::idle()]).await;
+    rig.commands.send(Command::Send("Hello".into())).unwrap();
+    rig.done().await;
+    assert!(!rig.probe.sent.lock().unwrap()[0].contains("<project-context>"));
+    rig.task.abort();
+    let _ = (&mut rig.task).await;
+    let repo = rig._dir.path().join("project");
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::write(repo.join("README.md"), "Discard is an agent workspace.").unwrap();
+    let (channel, session) = {
+        let store = rig.store.lock().unwrap();
+        let project = store.import_project_folder(&repo).unwrap();
+        let channel = store.ensure_project_general_channel(&project.id, &rig.agent).unwrap();
+        let session = store.latest_session(&channel.id).unwrap().unwrap();
+        (channel, session)
+    };
+    let provider = Arc::new(FakeProvider::new(vec![Step::text("project answer"), Step::idle()]));
+    let probe = provider.probe.clone();
+    let engine = Engine {
+        reasoning_effort: None, mode: SessionMode::Conversation, providers: vec![provider.clone()],
+        store: rig.store.clone(), agent_id: rig.agent.clone(), project_id: channel.project_id.clone(),
+        memory: Some(rig.runtime.clone()), plugin_write: false, workspace_mode: WorkspaceMode::MainCheckout,
+        workspace: None, observer: None, channel_name: channel.name.clone(), provider,
+        channel_id: channel.id.clone(), session_id: session, cwd: rig._dir.path().join("empty"),
+        model: None, system_prompt: None, policy: ApprovalPolicy::Ask,
+    };
+    let (commands, rx) = mpsc::unbounded_channel();
+    let (tx, updates) = mpsc::unbounded_channel();
+    rig.commands = commands;
+    rig.updates = updates;
+    rig.task = tokio::spawn(engine.run(rx, tx));
+    rig.commands.send(Command::Send("What can you tell me about this project?".into())).unwrap();
+    rig.done().await;
+    std::fs::write(repo.join("README.md"), "Discard manages projects and agents.").unwrap();
+    rig.commands.send(Command::Send("What changed?".into())).unwrap();
+    rig.done().await;
+    let sent = probe.sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 2);
+    assert!(sent[0].contains("Discard is an agent workspace."));
+    assert!(sent[1].contains("Discard manages projects and agents."));
+    assert!(!sent[1].contains("Discard is an agent workspace."));
+    assert!(sent[1].contains("project answer"));
+    assert!(sent.iter().all(|input| input.matches("<project-context>").count() == 1));
+    assert!(sent.iter().all(|input| !input.contains("<worktree-snapshot>")));
+    let history = rig.store.lock().unwrap().messages_for_channel(&channel.id).unwrap();
+    assert!(!history.iter().any(|message| format!("{:?}", message.blocks).contains("<project-context>")));
+    rig.close().await;
+}
+
+#[tokio::test]
 async fn conversation_prompt_refreshes_topic_without_writing_it_to_the_transcript() {
     let mut rig = Rig::new(vec![Step::text("first answer"), Step::text("second answer"), Step::idle()]).await;
     rig.store.lock().unwrap().save_channel_topic(&rig.channel, 0, "Old topic", discard_core::model::TopicAuthorKind::User, None).unwrap();

@@ -24,6 +24,31 @@ Each channel can have a versioned plain-text topic. Topic edits use an expected 
 
 Selecting a project or branch channel does not switch Git branches or create a worktree. Normal Conversation mode still uses the provider adapter's empty working directory. Each unmentioned project message uses the current project main agent, including messages in existing branch and detached worktree channels. The channel's saved agent is a fallback when no project main agent exists. Each response keeps the configuration selected when it starts; a default change affects the next response.
 
+## Project files in conversations
+
+Before each Conversation-mode reply, Discard resolves the project from the saved conversation. It supplies
+the project name, channel, folder, a bounded file list, and a README excerpt. A saved worktree takes precedence
+over the project folder. Without a worktree binding, the context explicitly describes the project folder's
+current checkout. It does not claim that this checkout matches a branch channel's name. Direct chats without
+a project receive no project context. Sidebar selection and the provider's empty working directory do not
+change this scope. The context counts toward the input budget and never becomes a transcript message.
+
+The scoped MCP server provides `project_list_files`, `project_read_file`, and `project_search` for follow-up
+questions. These tools validate the token's project and conversation on each call. General channels can use
+them without a worktree binding. Worktree-only tools are not listed for general channels. Summary sessions
+and plugin tokens cannot use project tools. File content is reference data, not agent instructions.
+
+File tools accept relative paths. They reject parent traversal, symlinks, special files, hidden paths except
+`.github`, common build directories, and key files. Git projects expose tracked and nonignored files.
+Other folders use a bounded directory walk. File reads accept UTF-8 text up to 256 KiB and return up to
+200 lines or 8 KiB per call. Listing supports offsets. Search uses literal, case-sensitive text and scans
+up to 100 files with up to 40 matches or 8 KiB of excerpts. Results report continuation, skipped files,
+and partial search results. Large directory listings ask for a narrower directory.
+
+The prompt asks the agent to answer from supplied facts, use project tools for missing details, and retain
+conversation context for follow-ups. It should not ask users to paste accessible files or treat an empty
+generic MCP resource list as proof that the project is unavailable.
+
 ## Worktree snapshots
 
 Before each Conversation-mode reply in a channel with a saved worktree binding, Discard runs bounded read-only

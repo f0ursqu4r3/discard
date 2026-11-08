@@ -91,9 +91,9 @@ async function copy() {
       :class="compact ? 'py-1' : 'py-2'"
     >
       <MarkerIcon><Info /></MarkerIcon>
-      <MarkerContent class="whitespace-pre-wrap">{{
-        systemText
-      }}</MarkerContent>
+      <MarkerContent class="whitespace-pre-wrap">
+        {{ systemText }}
+      </MarkerContent>
     </Marker>
     <article
       v-else
@@ -169,10 +169,11 @@ async function copy() {
         :delay-duration="500"
         :skip-delay-duration="0"
       >
+        <!-- Keep button transitions off visibility so the toolbar hides as one unit. -->
         <div
           role="group"
           aria-label="Message actions"
-          class="absolute right-0 top-[-80%] z-10 invisible flex gap-0.5 rounded-md border bg-background p-1 shadow-sm group-hover:visible group-focus-within:visible"
+          class="absolute right-0 top-0 -translate-y-3/4 z-10 invisible flex gap-0.5 rounded-md border bg-background p-1 shadow-sm group-hover:visible group-focus-within:visible"
         >
           <Tooltip>
             <TooltipTrigger as-child>
@@ -180,6 +181,7 @@ async function copy() {
                 :disabled="!target.hasText"
                 variant="ghost"
                 size="icon-xs"
+                class="transition-colors"
                 aria-label="Copy message"
                 @click="copy"
               >
@@ -194,6 +196,7 @@ async function copy() {
                 :disabled="quoteDisabled || !target.hasText"
                 variant="ghost"
                 size="icon-xs"
+                class="transition-colors"
                 aria-label="Quote message"
                 @click="quote"
               >
@@ -215,6 +218,7 @@ async function copy() {
                   disabled
                   variant="ghost"
                   size="icon-xs"
+                  class="transition-colors"
                   aria-label="Start thread — Soon"
                 >
                   <MessagesSquare aria-hidden="true" />

@@ -343,7 +343,11 @@ async fn conversation_startup_disables_inherited_servers_before_prompt_and_clean
     assert_eq!(request["params"]["model"], "exact-model");
     assert_eq!(request["params"]["config"]["mcp_servers"]["inherited"]["enabled"], false);
     assert_eq!(request["params"]["developerInstructions"], "Synthetic scoped memory.");
-    assert_eq!(request["params"]["config"]["mcp_servers"]["discard-memory"]["enabled_tools"].as_array().unwrap().len(), 6);
+    assert_eq!(
+        request["params"]["config"]["mcp_servers"]["discard-memory"]["enabled_tools"],
+        json!(["memory_search", "memory_list", "memory_read", "memory_save", "memory_edit", "memory_forget",
+            "worktree_inspect", "worktree_request_removal", "project_list_files", "project_read_file", "project_search"])
+    );
     let cwd = PathBuf::from(request["params"]["cwd"].as_str().unwrap());
     assert!(std::fs::read_dir(&cwd).unwrap().next().is_none());
     let catalog = cwd.parent().unwrap().join("models.json");
