@@ -12,7 +12,7 @@ import {
 import { mentionQuery, mentionToken } from './mentions'
 import AttachmentCard from './AttachmentCard.vue'
 import type { AttachmentDto } from '../bridge/types'
-import { Send, Square, AtSign, Paperclip, LoaderCircle } from '@lucide/vue'
+import { Send, Square, AtSign, Paperclip, LoaderCircle, ChevronRight } from '@lucide/vue'
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from './ui/input-group'
 import { maySend, mayStop } from './composer'
 const props = defineProps<{
@@ -421,7 +421,9 @@ function keydown(event: KeyboardEvent) {
             <Paperclip v-else />
           </InputGroupButton>
         </InputGroupAddon>
-        <span aria-hidden="true" class="font-mono text-primary">›</span>
+        <span aria-hidden="true" class="flex h-8 shrink-0 items-center text-primary">
+          <ChevronRight class="size-3.5" />
+        </span>
         <InputGroupTextarea
           v-model="text"
           data-ui-id="composer-input"
