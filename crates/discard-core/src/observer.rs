@@ -74,7 +74,7 @@ mod tests {
     #[test]
     fn an_approval_request_carries_ids_and_the_tool_but_not_the_input() {
         let id = ApprovalId("a1".into());
-        let kind = EventKind::ApprovalRequest { approval_id: id, call_id: "c1".into(), tool: "Bash".into(), input: json!({"command": "rm -rf x"}) };
+        let kind = EventKind::ApprovalRequest { kind: Default::default(), paths: vec![],  approval_id: id, call_id: "c1".into(), tool: "Bash".into(), input: json!({"command": "rm -rf x"}) };
         assert_eq!(from_event(&kind).unwrap(), ("approval_requested", json!({ "approval_id": "a1", "call_id": "c1", "tool": "Bash" })));
     }
 
@@ -102,7 +102,7 @@ mod tests {
         let kinds = [
             EventKind::ToolCallStart { call_id: "c".into(), name: "n".into(), input: json!({}) },
             EventKind::ToolCallResult { call_id: "c".into(), output: String::new(), is_error: false },
-            EventKind::ApprovalRequest { approval_id: ApprovalId("a".into()), call_id: "c".into(), tool: "t".into(), input: json!({}) },
+            EventKind::ApprovalRequest { kind: Default::default(), paths: vec![],  approval_id: ApprovalId("a".into()), call_id: "c".into(), tool: "t".into(), input: json!({}) },
             EventKind::StatusChange { status: AgentStatus::Idle },
         ];
         let mut names: Vec<&str> = kinds.iter().filter_map(from_event).map(|(n, _)| n).collect();

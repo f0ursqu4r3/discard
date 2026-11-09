@@ -478,3 +478,45 @@ async fn conversation_version_timeout_kills_setup_process() {
     assert!(error.contains("timed out"), "{error}");
     assert_setup_process_terminated(&rig.pid_file()).await;
 }
+
+#[tokio::test]
+async fn workspace_thread_starts_in_the_granted_directory() {
+    let rig = Rig::new(); let mut s = conversation_spec(&rig);
+    s.mode = discard_core::provider::SessionMode::Workspace; s.cwd = rig.dir.path().canonicalize().unwrap();
+    let mut session = rig.provider("approval").with_env("CODEX_HOME", rig.dir.path()).start_session(s.clone()).await.unwrap();
+    session.send_user_message("synthetic").await.unwrap();
+    let log = rig.log_text();
+    let params = log.lines().filter_map(|l| l.strip_prefix("STDIN ")).filter_map(|l| serde_json::from_str::<Value>(l).ok()).find(|v| v["method"] == "thread/start").unwrap();
+    assert_eq!(params["params"]["cwd"], s.cwd.to_string_lossy().as_ref());
+    assert_eq!(params["params"]["sandbox"], "workspace-write");
+    assert!(params["params"]["config"]["mcp_servers"]["discard-memory"]["enabled_tools"].as_array().unwrap().contains(&json!("worktree_commit")));
+    assert!(log.contains(&format!("CWD {}", s.cwd.display())));
+}
+
+#[tokio::test]
+async fn workspace_repairs_stale_catalog_and_keeps_native_write_tools() {
+    let rig = Rig::new(); let mut s = conversation_spec(&rig);
+    s.mode = discard_core::provider::SessionMode::Workspace; s.cwd = rig.dir.path().canonicalize().unwrap();
+    let path = rig.dir.path().join("models_cache.json"); let refreshed = rig.dir.path().join("refreshed-cache.json");
+    let mut cache: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    cache["models"][0]["shell_type"] = json!("default"); cache["models"][0]["apply_patch_tool_type"] = json!("freeform");
+    std::fs::write(&refreshed, cache.to_string()).unwrap();
+    std::fs::write(&path, json!({"client_version":"0.167.0","models":[]}).to_string()).unwrap();
+    let session = rig.provider("approval").with_env("CODEX_HOME", rig.dir.path()).with_env("FAKE_CODEX_REFRESH_CACHE", &refreshed).start_session(s).await.unwrap();
+    assert_eq!(rig.received().iter().filter(|v| v["method"] == "model/list").count(), 1);
+    let request = rig.request("thread/start");
+    assert_eq!(request["params"]["sandbox"], "workspace-write");
+    let catalog: Value = serde_json::from_slice(&std::fs::read(request["params"]["config"]["model_catalog_json"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(catalog["models"][0]["shell_type"], "default");
+    assert_eq!(catalog["models"][0]["apply_patch_tool_type"], "freeform");
+    drop(session);
+}
+
+#[tokio::test]
+async fn workspace_missing_model_keeps_setup_error() {
+    let rig = Rig::new(); let mut s = conversation_spec(&rig);
+    s.mode = discard_core::provider::SessionMode::Workspace; s.cwd = rig.dir.path().canonicalize().unwrap(); s.model = None;
+    let error = rig.provider("approval").with_env("CODEX_HOME", rig.dir.path()).start_session(s).await.err().unwrap();
+    assert!(matches!(error, ProviderError::Setup(_)), "{error:?}");
+    assert!(error.to_string().contains("select an exact Codex model"));
+}

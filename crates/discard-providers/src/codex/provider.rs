@@ -70,9 +70,9 @@ impl CodexProvider {
         Ok(home)
     }
 
-    async fn conversation_catalog(&self, home: &Path, model: &str) -> Result<(Value, Option<u64>), ProviderError> {
+    async fn conversation_catalog(&self, home: &Path, model: &str, tools: crate::conversation::CatalogTools) -> Result<(Value, Option<u64>), ProviderError> {
         use crate::conversation::{load_catalog, setup};
-        if let Ok(catalog) = load_catalog(home, model) {
+        if let Ok(catalog) = load_catalog(home, model, tools) {
             return Ok(catalog);
         }
         // A model-list probe starts no thread and sends no user message. Let the
@@ -82,7 +82,7 @@ impl CodexProvider {
         command.env("CODEX_HOME", home);
         crate::models::codex(command).await
             .map_err(|error| setup(format!("Automatic Codex model refresh failed: {error}")))?;
-        load_catalog(home, model)
+        load_catalog(home, model, tools)
             .map_err(|error| setup(format!("Codex model cache is still unavailable after one automatic refresh: {error}")))
     }
 
@@ -128,7 +128,7 @@ impl CodexProvider {
 /// Returns the method name and its params.
 pub fn thread_params(spec: &SessionSpec) -> (&'static str, Value) {
     let (policy, sandbox) = match (spec.mode, spec.enforcement) {
-        (SessionMode::Coding, EnforcementMode::HostPrompts) => ("untrusted", "workspace-write"),
+        (SessionMode::Coding | SessionMode::Workspace, EnforcementMode::HostPrompts) => ("untrusted", "workspace-write"),
         _ => ("never", "read-only"),
     };
     let mut params = json!({"cwd": spec.cwd.to_string_lossy(), "approvalPolicy": policy, "sandbox": sandbox});
@@ -145,8 +145,8 @@ pub fn thread_params(spec: &SessionSpec) -> (&'static str, Value) {
         }
         None => {
             // Saved threads can be resumed in a later process.
-            params["ephemeral"] = json!(spec.mode == SessionMode::Conversation);
-            if spec.mode == SessionMode::Conversation {
+            params["ephemeral"] = json!(spec.mode.replays_transcript());
+            if spec.mode.replays_transcript() {
                 params["allowProviderModelFallback"] = json!(false);
             }
             ("thread/start", params)
@@ -212,16 +212,20 @@ impl Provider for CodexProvider {
     }
 
     fn model_context_window(&self, model: &str) -> Option<u64> {
-        crate::conversation::load_catalog(&self.codex_home().ok()?, model).ok()?.1
+        crate::conversation::load_catalog(&self.codex_home().ok()?, model, crate::conversation::CatalogTools::None).ok()?.1
     }
 
     async fn start_session(&self, mut spec: SessionSpec) -> Result<Box<dyn ProviderSession>, ProviderError> {
+        let workspace = spec.mode == SessionMode::Workspace;
+        if workspace && (spec.enforcement != EnforcementMode::HostPrompts || !spec.cwd.is_absolute() || !spec.cwd.is_dir()) {
+            return Err(ProviderError::SandboxUnavailable("workspace sessions require host approvals and an existing absolute directory".into()));
+        }
         // Fail closed before any process starts.
         self.matrix.supports(spec.enforcement)?;
         let mut files = None;
         let mut startup_args = Vec::new();
         let mut expected_controls = None;
-        if spec.mode == SessionMode::Conversation {
+        if spec.mode.replays_transcript() {
             use crate::conversation::*;
             read_memory_config(&spec)?;
             if spec.resume_handle.is_some() {
@@ -236,17 +240,18 @@ impl Provider for CodexProvider {
                 return Err(setup("Codex 0.166.0 is required for the verified conversation controls"));
             }
             let owned = ConversationFiles::new()?;
-            spec.cwd = owned.cwd.clone();
-            let (catalog, _) = self.conversation_catalog(&self.codex_home()?, model).await?;
+            if !workspace { spec.cwd = owned.cwd.clone(); }
+            let tools = if workspace { CatalogTools::Workspace } else { CatalogTools::None };
+            let (catalog, _) = self.conversation_catalog(&self.codex_home()?, model, tools).await?;
             let catalog_path = owned.root.path().join("models.json");
             std::fs::write(&catalog_path, catalog.to_string()).map_err(|e| setup(e.to_string()))?;
             startup_args.extend(["-c".into(), format!("model_catalog_json={}", json!(catalog_path))]);
             // A config-only app-server starts no thread, model request, or external MCP client.
-            let initial = codex_controls(&json!({}))?;
+            let initial = codex_controls(&json!({}), tools)?;
             let mut probe_args = startup_args.clone();
             probe_args.extend(config_args(&initial));
             let effective = self.read_effective_config(&spec.cwd, &probe_args).await?;
-            let mut controls = codex_controls(&effective)?;
+            let mut controls = codex_controls(&effective, tools)?;
             controls["model_catalog_json"] = json!(catalog_path);
             startup_args.extend(config_args(&controls));
             expected_controls = Some(controls);
@@ -262,18 +267,19 @@ impl Provider for CodexProvider {
                 params["config"] = controls.clone();
                 params["config"]["mcp_servers"]["discard-memory"] = memory;
             }
-            if spec.mode == SessionMode::Conversation {
+            if spec.mode.replays_transcript() {
                 params["config"]["mcp_servers"]["discard-memory"]["enabled"] = json!(true);
                 // The scoped memory service owns shared-write approval. Default auto
                 // mode would require a CLI prompt that never policy cannot answer.
                 params["config"]["mcp_servers"]["discard-memory"]["default_tools_approval_mode"] = json!("approve");
                 params["config"]["mcp_servers"]["discard-memory"]["omit_tools_from"] = json!(["deferred", "code_mode"]);
-                params["config"]["mcp_servers"]["discard-memory"]["enabled_tools"] = json!(crate::conversation::MEMORY_TOOLS);
+                params["config"]["mcp_servers"]["discard-memory"]["enabled_tools"] = json!(crate::conversation::MEMORY_TOOLS.iter().chain(if workspace { crate::conversation::WORKSPACE_TOOLS } else { &[] }).collect::<Vec<_>>());
             }
         }
 
-        let mut child = self
-            .command()
+        let mut command = self.command();
+        if workspace { command.env("GIT_OPTIONAL_LOCKS", "0"); }
+        let mut child = command
             .args(&startup_args)
             .args(["app-server", "--listen", "stdio://"])
             .current_dir(&spec.cwd)
@@ -318,6 +324,8 @@ impl Provider for CodexProvider {
                     let _ = killpg(Pid::from_raw(pgid), Signal::SIGKILL);
                 }
                 return Err(match failure {
+                    Failure::Controls(message) if workspace => ProviderError::SandboxUnavailable(redact(&message)),
+                    Failure::Controls(message) => ProviderError::Protocol(redact(&message)),
                     Failure::Rejected(message) if method == "thread/resume" => ProviderError::ResumeRejected(redact(&message)),
                     Failure::Rejected(message) => ProviderError::Protocol(redact(&message)),
                     Failure::Closed => ProviderError::Protocol(format!("codex exited before the handshake finished: {detail}")),
@@ -332,7 +340,7 @@ impl Provider for CodexProvider {
         {
             let (stdin, shared) = (Arc::clone(&stdin), Arc::clone(&shared));
             tokio::spawn(async move {
-                let mut mapper = Mapper::new();
+                let mut mapper = Mapper::with_mode(spec.mode);
                 while let Ok(Some(line)) = lines.next_line().await {
                     let Ok(msg) = serde_json::from_str::<Value>(&line) else {
                         continue;
@@ -370,11 +378,12 @@ impl Provider for CodexProvider {
             });
         }
 
-        Ok(Box::new(CodexSession { child, pgid, stdin, events, shared, thread_id, reasoning_effort: spec.reasoning_effort, next_id: 10, _conversation_files: files }))
+        Ok(Box::new(CodexSession { child, pgid, stdin, events, shared, thread_id, reasoning_effort: spec.reasoning_effort, next_id: 10, _conversation_files: files }) as Box<dyn ProviderSession>)
     }
 }
 
 enum Failure {
+    Controls(String),
     /// The server answered with a JSON-RPC error.
     Rejected(String),
     Closed,
@@ -454,13 +463,13 @@ async fn handshake(
             &crate::conversation::effective_config(&effective).map_err(|e| Failure::Rejected(e.to_string()))?,
             expected,
         )
-        .map_err(|e| Failure::Rejected(e.to_string()))?;
+        .map_err(|e| Failure::Controls(e.to_string()))?;
         // A newly appearing inherited server must not initialize through thread/start.
         let actual_servers = effective["config"]["mcp_servers"]
             .as_object()
             .ok_or_else(|| Failure::Rejected("effective MCP configuration is malformed".into()))?;
         if actual_servers.values().any(|s| s.get("enabled") != Some(&json!(false))) {
-            return Err(Failure::Rejected("an inherited MCP server remains enabled".into()));
+            return Err(Failure::Controls("an inherited MCP server remains enabled".into()));
         }
     }
     send_raw(stdin, &json!({"jsonrpc": "2.0", "id": 2, "method": method, "params": params})).await?;
@@ -569,6 +578,15 @@ mod tests {
             resume_handle: None,
             mcp_config: None,
         }
+    }
+
+    #[test]
+    fn workspace_thread_uses_untrusted_and_workspace_write() {
+        let mut s = spec(EnforcementMode::HostPrompts); s.mode = SessionMode::Workspace;
+        let (_, p) = thread_params(&s);
+        assert_eq!(p["approvalPolicy"], "untrusted"); assert_eq!(p["sandbox"], "workspace-write");
+        assert_eq!(p["ephemeral"], true); assert_eq!(p["allowProviderModelFallback"], false);
+        assert_eq!(p["cwd"], s.cwd.to_string_lossy().as_ref());
     }
 
     #[test]

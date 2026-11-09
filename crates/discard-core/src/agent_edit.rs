@@ -5,9 +5,9 @@ use crate::model::AgentId;
 use crate::store::{Store, StoreError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentDraft { pub name: String, pub avatar: Option<String>, pub provider: String, pub model: Option<String>, pub reasoning_effort: Option<String>, pub system_prompt: String, pub policy: ApprovalPolicy, pub plugin_write: bool }
+pub struct AgentDraft { pub name: String, pub avatar: Option<String>, pub provider: String, pub model: Option<String>, pub reasoning_effort: Option<String>, pub system_prompt: String, pub policy: ApprovalPolicy, pub plugin_write: bool, pub workspace_write: bool }
 impl From<&AgentConfig> for AgentDraft {
-    fn from(c: &AgentConfig) -> Self { Self { name:c.name.clone(), avatar:c.avatar.clone(), provider:c.provider.clone(), model: c.model.clone(), reasoning_effort: c.reasoning_effort.clone(), system_prompt: c.system_prompt.clone(), policy: c.policy, plugin_write: c.plugin_write } }
+    fn from(c: &AgentConfig) -> Self { Self { name:c.name.clone(), avatar:c.avatar.clone(), provider:c.provider.clone(), model: c.model.clone(), reasoning_effort: c.reasoning_effort.clone(), system_prompt: c.system_prompt.clone(), policy: c.policy, plugin_write: c.plugin_write, workspace_write: c.workspace_write } }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldChange { pub field: &'static str, pub before: String, pub after: String }
@@ -50,8 +50,9 @@ pub fn review(current: &AgentConfig, draft: &AgentDraft, matrix: &CapabilityMatr
     add("System prompt", current.system_prompt.clone(), draft.system_prompt.clone());
     add("Approval policy", policy(current.policy), policy(draft.policy));
     add("plugin.write", flag(current.plugin_write), flag(draft.plugin_write));
+    add("Workspace writes", flag(current.workspace_write), flag(draft.workspace_write));
     let id = AgentId(String::new());
-    let needs_confirm = (current.policy != draft.policy && AgentChange::SetPolicy { agent: id.clone(), from: current.policy, to: draft.policy }.needs_user_approval(&Initiator::User)) || (current.plugin_write != draft.plugin_write && AgentChange::SetPluginWrite { agent: id, enabled: draft.plugin_write }.needs_user_approval(&Initiator::User));
+    let needs_confirm = (current.policy != draft.policy && AgentChange::SetPolicy { agent: id.clone(), from: current.policy, to: draft.policy }.needs_user_approval(&Initiator::User)) || (current.plugin_write != draft.plugin_write && AgentChange::SetPluginWrite { agent: id.clone(), enabled: draft.plugin_write }.needs_user_approval(&Initiator::User)) || (current.workspace_write != draft.workspace_write && AgentChange::SetWorkspaceWrite { agent: id, enabled: draft.workspace_write }.needs_user_approval(&Initiator::User));
     let blocked = if draft.provider != matrix.provider {
         Some("Select the capability matrix for this provider.".into())
     } else {
@@ -68,7 +69,7 @@ pub fn save(store: &Store, id: &AgentId, draft: &AgentDraft, matrix: &Capability
     if result.needs_confirm && !confirmed { return Err(SaveError::NeedsConfirm); }
     cfg.name=draft.name.clone(); cfg.avatar=draft.avatar.clone(); cfg.provider=draft.provider.clone();
     cfg.reasoning_effort = draft.reasoning_effort.clone();
-    cfg.model = draft.model.clone(); cfg.system_prompt = draft.system_prompt.clone(); cfg.policy = draft.policy; cfg.plugin_write = draft.plugin_write;
+    cfg.model = draft.model.clone(); cfg.system_prompt = draft.system_prompt.clone(); cfg.policy = draft.policy; cfg.plugin_write = draft.plugin_write; cfg.workspace_write = draft.workspace_write;
     store.update_agent(id, &cfg)?;
     Ok(cfg)
 }
@@ -81,7 +82,7 @@ mod tests {
     fn setup(policy: ApprovalPolicy) -> (Store, AgentId, AgentConfig, CapabilityMatrix) {
         let store = Store::open_in_memory().unwrap();
         let id = AgentId::new();
-        let cfg = AgentConfig { reasoning_effort: None, name: "A".into(), avatar: None, provider: "p".into(), model: Some("old-model".into()), system_prompt: "old".into(), policy, plugin_write: false };
+        let cfg = AgentConfig { workspace_write: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "p".into(), model: Some("old-model".into()), system_prompt: "old".into(), policy, plugin_write: false };
         store.insert_agent(&id, &cfg).unwrap();
         let matrix = CapabilityMatrix { provider: "p".into(), matrix_version: 1, cli_version: "1".into(), capabilities: Capabilities { interactive_approvals: true, tool_call_visibility: true, per_session_mcp: true, session_resume: true, cancellation: true, pre_execution_blocking: true } };
         (store, id, cfg, matrix)
@@ -102,6 +103,18 @@ mod tests {
         assert_eq!(store.load_agent(&id).unwrap().reasoning_effort, None);
         draft.reasoning_effort = Some("invalid".into());
         assert!(save(&store, &id, &draft, &matrix, false).is_err());
+    }
+
+    #[test]
+    fn workspace_writes_are_reviewed_confirmed_and_saved() {
+        let (store, id, cfg, matrix) = setup(ApprovalPolicy::Ask);
+        let mut draft = AgentDraft::from(&cfg);
+        draft.workspace_write = true;
+        let result = review(&cfg, &draft, &matrix);
+        assert_eq!(result.changes, vec![FieldChange { field: "Workspace writes", before: "off".into(), after: "on".into() }]);
+        assert!(result.needs_confirm);
+        assert!(matches!(save(&store, &id, &draft, &matrix, false), Err(SaveError::NeedsConfirm)));
+        assert!(save(&store, &id, &draft, &matrix, true).unwrap().workspace_write);
     }
 
     #[test]

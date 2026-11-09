@@ -15,6 +15,7 @@ pub enum Surface {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
+    pub workspace_root: Option<std::path::PathBuf>,
     pub agent: AgentId,
     pub project: Option<ProjectId>,
     pub source_conversation: Option<ChannelId>,
@@ -101,7 +102,7 @@ mod tests {
     use super::*;
 
     fn identity(surface: Surface) -> Identity {
-        Identity {
+        Identity { workspace_root: None,
             agent: AgentId("a1".into()),
             project: Some(ProjectId("p1".into())),
             source_conversation: Some(ChannelId("chat".into())),

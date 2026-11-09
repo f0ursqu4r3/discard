@@ -4,6 +4,8 @@ use discard_core::provider::{ProviderError, SessionSpec};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
+pub(crate) const WORKSPACE_TOOLS: &[&str] = &["worktree_commit"];
+
 pub(crate) const MEMORY_TOOLS: &[&str] = &["memory_search", "memory_list", "memory_read", "memory_save", "memory_edit", "memory_forget", "worktree_inspect", "worktree_request_removal", "project_list_files", "project_read_file", "project_search"];
 
 pub(crate) fn setup(message: impl Into<String>) -> ProviderError {
@@ -63,7 +65,10 @@ pub(crate) fn read_memory_config(spec: &SessionSpec) -> Result<Value, ProviderEr
     memory_config(&doc)
 }
 
-pub(crate) fn sanitize_catalog(cache: Value, selected: &str) -> Result<(Value, Option<u64>), ProviderError> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CatalogTools { None, Workspace }
+
+pub(crate) fn sanitize_catalog(cache: Value, selected: &str, tools: CatalogTools) -> Result<(Value, Option<u64>), ProviderError> {
     if cache.get("client_version").and_then(Value::as_str) != Some("0.166.0") {
         let actual = cache.get("client_version").and_then(Value::as_str).unwrap_or("unknown");
         return Err(setup(format!("The Codex model cache was written by version {actual}, but Discard requires 0.166.0. Refresh the model list with Codex 0.166.0, then retry.")));
@@ -85,8 +90,10 @@ pub(crate) fn sanitize_catalog(cache: Value, selected: &str) -> Result<(Value, O
             return Err(setup("Codex model record has no slug"));
         }
         // Preserve every unrelated model field. These are supported ModelInfo capability fields.
-        record.insert("apply_patch_tool_type".into(), Value::Null);
-        record.insert("shell_type".into(), json!("disabled"));
+        if tools == CatalogTools::None {
+            record.insert("apply_patch_tool_type".into(), Value::Null);
+            record.insert("shell_type".into(), json!("disabled"));
+        }
         record.insert("experimental_supported_tools".into(), json!([]));
         record.insert("multi_agent_version".into(), json!("disabled"));
         record.insert("node_repl_disabled".into(), json!(true));
@@ -95,15 +102,15 @@ pub(crate) fn sanitize_catalog(cache: Value, selected: &str) -> Result<(Value, O
     Ok((json!({"models":models}), window))
 }
 
-pub(crate) fn load_catalog(home: &Path, selected: &str) -> Result<(Value, Option<u64>), ProviderError> {
+pub(crate) fn load_catalog(home: &Path, selected: &str, tools: CatalogTools) -> Result<(Value, Option<u64>), ProviderError> {
     let bytes = std::fs::read(home.join("models_cache.json")).map_err(|e| {
         setup(format!("could not read Codex model cache: {e}. Open Codex once and refresh its model list, then retry with the same model"))
     })?;
     let doc = serde_json::from_slice(&bytes).map_err(|e| setup(format!("invalid Codex model cache: {e}")))?;
-    sanitize_catalog(doc, selected)
+    sanitize_catalog(doc, selected, tools)
 }
 
-pub(crate) fn codex_controls(effective: &Value) -> Result<Value, ProviderError> {
+pub(crate) fn codex_controls(effective: &Value, tools: CatalogTools) -> Result<Value, ProviderError> {
     let mut controls = json!({
         "web_search":"disabled", "agents":{"enabled":false},
         "memories":{"use_memories":false,"dedicated_tools":false,"generate_memories":false},
@@ -142,6 +149,10 @@ pub(crate) fn codex_controls(effective: &Value) -> Result<Value, ProviderError> 
         controls["features"][name] = json!(false);
     }
     controls["features"]["skip_host_skill_discovery"] = json!(true);
+    if tools == CatalogTools::Workspace {
+        controls["features"]["shell_tool"] = json!(true);
+        controls["sandbox_workspace_write"] = json!({"network_access":false,"writable_roots":[]});
+    }
     if let Some(servers) = effective.get("mcp_servers") {
         let servers = servers.as_object().ok_or_else(|| setup("effective Codex mcp_servers is malformed"))?;
         if servers.contains_key("discard-memory") {
@@ -215,7 +226,7 @@ pub(crate) fn config_args(config: &Value) -> Vec<String> {
     args
 }
 
-pub(crate) fn check_claude_managed_files() -> Result<(), ProviderError> {
+pub(crate) fn check_claude_managed_files(workspace: bool) -> Result<(), ProviderError> {
     let root = if cfg!(target_os = "macos") { Path::new("/Library/Application Support/ClaudeCode") } else { Path::new("/etc/claude-code") };
     let mut paths = vec![root.join("managed-settings.json")];
     match std::fs::read_dir(root.join("managed-settings.d")) {
@@ -237,6 +248,10 @@ pub(crate) fn check_claude_managed_files() -> Result<(), ProviderError> {
             Err(_) => return Err(setup("cannot inspect local managed Claude settings")),
         };
         let settings: Value = serde_json::from_slice(&bytes).map_err(|_| setup("local managed Claude settings are malformed"))?;
+        if workspace && (settings["sandbox"]["enabled"] == false || settings["sandbox"]["allowUnsandboxedCommands"] == true
+            || settings["sandbox"]["autoAllowBashIfSandboxed"] == true || settings["sandbox"]["filesystem"].get("allowWrite").is_some()) {
+            return Err(ProviderError::SandboxUnavailable("managed Claude settings override workspace sandbox controls".into()));
+        }
         for key in ["CLAUDE_CODE_DISABLE_AUTO_MEMORY", "CLAUDE_CODE_DISABLE_CLAUDE_MDS"] {
             if settings["env"].get(key).is_some_and(|v| v.as_str() != Some("1")) {
                 return Err(setup(format!("managed Claude setting overrides required {key}")));
@@ -256,6 +271,24 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn workspace_catalog_keeps_shell_and_patch() {
+        let (out, _) = sanitize_catalog(catalog(), "chosen", CatalogTools::Workspace).unwrap();
+        assert_eq!(out["models"][0]["shell_type"], "local");
+        assert_eq!(out["models"][0]["apply_patch_tool_type"], "freeform");
+        assert_eq!(out["models"][0]["experimental_supported_tools"], json!([]));
+        assert_eq!(out["models"][0]["multi_agent_version"], "disabled");
+        assert_eq!(out["models"][0]["node_repl_disabled"], true);
+    }
+    #[test]
+    fn workspace_controls_keep_sandbox_and_disable_network() {
+        let c = codex_controls(&json!({}), CatalogTools::Workspace).unwrap();
+        assert_eq!(c["features"]["shell_tool"], true);
+        assert_eq!(c["sandbox_workspace_write"]["network_access"], false);
+        assert_eq!(c["sandbox_workspace_write"]["writable_roots"], json!([]));
+        assert_eq!(c["project_doc_max_bytes"], 0); assert_eq!(c["web_search"], "disabled");
+    }
+
     fn catalog() -> serde_json::Value {
         json!({"client_version":"0.166.0", "identity":{"secret":"must-not-copy"}, "models":[{
             "slug":"chosen", "display_name":"Chosen", "context_window":123456,
@@ -265,7 +298,7 @@ mod tests {
 
     #[test]
     fn catalog_preserves_complete_records_and_exact_model() {
-        let (out, window) = sanitize_catalog(catalog(), "chosen").unwrap();
+        let (out, window) = sanitize_catalog(catalog(), "chosen", CatalogTools::None).unwrap();
         assert_eq!(window, Some(123456));
         assert_eq!(out["models"][0]["slug"], "chosen");
         assert_eq!(out["models"][0]["unrelated"], json!({"preserve":true}));
@@ -277,12 +310,12 @@ mod tests {
 
     #[test]
     fn missing_exact_model_and_incompatible_catalog_fail() {
-        assert!(sanitize_catalog(catalog(), "other").is_err());
-        assert!(sanitize_catalog(json!({"models":[]}), "chosen").is_err());
-        assert!(sanitize_catalog(json!({"models":[{}]}), "chosen").is_err());
+        assert!(sanitize_catalog(catalog(), "other", CatalogTools::None).is_err());
+        assert!(sanitize_catalog(json!({"models":[]}), "chosen", CatalogTools::None).is_err());
+        assert!(sanitize_catalog(json!({"models":[{}]}), "chosen", CatalogTools::None).is_err());
         let mut old = catalog();
         old["client_version"] = json!("0.1.0");
-        let error = sanitize_catalog(old, "chosen").unwrap_err().to_string();
+        let error = sanitize_catalog(old, "chosen", CatalogTools::None).unwrap_err().to_string();
         assert!(error.contains("written by version 0.1.0"));
         assert!(error.contains("Refresh the model list with Codex 0.166.0, then retry."));
     }
@@ -321,14 +354,14 @@ mod tests {
     #[test]
     fn inherited_servers_are_disabled_and_overridden_controls_fail() {
         let source = json!({"mcp_servers":{"unrelated":{"command":"do-not-run"}}});
-        let config = codex_controls(&source).unwrap();
+        let config = codex_controls(&source, CatalogTools::None).unwrap();
         assert_eq!(config["mcp_servers"]["unrelated"]["enabled"], false);
-        assert!(codex_controls(&json!({"mcp_servers":{"discard-memory":{"command":"inherited"}}})).is_err());
+        assert!(codex_controls(&json!({"mcp_servers":{"discard-memory":{"command":"inherited"}}}), CatalogTools::None).is_err());
         validate_controls(&config, &config).unwrap();
         let mut bad = config.clone();
         bad["features"]["shell_tool"] = json!(true);
         assert!(validate_controls(&bad, &config).is_err());
-        assert!(codex_controls(&json!({"mcp_servers":[]})).is_err());
+        assert!(codex_controls(&json!({"mcp_servers":[]}), CatalogTools::None).is_err());
     }
 
     #[test]

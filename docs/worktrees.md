@@ -80,3 +80,17 @@ Removal creates an app approval card. The request does not remove files. Only th
 Before removal, Discard waits for app responses and archive operations to finish, resolves the saved binding again, and compares the current Git state with the approved snapshot. Main checkouts, locked worktrees, dirty files, untracked files, ignored files, and submodule configurations block removal. Git runs without `--force`. If no local branch or tag contains the commit, the card includes creation of a recovery branch under `discard/retained-worktrees/`. Discard creates that branch before removal. A failed removal can leave this recovery branch in place; the result reports it.
 
 The app serializes these tool operations. External Git processes are not controlled by Discard. Git performs its own final removal checks. Removing a worktree keeps the conversation history available.
+
+## Agent workspace writes (slice A)
+
+An agent with **Edit files in branch channels** enabled can answer in a bound project branch or detached worktree channel using `SessionMode::Workspace`. The provider runs in that directory with a small native tool set and OS sandbox. General channels, direct chats, unbound branches, main checkouts, disabled agents, and unavailable sandbox profiles stay read-only. Discard states the reason. Root `AGENTS.md` and `CLAUDE.md` enter the prompt as bounded, untrusted repository instructions.
+
+In-root file edits receive automatic approval. Shell requests use approval cards. Sandbox escapes require a separate full-access card with no Always allow action. Codex cannot reliably identify command escalation, so every Codex Workspace command approval uses the full-access card. Durable Always-allow rules and network-domain Always allow remain planned. Their controls show **Soon** where present.
+
+One response at a time holds a canonical worktree path. Other responses wait and show the current channel. Cancellation, setup failure, and provider failure release the lock. This lock covers Discard responses; it does not control external editors or Git processes.
+
+Workspace tokens expose `worktree_commit` with a commit message and optional relative paths. The tool rechecks the agent, channel, worktree binding, and response lock. It runs outside the provider sandbox with hooks disabled. It preserves the user’s Git identity and signing settings. It rejects main checkouts, detached HEAD, traversal, and paths outside the root. Selected-path commits exclude unrelated staged files. Commit audit records link to the saved response. Conversation and summary tokens do not expose this tool.
+
+Each Workspace response ends with a protected changes card, including stopped and failed responses. The card lists commits and changed files with expandable, bounded diffs. It excludes unchanged pre-existing dirty files and labels pre-existing files that changed. A collection failure saves a visible notice and releases the lock.
+
+Slices B and C remain planned: worktree creation, main-checkout write grants, durable Always-allow rules, network-domain Always allow, conversation moves, new-branch targets, and native provider resume per agent. Slice A does not change the `--builder` Coding path.

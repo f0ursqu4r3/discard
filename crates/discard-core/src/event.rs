@@ -37,7 +37,11 @@ pub enum EventKind {
     TextDelta { text: String },
     ToolCallStart { call_id: String, name: String, input: Value },
     ToolCallResult { call_id: String, output: String, is_error: bool },
-    ApprovalRequest { approval_id: ApprovalId, call_id: String, tool: String, input: Value },
+    ApprovalRequest {
+        #[serde(default)]
+        kind: crate::approval::ApprovalKind,
+        #[serde(default)]
+        paths: Vec<String>, approval_id: ApprovalId, call_id: String, tool: String, input: Value },
     StatusChange { status: AgentStatus },
     Usage { input_tokens: u64, output_tokens: u64 },
     Error { message: String },

@@ -84,6 +84,7 @@ async fn send_streams_then_finishes() {
         .insert_agent(
             &agent_id,
             &AgentConfig {
+                workspace_write: false,
                 reasoning_effort: None,
                 name: "A".into(),
                 avatar: None,
@@ -106,6 +107,8 @@ async fn send_streams_then_finishes() {
     let session = SessionId::new();
     store.create_session(&session, &channel.id).unwrap();
     let engine = Engine {
+        workspace_locks: Arc::default(),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
         reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::new(Mutex::new(store)),

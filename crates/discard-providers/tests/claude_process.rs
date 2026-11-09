@@ -289,3 +289,28 @@ async fn conversation_version_timeout_kills_setup_process() {
 async fn conversation_help_timeout_kills_setup_process() {
     check_conversation_setup_timeout_kills_child("--help").await;
 }
+
+#[tokio::test]
+#[cfg(target_os = "macos")]
+async fn workspace_session_runs_in_the_granted_directory() {
+    let rig = Rig::new(); let mut s = conversation_spec(&rig);
+    s.mode = discard_core::provider::SessionMode::Workspace;
+    s.cwd = rig.dir.path().canonicalize().unwrap();
+    let out = std::process::Command::new("git").args(["init", "-q"]).current_dir(&s.cwd).output().unwrap(); assert!(out.status.success());
+    let mut session = rig.provider("approval").start_session(s.clone()).await.unwrap();
+    let _ = session.next_event().await;
+    let log = rig.log_text(); assert!(log.contains(&format!("CWD {}", s.cwd.display())), "{log}");
+    assert!(log.contains("GIT_LOCKS 0")); assert!(log.contains("MEMORY_ENV 1 1 "));
+    drop(session); assert!(s.cwd.exists());
+}
+
+#[tokio::test]
+#[cfg(target_os = "macos")]
+async fn workspace_missing_model_keeps_setup_error() {
+    let rig = Rig::new(); let mut s = conversation_spec(&rig);
+    s.mode = discard_core::provider::SessionMode::Workspace; s.cwd = rig.dir.path().canonicalize().unwrap(); s.model = None;
+    assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&s.cwd).status().unwrap().success());
+    let error = rig.provider("approval").start_session(s).await.err().unwrap();
+    assert!(matches!(error, ProviderError::Setup(_)), "{error:?}");
+    assert!(error.to_string().contains("select an exact Claude model"));
+}

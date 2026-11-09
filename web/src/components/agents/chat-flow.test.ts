@@ -44,6 +44,7 @@ test('short profile shows identity and personality with an explicit full-profile
       archived: false,
       policy: 'deny',
       pluginWrite: false,
+      workspaceWrite: false,
     },
   ])
   view = mount(AgentSummary, { props: { agentId: 'a', name: 'Robin', status: 'idle' } })

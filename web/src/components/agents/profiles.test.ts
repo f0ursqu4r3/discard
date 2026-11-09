@@ -15,6 +15,7 @@ const original = {
   systemPrompt: '',
   policy: 'deny',
   pluginWrite: false,
+  workspaceWrite: false,
   archived: false,
 }
 const rows = { agents: [structuredClone(original)] }

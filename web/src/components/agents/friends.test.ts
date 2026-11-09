@@ -15,6 +15,7 @@ const base: AgentEntry = {
   systemPrompt: '',
   policy: 'deny',
   pluginWrite: false,
+  workspaceWrite: false,
   archived: false,
 }
 let rows: AgentEntry[], changed: () => void

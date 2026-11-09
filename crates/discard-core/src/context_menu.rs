@@ -39,7 +39,7 @@ pub fn context_menu(target: &ContextTarget, ctx: &MenuContext) -> Vec<MenuEntry>
 }
 
 pub fn message_text(blocks: &[Block]) -> String {
-    blocks.iter().filter_map(|block| match block { Block::Markdown { text } | Block::Code { text, .. } | Block::Diff { text } => Some(text.as_str()), Block::Attachment { .. } | Block::ToolCall { .. } | Block::Approval { .. } => None }).collect::<Vec<_>>().join("\n\n")
+    blocks.iter().filter_map(|block| match block { Block::Markdown { text } | Block::Code { text, .. } | Block::Diff { text } => Some(text.as_str()), Block::Attachment { .. } | Block::ToolCall { .. } | Block::Approval { .. } | Block::Changes { .. } => None }).collect::<Vec<_>>().join("\n\n")
 }
 
 pub fn resolve_copy(messages: &[Message], channel_name: &str, target: &ContextTarget, action: Action) -> Option<String> {
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn message_text_joins_text_blocks_and_skips_tool_calls_and_approvals() {
-        let blocks = vec![Block::Markdown { text: "hello".into() }, Block::Code { language: None, text: "code".into() }, Block::Diff { text: "diff".into() }, Block::ToolCall { call_id: "c".into(), name: "n".into(), input: serde_json::Value::Null, output: None, is_error: None }, Block::Approval { approval_id: "a".into(), tool: "t".into(), summary: "s".into() }];
+        let blocks = vec![Block::Markdown { text: "hello".into() }, Block::Code { language: None, text: "code".into() }, Block::Diff { text: "diff".into() }, Block::ToolCall { call_id: "c".into(), name: "n".into(), input: serde_json::Value::Null, output: None, is_error: None }, Block::Approval { kind: crate::approval::ApprovalKind::ProviderTool, approval_id: "a".into(), tool: "t".into(), summary: "s".into() }];
         assert_eq!(message_text(&blocks), "hello\n\ncode\n\ndiff");
     }
 

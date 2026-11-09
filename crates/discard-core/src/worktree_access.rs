@@ -35,39 +35,67 @@ pub struct WorktreeAccess {
     store: Arc<Mutex<Store>>,
     requests: Mutex<HashMap<String, Pending>>,
     operation: Mutex<()>,
+    locks: Arc<crate::workspace_lock::WorkspaceLocks>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> { mutex.lock().unwrap_or_else(|e| e.into_inner()) }
 
 // Arguments are app-owned. No shell, hooks, external diff, network, or force option.
 pub(crate) fn git(directory: &Path, args: &[&str]) -> Result<String, String> {
+    let (output, truncated) = git_bounded(directory, args, LIMIT as usize, Duration::from_secs(10))?;
+    if truncated { Err("Git output exceeds the inspection limit. No complete result is available.".into()) } else { Ok(output.trim_end().to_owned()) }
+}
+
+pub(crate) fn git_bounded(directory: &Path, args: &[&str], limit: usize, timeout: Duration) -> Result<(String, bool), String> {
+    use std::os::unix::process::CommandExt;
     let mut child = Command::new("git").current_dir(directory)
-        .args(["--no-pager", "--no-optional-locks", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"])
-        .args(args).env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .args(["--no-pager", "--no-optional-locks", "--literal-pathspecs", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"])
+        .args(args).env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0)
         .spawn().map_err(|_| "Could not start Git.".to_string())?;
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-    let read = |pipe: Box<dyn Read + Send>| std::thread::spawn(move || { let mut data = Vec::new(); pipe.take(LIMIT + 1).read_to_end(&mut data).map(|_| data) });
-    let out = read(Box::new(stdout));
-    let err = read(Box::new(stderr));
+    let read = |mut pipe: Box<dyn Read + Send>| std::thread::spawn(move || -> std::io::Result<(Vec<u8>, bool)> {
+        let mut data = Vec::new(); let mut buffer = [0; 8192]; let mut truncated = false;
+        loop { let n = pipe.read(&mut buffer)?; if n == 0 { break; } let keep = n.min(limit.saturating_sub(data.len())); data.extend_from_slice(&buffer[..keep]); truncated |= keep < n; }
+        Ok((data, truncated))
+    });
+    let out = read(Box::new(child.stdout.take().unwrap())); let err = read(Box::new(child.stderr.take().unwrap()));
     let started = Instant::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
-            Ok(None) if started.elapsed() < Duration::from_secs(10) => std::thread::sleep(Duration::from_millis(20)),
-            _ => { let _ = child.kill(); let _ = child.wait(); break Err("Git did not finish. Inspect the worktree before retrying.".to_string()); }
+            Ok(None) if started.elapsed() < timeout => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = Command::new("/bin/kill").args(["-KILL", &format!("-{}", child.id())]).status();
+                let _ = child.kill(); let _ = child.wait(); break Err("Git did not finish. Inspect the worktree before retrying.".to_string());
+            }
         }
     };
-    let output = out.join().map_err(|_| "Could not read Git output.")?.map_err(|_| "Could not read Git output.")?;
-    let error = err.join().map_err(|_| "Could not read Git error.")?.map_err(|_| "Could not read Git error.")?;
+    let (output, truncated) = out.join().map_err(|_| "Could not read Git output.")?.map_err(|_| "Could not read Git output.")?;
+    let (error, _) = err.join().map_err(|_| "Could not read Git error.")?.map_err(|_| "Could not read Git error.")?;
     let status = status?;
-    if output.len() as u64 > LIMIT || error.len() as u64 > LIMIT { return Err("Git output exceeds the inspection limit. No complete result is available.".into()); }
-    if !status.success() { return Err(format!("Git refused the operation: {}", String::from_utf8_lossy(&error).trim())); }
-    Ok(String::from_utf8_lossy(&output).trim_end().to_owned())
+    if !status.success() && !(args.contains(&"--no-index") && status.code() == Some(1)) { return Err(format!("Git refused the operation: {}", String::from_utf8_lossy(&error).trim())); }
+    Ok((String::from_utf8_lossy(&output).into_owned(), truncated))
 }
 
 impl WorktreeAccess {
-    pub fn new(store: Arc<Mutex<Store>>) -> Self { Self { store, requests: Mutex::new(HashMap::new()), operation: Mutex::new(()) } }
+    pub fn new(store: Arc<Mutex<Store>>) -> Self { Self { store, requests: Mutex::new(HashMap::new()), operation: Mutex::new(()), locks: Arc::default() } }
+    pub fn with_locks(mut self, locks: Arc<crate::workspace_lock::WorkspaceLocks>) -> Self { self.locks = locks; self }
+    pub fn commit(&self, agent: &AgentId, channel: &ChannelId, root: &Path, request: &crate::workspace_commit::CommitRequest) -> Result<crate::workspace_commit::CommitResult, String> {
+        self.locks.with_holder(root, channel, || {
+            let _operation = lock(&self.operation);
+            let binding = {
+                let store = lock(&self.store);
+                if store.agent_archived(agent).map_err(|e| e.to_string())? || store.channel_archived(channel).map_err(|e| e.to_string())? { return Err("This agent or channel is archived.".into()); }
+                let config = store.load_agent(agent).map_err(|e| e.to_string())?;
+                crate::workspace_session::eligibility(&store, channel, &config).map_err(|r| r.note())?
+            };
+            let repository = binding.record.repo.clone();
+            let grant = crate::workspace_session::verify_binding(binding).map_err(|r| r.note())?;
+            if root.canonicalize().map_err(|e| e.to_string())? != grant.root { return Err("The workspace binding changed.".into()); }
+            let result = crate::workspace_commit::commit(root, request)?;
+            lock(&self.store).record_agent_commit(&result.commit, &repository, channel, agent).map_err(|e| format!("Commit {} succeeded, but its audit could not be saved: {e}", result.commit))?;
+            Ok(result)
+        })
+    }
     pub fn authorize(&self, agent: &AgentId, project: Option<&ProjectId>, channel: &ChannelId) -> Result<(), String> {
         let store = lock(&self.store);
         let actual = store.load_channel(channel).map_err(|e| e.to_string())?;
@@ -208,7 +236,7 @@ mod tests {
         git(&repo, &["worktree", "add", "--detach", path.to_str().unwrap()]).unwrap();
         git(&path, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "unique commit"]).unwrap();
         let store = Store::open_in_memory().unwrap();
-        let agent = store.create_agent(&AgentConfig { name: "Agent".into(), provider: "fake".into(), model: Some("test".into()), avatar: None, reasoning_effort: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        let agent = store.create_agent(&AgentConfig { workspace_write: false, name: "Agent".into(), provider: "fake".into(), model: Some("test".into()), avatar: None, reasoning_effort: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         let project = store.import_project_folder(&repo).unwrap();
         let channel = Channel { id: ChannelId::new(), project_id: Some(project.id), name: "detached".into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::Worktree };
         store.create_named_repository_channel(&channel, "", None, Some(&WorktreeRecord { channel_id: channel.id.clone(), path: path.to_string_lossy().into(), branch: "detached".into(), base_commit: String::new(), repo: repo.to_string_lossy().into(), owned: false })).unwrap();

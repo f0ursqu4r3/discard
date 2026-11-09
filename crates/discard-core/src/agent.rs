@@ -20,6 +20,9 @@ pub struct AgentConfig {
     /// May write plugins (as drafts the user must review). Off by default.
     #[serde(default)]
     pub plugin_write: bool,
+    /// May edit the bound branch or worktree. Off by default.
+    #[serde(default)]
+    pub workspace_write: bool,
 }
 
 /// Generate an editable human name without using a model as identity.
@@ -86,6 +89,7 @@ pub enum AgentChange {
     Create { config: AgentConfig },
     SetPolicy { agent: AgentId, from: ApprovalPolicy, to: ApprovalPolicy },
     SetPluginWrite { agent: AgentId, enabled: bool },
+    SetWorkspaceWrite { agent: AgentId, enabled: bool },
 }
 
 /// Strictness rank. Higher is stricter.
@@ -103,7 +107,7 @@ impl AgentChange {
         match (initiator, self) {
             (Initiator::User, AgentChange::Create { .. }) => false,
             (Initiator::User, AgentChange::SetPolicy { from, to, .. }) => strictness(*to) < strictness(*from),
-            (Initiator::User, AgentChange::SetPluginWrite { enabled, .. }) => *enabled,
+            (Initiator::User, AgentChange::SetPluginWrite { enabled, .. } | AgentChange::SetWorkspaceWrite { enabled, .. }) => *enabled,
             (Initiator::Plugin(_) | Initiator::Agent(_), _) => true,
         }
     }
@@ -113,8 +117,23 @@ impl AgentChange {
 mod tests {
     use super::*;
 
+    #[test]
+    fn enabling_workspace_writes_needs_user_approval() {
+        let change = AgentChange::SetWorkspaceWrite { agent: AgentId("a".into()), enabled: true };
+        assert!(change.needs_user_approval(&Initiator::User));
+        let off = AgentChange::SetWorkspaceWrite { agent: AgentId("a".into()), enabled: false };
+        assert!(!off.needs_user_approval(&Initiator::User));
+        assert!(off.needs_user_approval(&Initiator::Plugin("p".into())));
+    }
+
+    #[test]
+    fn old_agent_toml_reads_workspace_write_as_false() {
+        assert!(!AgentConfig::from_toml("name = 'A'\nprovider = 'claude'\npolicy = 'ask'\n").unwrap().workspace_write);
+    }
+
     fn cfg(policy: ApprovalPolicy) -> AgentConfig {
         AgentConfig {
+            workspace_write: false,
             reasoning_effort: None,
             name: "Scout".into(),
             avatar: None,

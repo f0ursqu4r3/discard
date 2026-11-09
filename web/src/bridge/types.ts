@@ -6,6 +6,20 @@ export interface AttachmentDto {
   text: string | null
 }
 export type BlockDto =
+  | {
+      type: 'changes'
+      root: string
+      state: 'completed' | 'stopped' | 'failed'
+      commits: { id: string; subject: string }[]
+      files: {
+        path: string
+        status: string
+        diff: string
+        truncated: boolean
+        preexisting: boolean
+      }[]
+      truncated: boolean
+    }
   | { type: 'attachment'; attachment: AttachmentDto }
   | { type: 'markdown' | 'diff'; text: string }
   | { type: 'code'; language: string | null; text: string }
@@ -17,7 +31,7 @@ export type BlockDto =
       output: string | null
       is_error?: boolean
     }
-  | { type: 'approval'; approval_id: string; tool: string; summary: string }
+  | { type: 'approval'; kind?: string; approval_id: string; tool: string; summary: string }
 export interface MessageAuthorDto {
   agentId: string
   name: string
@@ -89,6 +103,8 @@ export interface ChannelDetailsDto {
   mainAgentId: string | null
 }
 export interface PromptDto {
+  kind: string
+  alwaysAllow: string
   approvalId: string
   tool: string
   summary: string

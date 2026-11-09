@@ -7,6 +7,7 @@ import CodeBlock from './CodeBlock.vue'
 import DiffBlock from './DiffBlock.vue'
 import ToolCallBlock from './ToolCallBlock.vue'
 import ApprovalCard from './ApprovalCard.vue'
+import ChangesCard from './ChangesCard.vue'
 import ContextMenuHost from './ContextMenuHost.vue'
 import type { ContextTargetDto } from '../bridge/types'
 import type { PromptDto } from '../bridge/types'
@@ -44,13 +45,16 @@ const approval = computed(() => {
       tool: block.tool,
       summary: block.summary,
       view: 'answered',
+      kind: block.kind ?? 'provider_tool',
+      alwaysAllow: 'unavailable',
     }
   )
 })
 </script>
 <template>
   <ContextMenuHost :target="target">
-    <AttachmentCard v-if="block.type === 'attachment'" :attachment="block.attachment" />
+    <ChangesCard v-if="block.type === 'changes'" :block="block" />
+    <AttachmentCard v-else-if="block.type === 'attachment'" :attachment="block.attachment" />
     <SafeMarkdown v-else-if="block.type === 'markdown'" :text="block.text" :inline="inline" />
     <DiffBlock
       v-else-if="

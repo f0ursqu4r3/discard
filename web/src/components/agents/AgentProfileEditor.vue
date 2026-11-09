@@ -312,6 +312,20 @@ async function remove() {
         </FieldSet>
         <Field orientation="horizontal">
           <FieldContent>
+            <FieldLabel for="agent-workspace-write">Edit files in branch channels</FieldLabel>
+            <FieldDescription id="agent-workspace-write-description">
+              Lets this agent edit files and run approved commands in branch and worktree channels.
+            </FieldDescription>
+          </FieldContent>
+          <Switch
+            id="agent-workspace-write"
+            v-model="draft.workspaceWrite"
+            :disabled="busy"
+            aria-describedby="agent-workspace-write-description"
+          />
+        </Field>
+        <Field orientation="horizontal">
+          <FieldContent>
             <FieldLabel for="agent-plugin-write">Allow plugin writes</FieldLabel>
             <FieldDescription id="agent-plugin-write-description">
               Works only in a builder session. Start Discard with

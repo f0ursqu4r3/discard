@@ -37,6 +37,7 @@ impl Harness {
             .insert_agent(
                 &agent,
                 &AgentConfig {
+                    workspace_write: false,
                     reasoning_effort: None,
                     name: "A".into(),
                     avatar: None,
@@ -107,6 +108,7 @@ where
     let (dec_tx, dec_rx) = mpsc::unbounded_channel();
     let (cancel_tx, cancel_rx) = mpsc::unbounded_channel();
     let ctx = TurnContext {
+        workspace_root: None,
         store: &h.store,
         sequencer: &mut h.sequencer,
         session_id: &h.session_id,

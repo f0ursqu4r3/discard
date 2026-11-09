@@ -82,3 +82,43 @@ The opt-in synthetic probe at `crates/discard-providers/tests/probes/claude_conv
 Run the local probe with `python3 crates/discard-providers/tests/probes/claude_conversation.py`. The script works from any working directory when you give its full path. Use `--claude /path/to/claude` or `DISCARD_CLAUDE_BIN` to select the CLI executable.
 
 Normal app conversations replay the current conversation transcript with refreshed personality and applicable saved memory before every response. Memory edits apply to existing conversations without restarting. Native resume behavior described above applies to Coding sessions. See [Saved memory](memory.md) for the four domains, shared-write approval, Forget, and capture controls.
+
+## Workspace sessions (spike results)
+
+Tested Claude Code 2.1.318 with synthetic local model requests and temporary homes.
+Command for every row: `python3 crates/discard-providers/tests/probes/claude_workspace.py`.
+
+| Question | Observed value | Probe command |
+| --- | --- | --- |
+| Native tools | Exactly Read, Glob, Grep, Edit, Write, Bash. | Command above |
+| In-root Edit | `can_use_tool`, with `input.file_path`; allow edits the file. | Command above |
+| Outside Write | `--restricted` rejects it before a card; without that flag an allow writes outside. Keep `--restricted`. | Command above |
+| Bash sandbox | In-root touch succeeds; touch in the temporary HOME fails with Operation not permitted. | Command above |
+| Shell approvals | touch, curl, and git add ask; git status runs without asking. | Command above |
+| Network approval | Separate `can_use_tool` named `SandboxNetworkAccess`, with `input.host=example.com`. An allow permits that domain. | Command above |
+| Instruction discovery | The root AGENTS.md/CLAUDE.md sentinel never reaches the model with `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`. | Command above |
+| Git writes | The three specified sandbox settings alone permit git add. A third run adds `sandbox.filesystem.denyWrite=[<absolute .git path>]`; git add then fails with Operation not permitted. Workspace must protect Git metadata explicitly. | Command above |
+| Escape marker | No escape was offered with `allowUnsandboxedCommands=false`; explicit unsandboxed inputs must never become ordinary approvals. | Command above |
+
+The recorded transcript is `fixtures/claude-workspace-turn.jsonl`. Paths are scrubbed.
+The probe adds a three-second curl limit and a third Git-protection run.
+
+## Workspace sessions
+
+Workspace uses the Conversation isolation controls and a fresh replay, with the bound directory
+as cwd. It enables only Read, Glob, Grep, Edit, Write and Bash, plus the scoped Discard tools
+and worktree_commit. Native resume is refused. Hooks, plugin directories, automatic memory,
+and instruction discovery remain off. `GIT_OPTIONAL_LOCKS=0` allows read-only Git commands.
+
+The profile requires macOS, sandbox-exec, HostPrompts, the pinned version, and the required
+help controls. It rejects conflicting local managed sandbox settings. It keeps `--restricted`,
+sets sandbox.enabled, disables unsandboxed commands and automatic Bash approval, and denies
+writes to the worktree's .git path, Git directory and common Git directory. Missing controls
+return SandboxUnavailable so the engine can use the read-only profile. Remote managed policy
+has the same visibility limit as Conversation mode.
+
+Edit paths are explicit. SandboxNetworkAccess requests use NetworkDomain cards. Explicit
+unsandboxed requests use SandboxEscape cards. Neither plugins nor automatic edit rules can
+approve these cards.
+
+Supplemental synthetic review probes found that native `Write` can change a linked worktree's `.git` pointer after approval even with `--restricted` and `sandbox.filesystem.denyWrite`. Those sandbox restrictions protect shell writes. Discard therefore treats native edits to Git metadata, its aliases, outside paths, and unknown targets as user-only full-access requests before storing approvals.

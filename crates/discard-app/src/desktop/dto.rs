@@ -91,6 +91,8 @@ pub struct MessageDto {
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptDto {
+    pub kind: String,
+    pub always_allow: String,
     pub approval_id: String,
     pub tool: String,
     pub summary: String,

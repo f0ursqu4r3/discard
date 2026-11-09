@@ -50,6 +50,7 @@ pub struct Probe {
 }
 
 pub struct FakeProvider {
+    workspace_error: Option<String>,
     matrix: CapabilityMatrix,
     script: Vec<Step>,
     setup: SetupStatus,
@@ -64,6 +65,7 @@ impl FakeProvider {
 
     pub fn with_capabilities(script: Vec<Step>, interactive_approvals: bool) -> Self {
         Self {
+            workspace_error: None,
             matrix: CapabilityMatrix {
                 provider: "fake".into(),
                 matrix_version: 1,
@@ -83,6 +85,8 @@ impl FakeProvider {
             probe: Probe::default(),
         }
     }
+
+    pub fn with_workspace_error(mut self, error: &str) -> Self { self.workspace_error = Some(error.into()); self }
 
     /// What `check_setup` reports.
     pub fn with_setup(mut self, setup: SetupStatus) -> Self {
@@ -118,6 +122,7 @@ impl Provider for FakeProvider {
         self.matrix.supports(spec.enforcement)?;
         self.probe.started_with.lock().expect("probe lock").push(spec.resume_handle.clone());
         self.probe.specs.lock().expect("probe lock").push(spec.clone());
+        if spec.mode == discard_core::provider::SessionMode::Workspace && let Some(error) = &self.workspace_error { return Err(ProviderError::SandboxUnavailable(error.clone())); }
         let (decisions_tx, decisions_rx) = mpsc::unbounded_channel();
         Ok(Box::new(FakeSession {
             script: self.script.iter().cloned().collect(),
@@ -199,7 +204,7 @@ impl ProviderSession for FakeSession {
 
 fn approval_event(id: ApprovalId, tool: String, input: Value) -> RawEvent {
     RawEvent {
-        kind: EventKind::ApprovalRequest { call_id: format!("call-{id}"), approval_id: id, tool, input },
+        kind: EventKind::ApprovalRequest { kind: Default::default(), paths: input.get("file_path").and_then(Value::as_str).map(|p| vec![p.to_owned()]).unwrap_or_default(), call_id: format!("call-{id}"), approval_id: id, tool, input },
         raw: None,
     }
 }

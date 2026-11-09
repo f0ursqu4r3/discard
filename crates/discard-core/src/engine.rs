@@ -6,7 +6,8 @@ use crate::driver::{DecisionMsg, TurnContext, TurnInputs, run_turn_with_images};
 use crate::event::{EventKind, Sequencer, SessionId};
 use crate::observer::{self, EventObserver};
 use crate::model::{AgentId, Block, ChannelId, Message, MessageId, ProjectId, Role, WorkspaceMode};
-use crate::provider::{Provider, ProviderError, SessionSpec, SetupStatus};
+use crate::provider::{Provider, ProviderError, SessionMode, SessionSpec, SetupStatus};
+use crate::workspace_session::{self, ReadOnlyReason, WorkspaceGrant, SessionProfile};
 use crate::redact::redact;
 use crate::store::Store;
 use crate::timeline::{ApprovalView, Timeline};
@@ -69,6 +70,9 @@ pub trait MemoryService: Send + Sync {
     fn prepare_turn(&self, agent: &AgentId, project: Option<&ProjectId>, source: &ChannelId, base_prompt: Option<&str>, plugin_write: bool, _query: &str) -> Result<PreparedMemory, String> {
         self.prepare(agent, project, source, base_prompt, plugin_write)
     }
+    fn prepare_workspace_turn(&self, _agent: &AgentId, _project: Option<&ProjectId>, _source: &ChannelId, _base_prompt: Option<&str>, _grant: &WorkspaceGrant, _query: &str) -> Result<PreparedMemory, String> {
+        Err("Write sessions require scoped workspace tools.".into())
+    }
     /// Read-only tools for semantic history summarization. Fail closed unless implemented.
     fn prepare_summary(&self, _agent: &AgentId, _project: Option<&ProjectId>, _source: &ChannelId) -> Result<PreparedMemory, String> {
         Err("Read-only summary memory is not available.".into())
@@ -83,6 +87,8 @@ pub trait MemoryService: Send + Sync {
 #[derive(Clone)]
 pub struct Engine {
     pub mode: crate::provider::SessionMode,
+    pub write_access: Result<WorkspaceGrant, ReadOnlyReason>,
+    pub workspace_locks: Arc<crate::workspace_lock::WorkspaceLocks>,
     pub providers: Vec<Arc<dyn Provider>>,
     pub store: Arc<Mutex<Store>>,
     pub agent_id: AgentId,
@@ -130,31 +136,39 @@ fn policy_name(policy: ApprovalPolicy) -> &'static str {
 }
 
 impl Engine {
-    fn snapshot(&self, text: &str) -> Result<(Self, crate::model::MessageAuthor), String> {
-        let store = crate::driver::lock(&self.store);
-        let channel = store.load_channel(&self.channel_id).map_err(|e| e.to_string())?;
-        if store.channel_archived(&self.channel_id).map_err(|e| e.to_string())? { return Err("This conversation is archived.".into()); }
-        let mentioned = crate::mentions::resolve(&store, &self.channel_id, text)?;
-        let recipient = match &mentioned { Some(agent) => agent.clone(), None => crate::mentions::default_agent(&store, &channel)? };
-        if store.agent_archived(&recipient).map_err(|e| e.to_string())? { return Err("This agent is archived. Restore it before sending a message.".into()); }
-        let config = store.load_agent(&recipient).map_err(|e| e.to_string())?;
-        let provider = self.providers.iter().find(|p| p.id() == config.provider).cloned()
-            .or_else(|| (self.provider.id() == config.provider).then(|| self.provider.clone()))
-            .ok_or_else(|| format!("Provider '{}' is unavailable. Reconnect it or select another provider in agent settings.", config.provider))?;
-        if config.model.as_ref().is_none_or(|m| m.trim().is_empty()) { return Err("Select an explicit model in agent settings, then retry.".into()); }
-        if let (Some(project), Some(agent)) = (channel.project_id.as_ref(), mentioned.as_ref()) {
-            store.invite_agent_to_channel(project, &channel.id, agent).map_err(|e| e.to_string())?;
-        }
-        let author = crate::model::MessageAuthor { agent_id: recipient.clone(), name: config.name.clone(), provider: config.provider.clone(), avatar: config.avatar.clone() };
-        let mut snapshot = self.clone();
-        snapshot.agent_id = recipient;
-        snapshot.project_id = channel.project_id;
-        snapshot.provider = provider;
-        snapshot.system_prompt = Some(config.conversation_system_prompt());
-        snapshot.model = config.model;
-        snapshot.reasoning_effort = config.reasoning_effort;
-        snapshot.policy = config.policy;
-        snapshot.plugin_write = false;
+    async fn snapshot(&self, text: &str) -> Result<(Self, crate::model::MessageAuthor), String> {
+        let (mut snapshot, author, binding) = {
+            let store = crate::driver::lock(&self.store);
+            let channel = store.load_channel(&self.channel_id).map_err(|e| e.to_string())?;
+            if store.channel_archived(&self.channel_id).map_err(|e| e.to_string())? { return Err("This conversation is archived.".into()); }
+            let mentioned = crate::mentions::resolve(&store, &self.channel_id, text)?;
+            let recipient = match &mentioned { Some(agent) => agent.clone(), None => crate::mentions::default_agent(&store, &channel)? };
+            if store.agent_archived(&recipient).map_err(|e| e.to_string())? { return Err("This agent is archived. Restore it before sending a message.".into()); }
+            let config = store.load_agent(&recipient).map_err(|e| e.to_string())?;
+            let provider = self.providers.iter().find(|p| p.id() == config.provider).cloned()
+                .or_else(|| (self.provider.id() == config.provider).then(|| self.provider.clone()))
+                .ok_or_else(|| format!("Provider '{}' is unavailable. Reconnect it or select another provider in agent settings.", config.provider))?;
+            if config.model.as_ref().is_none_or(|m| m.trim().is_empty()) { return Err("Select an explicit model in agent settings, then retry.".into()); }
+            if let (Some(project), Some(agent)) = (channel.project_id.as_ref(), mentioned.as_ref()) {
+                store.invite_agent_to_channel(project, &channel.id, agent).map_err(|e| e.to_string())?;
+            }
+            let author = crate::model::MessageAuthor { agent_id: recipient.clone(), name: config.name.clone(), provider: config.provider.clone(), avatar: config.avatar.clone() };
+            let mut snapshot = self.clone();
+            let binding = workspace_session::eligibility(&store, &self.channel_id, &config);
+            snapshot.agent_id = recipient;
+            snapshot.project_id = channel.project_id;
+            snapshot.provider = provider;
+            snapshot.system_prompt = Some(config.conversation_system_prompt());
+            snapshot.model = config.model;
+            snapshot.reasoning_effort = config.reasoning_effort;
+            snapshot.policy = config.policy;
+            snapshot.plugin_write = false;
+            (snapshot, author, binding)
+        };
+        snapshot.write_access = match binding {
+            Ok(binding) => tokio::task::spawn_blocking(move || workspace_session::verify_binding(binding)).await.map_err(|e| e.to_string())?,
+            Err(reason) => Err(reason),
+        };
         Ok((snapshot, author))
     }
 
@@ -289,7 +303,7 @@ impl Engine {
         updates: &mpsc::UnboundedSender<Update>,
     ) {
         let (snapshot, author) = if self.mode == crate::provider::SessionMode::Conversation {
-            match self.snapshot(&text) {
+            match self.snapshot(&text).await {
                 Ok(snapshot) => snapshot,
                 Err(error) => { send(updates, Update::Error(error)); self.finish(updates, crate::driver::TurnOutcome::Failed); return; }
             }
@@ -306,10 +320,28 @@ impl Engine {
             }
         };
         send(updates, Update::Responding(author.clone()));
+        if snapshot.mode == SessionMode::Conversation { send(updates, Update::SessionProfile(snapshot.session_profile())); }
         snapshot.turn_snapshot(&author, sequencer, text, attachments, commands, updates).await;
     }
 
+    fn changes_block(&self, start: &Result<crate::workspace_changes::StartSnapshot, String>, state: crate::workspace_changes::ChangesState) -> Block {
+        let result = start.as_ref().map_err(Clone::clone).and_then(|start| crate::workspace_changes::changes(&self.write_access.as_ref().unwrap().root, start, state));
+        result.unwrap_or_else(|error| Block::Markdown { text: format!("Discard could not list this response's changes: {error}") })
+    }
+
+    fn session_profile(&self) -> SessionProfile {
+        match &self.write_access {
+            Ok(grant) => SessionProfile::Workspace { root: grant.root.clone() },
+            Err(reason) => {
+                let store = crate::driver::lock(&self.store);
+                let direct_without_opt_in = self.project_id.is_none() && store.load_agent(&self.agent_id).is_ok_and(|a| !a.workspace_write);
+                SessionProfile::ReadOnly { reason: (!direct_without_opt_in).then(|| reason.clone()) }
+            }
+        }
+    }
+
     async fn turn_snapshot(&self, author: &crate::model::MessageAuthor, sequencer: &mut Sequencer, text: String, attachments: Vec<crate::attachments::Attachment>, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) {
+        let mut session_mode = if self.mode == SessionMode::Conversation && self.write_access.is_ok() { SessionMode::Workspace } else { self.mode };
         let history = crate::driver::lock(&self.store).messages_for_channel(&self.channel_id);
         let previous_changes = self.memory.as_ref().map(|m| m.changes(&self.channel_id)).transpose();
         if let Err(error) = self.store_message(Role::User, crate::attachments::blocks(&text, &attachments), None) {
@@ -344,7 +376,7 @@ impl Engine {
         }
 
         // The workspace is chosen and created before the provider session starts. A session is never moved.
-        let cwd = match if self.mode == crate::provider::SessionMode::Conversation { WorkspaceMode::MainCheckout } else { self.workspace_mode } {
+        let cwd = if session_mode == SessionMode::Workspace { self.write_access.as_ref().unwrap().root.clone() } else { match if self.mode == crate::provider::SessionMode::Conversation { WorkspaceMode::MainCheckout } else { self.workspace_mode } {
             WorkspaceMode::MainCheckout => self.cwd.clone(),
             WorkspaceMode::Worktree => {
                 let prepared = match &self.workspace {
@@ -365,6 +397,7 @@ impl Engine {
                     }
                 }
             }
+        }
         };
 
         let mut memory_query = text.clone();
@@ -374,34 +407,75 @@ impl Engine {
                 memory_query.push_str(&serde_json::to_string(&message.blocks).unwrap_or_default());
             }
         }
+        let mut workspace_guard = None;
+        if session_mode == SessionMode::Workspace {
+            let root = &self.write_access.as_ref().unwrap().root;
+            if let Some(holder) = self.workspace_locks.holder(root) {
+                let name = crate::driver::lock(&self.store).load_channel(&holder).map(|c| c.name).unwrap_or(holder.0);
+                send(updates, Update::Notice(format!("Waiting for #{name} to finish using this worktree.")));
+            }
+            let acquire = self.workspace_locks.acquire(root, self.channel_id.clone()); tokio::pin!(acquire);
+            loop {
+                tokio::select! {
+                    guard = &mut acquire => { workspace_guard = Some(guard); break; }
+                    command = commands.recv() => match command {
+                        None | Some(Command::Cancel) => { self.finish(updates, crate::driver::TurnOutcome::Cancelled); return; }
+                        Some(_) => send(updates, Update::Error("A turn is already running. Wait for it to finish or cancel it.".into())),
+                    }
+                }
+            }
+        }
+        let mut start_snapshot = if session_mode == SessionMode::Workspace { Some(crate::workspace_changes::snapshot(&cwd)) } else { None };
+        let save_setup_changes = |state| {
+            if let Some(start) = &start_snapshot {
+                match self.store_message(Role::Agent, vec![self.changes_block(start, state)], Some(author)) {
+                    Ok(response) => send(updates, Update::ResponseCompleted(response)),
+                    Err(error) => send(updates, Update::ResponseSaveFailed(error)),
+                }
+            }
+        };
         // Memory: issue a session token and build the prompt. If this fails, no session starts.
-        let prepared = match &self.memory {
-            Some(service) => match service.prepare_turn(&self.agent_id, self.project_id.as_ref(), &self.channel_id, self.system_prompt.as_deref(), self.plugin_write && self.mode == crate::provider::SessionMode::Coding, &memory_query) {
+        let mut prepared = match &self.memory {
+            Some(service) => match if session_mode == SessionMode::Workspace {
+                service.prepare_workspace_turn(&self.agent_id, self.project_id.as_ref(), &self.channel_id, self.system_prompt.as_deref(), self.write_access.as_ref().unwrap(), &memory_query)
+            } else { service.prepare_turn(&self.agent_id, self.project_id.as_ref(), &self.channel_id, self.system_prompt.as_deref(), self.plugin_write && self.mode == crate::provider::SessionMode::Coding, &memory_query) } {
                 Ok(p) => Some(p),
                 Err(e) => {
                     send(updates, Update::Error(redact(&e)));
-                    self.finish(updates, crate::driver::TurnOutcome::Failed);
+                    save_setup_changes(crate::workspace_changes::ChangesState::Failed); self.finish(updates, crate::driver::TurnOutcome::Failed);
                     return;
                 }
             },
+            None if session_mode == SessionMode::Workspace => {
+                send(updates, Update::Error("Write sessions require scoped workspace tools.".into())); save_setup_changes(crate::workspace_changes::ChangesState::Failed); self.finish(updates, crate::driver::TurnOutcome::Failed); return;
+            }
             None => None,
         };
         // Revokes the token on every exit path, including early returns.
-        let _revoke = prepared.as_ref().zip(self.memory.as_ref()).map(|(p, service)| RevokeOnDrop {
+        let mut revoke = prepared.as_ref().zip(self.memory.as_ref()).map(|(p, service)| RevokeOnDrop {
             service: Arc::clone(service),
             token: p.token.clone(),
         });
 
+        let base_system = prepared.as_ref().map(|p| p.system_prompt.clone()).or_else(|| self.system_prompt.clone()).unwrap_or_default();
+        let mut system = base_system.clone();
+        if session_mode == SessionMode::Workspace {
+            let grant = self.write_access.as_ref().unwrap();
+            system.push_str("\n\n"); system.push_str(&workspace_session::workspace_prompt(grant));
+            if let Some(instructions) = workspace_session::repository_instructions(&grant.root) { system.push_str("\n\n"); system.push_str(&instructions); }
+        } else if session_mode == SessionMode::Conversation && let SessionProfile::ReadOnly { reason: Some(reason) } = self.session_profile() {
+            system.push_str("\n\n"); system.push_str(&reason.note());
+        }
         let request_text = crate::attachments::prompt(&text, &attachments);
-        let (input, previous_images) = if self.mode == crate::provider::SessionMode::Conversation {
-            let history = match history { Ok(h) => h, Err(e) => { send(updates, Update::Error(e.to_string())); self.finish(updates, crate::driver::TurnOutcome::Failed); return; } };
-            match self.conversation_input(&request_text, &history, prepared.as_ref().map(|p| p.system_prompt.as_str()).unwrap_or(""), commands, updates).await {
+        let (input, previous_images) = if session_mode.replays_transcript() {
+            let history = match history { Ok(h) => h, Err(e) => { send(updates, Update::Error(e.to_string())); save_setup_changes(crate::workspace_changes::ChangesState::Failed); self.finish(updates, crate::driver::TurnOutcome::Failed); return; } };
+            match self.conversation_input(&request_text, &history, &system, commands, updates).await {
                 Ok(input) => input,
                 Err(crate::conversation_context::ContextError::Cancelled) => {
                     send(updates, Update::Notice("History summary cancelled. The saved summary is unchanged.".into()));
-                    self.finish(updates, crate::driver::TurnOutcome::Cancelled); return;
+                    save_setup_changes(crate::workspace_changes::ChangesState::Stopped); self.finish(updates, crate::driver::TurnOutcome::Cancelled); return;
                 }
-                Err(error) => { send(updates, Update::Error(error.to_string())); self.finish(updates, crate::driver::TurnOutcome::Failed); return; }
+                Err(error) => { send(updates, Update::Error(error.to_string())); save_setup_changes(crate::workspace_changes::ChangesState::Failed); self.finish(updates, crate::driver::TurnOutcome::Failed); return; }
             }
         } else { (request_text, Vec::new()) };
         let mut images = previous_images;
@@ -410,20 +484,39 @@ impl Engine {
         images.retain(|image| seen_images.insert(image.id.clone()));
         if images.iter().map(|file| file.size).sum::<u64>() > crate::attachments::MAX_TOTAL_BYTES {
             send(updates, Update::Error("Image history exceeds 20 MB. Start a new conversation or use smaller images.".into()));
-            self.finish(updates, crate::driver::TurnOutcome::Failed); return;
+            save_setup_changes(crate::workspace_changes::ChangesState::Failed); self.finish(updates, crate::driver::TurnOutcome::Failed); return;
         }
         let resume_handle = if self.mode == crate::provider::SessionMode::Coding { crate::driver::lock(&self.store).resume_handle(&self.session_id).ok().flatten() } else { None };
-        let spec = SessionSpec {
+        let mut spec = SessionSpec {
             reasoning_effort: self.reasoning_effort.clone(),
-            mode: self.mode,
+            mode: session_mode,
             cwd,
             model: self.model.clone(),
-            system_prompt: prepared.as_ref().map(|p| p.system_prompt.clone()).or_else(|| self.system_prompt.clone()),
+            system_prompt: Some(system),
             enforcement,
             resume_handle,
             mcp_config: prepared.as_ref().map(|p| p.mcp_config.clone()),
         };
-        let mut session = match self.provider.start_session(spec).await {
+        let mut started = self.provider.start_session(spec.clone()).await;
+        if let Err(ProviderError::SandboxUnavailable(detail)) = &started && session_mode == SessionMode::Workspace {
+            let reason = ReadOnlyReason::SandboxUnavailable(detail.clone());
+            send(updates, Update::Notice(reason.note()));
+            send(updates, Update::SessionProfile(SessionProfile::ReadOnly { reason: Some(reason.clone()) }));
+            start_snapshot = None;
+            drop(workspace_guard.take());
+            drop(revoke.take());
+            prepared = match self.memory.as_ref().map(|service| service.prepare_turn(&self.agent_id, self.project_id.as_ref(), &self.channel_id, self.system_prompt.as_deref(), false, &memory_query)).transpose() {
+                Ok(prepared) => prepared,
+                Err(e) => { send(updates, Update::Error(e)); self.finish(updates, crate::driver::TurnOutcome::Failed); return; }
+            };
+            revoke = prepared.as_ref().zip(self.memory.as_ref()).map(|(p, service)| RevokeOnDrop { service: service.clone(), token: p.token.clone() });
+            spec.mcp_config = prepared.as_ref().map(|p| p.mcp_config.clone());
+            let base_system = prepared.as_ref().map(|p| p.system_prompt.clone()).or_else(|| self.system_prompt.clone()).unwrap_or_default();
+            session_mode = SessionMode::Conversation;
+            spec.mode = session_mode; spec.cwd = self.cwd.clone(); spec.system_prompt = Some(format!("{base_system}\n\n{}", reason.note()));
+            started = self.provider.start_session(spec).await;
+        }
+        let mut session = match started {
             Ok(session) => session,
             Err(e) => {
                 let message = match e {
@@ -433,6 +526,10 @@ impl Engine {
                     ),
                     other => redact(&other.to_string()),
                 };
+                if let Some(start) = &start_snapshot {
+                    let blocks = vec![self.changes_block(start, crate::workspace_changes::ChangesState::Failed)];
+                    match self.store_message(Role::Agent, blocks, Some(author)) { Ok(response) => send(updates, Update::ResponseCompleted(response)), Err(e) => send(updates, Update::ResponseSaveFailed(e)) }
+                }
                 send(updates, Update::Error(message));
                 self.finish(updates, crate::driver::TurnOutcome::Failed);
                 return;
@@ -443,6 +540,7 @@ impl Engine {
         let (decisions_tx, decisions_rx) = mpsc::unbounded_channel();
         let (cancel_tx, cancel_rx) = mpsc::unbounded_channel();
         let ctx = TurnContext {
+            workspace_root: if session_mode == SessionMode::Workspace { self.write_access.as_ref().ok().map(|grant| grant.root.as_path()) } else { None },
             store: &self.store,
             sequencer,
             session_id: &self.session_id,
@@ -467,20 +565,22 @@ impl Engine {
                             self.observe(mapped);
                         }
                         // Discard's own memory tools are approved by policy, and the decision is audited.
-                        let memory_approval = match &event.kind {
-                            EventKind::ApprovalRequest { approval_id, tool, .. }
+                        let automatic_approval = match &event.kind {
+                            EventKind::ApprovalRequest { approval_id, tool, kind: crate::approval::ApprovalKind::ProviderTool, paths, .. }
+                                if session_mode == SessionMode::Workspace && workspace_session::is_edit_tool(tool) && workspace_session::paths_inside(&self.write_access.as_ref().unwrap().root, paths) => Some((approval_id.clone(), "workspace_edit")),
+                            EventKind::ApprovalRequest { approval_id, tool, kind: crate::approval::ApprovalKind::ProviderTool, .. }
                                 if self.memory.is_some() && auto_approved_tool(tool) =>
                             {
-                                Some(approval_id.clone())
+                                Some((approval_id.clone(), "builtin-discard-tools"))
                             }
                             _ => None,
                         };
                         send(updates, Update::Event(Box::new(event)));
-                        if let Some(approval_id) = memory_approval {
+                        if let Some((approval_id, policy)) = automatic_approval {
                             let _ = decisions_tx.send(DecisionMsg {
                                 approval_id: approval_id.clone(),
                                 decision: Decision::Approve,
-                                decider: Decider::Policy("builtin-discard-tools".into()),
+                                decider: Decider::Policy(policy.into()),
                             });
                             let state = ApprovalState::Decided(Decision::Approve);
                             timeline.mark_approval(&approval_id, state);
@@ -490,6 +590,13 @@ impl Engine {
                     command = commands.recv(), if commands_open => match command {
                         None => commands_open = false,
                         Some(Command::Decide { approval_id, decision }) => {
+                            if session_mode == SessionMode::Workspace && decision == Decision::AlwaysAllow {
+                                send(updates, Update::Error("Always allow is not available in write sessions yet. Approve this request once.".into()));
+                                continue;
+                            }
+                            if decision == Decision::AlwaysAllow && timeline.prompts().iter().any(|p| p.approval_id == approval_id && p.kind != crate::approval::ApprovalKind::ProviderTool) {
+                                send(updates, Update::Error("Always allow is unavailable for this approval.".into())); continue;
+                            }
                             let pending = timeline
                                 .prompts()
                                 .iter()
@@ -517,6 +624,10 @@ impl Engine {
             }
         };
         let (result, ()) = tokio::join!(driver, pump);
+        if let Some(guard) = &workspace_guard {
+            drop(revoke.take());
+            guard.stop_writes().await;
+        }
 
         let changes = match (&self.memory, previous_changes) {
             (Some(memory), Ok(Some(before))) => match memory.changes(&self.channel_id) {
@@ -529,8 +640,13 @@ impl Engine {
             (_, Err(e)) => { send(updates, Update::Error(e)); vec![] },
             _ => vec![],
         };
-        if !timeline.blocks().is_empty() || !changes.is_empty() {
-            let response = match self.store_message(Role::Agent, timeline.blocks().to_vec(), Some(author)) {
+        let mut response_blocks = timeline.blocks().to_vec();
+        if let Some(start) = &start_snapshot {
+            let state = match &result { Ok((_, crate::driver::TurnOutcome::Completed)) => crate::workspace_changes::ChangesState::Completed, Ok((_, crate::driver::TurnOutcome::Cancelled)) => crate::workspace_changes::ChangesState::Stopped, _ => crate::workspace_changes::ChangesState::Failed };
+            response_blocks.push(self.changes_block(start, state));
+        }
+        if !response_blocks.is_empty() || !changes.is_empty() {
+            let response = match self.store_message(Role::Agent, response_blocks, Some(author)) {
                 Ok(response) => response,
                 Err(error) => {
                     send(updates, Update::ResponseSaveFailed(format!("{error}. Copy the reply before sending another message, then resolve the storage error.")));
@@ -538,7 +654,8 @@ impl Engine {
                     return;
                 }
             };
-            if self.mode == crate::provider::SessionMode::Conversation { send(updates, Update::ResponseCompleted(response.clone())); }
+            if session_mode == SessionMode::Workspace && let Err(e) = crate::driver::lock(&self.store).link_agent_commits(&self.channel_id, &response.id) { send(updates, Update::Error(e.to_string())); }
+            if session_mode.replays_transcript() { send(updates, Update::ResponseCompleted(response.clone())); }
             let mut recorded = Vec::new();
             for change in changes {
                 match crate::driver::lock(&self.store).record_response_memory_at(&self.channel_id, &response.id, &change) {
@@ -565,6 +682,8 @@ impl Engine {
             }
             for (response, changes) in groups { send(updates, Update::MemoryChanges { response, changes }); }
         }
+        drop(revoke);
+        drop(workspace_guard);
         match result {
             Ok((_turn, outcome)) => {
                 if self.mode == crate::provider::SessionMode::Coding

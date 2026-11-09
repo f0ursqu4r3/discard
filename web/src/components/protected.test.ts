@@ -18,7 +18,14 @@ test('stale approvals have no decision buttons', () => {
   const card = mount(ApprovalCard, {
     props: {
       channelId: 'channel',
-      prompt: { approvalId: 'a', tool: 'shell', summary: 'run', view: 'stale' },
+      prompt: {
+        kind: 'provider_tool',
+        alwaysAllow: 'available',
+        approvalId: 'a',
+        tool: 'shell',
+        summary: 'run',
+        view: 'stale',
+      },
     },
   })
   expect(card.find('button').exists()).toBe(false)
@@ -59,7 +66,14 @@ test('approval buttons use the protected border for focus', () => {
   const card = mount(ApprovalCard, {
     props: {
       channelId: 'channel',
-      prompt: { approvalId: 'a', tool: 'shell', summary: 'run', view: 'pending' },
+      prompt: {
+        kind: 'provider_tool',
+        alwaysAllow: 'available',
+        approvalId: 'a',
+        tool: 'shell',
+        summary: 'run',
+        view: 'pending',
+      },
     },
   })
   for (const button of card.findAll('button'))
@@ -76,7 +90,16 @@ test('approval decisions in a live transcript include the originating channel', 
       live: [{ type: 'approval', approval_id: 'approval-2', tool: 'shell', summary: 'Run tests' }],
       running: true,
       newAnchorId: null,
-      prompts: [{ approvalId: 'approval-2', tool: 'shell', summary: 'Run tests', view: 'pending' }],
+      prompts: [
+        {
+          kind: 'provider_tool',
+          alwaysAllow: 'available',
+          approvalId: 'approval-2',
+          tool: 'shell',
+          summary: 'Run tests',
+          view: 'pending',
+        },
+      ],
     },
   })
   const approve = list.findAll('button').find((button) => button.text() === 'Approve')!
@@ -94,4 +117,23 @@ test('long notices wrap inside their inset alert and preserve the full error', (
   const description = notices.get('[data-slot="alert-description"]')
   expect(description.text()).toBe(error)
   expect(description.classes()).toContain('[overflow-wrap:anywhere]')
+})
+
+test('changes cards retain the protected surface', async () => {
+  const { default: ChangesCard } = await import('./ChangesCard.vue')
+  const view = mount(ChangesCard, {
+    props: {
+      block: {
+        type: 'changes',
+        root: '/worktree',
+        state: 'completed',
+        commits: [],
+        files: [],
+        truncated: false,
+      },
+    },
+  })
+  const card = view.get('[data-ui-id="changes-card"]')
+  expect(card.attributes('data-protected')).toBe('true')
+  expect(card.classes()).toContain('bg-[var(--protected-bg)]')
 })

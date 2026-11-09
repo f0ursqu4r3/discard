@@ -39,6 +39,7 @@ pub struct TurnInputs {
 }
 
 pub struct TurnContext<'a> {
+    pub workspace_root: Option<&'a std::path::Path>,
     pub store: &'a Mutex<Store>,
     pub sequencer: &'a mut Sequencer,
     pub session_id: &'a SessionId,
@@ -90,7 +91,7 @@ pub async fn run_turn_with_images(
     images: &[crate::attachments::Attachment],
     mut inputs: TurnInputs,
 ) -> Result<(Turn, TurnOutcome), DriverError> {
-    let TurnContext { store, sequencer, session_id, policy_name, updates } = ctx;
+    let TurnContext { workspace_root, store, sequencer, session_id, policy_name, updates } = ctx;
     let mut turn = Turn::new(session_id.clone());
     lock(store).insert_turn(&turn)?;
     set_state(store, &mut turn, TurnState::Running)?;
@@ -108,20 +109,26 @@ pub async fn run_turn_with_images(
     let outcome = loop {
         tokio::select! {
             next = session.next_event() => {
-                let Some(raw) = next else {
+                let Some(mut raw) = next else {
                     warn!(session = %session_id, turn = %turn.id, "provider stream ended before the turn finished");
                     stale_all(store, &mut pending)?;
                     set_state(store, &mut turn, TurnState::Failed)?;
                     break TurnOutcome::Failed;
                 };
+                if let Some(root) = workspace_root
+                    && let EventKind::ApprovalRequest { tool, paths, kind, .. } = &mut raw.kind
+                    && crate::workspace_session::is_edit_tool(tool)
+                    && !crate::workspace_session::paths_inside(root, paths)
+                { *kind = crate::approval::ApprovalKind::SandboxEscape; }
                 let event = sequencer.stamp(session_id, raw);
                 lock(store).append_event(&event)?;
                 let _ = updates.send(event.clone());
                 match &event.kind {
                     EventKind::Error { .. } => saw_error = true,
-                    EventKind::ApprovalRequest { approval_id, tool, input, .. } => {
+                    EventKind::ApprovalRequest { approval_id, tool, input, kind, .. } => {
                         let mut approval = Approval::new(turn.id.clone(), tool.clone(), input.clone());
                         approval.id = approval_id.clone();
+                        approval.kind = *kind;
                         lock(store).save_approval(&approval)?;
                         pending.insert(approval_id.clone(), approval);
                         if turn.state == TurnState::Running {

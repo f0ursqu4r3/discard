@@ -1,6 +1,7 @@
 //! Maps Codex app-server messages to normalized events. Pure: no I/O.
 
-use discard_core::approval::Decision;
+use discard_core::approval::{ApprovalKind, Decision};
+use discard_core::provider::SessionMode;
 use discard_core::event::{AgentStatus, ApprovalId, EventKind, RawEvent};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -36,6 +37,8 @@ pub enum Item {
 #[derive(Debug, Default)]
 pub struct Mapper {
     started: HashSet<String>,
+    mode: SessionMode,
+    edit_paths: std::collections::HashMap<String, Vec<String>>,
     input_tokens: u64,
     output_tokens: u64,
 }
@@ -44,6 +47,8 @@ impl Mapper {
     pub fn new() -> Self {
         Self::default()
     }
+
+    pub fn with_mode(mode: SessionMode) -> Self { Self { mode, ..Self::default() } }
 
     /// Map one server message. Responses to our own requests are not handled here.
     pub fn on_message(&mut self, msg: &Value) -> Vec<Item> {
@@ -96,6 +101,7 @@ impl Mapper {
 
     fn item_started(&mut self, item: &Value, raw: &Value) -> Vec<Item> {
         let Some((call_id, name, input)) = describe_item(item) else { return Vec::new() };
+        if name == "file_change" { self.edit_paths.insert(call_id.clone(), input["paths"].as_array().map(|p| p.iter().filter_map(|p| p.as_str().map(str::to_owned)).collect()).unwrap_or_default()); }
         if !self.started.insert(call_id.clone()) {
             return Vec::new();
         }
@@ -114,7 +120,7 @@ impl Mapper {
     }
 
     fn server_request(&mut self, method: &str, id: &Value, params: &Value, raw: &Value) -> Vec<Item> {
-        let (kind, tool, input) = match method {
+        let (kind, tool, mut input) = match method {
             "item/commandExecution/requestApproval" => (
                 RequestKind::Command,
                 "command".to_string(),
@@ -142,9 +148,15 @@ impl Mapper {
             .unwrap_or_default();
         let approval_id = ApprovalId::new();
         let call_id = params.get("itemId").and_then(Value::as_str).unwrap_or_default().to_string();
+        // Only complete item notifications carry every edit and rename target.
+        let paths = self.edit_paths.get(&call_id).cloned().unwrap_or_default();
+        if kind == RequestKind::FileChange { input["paths"] = serde_json::json!(paths); }
+        let approval_kind = if self.mode == SessionMode::Workspace && (kind == RequestKind::Command || kind == RequestKind::FileChange && !params["grantRoot"].is_null()) {
+            ApprovalKind::SandboxEscape
+        } else { ApprovalKind::ProviderTool };
         vec![
             Item::Request(PendingRequest { approval_id: approval_id.clone(), rpc_id: id.clone(), kind, available }),
-            event(EventKind::ApprovalRequest { approval_id, call_id, tool, input }, raw),
+            event(EventKind::ApprovalRequest { approval_id, call_id, tool, input, kind: approval_kind, paths }, raw),
         ]
     }
 }
@@ -163,11 +175,16 @@ fn describe_item(item: &Value) -> Option<(String, String, Value)> {
     match item.get("type").and_then(Value::as_str)? {
         "commandExecution" => Some((id, "command".into(), serde_json::json!({"command": item.get("command"), "cwd": item.get("cwd")}))),
         "fileChange" => {
-            let paths: Vec<&str> = item
-                .get("changes")
-                .and_then(Value::as_array)
-                .map(|c| c.iter().filter_map(|c| c.get("path").and_then(Value::as_str)).collect())
-                .unwrap_or_default();
+            let paths = item.get("changes").and_then(Value::as_array).and_then(|changes| {
+                let mut paths = Vec::new();
+                for change in changes {
+                    paths.push(change.get("path")?.as_str()?);
+                    let kind = change.get("kind")?;
+                    match kind.get("type")?.as_str()? { "add" | "delete" | "update" => {}, _ => return None }
+                    if let Some(destination) = kind.get("move_path").filter(|value| !value.is_null()) { paths.push(destination.as_str()?); }
+                }
+                Some(paths)
+            }).unwrap_or_default();
             Some((id, "file_change".into(), serde_json::json!({"paths": paths})))
         }
         "mcpToolCall" => {
@@ -245,6 +262,37 @@ mod tests {
 
     fn command_item(status: &str, exit: Value, output: Value) -> Value {
         json!({"type": "commandExecution", "id": "c1", "command": "ls -la", "cwd": "/tmp/p", "status": status, "exitCode": exit, "aggregatedOutput": output})
+    }
+
+    #[test]
+    fn rename_approvals_include_the_destination_and_reject_partial_paths() {
+        let mut mapper = Mapper::with_mode(SessionMode::Workspace);
+        for (changes, expected) in [
+            (json!([{"path":"/root/a","kind":{"type":"update","move_path":"/outside"}}]), vec!["/root/a", "/outside"]),
+            (json!([{"path":"/root/a","kind":{"type":"add"}}, {"kind":{"type":"add"}}]), vec![]),
+            (json!([{"path":"/root/a","kind":{"type":"update","move_path":true}}]), vec![]),
+        ] {
+            feed(&mut mapper, json!({"method":"item/started","params":{"item":{"id":"rename","type":"fileChange","changes":changes}}}));
+            let items = feed(&mut mapper, json!({"id":1,"method":"item/fileChange/requestApproval","params":{"itemId":"rename","grantRoot":null}}));
+            let EventKind::ApprovalRequest { paths, input, .. } = events(&items)[0] else { panic!() };
+            assert_eq!(paths, &expected);
+            assert_eq!(input["paths"], json!(expected));
+        }
+    }
+
+    #[test]
+    fn workspace_recording_uses_file_paths_and_escape_fallback() {
+        let mut mapper = Mapper::with_mode(SessionMode::Workspace); let mut edits = 0; let mut commands = 0;
+        for line in include_str!("../../fixtures/codex-workspace-turn.jsonl").lines() {
+            let value: Value = serde_json::from_str(line).unwrap();
+            for item in mapper.on_message(&value) {
+                if let Item::Event(e) = item && let EventKind::ApprovalRequest { tool, paths, kind, .. } = e.kind {
+                    if tool == "command" { assert_eq!(kind, ApprovalKind::SandboxEscape); commands += 1; }
+                    if tool == "file_change" { assert!(!paths.is_empty()); edits += 1; }
+                }
+            }
+        }
+        assert!(edits >= 2 && commands >= 4);
     }
 
     #[test]
@@ -396,7 +444,7 @@ mod tests {
         );
         let Item::Request(req) = &items[0] else { panic!("expected a pending request first") };
         assert_eq!((req.rpc_id.clone(), req.kind, req.available.clone()), (json!(0), RequestKind::Command, vec!["accept".to_string(), "cancel".to_string()]));
-        let EventKind::ApprovalRequest { approval_id, call_id, tool, input } = events(&items)[0] else { panic!() };
+        let EventKind::ApprovalRequest { approval_id, call_id, tool, input, .. } = events(&items)[0] else { panic!() };
         assert_eq!((call_id.as_str(), tool.as_str()), ("c1", "command"));
         assert_eq!(input["command"], "touch x");
         assert_eq!(approval_id, &req.approval_id);

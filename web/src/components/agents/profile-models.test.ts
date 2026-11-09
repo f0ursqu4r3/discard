@@ -14,6 +14,7 @@ const agent = {
   systemPrompt: '',
   policy: 'deny',
   pluginWrite: false,
+  workspaceWrite: false,
   archived: false,
 }
 const claude = { id: 'claude-model', name: 'Claude model', description: '' }

@@ -27,6 +27,7 @@ beforeEach(() => {
           systemPrompt: '',
           policy: 'deny',
           pluginWrite: false,
+          workspaceWrite: false,
         }
       if (name === 'settings_providers')
         return [

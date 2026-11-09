@@ -1,5 +1,5 @@
 //! Conversation replay and conservative context accounting. Original messages remain in Store.
-use crate::model::{Message, MessageId, Role};
+use crate::model::{Block, Message, MessageId, Role};
 use serde::{Deserialize, Serialize};
 
 /// 24k input tokens and 8k output/headroom when exact provider metadata is unavailable.
@@ -19,6 +19,27 @@ pub fn input_budget(window: Option<u64>) -> usize {
     (window.unwrap_or(UNKNOWN_CONTEXT).min(131_072) as usize).saturating_sub(OUTPUT_RESERVE)
 }
 
+/// Bound provider replay without changing the saved transcript.
+pub fn compact_blocks(blocks: &[Block]) -> serde_json::Value {
+    serde_json::Value::Array(blocks.iter().map(|block| match block {
+        Block::ToolCall { name, input, output, is_error, .. } => {
+            let mut target = serde_json::Map::new();
+            for key in ["command", "cmd", "file_path", "path", "paths", "notebook_path", "pattern"] {
+                if let Some(value) = input.get(key) { target.insert(key.into(), value.clone()); }
+            }
+            let output = output.as_ref().map(|text| {
+                if text.len() <= 1024 { return text.clone(); }
+                let mut end = 1024;
+                while !text.is_char_boundary(end) { end -= 1; }
+                format!("{}…[truncated {} bytes]", &text[..end], text.len() - end)
+            });
+            serde_json::json!({"type":"tool_call","name":name,"input":target,"output":output,"is_error":is_error})
+        }
+        Block::Changes { state, files, commits, .. } => serde_json::json!({"type":"changes","state":state,"files":files.iter().map(|file| serde_json::json!({"path":file.path,"status":file.status})).collect::<Vec<_>>(),"commits":commits.iter().map(|commit| &commit.id).collect::<Vec<_>>()}),
+        _ => serde_json::to_value(block).expect("message block serializes"),
+    }).collect())
+}
+
 pub fn replay(messages: &[Message]) -> Vec<(MessageId, String)> {
     replay_with_authors(messages, &std::collections::HashMap::new())
 }
@@ -29,7 +50,7 @@ pub fn replay_with_authors(messages: &[Message], authors: &std::collections::Has
         .filter(|m| m.role != Role::System)
         .flat_map(|m| {
             let author = authors.get(&m.id).map(|a| format!("Author: {}\n", serde_json::to_string(a).expect("author serializes"))).unwrap_or_default();
-            let body = serde_json::to_string(&m.blocks).expect("message blocks serialize");
+            let body = serde_json::to_string(&compact_blocks(&m.blocks)).expect("message blocks serialize");
             let mut parts = Vec::new();
             let mut start = 0;
             while start < body.len() {
@@ -58,7 +79,10 @@ pub fn after_boundary<'a>(
     messages: &'a [(MessageId, String)],
     through: Option<&MessageId>,
 ) -> &'a [(MessageId, String)] {
-    match through.and_then(|id| messages.iter().position(|(mid, _)| mid == id)) {
+    match through.and_then(|id| messages.iter().position(|(mid, _)| mid == id).or_else(|| {
+        let prefix = id.0.split(":part:").next().unwrap_or(&id.0);
+        messages.iter().rposition(|(mid, _)| mid.0.split(":part:").next() == Some(prefix))
+    })) {
         Some(index) => &messages[index + 1..],
         None => messages,
     }
@@ -168,6 +192,32 @@ pub async fn summarize(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tool_call_replays_name_target_status_and_first_kib() {
+        let blocks = vec![crate::model::Block::ToolCall { call_id: "call".into(), name: "Edit".into(), input: serde_json::json!({"file_path":"a.rs","old_string":"x".repeat(9216),"new_string":"y".repeat(9216)}), output: Some("z".repeat(10240)), is_error: Some(false) }];
+        let compact = compact_blocks(&blocks);
+        assert_eq!(compact[0]["name"], "Edit");
+        assert_eq!(compact[0]["input"], serde_json::json!({"file_path":"a.rs"}));
+        assert_eq!(compact[0]["is_error"], false);
+        assert_eq!(compact[0]["output"], format!("{}…[truncated 9216 bytes]", "z".repeat(1024)));
+        let unicode = vec![crate::model::Block::ToolCall { call_id: "c".into(), name: "x".into(), input: serde_json::json!({}), output: Some("€".repeat(500)), is_error: None }];
+        assert_eq!(compact_blocks(&unicode)[0]["output"], format!("{}…[truncated 477 bytes]", "€".repeat(341)));
+    }
+    #[test]
+    fn changes_card_replays_files_and_commit_ids() {
+        let block = crate::model::Block::Changes { root: "/tmp/root".into(), state: crate::workspace_changes::ChangesState::Stopped, commits: vec![crate::workspace_changes::ChangedCommit { id: "abc".into(), subject: "subject".into() }], files: vec![crate::workspace_changes::ChangedFile { path: "a.rs".into(), status: "M".into(), diff: "large diff".into(), truncated: false, preexisting: true }], truncated: false };
+        assert_eq!(compact_blocks(&[block]), serde_json::json!([{"type":"changes","state":"stopped","files":[{"path":"a.rs","status":"M"}],"commits":["abc"]}]));
+    }
+    #[test]
+    fn other_blocks_replay_unchanged() {
+        let blocks = vec![crate::model::Block::Markdown { text: "hello".into() }, crate::model::Block::Diff { text: "diff".into() }];
+        assert_eq!(compact_blocks(&blocks), serde_json::to_value(&blocks).unwrap());
+    }
+    #[test]
+    fn saved_boundary_survives_fewer_fragments() {
+        let messages = vec![(MessageId("old:part:0".into()), "a".into()), (MessageId("old:part:1".into()), "b".into()), (MessageId("new:part:0".into()), "c".into())];
+        assert_eq!(after_boundary(&messages, Some(&MessageId("old:part:5".into()))), &messages[2..]);
+    }
     #[test]
     fn budget_is_conservative_and_current_input_is_never_truncated() {
         assert_eq!(input_budget(None), 24576);

@@ -10,7 +10,7 @@ Memory instructions and preferences always enter the prompt in domain precedence
 
 ## Codex model-cache recovery
 
-Conversation setup checks the installed Codex version before using model metadata. If the cache is missing, malformed, from another version, or missing the exact selected model, Discard makes one bounded `model/list` probe with the same executable and Codex home. The CLI refreshes its own cache. Discard then reloads and validates it before building the restricted conversation catalog.
+Conversation and Workspace setup check the installed Codex version before using model metadata. If the cache is missing, malformed, from another version, or missing the exact selected model, Discard makes one bounded `model/list` probe with the same executable and Codex home. The CLI refreshes its own cache. Discard then reloads and validates it before building the restricted conversation catalog.
 
 The probe starts no conversation thread and sends no user prompt. A valid cache skips recovery. Recovery never changes the selected model or relaxes conversation controls. If refresh fails or the refreshed cache is still invalid, setup reports an error and remains available for retry.
 
@@ -117,3 +117,11 @@ New replies store their author ID, name, provider, and avatar. The transcript an
 Conversation mode retains its empty provider working directory and disabled native shell tools. The scoped Discard MCP server can also expose worktree inspection and removal requests when the app starts it with the worktree service. Calls bind to the authenticated source conversation. The agent can request removal, but it cannot approve it. The app rechecks the worktree and executes removal only after a user approval. Summary tokens cannot use these tools. See [worktree tools](../worktrees.md#conversation-worktree-tools).
 
 The response prompt leads with the current answer or next action, limits repeated snapshot facts and warnings, and distinguishes pending approval from confirmed completion. Agent personality and user instructions can still set the desired detail. Message prose and code blocks use the same base text size. Paragraph and code-block spacing separate explanations from commands.
+
+## Workspace replay
+
+Eligible project worktree responses use `SessionMode::Workspace`. They replay saved history with the same context budget and read-only summary sessions as Conversation mode. The `--builder` Coding path keeps native resume.
+
+Replay keeps each tool name, error status, and target fields (`command`, `cmd`, `file_path`, `path`, `paths`, `notebook_path`, `pattern`). It limits tool output to the first 1024 bytes on a UTF-8 boundary and reports the omitted byte count. Changes cards replay their state, file paths and statuses, and commit IDs. Other blocks stay unchanged. Store retains all original tool inputs, outputs, and changes cards.
+
+Compaction can reduce a message's fragment count. If the saved summary boundary no longer exists, replay starts after the last fragment of that same message. If the message is absent, replay retains the existing fallback and includes all available fragments.

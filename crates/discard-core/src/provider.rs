@@ -10,6 +10,8 @@ use std::path::PathBuf;
 pub enum ProviderError {
     #[error("provider setup problem: {0}")]
     Setup(String),
+    #[error("provider sandbox unavailable: {0}")]
+    SandboxUnavailable(String),
     #[error("failed to start provider process: {0}")]
     Spawn(String),
     #[error("provider I/O error: {0}")]
@@ -37,6 +39,11 @@ pub enum SessionMode {
     #[default]
     Coding,
     Conversation,
+    Workspace,
+}
+
+impl SessionMode {
+    pub fn replays_transcript(self) -> bool { matches!(self, Self::Conversation | Self::Workspace) }
 }
 
 #[derive(Debug, Clone)]

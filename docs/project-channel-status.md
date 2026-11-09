@@ -1,6 +1,6 @@
 # Project channel foundation status
 
-Updated: 2026-11-06
+Updated: 2026-11-09
 
 The project-channel foundation is implemented. It adds durable project channel identities, saved project navigation, a project main-agent setting, channel memberships, versioned topics, project navigation and details, and topic context in Conversation-mode prompts. The approved design in `docs/superpowers/specs/2026-11-05-project-channel-orchestration-design.md` describes a larger orchestration system. This status page describes the implemented foundation only.
 
@@ -29,9 +29,15 @@ The project-channel foundation is implemented. It adds durable project channel i
 These items are later implementation slices:
 
 - Concurrent multi-agent replies, structured mention tokens, and agent-initiated delegation.
-- A durable task graph, queued steering, bounded delegation, project concurrency, and worktree mutation locks.
+- A durable task graph, queued steering, bounded delegation, project concurrency, and task orchestration locks.
 - Main-agent tools for branch and channel creation, topic handoffs, progress links, and integration.
 - Descendant cancellation, restart reconciliation, paused-task recovery, and branch lifecycle detection.
 - Provider-cache-aware input and context retrieval that retains required evidence.
 
 The current main-agent setting assigns the general channel's responder. It does not schedule specialists. Conversation tools can inspect a bound worktree and request app-approved removal. They do not expose general shell access, and the app does not claim full task orchestration or recovery.
+
+## Agent workspace writes
+
+Slice A is implemented. Agents can opt in to sandboxed writes in bound branch and detached worktree channels. Discard serializes write responses by canonical worktree path, approves in-root edits, asks for shell approvals, and separates full-access approvals. Scoped `worktree_commit` calls disable hooks and create response-linked audit records. Protected changes cards close write responses. Replay compacts tool calls and changes cards. Ineligible responses remain read-only with a reason. See [worktree writes](worktrees.md#agent-workspace-writes-slice-a).
+
+Slices B and C remain planned: worktree creation, main-checkout grants, durable Always-allow rules, network-domain Always allow, conversation moves, new-branch targets, and native provider resume per agent. This does not implement multi-agent task orchestration.

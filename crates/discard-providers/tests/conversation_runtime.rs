@@ -51,6 +51,7 @@ impl Rig {
         let store = Store::open(&dir.path().join("store.db")).unwrap();
         let agent = store
             .create_agent(&AgentConfig {
+                workspace_write: false,
                 reasoning_effort: None,
                 name: "A".into(),
                 avatar: None,
@@ -72,6 +73,8 @@ impl Rig {
             .unwrap();
         let memory_service = decorate(runtime.clone(), memory.clone());
         let engine = Engine {
+        workspace_locks: Arc::default(),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
             reasoning_effort: None,
             mode: SessionMode::Conversation,
             providers: vec![provider.clone()],
@@ -279,6 +282,8 @@ async fn worktree_facts_reach_each_reply_without_entering_history_or_direct_chat
     let provider = Arc::new(FakeProvider::new(vec![Step::text("worktree answer"), Step::idle()]));
     let probe = provider.probe.clone();
     let engine = Engine {
+        workspace_locks: Arc::default(),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
         reasoning_effort: None, mode: SessionMode::Conversation, providers: vec![provider.clone()],
         store: rig.store.clone(), agent_id: rig.agent.clone(), project_id: channel.project_id.clone(),
         memory: Some(rig.runtime.clone()), plugin_write: false, workspace_mode: WorkspaceMode::Worktree,
@@ -332,6 +337,8 @@ async fn general_project_context_reaches_followups_without_polluting_history() {
     let provider = Arc::new(FakeProvider::new(vec![Step::text("project answer"), Step::idle()]));
     let probe = provider.probe.clone();
     let engine = Engine {
+        workspace_locks: Arc::default(),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
         reasoning_effort: None, mode: SessionMode::Conversation, providers: vec![provider.clone()],
         store: rig.store.clone(), agent_id: rig.agent.clone(), project_id: channel.project_id.clone(),
         memory: Some(rig.runtime.clone()), plugin_write: false, workspace_mode: WorkspaceMode::MainCheckout,
@@ -812,6 +819,8 @@ async fn provider_switch_preserves_conversation_and_records_visible_marker() {
         .unwrap()
         .unwrap();
     let engine = Engine {
+        workspace_locks: Arc::default(),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
         reasoning_effort: None,
         mode: SessionMode::Conversation,
         providers: vec![other.clone()],
@@ -1225,6 +1234,8 @@ async fn explicit_mention_routes_one_reply_and_persists_its_author() {
     let probe = provider.probe.clone();
     let session = rig.store.lock().unwrap().latest_session(&channel.id).unwrap().unwrap();
     let engine = Engine {
+        workspace_locks: Arc::default(),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
         reasoning_effort: None, mode: SessionMode::Conversation, providers: vec![provider.clone()],
         store: rig.store.clone(), agent_id: rig.agent.clone(), project_id: channel.project_id.clone(),
         memory: Some(rig.runtime.clone()), plugin_write: false, workspace_mode: WorkspaceMode::MainCheckout,

@@ -1,5 +1,6 @@
 //! Maps Claude `stream-json` lines to normalized events. Pure: no I/O.
 
+use discard_core::approval::ApprovalKind;
 use discard_core::event::{AgentStatus, ApprovalId, EventKind, RawEvent};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -151,6 +152,12 @@ fn control_request(v: &Value) -> Vec<Item> {
         return Vec::new();
     };
     let input = req.get("input").cloned().unwrap_or(Value::Null);
+    let paths = if matches!(tool, "Edit" | "Write" | "NotebookEdit") {
+        input.get(if tool == "NotebookEdit" { "notebook_path" } else { "file_path" }).and_then(Value::as_str).map(|p| vec![p.to_owned()]).unwrap_or_default()
+    } else { vec![] };
+    let kind = if tool == "SandboxNetworkAccess" { ApprovalKind::NetworkDomain }
+        else if input.get("dangerouslyDisableSandbox").and_then(Value::as_bool) == Some(true) { ApprovalKind::SandboxEscape }
+        else { ApprovalKind::ProviderTool };
     let approval_id = ApprovalId::new();
     let suggestions = req
         .get("permission_suggestions")
@@ -165,7 +172,7 @@ fn control_request(v: &Value) -> Vec<Item> {
             suggestions,
         }),
         event(
-            EventKind::ApprovalRequest {
+            EventKind::ApprovalRequest { kind, paths,
                 approval_id,
                 call_id: req.get("tool_use_id").and_then(Value::as_str).unwrap_or_default().to_string(),
                 tool: tool.to_string(),
@@ -208,6 +215,20 @@ mod tests {
 
     fn parse(p: &mut StreamParser, v: Value) -> Vec<Item> {
         p.parse_line(&v.to_string())
+    }
+
+    #[test]
+    fn workspace_recording_identifies_edit_paths_and_network_domains() {
+        let mut parser = StreamParser::new(); let mut edits = 0; let mut network = 0;
+        for line in include_str!("../../fixtures/claude-workspace-turn.jsonl").lines() {
+            for item in parser.parse_line(line) {
+                if let Item::Event(e) = item && let EventKind::ApprovalRequest { tool, kind, paths, .. } = e.kind {
+                    if tool == "Edit" { assert_eq!(paths, ["/synthetic/repo/edit.txt"]); edits += 1; }
+                    if tool == "SandboxNetworkAccess" { assert_eq!(kind, discard_core::approval::ApprovalKind::NetworkDomain); network += 1; }
+                }
+            }
+        }
+        assert!(edits >= 2 && network >= 2);
     }
 
     #[test]

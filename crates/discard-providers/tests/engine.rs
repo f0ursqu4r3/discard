@@ -51,6 +51,7 @@ fn start_full(
         .insert_agent(
             &agent,
             &AgentConfig {
+        workspace_write: false,
         reasoning_effort: None, name: "A".into(), avatar: None, provider: "fake".into(), model: None, system_prompt: String::new(), policy, plugin_write: false },
         )
         .unwrap();
@@ -67,6 +68,8 @@ fn start_full(
     let store = Arc::new(Mutex::new(store));
     let probe = provider.probe.clone();
     let engine = Engine {
+        workspace_locks: Arc::default(),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
         reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::clone(&store),
@@ -307,6 +310,10 @@ impl FakeMemory {
 }
 
 impl MemoryService for FakeMemory {
+    fn prepare_workspace_turn(&self, agent: &AgentId, project: Option<&ProjectId>, source: &ChannelId, base: Option<&str>, _grant: &discard_core::workspace_session::WorkspaceGrant, _query: &str) -> Result<PreparedMemory, String> {
+        let mut prepared = self.prepare(agent, project, source, base, false)?;
+        prepared.token = "workspace-token".into(); prepared.mcp_config = PathBuf::from("/run/discard/workspace.json"); Ok(prepared)
+    }
     fn prepare(&self, agent: &AgentId, project: Option<&ProjectId>, _source: &ChannelId, base: Option<&str>, _plugin_write: bool) -> Result<PreparedMemory, String> {
         self.prepared.lock().unwrap().push((agent.clone(), project.cloned(), base.map(str::to_string)));
         if self.fail {
@@ -494,7 +501,7 @@ fn start_workspace(
     let project = Project { id: ProjectId::new(), name: "p".into(), path: "/p".into() };
     store.insert_project(&project).unwrap();
     let agent_id = AgentId::new();
-    store.insert_agent(&agent_id, &AgentConfig { reasoning_effort: None, name: "A".into(), avatar: None, provider: "fake".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+    store.insert_agent(&agent_id, &AgentConfig { workspace_write: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "fake".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
     let channel = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "general".into(), agent_id: agent_id.clone(), workspace_mode: mode };
     store.insert_channel(&channel).unwrap();
     let session = SessionId::new();
@@ -502,6 +509,8 @@ fn start_workspace(
     let store = Arc::new(Mutex::new(store));
     let probe = provider.probe.clone();
     let engine = Engine {
+        workspace_locks: Arc::default(),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
         reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::clone(&store),
@@ -678,4 +687,232 @@ async fn tool_events_are_not_sent_when_the_provider_cannot_show_tool_calls() {
     let names = rec.names();
     assert!(!names.iter().any(|n| n == "approval_requested" || n == "tool_call" || n == "tool_result"), "{names:?}");
     assert!(names.iter().any(|n| n == "agent_status"), "non-tool events still flow: {names:?}");
+}
+
+fn workspace_engine(provider: FakeProvider, eligible: bool) -> (tempfile::TempDir, Engine, Probe) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo"); std::fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| { let out = std::process::Command::new("git").current_dir(&repo).args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]).args(args).output().unwrap(); assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr)); };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "initial"]);
+    let root = dir.path().join("worktree"); git(&["worktree", "add", "-b", "feature", root.to_str().unwrap()]);
+    let store = Store::open_in_memory().unwrap();
+    let mut config = AgentConfig::from_toml("name='A'\nprovider='fake'\nmodel='test'\npolicy='ask'\n").unwrap(); config.workspace_write = true;
+    let agent = store.create_agent(&config).unwrap();
+    let project = store.import_project_folder(&repo).unwrap();
+    let channel = Channel { id: ChannelId::new(), name: "feature".into(), project_id: Some(project.id.clone()), agent_id: agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+    store.create_named_channel(&channel, eligible.then_some("feature"), eligible.then_some(&discard_core::store::WorktreeRecord { channel_id: channel.id.clone(), path: root.to_string_lossy().into(), repo: repo.to_string_lossy().into(), branch: "feature".into(), base_commit: String::new(), owned: false })).unwrap();
+    let session = SessionId::new(); store.create_session(&session, &channel.id).unwrap();
+    let probe = provider.probe.clone();
+    let engine = Engine { workspace_locks: Arc::default(), mode: discard_core::provider::SessionMode::Conversation, providers: vec![], store: Arc::new(Mutex::new(store)), agent_id: agent, project_id: Some(project.id), memory: Some(FakeMemory::new(false)), plugin_write: false, workspace_mode: WorkspaceMode::Worktree, workspace: None, observer: None, channel_name: channel.name, provider: Arc::new(provider), channel_id: channel.id, session_id: session, cwd: repo, model: Some("test".into()), reasoning_effort: None, system_prompt: None, policy: ApprovalPolicy::Ask, write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel) };
+    (dir, engine, probe)
+}
+
+fn launch_workspace(engine: Engine, probe: Probe) -> Rig {
+    let (commands, rx) = mpsc::unbounded_channel(); let (tx, updates) = mpsc::unbounded_channel();
+    let store = engine.store.clone(); let channel = engine.channel_id.clone(); let session = engine.session_id.clone();
+    let task = tokio::spawn(engine.run(rx, tx));
+    Rig { store, channel, session, probe, commands, updates, task }
+}
+
+#[tokio::test]
+async fn eligible_branch_channel_starts_a_workspace_session() {
+    let (dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::working(), Step::text("done"), Step::idle()]), true);
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::Send("Edit".into())).unwrap(); rig.until_finished().await;
+    let specs = rig.probe.specs.lock().unwrap(); let spec = &specs[0];
+    assert_eq!(spec.mode, discard_core::provider::SessionMode::Workspace);
+    assert_eq!(spec.cwd, dir.path().join("worktree").canonicalize().unwrap());
+    assert_eq!(spec.resume_handle, None);
+    assert!(spec.system_prompt.as_ref().unwrap().contains("Commit through worktree_commit"));
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn ineligible_channel_states_the_reason() {
+    let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::working(), Step::idle()]), false);
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::Send("Edit".into())).unwrap(); rig.until_finished().await;
+    let specs = rig.probe.specs.lock().unwrap(); let spec = &specs[0];
+    assert_eq!(spec.mode, discard_core::provider::SessionMode::Conversation);
+    assert!(spec.system_prompt.as_ref().unwrap().contains("File edits are unavailable in this response: this is not a project branch channel."));
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn in_root_edit_is_auto_approved_in_workspace_sessions() {
+    let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::Approval { tool: "Edit".into(), input: json!({"file_path":"new.txt"}) }, Step::idle()]), true);
+    let mut rig = launch_workspace(engine, probe); rig.commands.send(Command::Send("Edit".into())).unwrap();
+    let updates = rig.until_finished().await;
+    let id = updates.iter().find_map(|u| match u { Update::Event(e) => match &e.kind { EventKind::ApprovalRequest { approval_id, .. } => Some(approval_id), _ => None }, _ => None }).unwrap();
+    let a = rig.store.lock().unwrap().load_approval(id).unwrap();
+    assert_eq!(a.audit[0].decider, discard_core::approval::Decider::Policy("workspace_edit".into()));
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn out_of_root_edit_waits_for_the_user() {
+    let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::Approval { tool: "Edit".into(), input: json!({"file_path":"../outside.txt"}) }, Step::idle()]), true);
+    let mut rig = launch_workspace(engine, probe); rig.commands.send(Command::Send("Edit".into())).unwrap();
+    loop { if let Update::Event(e) = rig.next().await && matches!(e.kind, EventKind::ApprovalRequest { .. }) { break; } }
+    assert!(rig.probe.responses.lock().unwrap().is_empty());
+    rig.commands.send(Command::Cancel).unwrap(); rig.until_finished().await; rig.task.abort();
+}
+
+#[tokio::test]
+async fn always_allow_in_a_workspace_session_is_refused_and_not_forwarded() {
+    let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::Approval { tool: "Bash".into(), input: json!({"command":"test"}) }, Step::idle()]), true);
+    let mut rig = launch_workspace(engine, probe); rig.commands.send(Command::Send("Run".into())).unwrap();
+    let id = loop { if let Update::Event(e) = rig.next().await && let EventKind::ApprovalRequest { approval_id, .. } = e.kind { break approval_id; } };
+    rig.commands.send(Command::Decide { approval_id: id.clone(), decision: Decision::AlwaysAllow }).unwrap();
+    assert_eq!(rig.next().await, Update::Error("Always allow is not available in write sessions yet. Approve this request once.".into()));
+    assert!(rig.probe.responses.lock().unwrap().is_empty());
+    rig.commands.send(Command::Decide { approval_id: id, decision: Decision::Approve }).unwrap(); rig.until_finished().await; rig.task.abort();
+}
+
+#[tokio::test]
+async fn sandbox_fallback_drops_the_lock_and_the_commit_tool() {
+    let (dir, mut engine, probe) = workspace_engine(FakeProvider::new(vec![Step::working(), Step::idle()]).with_workspace_error("test unavailable"), true);
+    let memory = FakeMemory::new(false); engine.memory = Some(memory.clone()); let locks = engine.workspace_locks.clone();
+    let mut rig = launch_workspace(engine, probe); rig.commands.send(Command::Send("Edit".into())).unwrap(); rig.until_finished().await;
+    let specs = rig.probe.specs.lock().unwrap(); assert_eq!(specs.len(), 2);
+    assert_eq!(specs[1].mode, discard_core::provider::SessionMode::Conversation);
+    assert_eq!(specs[1].mcp_config, Some(PathBuf::from("/run/discard/session.json")));
+    assert!(specs[1].system_prompt.as_ref().unwrap().contains("the provider sandbox is unavailable (test unavailable)"));
+    assert_eq!(locks.holder(&dir.path().join("worktree")), None);
+    assert!(memory.finished.lock().unwrap().contains(&"workspace-token".into())); rig.task.abort();
+}
+
+#[tokio::test]
+async fn lock_is_released_after_cancel_provider_crash_and_setup_failure() {
+    for case in ["cancel", "crash", "setup"] {
+        let script = if case == "crash" { vec![Step::working(), Step::Crash] } else { vec![Step::working(), Step::Hang] };
+        let (dir, mut engine, probe) = workspace_engine(FakeProvider::new(script), true);
+        let locks = engine.workspace_locks.clone();
+        if case == "setup" { engine.memory = Some(FakeMemory::new(true)); }
+        let mut rig = launch_workspace(engine, probe); rig.commands.send(Command::Send("Edit".into())).unwrap();
+        if case == "cancel" {
+            loop { if matches!(rig.next().await, Update::Event(_)) { break; } }
+            assert_eq!(locks.holder(&dir.path().join("worktree")), Some(rig.channel.clone()));
+            rig.commands.send(Command::Cancel).unwrap();
+        }
+        rig.until_finished().await; assert_eq!(locks.holder(&dir.path().join("worktree")), None, "{case}"); rig.task.abort();
+    }
+}
+
+#[tokio::test]
+async fn second_channel_on_the_same_path_waits_and_then_runs() {
+    let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::working(), Step::Hang]), true);
+    let mut second = engine.clone(); let second_provider = FakeProvider::new(vec![Step::working(), Step::idle()]); let second_probe = second_provider.probe.clone(); second.provider = Arc::new(second_provider);
+    {
+        let store = engine.store.lock().unwrap(); let project = Project { id: ProjectId::new(), name: "Other".into(), path: engine.cwd.to_string_lossy().into() }; store.insert_project(&project).unwrap();
+        let channel = Channel { id: ChannelId::new(), name: "second".into(), agent_id: engine.agent_id.clone(), project_id: Some(project.id.clone()), workspace_mode: WorkspaceMode::Worktree };
+        let mut record = store.worktree_for(&engine.channel_id).unwrap().unwrap(); record.channel_id = channel.id.clone();
+        store.create_named_channel(&channel, Some("feature"), Some(&record)).unwrap();
+        second.channel_id = channel.id; second.project_id = Some(project.id); second.channel_name = channel.name; second.session_id = SessionId::new(); store.create_session(&second.session_id, &second.channel_id).unwrap();
+    }
+    let mut first = launch_workspace(engine, probe); first.commands.send(Command::Send("hold".into())).unwrap();
+    loop { if matches!(first.next().await, Update::Event(_)) { break; } }
+    let mut second = launch_workspace(second, second_probe); second.commands.send(Command::Send("wait".into())).unwrap();
+    loop { if let Update::Notice(text) = second.next().await && text.starts_with("Waiting for #feature") { break; } }
+    assert!(second.probe.specs.lock().unwrap().is_empty());
+    first.commands.send(Command::Cancel).unwrap(); first.until_finished().await; second.until_finished().await;
+    assert_eq!(second.probe.specs.lock().unwrap().len(), 1); first.task.abort(); second.task.abort();
+}
+
+#[tokio::test]
+async fn commits_made_during_a_response_link_to_that_response() {
+    let (dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::working(), Step::text("done"), Step::Hang]), true);
+    let access = discard_core::worktree_access::WorktreeAccess::new(engine.store.clone()).with_locks(engine.workspace_locks.clone()); let agent = engine.agent_id.clone();
+    let root = dir.path().join("worktree");
+    for (key, value) in [("user.name", "Test"), ("user.email", "test@example.invalid"), ("commit.gpgsign", "false")] {
+        assert!(std::process::Command::new("git").current_dir(&root).args(["config", key, value]).status().unwrap().success());
+    }
+    let mut rig = launch_workspace(engine, probe); rig.commands.send(Command::Send("commit".into())).unwrap();
+    loop { if matches!(rig.next().await, Update::Event(_)) { break; } }
+    std::fs::write(root.join("a"), "new").unwrap();
+    access.commit(&agent, &rig.channel, &root, &discard_core::workspace_commit::CommitRequest { message: "Change".into(), paths: None }).unwrap();
+    rig.commands.send(Command::Cancel).unwrap(); rig.until_finished().await;
+    let store = rig.store.lock().unwrap(); let messages = store.messages_for_channel(&rig.channel).unwrap();
+    let response = messages.iter().find(|m| m.role == Role::Agent).unwrap();
+    assert_eq!(store.link_agent_commits(&rig.channel, &response.id).unwrap(), 0); rig.task.abort();
+}
+
+#[tokio::test]
+async fn workspace_responses_always_save_a_changes_card() {
+    for (script, expected) in [(vec![Step::working(), Step::idle()], discard_core::workspace_changes::ChangesState::Completed), (vec![Step::working(), Step::Crash], discard_core::workspace_changes::ChangesState::Failed)] {
+        let (_dir, engine, probe) = workspace_engine(FakeProvider::new(script), true);
+        let mut rig = launch_workspace(engine, probe); rig.commands.send(Command::Send("check".into())).unwrap(); rig.until_finished().await;
+        let store = rig.store.lock().unwrap(); let messages = store.messages_for_channel(&rig.channel).unwrap();
+        assert!(messages.iter().any(|m| m.role == Role::Agent && m.blocks.iter().any(|b| matches!(b, Block::Changes { state, .. } if *state == expected)))); rig.task.abort();
+    }
+}
+
+#[tokio::test]
+async fn changes_card_failure_still_saves_a_notice_and_releases_the_lock() {
+    let (dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::working(), Step::Hang]), true);
+    let locks = engine.workspace_locks.clone(); let root = dir.path().join("worktree");
+    let mut rig = launch_workspace(engine, probe); rig.commands.send(Command::Send("check".into())).unwrap();
+    loop { if matches!(rig.next().await, Update::Event(_)) { break; } }
+    std::fs::remove_file(root.join(".git")).unwrap();
+    rig.commands.send(Command::Cancel).unwrap(); rig.until_finished().await;
+    assert_eq!(locks.holder(&root), None);
+    assert!(rig.store.lock().unwrap().messages_for_channel(&rig.channel).unwrap().iter().any(|m| m.blocks.iter().any(|b| matches!(b, Block::Markdown { text } if text.starts_with("Discard could not list this response's changes:")))));
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn escaped_edits_use_full_access_cards_and_user_only_audit() {
+    use discard_core::approval::{ApprovalKind, Decider};
+    for path in ["../outside.txt", ".git", ".git/config", ".GIT/config"] {
+        let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::Approval { tool: "Edit".into(), input: json!({"file_path":path}) }, Step::idle()]), true);
+        let mut rig = launch_workspace(engine, probe); rig.commands.send(Command::Send("Edit".into())).unwrap();
+        let id = loop { if let Update::Event(e) = rig.next().await && let EventKind::ApprovalRequest { approval_id, kind, .. } = e.kind { assert_eq!(kind, ApprovalKind::SandboxEscape, "{path}"); break approval_id; } };
+        let mut approval = rig.store.lock().unwrap().load_approval(&id).unwrap();
+        assert_eq!(approval.kind, ApprovalKind::SandboxEscape);
+        assert!(approval.decide(Decision::Approve, Decider::Plugin("plugin".into()), "ask").is_err());
+        assert!(rig.probe.responses.lock().unwrap().is_empty());
+        rig.commands.send(Command::Cancel).unwrap(); rig.until_finished().await; rig.task.abort();
+    }
+}
+
+#[tokio::test]
+async fn workspace_setup_errors_still_save_failed_changes_cards() {
+    for failure in ["memory", "context"] {
+        let (_dir, mut engine, probe) = workspace_engine(FakeProvider::new(vec![Step::idle()]), true);
+        if failure == "memory" { engine.memory = Some(FakeMemory::new(true)); }
+        let mut rig = launch_workspace(engine, probe);
+        rig.commands.send(Command::Send(if failure == "context" { "x".repeat(200_000) } else { "edit".into() })).unwrap(); rig.until_finished().await;
+        assert!(rig.store.lock().unwrap().messages_for_channel(&rig.channel).unwrap().iter().any(|m| m.blocks.iter().any(|b| matches!(b, Block::Changes { state: discard_core::workspace_changes::ChangesState::Failed, .. }))), "{failure}");
+        rig.task.abort();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopped_response_waits_for_active_commit_before_saving_changes() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::working(), Step::Hang]), true);
+    let root = dir.path().join("worktree");
+    let script = dir.path().join("filter.sh"); let entered = dir.path().join("entered"); let release = dir.path().join("release");
+    std::fs::write(&script, format!("#!/bin/sh\nif [ ! -e '{}' ]; then\n touch '{}'\n while [ ! -e '{}' ]; do sleep 0.01; done\nfi\ncat\n", entered.display(), entered.display(), release.display())).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for (key, value) in [("user.name", "Test"), ("user.email", "test@example.invalid"), ("commit.gpgsign", "false"), ("filter.delay.clean", script.to_str().unwrap())] {
+        assert!(std::process::Command::new("git").current_dir(&root).args(["config", key, value]).status().unwrap().success());
+    }
+    std::fs::write(root.join(".gitattributes"), "gated.txt filter=delay\n").unwrap();
+    let access = Arc::new(discard_core::worktree_access::WorktreeAccess::new(engine.store.clone()).with_locks(engine.workspace_locks.clone()));
+    let agent = engine.agent_id.clone(); let mut rig = launch_workspace(engine, probe); rig.commands.send(Command::Send("commit".into())).unwrap();
+    loop { if matches!(rig.next().await, Update::Event(_)) { break; } }
+    std::fs::write(root.join("gated.txt"), "new\n").unwrap();
+    let commit_root = root.clone(); let channel = rig.channel.clone();
+    let commit = tokio::task::spawn_blocking(move || access.commit(&agent, &channel, &commit_root, &discard_core::workspace_commit::CommitRequest { message: "Delayed commit".into(), paths: None }));
+    tokio::time::timeout(Duration::from_secs(5), async { while !entered.exists() { tokio::time::sleep(Duration::from_millis(10)).await; } }).await.unwrap();
+    let gate = release.clone(); std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(500)); std::fs::write(gate, "release").unwrap(); });
+    rig.commands.send(Command::Cancel).unwrap();
+    let response = loop { if let Update::ResponseCompleted(message) = rig.next().await { break message; } };
+    assert!(release.exists(), "saved changes before the commit completed");
+    let committed = commit.await.unwrap().unwrap();
+    assert!(response.blocks.iter().any(|b| matches!(b, Block::Changes { commits, state: discard_core::workspace_changes::ChangesState::Stopped, .. } if commits.iter().any(|c| c.id == committed.commit))));
+    assert_eq!(rig.store.lock().unwrap().link_agent_commits(&rig.channel, &response.id).unwrap(), 0);
+    rig.until_finished().await; rig.task.abort();
 }

@@ -93,3 +93,44 @@ The supported version is pinned because tool registration and catalog fields can
 Run the local probe with `python3 crates/discard-providers/tests/probes/codex_conversation.py`. The script works from any working directory when you give its full path. Use `--codex /path/to/codex` or `DISCARD_CODEX_BIN` to select the CLI executable. Use `--codex-home /path/to/provider-home` to select the source model cache; the default uses `CODEX_HOME` or `~/.codex`. The probe fails before thread creation if a required effective control differs.
 
 Normal app conversations replay the current conversation transcript with refreshed personality and applicable saved memory before every response. Memory edits apply to existing conversations without restarting. Native resume behavior described above applies to Coding sessions. See [Saved memory](memory.md) for the four domains, shared-write approval, Forget, and capture controls.
+
+## Workspace sessions (spike results)
+
+Tested codex-cli 0.166.0 against a synthetic local Responses endpoint with a temporary home.
+Command for every row: `python3 crates/discard-providers/tests/probes/codex_workspace.py`.
+The available model cache was written by 0.167.0. The probe uses only its model metadata;
+it does not copy credentials or change the source cache. Production still requires a 0.166.0 cache.
+
+| Question | Observed value | Probe command |
+| --- | --- | --- |
+| Native tools | Cached unified_exec shell exposes `functions.exec_command`, `functions.write_stdin`, and `functions.apply_patch`; `features.shell_tool=true` works with `unified_exec=false`. | Command above |
+| In-root apply_patch | Sends `item/fileChange/requestApproval`; params contain itemId and grantRoot, but no changes. Paths come from the preceding fileChange item. | Command above |
+| Shell requests | `item/commandExecution/requestApproval`, `kind=command`, command, cwd, commandActions. | Command above |
+| Decisions | Commands offer accept, acceptWithExecpolicyAmendment, cancel. File-change requests omit availableDecisions. | Command above |
+| Escalation marker | No reliable distinct marker. Classify every Workspace command approval as SandboxEscape. | Command above |
+| Writable roots | Effective `sandbox_workspace_write.writable_roots=[]`, network_access=false; temp directories remain writable by default. | Command above |
+| Instruction discovery | `project_doc_max_bytes=0`; root AGENTS.md sentinel absent from model requests. | Command above |
+| Approved writes | Approving all requests permits outside patch, temporary-HOME touch, and git add. Ordinary approval must not be described as proof that these operations stay sandboxed. | Command above |
+| Network | curl exits 6 with network_access=false. | Command above |
+
+The recorded transcript is `fixtures/codex-workspace-turn.jsonl`. Paths are scrubbed.
+The probe uses the observed exec_command schema and adds a three-second curl limit.
+
+## Workspace sessions
+
+Workspace starts a fresh ephemeral thread in the granted directory. It uses `untrusted`
+approval policy and `workspace-write` sandbox, with network access off and no extra writable
+roots. It preserves the exact cached shell and patch capabilities and disables the other
+Conversation features. The scoped MCP allowlist adds worktree_commit. Hooks, provider memory,
+plugins, other MCP servers and project instruction discovery stay off. `GIT_OPTIONAL_LOCKS=0`
+permits read-only Git inspection. System temporary directories remain writable.
+
+The adapter checks effective controls before prompt delivery. Missing controls, mismatches,
+invalid directories and non-host approval modes return SandboxUnavailable for read-only
+fallback. The model cache and running CLI remain pinned to 0.166.0. Workspace uses the same bounded model-list cache recovery as Conversation mode. A stale cache refresh keeps the selected model’s shell and patch capabilities. Ordinary setup, spawn, and protocol failures retain their error type; only failed Workspace controls trigger read-only fallback.
+
+All Workspace command approvals use the full-access SandboxEscape card because the spike
+found no reliable escalation marker. File-change paths come from preceding item notifications;
+unknown paths never receive automatic edit approval. Coding approvals keep their existing behavior.
+
+Supplemental synthetic review probes found that a file move supplies its destination in `changes[].kind.move_path`. The source can be inside the root while the destination is outside it, with `grantRoot: null`. Discard checks both paths. Incomplete path records cannot receive automatic approval. Outside or protected targets use full-access cards, and the normalized paths appear in the approval input.

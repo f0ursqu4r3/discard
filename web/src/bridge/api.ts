@@ -130,6 +130,7 @@ export interface AgentEntry {
   systemPrompt: string
   policy: string
   pluginWrite: boolean
+  workspaceWrite: boolean
   archived: boolean
 }
 export interface ConversationEntry {

@@ -38,6 +38,7 @@ fn setup() -> Fixture {
     for name in ["Ada", "Ben"] {
         let agent = store
             .create_agent(&AgentConfig {
+                workspace_write: false,
                 name: name.into(),
                 avatar: None,
                 provider: "codex".into(),

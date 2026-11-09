@@ -4,6 +4,19 @@ use crate::event::{ApprovalId, TurnId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalKind {
+    #[default]
+    ProviderTool, SandboxEscape, NetworkDomain, MainCheckoutWrite, WorktreeCreate, ConversationMove, BranchCreate,
+}
+impl ApprovalKind {
+    pub fn as_str(self) -> &'static str { match self {
+        Self::ProviderTool => "provider_tool", Self::SandboxEscape => "sandbox_escape", Self::NetworkDomain => "network_domain",
+        Self::MainCheckoutWrite => "main_checkout_write", Self::WorktreeCreate => "worktree_create", Self::ConversationMove => "conversation_move", Self::BranchCreate => "branch_create",
+    } }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Decision {
@@ -40,6 +53,8 @@ pub enum DecisionOutcome {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DecisionError {
+    #[error("{0}")]
+    NotPermitted(&'static str),
     #[error("approval is stale: the provider process exited")]
     Stale,
     #[error("approval already decided as {existing:?}; refusing {attempted:?}")]
@@ -56,6 +71,7 @@ pub struct AuditRecord {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Approval {
+    pub kind: ApprovalKind,
     pub id: ApprovalId,
     pub turn_id: TurnId,
     pub tool: String,
@@ -67,6 +83,7 @@ pub struct Approval {
 impl Approval {
     pub fn new(turn_id: TurnId, tool: impl Into<String>, input: Value) -> Self {
         Self {
+            kind: ApprovalKind::ProviderTool,
             id: ApprovalId::new(),
             turn_id,
             tool: tool.into(),
@@ -82,6 +99,10 @@ impl Approval {
         decider: Decider,
         policy: &str,
     ) -> Result<DecisionOutcome, DecisionError> {
+        if self.kind != ApprovalKind::ProviderTool {
+            if !matches!(decider, Decider::User) { return Err(DecisionError::NotPermitted("Only the user can decide this approval.")); }
+            if decision == Decision::AlwaysAllow { return Err(DecisionError::NotPermitted("Always allow is unavailable for this approval.")); }
+        }
         match self.state {
             ApprovalState::Stale => Err(DecisionError::Stale),
             ApprovalState::Decided(existing) if existing == decision => Ok(DecisionOutcome::Duplicate),
@@ -112,6 +133,20 @@ impl Approval {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn plugins_decide_only_provider_tool_approvals() {
+        let mut escape = pending(); escape.kind = ApprovalKind::SandboxEscape;
+        assert!(matches!(escape.decide(Decision::Approve, Decider::Plugin("p".into()), "ask"), Err(DecisionError::NotPermitted(_))));
+        assert!(pending().decide(Decision::Approve, Decider::Plugin("p".into()), "ask").is_ok());
+    }
+    #[test]
+    fn always_allow_is_refused_for_escapes_and_app_grants() {
+        for kind in [ApprovalKind::SandboxEscape, ApprovalKind::NetworkDomain, ApprovalKind::MainCheckoutWrite, ApprovalKind::WorktreeCreate, ApprovalKind::ConversationMove, ApprovalKind::BranchCreate] {
+            let mut a = pending(); a.kind = kind;
+            assert!(matches!(a.decide(Decision::AlwaysAllow, Decider::User, "ask"), Err(DecisionError::NotPermitted(_))));
+        }
+    }
 
     fn pending() -> Approval {
         Approval::new(TurnId::new(), "Bash", json!({"command": "touch x"}))

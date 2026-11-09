@@ -133,6 +133,7 @@ pub struct Channel {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Block {
+    Changes { root: String, state: crate::workspace_changes::ChangesState, commits: Vec<crate::workspace_changes::ChangedCommit>, files: Vec<crate::workspace_changes::ChangedFile>, truncated: bool },
     Attachment { attachment: crate::attachments::Attachment },
     Markdown {
         text: String,
@@ -154,6 +155,8 @@ pub enum Block {
     },
     /// Rendered by Rust. Not overridable by plugins.
     Approval {
+        #[serde(default)]
+        kind: crate::approval::ApprovalKind,
         approval_id: String,
         tool: String,
         summary: String,

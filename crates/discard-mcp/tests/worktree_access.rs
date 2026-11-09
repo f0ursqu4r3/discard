@@ -24,7 +24,7 @@ async fn scoped_http_tool_requests_removal_but_only_app_approval_executes_it() {
     git(&repo,&["init","-q","-b","main"]); git(&repo,&["commit","--allow-empty","-m","initial"]);
     let path = dir.path().join("linked"); git(&repo,&["worktree","add","--detach",path.to_str().unwrap()]);
     let store = Store::open_in_memory().unwrap();
-    let agent = store.create_agent(&AgentConfig { name:"Agent".into(),provider:"fake".into(),model:Some("test".into()),avatar:None,reasoning_effort:None,system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false }).unwrap();
+    let agent = store.create_agent(&AgentConfig { workspace_write: false, name:"Agent".into(),provider:"fake".into(),model:Some("test".into()),avatar:None,reasoning_effort:None,system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false }).unwrap();
     let project = store.import_project_folder(&repo).unwrap();
     let channel = Channel {id:ChannelId::new(),project_id:Some(project.id.clone()),name:"linked".into(),agent_id:agent.clone(),workspace_mode:WorkspaceMode::Worktree};
     store.create_named_repository_channel(&channel,"",None,Some(&WorktreeRecord {channel_id:channel.id.clone(),path:path.to_string_lossy().into(),repo:repo.to_string_lossy().into(),branch:"detached".into(),base_commit:String::new(),owned:false})).unwrap();
@@ -57,7 +57,7 @@ async fn general_channel_runtime_exposes_project_files_without_worktree_tools() 
     let repo = dir.path().join("project"); std::fs::create_dir(&repo).unwrap();
     std::fs::write(repo.join("README.md"), "Project overview").unwrap();
     let store = Store::open_in_memory().unwrap();
-    let agent = store.create_agent(&AgentConfig { name:"Agent".into(),provider:"fake".into(),model:Some("test".into()),avatar:None,reasoning_effort:None,system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false }).unwrap();
+    let agent = store.create_agent(&AgentConfig { workspace_write: false, name:"Agent".into(),provider:"fake".into(),model:Some("test".into()),avatar:None,reasoning_effort:None,system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false }).unwrap();
     let project = store.import_project_folder(&repo).unwrap();
     let channel = store.ensure_project_general_channel(&project.id, &agent).unwrap();
     let access = Arc::new(WorktreeAccess::new(Arc::new(Mutex::new(store))));

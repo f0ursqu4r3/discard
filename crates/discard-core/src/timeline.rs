@@ -15,6 +15,7 @@ pub enum ApprovalView {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApprovalPrompt {
+    pub kind: crate::approval::ApprovalKind,
     pub approval_id: ApprovalId,
     pub tool: String,
     pub summary: String,
@@ -39,7 +40,7 @@ impl Default for Timeline {
 /// One-line description of a tool input for an approval prompt.
 pub fn summarize_input(_tool: &str, input: &serde_json::Value) -> String {
     const MAX_CHARS: usize = 120;
-    let preferred = ["command", "file_path", "path", "url", "pattern"]
+    let preferred = ["host", "command", "file_path", "path", "url", "pattern"]
         .iter()
         .find_map(|key| input.get(*key).and_then(serde_json::Value::as_str));
     let full = preferred.map(str::to_string).unwrap_or_else(|| input.to_string());
@@ -88,15 +89,17 @@ impl Timeline {
                     }
                 }
             }
-            EventKind::ApprovalRequest { approval_id, tool, input, .. } => {
+            EventKind::ApprovalRequest { approval_id, tool, input, kind, .. } => {
                 self.text_open = false;
                 let summary = summarize_input(tool, input);
                 self.blocks.push(Block::Approval {
+                    kind: *kind,
                     approval_id: approval_id.to_string(),
                     tool: tool.clone(),
                     summary: summary.clone(),
                 });
                 self.prompts.push(ApprovalPrompt {
+                    kind: *kind,
                     approval_id: approval_id.clone(),
                     tool: tool.clone(),
                     summary,
@@ -157,7 +160,7 @@ mod tests {
     }
 
     fn approval(id: &ApprovalId) -> EventKind {
-        EventKind::ApprovalRequest {
+        EventKind::ApprovalRequest { kind: Default::default(), paths: vec![],
             approval_id: id.clone(),
             call_id: "c1".into(),
             tool: "Bash".into(),
@@ -165,6 +168,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn saved_approval_blocks_preserve_kind_and_read_old_records() {
+        let mut timeline = Timeline::new(); let mut event = approval(&ApprovalId::new());
+        if let EventKind::ApprovalRequest { kind, .. } = &mut event { *kind = crate::approval::ApprovalKind::SandboxEscape; }
+        timeline.apply(&event);
+        assert_eq!(serde_json::to_value(&timeline.blocks()[0]).unwrap()["kind"], "sandbox_escape");
+        let old: Block = serde_json::from_value(json!({"type":"approval","approval_id":"old","tool":"Bash","summary":"run"})).unwrap();
+        assert_eq!(serde_json::to_value(old).unwrap()["kind"], "provider_tool");
+    }
     #[test]
     fn consecutive_text_deltas_merge_into_one_markdown_block() {
         let mut t = Timeline::new();

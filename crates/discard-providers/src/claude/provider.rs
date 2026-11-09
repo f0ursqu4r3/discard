@@ -52,7 +52,10 @@ impl ClaudeProvider {
 }
 
 /// Command-line arguments for a Claude session. Never includes credentials.
-pub fn build_args(spec: &SessionSpec) -> Vec<String> {
+pub fn build_args(spec: &SessionSpec, protected_git_paths: &[PathBuf]) -> Result<Vec<String>, ProviderError> {
+    if spec.mode == SessionMode::Workspace && protected_git_paths.is_empty() {
+        return Err(ProviderError::SandboxUnavailable("workspace Git write protection is unavailable".into()));
+    }
     let mut args: Vec<String> = [
         "-p",
         "--input-format",
@@ -74,26 +77,28 @@ pub fn build_args(spec: &SessionSpec) -> Vec<String> {
             args.extend(["--permission-prompts", "none"].map(String::from));
         }
     }
-    if spec.mode == SessionMode::Conversation {
+    if spec.mode.replays_transcript() {
         // These tools enforce scoped memory and shared-write approval in Discard.
         // Permit only these exact names; native tools remain absent.
         args.extend([
             "--allowedTools".into(),
-            crate::conversation::MEMORY_TOOLS.iter().map(|name| format!("mcp__discard-memory__{name}")).collect::<Vec<_>>().join(","),
+            crate::conversation::MEMORY_TOOLS.iter().chain(if spec.mode == SessionMode::Workspace { crate::conversation::WORKSPACE_TOOLS } else { &[] }).map(|name| format!("mcp__discard-memory__{name}")).collect::<Vec<_>>().join(","),
         ]);
         args.extend(
-            ["--tools", "", "--strict-mcp-config", "--disable-slash-commands", "--restricted", "--system-prompt-snapshot", "off"]
+            ["--tools", if spec.mode == SessionMode::Workspace { "Read,Glob,Grep,Edit,Write,Bash" } else { "" }, "--strict-mcp-config", "--disable-slash-commands", "--restricted", "--system-prompt-snapshot", "off"]
                 .map(String::from),
         );
-        args.extend([
-            "--settings".into(),
-            json!({
-                "disableAllHooks":true, "autoMemoryEnabled":false,
-                "env":{"CLAUDE_CODE_DISABLE_AUTO_MEMORY":"1", "CLAUDE_CODE_DISABLE_CLAUDE_MDS":"1", "CLAUDE_CODE_PLUGIN_DIRS":""},
-                "pluginConfigs":{"cc-plugin-agents-md@builtin":{"options":{"instructionFiles":"managed-only"}}}
-            })
-            .to_string(),
-        ]);
+        let mut settings = json!({
+            "disableAllHooks":true, "autoMemoryEnabled":false,
+            "env":{"CLAUDE_CODE_DISABLE_AUTO_MEMORY":"1", "CLAUDE_CODE_DISABLE_CLAUDE_MDS":"1", "CLAUDE_CODE_PLUGIN_DIRS":""},
+            "pluginConfigs":{"cc-plugin-agents-md@builtin":{"options":{"instructionFiles":"managed-only"}}}
+        });
+        if spec.mode == SessionMode::Workspace {
+            settings["env"]["GIT_OPTIONAL_LOCKS"] = json!("0");
+            settings["sandbox"] = json!({"enabled":true,"allowUnsandboxedCommands":false,"autoAllowBashIfSandboxed":false});
+            settings["sandbox"]["filesystem"] = json!({"denyWrite":protected_git_paths});
+        }
+        args.extend(["--settings".into(), settings.to_string()]);
     }
     if let Some(effort) = &spec.reasoning_effort {
         args.extend(["--effort".into(), effort.clone()]);
@@ -110,7 +115,7 @@ pub fn build_args(spec: &SessionSpec) -> Vec<String> {
     if let Some(mcp) = &spec.mcp_config {
         args.extend(["--mcp-config".into(), mcp.to_string_lossy().into_owned()]);
     }
-    args
+    Ok(args)
 }
 
 impl ClaudeProvider {
@@ -159,27 +164,38 @@ impl Provider for ClaudeProvider {
     }
 
     async fn start_session(&self, mut spec: SessionSpec) -> Result<Box<dyn ProviderSession>, ProviderError> {
+        let workspace = spec.mode == SessionMode::Workspace;
+        let protected_git_paths = if workspace {
+            if !cfg!(target_os = "macos") || spec.enforcement != EnforcementMode::HostPrompts {
+                return Err(ProviderError::SandboxUnavailable("Claude workspace sessions require macOS and host approvals".into()));
+            }
+            if !spec.cwd.is_absolute() || !spec.cwd.is_dir() { return Err(ProviderError::SandboxUnavailable("the workspace must be an existing absolute directory".into())); }
+            let paths = discard_core::workspace_session::protected_git_paths(&spec.cwd).map_err(ProviderError::SandboxUnavailable)?;
+            if !std::path::Path::new("/usr/bin/sandbox-exec").is_file() { return Err(ProviderError::SandboxUnavailable("macOS sandbox-exec is unavailable".into())); }
+            paths
+        } else { Vec::new() };
+        let setup = |message: String| crate::conversation::setup(message);
         // Fail closed before any process starts.
         self.matrix.supports(spec.enforcement)?;
-        let files = if spec.mode == SessionMode::Conversation {
+        let files = if spec.mode.replays_transcript() {
             crate::conversation::read_memory_config(&spec)?;
             if spec.model.as_deref().filter(|s| !s.is_empty()).is_none() {
-                return Err(crate::conversation::setup("select an exact Claude model"));
+                return Err(setup("select an exact Claude model".into()));
             }
             if spec.resume_handle.is_some() {
-                return Err(crate::conversation::setup("Claude conversation sessions require a fresh transcript replay"));
+                return Err(setup("Claude conversation sessions require a fresh transcript replay".into()));
             }
             let version = tokio::time::timeout(SETUP_TIMEOUT, self.command().arg("--version").kill_on_drop(true).output())
                 .await
-                .map_err(|_| crate::conversation::setup("Claude version check timed out"))?
-                .map_err(|e| crate::conversation::setup(e.to_string()))?;
+                .map_err(|_| setup("Claude version check timed out".into()))?
+                .map_err(|e| setup(e.to_string()))?;
             if !version.status.success() || !String::from_utf8_lossy(&version.stdout).starts_with("2.1.318 ") {
-                return Err(crate::conversation::setup("Claude Code 2.1.318 is required for the verified conversation controls"));
+                return Err(setup("Claude Code 2.1.318 is required for the verified conversation controls".into()));
             }
             let help = tokio::time::timeout(SETUP_TIMEOUT, self.command().arg("--help").kill_on_drop(true).output())
                 .await
-                .map_err(|_| crate::conversation::setup("Claude control check timed out"))?
-                .map_err(|e| crate::conversation::setup(e.to_string()))?;
+                .map_err(|_| setup("Claude control check timed out".into()))?
+                .map_err(|e| setup(e.to_string()))?;
             let help_text = String::from_utf8_lossy(&help.stdout);
             if !help.status.success()
                 || [
@@ -194,25 +210,27 @@ impl Provider for ClaudeProvider {
                 .iter()
                 .any(|flag| !help_text.contains(flag))
             {
-                return Err(crate::conversation::setup("Claude is missing a required conversation control"));
+                return Err(setup("Claude is missing a required conversation control".into()));
             }
             // Managed policy remains authoritative. Reject known local conflicts; never change policy.
-            crate::conversation::check_claude_managed_files()?;
-            let owned = crate::conversation::ConversationFiles::new()?;
-            spec.cwd = owned.cwd.clone();
-            Some(owned)
+            crate::conversation::check_claude_managed_files(workspace)?;
+            if workspace { None } else {
+                let owned = crate::conversation::ConversationFiles::new()?;
+                spec.cwd = owned.cwd.clone(); Some(owned)
+            }
         } else {
             None
         };
         let mut command = self.command();
-        if spec.mode == SessionMode::Conversation {
+        if spec.mode.replays_transcript() {
             command
                 .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
                 .env("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1")
                 .env_remove("CLAUDE_CODE_PLUGIN_DIRS");
         }
+        if workspace { command.env("GIT_OPTIONAL_LOCKS", "0"); }
         let mut child = command
-            .args(build_args(&spec))
+            .args(build_args(&spec, &protected_git_paths)?)
             .current_dir(&spec.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -428,13 +446,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn workspace_args_enable_only_the_write_tools_and_the_sandbox() {
+        let mut s = spec(EnforcementMode::HostPrompts); s.mode = SessionMode::Workspace;
+        let paths = vec![PathBuf::from("/worktree/.git"), PathBuf::from("/repo/.git")];
+        let args = build_args(&s, &paths).unwrap();
+        assert!(has_pair(&args, "--tools", "Read,Glob,Grep,Edit,Write,Bash"));
+        let value = |key| &args[args.iter().position(|a| a == key).unwrap() + 1];
+        assert!(value("--allowedTools").contains("mcp__discard-memory__worktree_commit"));
+        let settings: Value = serde_json::from_str(value("--settings")).unwrap();
+        assert_eq!(settings["sandbox"]["filesystem"]["denyWrite"], json!(paths));
+        assert_eq!(settings["sandbox"]["enabled"], true);
+        assert_eq!(settings["sandbox"]["allowUnsandboxedCommands"], false);
+        assert_eq!(settings["sandbox"]["autoAllowBashIfSandboxed"], false);
+        assert_eq!(settings["disableAllHooks"], true);
+        assert_eq!(settings["env"]["GIT_OPTIONAL_LOCKS"], "0");
+        assert_eq!(settings["env"]["CLAUDE_CODE_DISABLE_CLAUDE_MDS"], "1");
+        assert!(has_pair(&args, "--permission-mode", "manual"));
+        assert!(args.contains(&"--restricted".into()));
+        assert!(!args.iter().any(|a| a == "acceptEdits" || a == "--resume"));
+    }
+    #[test]
+    fn workspace_args_refuse_missing_git_protection() {
+        let mut s = spec(EnforcementMode::HostPrompts); s.mode = SessionMode::Workspace;
+        assert!(matches!(build_args(&s, &[]), Err(ProviderError::SandboxUnavailable(_))));
+    }
+    #[tokio::test]
+    async fn workspace_mode_requires_host_prompts() {
+        let mut s = spec(EnforcementMode::ProviderDenies); s.mode = SessionMode::Workspace;
+        assert!(matches!(ClaudeProvider::new("unused").start_session(s).await, Err(ProviderError::SandboxUnavailable(_))));
+    }
+
     fn has_pair(args: &[String], a: &str, b: &str) -> bool {
         args.windows(2).any(|w| w[0] == a && w[1] == b)
     }
 
     #[test]
     fn streams_json_both_ways() {
-        let args = build_args(&spec(EnforcementMode::HostPrompts));
+        let args = build_args(&spec(EnforcementMode::HostPrompts), &[]).unwrap();
         assert!(args.contains(&"-p".to_string()));
         assert!(has_pair(&args, "--input-format", "stream-json"));
         assert!(has_pair(&args, "--output-format", "stream-json"));
@@ -443,14 +492,14 @@ mod tests {
 
     #[test]
     fn host_prompts_route_permission_requests_to_the_host() {
-        let args = build_args(&spec(EnforcementMode::HostPrompts));
+        let args = build_args(&spec(EnforcementMode::HostPrompts), &[]).unwrap();
         assert!(has_pair(&args, "--permission-prompts", "host"));
         assert!(has_pair(&args, "--permission-prompt-tool", "stdio"));
     }
 
     #[test]
     fn provider_denies_mode_never_asks_the_host() {
-        let args = build_args(&spec(EnforcementMode::ProviderDenies));
+        let args = build_args(&spec(EnforcementMode::ProviderDenies), &[]).unwrap();
         assert!(has_pair(&args, "--permission-prompts", "none"));
         assert!(!args.contains(&"--permission-prompt-tool".to_string()));
     }
@@ -463,7 +512,7 @@ mod tests {
         s.system_prompt = Some("Be brief.".into());
         s.resume_handle = Some("sess-1".into());
         s.mcp_config = Some(PathBuf::from("/run/discard/mcp.json"));
-        let args = build_args(&s);
+        let args = build_args(&s, &[]).unwrap();
         assert!(has_pair(&args, "--model", "haiku"));
         assert!(has_pair(&args, "--effort", "high"));
         assert!(has_pair(&args, "--append-system-prompt", "Be brief."));
@@ -473,7 +522,7 @@ mod tests {
 
     #[test]
     fn omitted_settings_add_no_flags() {
-        let args = build_args(&spec(EnforcementMode::HostPrompts));
+        let args = build_args(&spec(EnforcementMode::HostPrompts), &[]).unwrap();
         for flag in ["--effort", "--model", "--append-system-prompt", "--resume", "--mcp-config"] {
             assert!(!args.contains(&flag.to_string()), "{flag}");
         }
@@ -483,9 +532,9 @@ mod tests {
     fn conversation_memory_permissions_allow_only_the_exact_scoped_tools() {
         for enforcement in [EnforcementMode::HostPrompts, EnforcementMode::ProviderDenies] {
             let mut s = spec(enforcement);
-            assert!(!build_args(&s).iter().any(|arg| arg == "--allowedTools"));
+            assert!(!build_args(&s, &[]).unwrap().iter().any(|arg| arg == "--allowedTools"));
             s.mode = SessionMode::Conversation;
-            let args = build_args(&s);
+            let args = build_args(&s, &[]).unwrap();
             let allowed = args.iter().position(|arg| arg == "--allowedTools").expect("scoped memory permission list");
             assert_eq!(
                 args[allowed + 1],
@@ -499,7 +548,7 @@ mod tests {
     fn conversation_mode_removes_native_tools_and_provider_context() {
         let mut s = spec(EnforcementMode::HostPrompts);
         s.mode = discard_core::provider::SessionMode::Conversation;
-        let args = build_args(&s);
+        let args = build_args(&s, &[]).unwrap();
         for flag in ["--strict-mcp-config", "--restricted", "--disable-slash-commands"] {
             assert!(args.iter().any(|arg| arg == flag), "{flag}");
         }

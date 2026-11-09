@@ -1,5 +1,7 @@
 //! UI protocol and the state the views render. Pure logic: no GUI, no I/O.
 
+pub use crate::workspace_session::SessionProfile;
+
 use crate::approval::{ApprovalState, Decision};
 use crate::driver::TurnOutcome;
 use crate::event::{AgentStatus, ApprovalId, Event};
@@ -55,6 +57,7 @@ pub enum Update {
     ConversationMarker(Message),
     ResponseCompleted(Message),
     Responding(crate::model::MessageAuthor),
+    SessionProfile(SessionProfile),
     /// The live reply remains available for copying; no saved response ID exists.
     ResponseSaveFailed(String),
     MemoryChanges { response: MessageId, changes: Vec<crate::memory_items::MemoryChange> },
@@ -62,6 +65,7 @@ pub enum Update {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiState {
+    pub session_profile: SessionProfile,
     channel_id: ChannelId,
     history: Vec<Message>,
     authors: std::collections::HashMap<MessageId, crate::model::MessageAuthor>,
@@ -74,7 +78,7 @@ pub struct UiState {
 
 impl UiState {
     pub fn new(channel_id: ChannelId, history: Vec<Message>) -> Self {
-        Self { channel_id, history, authors: Default::default(), responder: None, live: Timeline::new(), turn_running: false, response_save_failed: false, notice: None }
+        Self { session_profile: SessionProfile::default(), channel_id, history, authors: Default::default(), responder: None, live: Timeline::new(), turn_running: false, response_save_failed: false, notice: None }
     }
 
     pub fn with_authors(mut self, authors: std::collections::HashMap<MessageId, crate::model::MessageAuthor>) -> Self { self.authors = authors; self }
@@ -103,6 +107,7 @@ impl UiState {
 
     pub fn apply(&mut self, update: Update) {
         match update {
+            Update::SessionProfile(profile) => self.session_profile = profile,
             Update::ResponseSaveFailed(message) => { self.response_save_failed = true; self.notice = Some(message); },
             Update::Responding(author) => self.responder = Some(author),
             Update::ResponseCompleted(message) => {
@@ -317,7 +322,7 @@ mod tests {
         let mut s = state();
         s.user_sent("hi");
         let id = ApprovalId::new();
-        s.apply(ev(EventKind::ApprovalRequest {
+        s.apply(ev(EventKind::ApprovalRequest { kind: Default::default(), paths: vec![],
             approval_id: id.clone(),
             call_id: "c".into(),
             tool: "Bash".into(),
@@ -332,7 +337,7 @@ mod tests {
     fn finishing_a_turn_stales_any_approval_still_pending() {
         let mut s = state();
         s.user_sent("hi");
-        s.apply(ev(EventKind::ApprovalRequest {
+        s.apply(ev(EventKind::ApprovalRequest { kind: Default::default(), paths: vec![],
             approval_id: ApprovalId::new(),
             call_id: "c".into(),
             tool: "Bash".into(),
@@ -385,7 +390,7 @@ mod tests {
             })
         );
         s.user_sent("hi");
-        s.apply(ev(EventKind::ApprovalRequest {
+        s.apply(ev(EventKind::ApprovalRequest { kind: Default::default(), paths: vec![],
             approval_id: ApprovalId::new(),
             call_id: "c".into(),
             tool: "Bash".into(),

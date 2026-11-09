@@ -402,9 +402,17 @@ impl Store {
             tx.pragma_update(None, "user_version", 7)?;
             tx.commit()?;
         }
-        if self.schema_version()? < 8 {
+        let has_column = |table: &str, column: &str| -> Result<bool> {
+            Ok(self.conn.prepare(&format!("PRAGMA table_info({table})"))?.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?.iter().any(|name| name == column))
+        };
+        if self.schema_version()? < 8 || !has_column("approvals", "kind")? {
             let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch("ALTER TABLE messages ADD COLUMN author_json TEXT;")?;
+            if !has_column("messages", "author_json")? { tx.execute_batch("ALTER TABLE messages ADD COLUMN author_json TEXT;")?; }
+            if !has_column("approvals", "kind")? { tx.execute_batch("ALTER TABLE approvals ADD COLUMN kind TEXT NOT NULL DEFAULT 'provider_tool';")?; }
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS agent_commits (
+                commit_id TEXT NOT NULL, repo TEXT NOT NULL, channel_id TEXT NOT NULL REFERENCES channels(id),
+                agent_id TEXT NOT NULL REFERENCES agents(id), response TEXT REFERENCES messages(id),
+                PRIMARY KEY(repo,commit_id));")?;
             tx.pragma_update(None, "user_version", 8)?;
             tx.commit()?;
         }
@@ -1370,6 +1378,7 @@ impl Store {
                     tx.execute(sql, params![channel.id.0])?;
                 }
                 for sql in [
+                    "DELETE FROM agent_commits WHERE channel_id=?1",
                     "DELETE FROM approval_audit WHERE approval_id IN (SELECT a.id FROM approvals a JOIN turns t ON a.turn_id=t.id JOIN sessions s ON t.session_id=s.id WHERE s.channel_id=?1)",
                     "DELETE FROM approvals WHERE turn_id IN (SELECT t.id FROM turns t JOIN sessions s ON t.session_id=s.id WHERE s.channel_id=?1)",
                     "DELETE FROM turns WHERE session_id IN (SELECT id FROM sessions WHERE channel_id=?1)",
@@ -1400,6 +1409,7 @@ impl Store {
         )?;
         // Keep a minimal tombstone so retained history still has a readable author.
         let tombstone = AgentConfig {
+            workspace_write: false,
             reasoning_effort: None,
             name: "Deleted agent".into(),
             avatar: None,
@@ -1922,12 +1932,20 @@ impl Store {
         Ok(n as u64)
     }
 
+    pub fn record_agent_commit(&self, commit: &str, repo: &str, channel: &ChannelId, agent: &AgentId) -> Result<()> {
+        self.conn.execute("INSERT INTO agent_commits(commit_id,repo,channel_id,agent_id) VALUES(?1,?2,?3,?4)", params![commit, repo, channel.0, agent.0])?;
+        Ok(())
+    }
+    pub fn link_agent_commits(&self, channel: &ChannelId, response: &MessageId) -> Result<usize> {
+        Ok(self.conn.execute("UPDATE agent_commits SET response=?2 WHERE channel_id=?1 AND response IS NULL", params![channel.0, response.0])?)
+    }
+
     pub fn save_approval(&self, a: &Approval) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
-            "INSERT INTO approvals (id, turn_id, tool, input_json, state) VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO approvals (id, turn_id, tool, input_json, state, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(id) DO UPDATE SET state = excluded.state",
-            params![a.id.0, a.turn_id.0, a.tool, serde_json::to_string(&a.input)?, approval_state_str(a.state)],
+            params![a.id.0, a.turn_id.0, a.tool, serde_json::to_string(&a.input)?, approval_state_str(a.state), a.kind.as_str()],
         )?;
         // Audit rows are append-only: existing rows are never rewritten.
         for (n, rec) in a.audit.iter().enumerate() {
@@ -1941,15 +1959,15 @@ impl Store {
     }
 
     pub fn load_approval(&self, id: &ApprovalId) -> Result<Approval> {
-        let row: Option<(String, String, String, String)> = self
+        let row: Option<(String, String, String, String, String)> = self
             .conn
             .query_row(
-                "SELECT turn_id, tool, input_json, state FROM approvals WHERE id = ?1",
+                "SELECT turn_id, tool, input_json, state, kind FROM approvals WHERE id = ?1",
                 params![id.0],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?;
-        let (turn_id, tool, input, state) =
+        let (turn_id, tool, input, state, kind) =
             row.ok_or_else(|| StoreError::NotFound(format!("approval {}", id.0)))?;
         let state = parse_approval_state(&state)
             .ok_or_else(|| StoreError::Corrupt(format!("approval state {state}")))?;
@@ -1975,6 +1993,7 @@ impl Store {
             });
         }
         Ok(Approval {
+            kind: serde_json::from_value(serde_json::Value::String(kind))?,
             id: id.clone(),
             turn_id: TurnId(turn_id),
             tool,
@@ -2304,6 +2323,7 @@ mod tests {
             .insert_agent(
                 &agent,
                 &AgentConfig {
+                    workspace_write: false,
                     reasoning_effort: None,
                     name: "Scout".into(),
                     avatar: None,
@@ -2639,6 +2659,18 @@ mod tests {
     }
 
     #[test]
+    fn existing_approval_rows_read_as_provider_tool_after_migration() {
+        let f = fixture(); let turn = Turn::new(f.session.clone()); f.store.insert_turn(&turn).unwrap();
+        let a = Approval::new(turn.id, "Bash", json!({})); f.store.save_approval(&a).unwrap();
+        f.store.conn.execute_batch("ALTER TABLE approvals DROP COLUMN kind; DROP TABLE agent_commits;").unwrap();
+        assert_eq!(f.store.schema_version().unwrap(), 8);
+        f.store.migrate().unwrap();
+        assert_eq!(f.store.load_approval(&a.id).unwrap().kind, crate::approval::ApprovalKind::ProviderTool);
+        f.store.migrate().unwrap();
+        assert_eq!(f.store.schema_version().unwrap(), 8);
+    }
+
+    #[test]
     fn approvals_round_trip_with_audit_records() {
         let f = fixture();
         let t = Turn::new(f.session.clone());
@@ -2678,6 +2710,7 @@ mod tests {
                     text: "fn main(){}".into(),
                 },
                 Block::Approval {
+                    kind: crate::approval::ApprovalKind::ProviderTool,
                     approval_id: "a1".into(),
                     tool: "Bash".into(),
                     summary: "touch x".into(),
@@ -2806,6 +2839,7 @@ mod tests {
                 .insert_agent(
                     &agent,
                     &AgentConfig {
+                        workspace_write: false,
                         reasoning_effort: None,
                         name: "Friend".into(),
                         avatar: None,
@@ -2908,6 +2942,7 @@ mod tests {
                 .insert_agent(
                     &agent,
                     &AgentConfig {
+                        workspace_write: false,
                         reasoning_effort: None,
                         name: "A".into(),
                         avatar: None,
@@ -3058,6 +3093,7 @@ mod agent_lifecycle_tests {
     }
     fn config() -> AgentConfig {
         AgentConfig {
+            workspace_write: false,
             reasoning_effort: None,
             name: crate::agent::generated_name(),
             avatar: None,

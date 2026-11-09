@@ -452,6 +452,8 @@ impl AppCore {
                     .prompts()
                     .iter()
                     .map(|p| PromptDto {
+                        kind: p.kind.as_str().into(),
+                        always_allow: if !matches!(p.kind, discard_core::approval::ApprovalKind::ProviderTool | discard_core::approval::ApprovalKind::NetworkDomain) { "unavailable" } else if matches!(ui.session_profile, discard_core::ui_state::SessionProfile::Workspace { .. }) { "planned" } else { "available" }.into(),
                         approval_id: p.approval_id.to_string(),
                         tool: p.tool.clone(),
                         summary: p.summary.clone(),

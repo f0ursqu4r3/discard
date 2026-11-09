@@ -73,3 +73,5 @@ cargo test -p discard-providers --test worktree_live  -- --ignored
 - `docs/ui-juice-spec.md`: the UI polish spec (surfaces 1 to 5 and the chrome changes).
 - `docs/runtime/conversation-context.md`: conversation context, project channels, and topics.
 - `docs/project-channel-status.md`: implemented project-channel behavior and the remaining orchestration roadmap.
+
+- `docs/superpowers/specs/2026-11-09-agent-workspace-writes-design.md`: agent workspace writes; slice A is implemented, slices B and C remain planned.
