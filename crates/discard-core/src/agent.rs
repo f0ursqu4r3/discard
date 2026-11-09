@@ -52,6 +52,18 @@ impl AgentConfig {
         prompt
     }
 
+    /// The prompt for a chat turn. Chats run in Conversation mode, which never loads plugin
+    /// tools, so the agent learns how the user can get them.
+    pub fn conversation_system_prompt(&self) -> String {
+        let mut prompt = self.runtime_system_prompt();
+        prompt.push_str(if self.plugin_write {
+            "\n\nPlugin tools: Your profile allows plugin writes, but this chat has no plugin tools. Plugin tools load only when the user starts Discard from a terminal with `discard --builder`. If the user asks you to create or change a plugin, tell them this once. Never claim you wrote a plugin."
+        } else {
+            "\n\nPlugin tools: This chat has no plugin tools. To create or change a plugin, the user starts Discard from a terminal with `discard --builder` and asks the Builder agent. If the user asks you for a plugin, tell them this once. Never claim you wrote a plugin."
+        });
+        prompt
+    }
+
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(s)
     }
@@ -159,6 +171,21 @@ mod tests {
         let mut on = cfg(ApprovalPolicy::Ask);
         on.plugin_write = true;
         assert!(AgentConfig::from_toml(&on.to_toml().unwrap()).unwrap().plugin_write);
+    }
+
+    #[test]
+    fn chat_prompt_tells_the_agent_how_the_user_gets_plugin_tools() {
+        let mut c = cfg(ApprovalPolicy::Ask);
+        assert!(!c.runtime_system_prompt().contains("discard --builder"), "builder sessions have the tools");
+        let off = c.conversation_system_prompt();
+        assert!(off.starts_with(&c.runtime_system_prompt()));
+        assert!(off.contains("This chat has no plugin tools."));
+        assert!(off.contains("`discard --builder` and asks the Builder agent"));
+        c.plugin_write = true;
+        let on = c.conversation_system_prompt();
+        assert!(on.contains("Your profile allows plugin writes, but this chat has no plugin tools."));
+        assert!(on.contains("`discard --builder`"));
+        assert!(!on.contains("Builder agent"));
     }
 
     #[test]

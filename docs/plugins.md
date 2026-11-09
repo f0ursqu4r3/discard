@@ -36,6 +36,9 @@ Under `$DISCARD_HOME` (default `~/.discard`):
 
 Agents have no tool that approves, installs, or trusts. Only the buttons in Discard's own window do.
 
+The plugin tools load only in a session started with `discard --builder`. Normal chats never load them, even for an
+agent with **Allow plugin writes** on. A chat agent tells you to start a builder session when you ask it for a plugin.
+
 ## Rules Discard enforces
 
 - **Exact bytes.** The review holds a copy of the draft. Editing the draft afterward does not change what is

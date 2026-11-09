@@ -410,6 +410,23 @@ async fn agent_identity_reaches_each_turn_and_renames_preserve_history() {
 }
 
 #[tokio::test]
+async fn chat_turns_tell_the_agent_that_plugin_tools_need_a_builder_session() {
+    let mut rig = Rig::new(vec![Step::text("Hello"), Step::idle()]).await;
+    rig.commands.send(Command::Send("Write a plugin.".into())).unwrap();
+    rig.done().await;
+    rig.edit(|c| c.plugin_write = false);
+    rig.commands.send(Command::Send("Write a plugin.".into())).unwrap();
+    rig.done().await;
+    let specs = rig.probe.specs.lock().unwrap().clone();
+    let on = specs[0].system_prompt.as_deref().unwrap();
+    let off = specs[1].system_prompt.as_deref().unwrap();
+    assert!(on.contains("Your profile allows plugin writes, but this chat has no plugin tools."));
+    assert!(off.contains("This chat has no plugin tools."));
+    assert!(off.contains("asks the Builder agent"));
+    rig.close().await;
+}
+
+#[tokio::test]
 async fn archive_and_unavailable_provider_prevent_new_turn_without_fallback() {
     let mut rig = Rig::new(vec![Step::text("ok"), Step::idle()]).await;
     rig.edit(|c| c.provider = "missing".into());

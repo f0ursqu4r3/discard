@@ -196,6 +196,16 @@ test('failed creation keeps the entered name and model', async () => {
   expect(view.emitted('created')).toBeUndefined()
   view.unmount()
 })
+test('the plugin write switch says it works only in a builder session', async () => {
+  const view = await editor()
+  const toggle = view.get('#agent-plugin-write')
+  const description = view.get(`#${toggle.attributes('aria-describedby')}`)
+  expect(description.text()).toContain('Works only in a builder session.')
+  expect(description.get('code').text()).toBe('discard --builder')
+  expect(description.text()).toContain('Normal chats cannot write plugins.')
+  view.unmount()
+})
+
 test('permission expansion still requires confirmation in the profile', async () => {
   const view = await editor()
   view.findAllComponents(Select)[1]!.vm.$emit('update:modelValue', 'exact/new-model')

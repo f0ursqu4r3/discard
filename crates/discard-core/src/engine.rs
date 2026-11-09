@@ -150,7 +150,7 @@ impl Engine {
         snapshot.agent_id = recipient;
         snapshot.project_id = channel.project_id;
         snapshot.provider = provider;
-        snapshot.system_prompt = Some(config.runtime_system_prompt());
+        snapshot.system_prompt = Some(config.conversation_system_prompt());
         snapshot.model = config.model;
         snapshot.reasoning_effort = config.reasoning_effort;
         snapshot.policy = config.policy;

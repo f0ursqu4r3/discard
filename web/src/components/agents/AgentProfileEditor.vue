@@ -13,6 +13,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { getAgents, type AgentEntry } from '@/bridge/api'
 import {
   Field,
+  FieldContent,
   FieldGroup,
   FieldLabel,
   FieldDescription,
@@ -310,8 +311,20 @@ async function remove() {
           </label>
         </FieldSet>
         <Field orientation="horizontal">
-          <FieldLabel for="agent-plugin-write">Allow plugin writes</FieldLabel>
-          <Switch id="agent-plugin-write" v-model="draft.pluginWrite" :disabled="busy" />
+          <FieldContent>
+            <FieldLabel for="agent-plugin-write">Allow plugin writes</FieldLabel>
+            <FieldDescription id="agent-plugin-write-description">
+              Works only in a builder session. Start Discard with
+              <code class="font-mono">discard --builder</code>
+              . Normal chats cannot write plugins.
+            </FieldDescription>
+          </FieldContent>
+          <Switch
+            id="agent-plugin-write"
+            v-model="draft.pluginWrite"
+            :disabled="busy"
+            aria-describedby="agent-plugin-write-description"
+          />
         </Field>
       </FieldGroup>
     </details>
