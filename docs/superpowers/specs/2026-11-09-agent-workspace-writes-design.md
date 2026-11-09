@@ -94,6 +94,13 @@ Agents in project channels can only read today. They must be able to edit files,
 18. A branch channel without a worktree runs read-only. The agent can call `worktree_request_creation`. When the user approves the card, Discard creates the worktree and starts a write-capable follow-up response for the same request.
 19. The main-checkout grant (decision 2) uses the tool `main_checkout_request_write` and works the same way. When the user approves, the follow-up response runs with the main checkout as its session root.
 
+### Slice B details (approved 2026-11-09, after slice A)
+
+20a. **Prefix choice.** The Always-allow control shows the parsed command words with a default cut: the program plus its first word that is not a flag. For `cargo test -p discard-core workspace`, the default is `cargo test`. The user can widen or narrow the cut before saving. The rule saves the words up to the cut.
+20b. **Codex.** Slice B spikes once for a reliable marker that separates Codex command approvals inside the sandbox from escalation requests. If the spike finds one, Codex command approvals inside the sandbox get the `ProviderTool` kind and can use Always allow. If it finds none, the slice A fallback stays: every Codex command approval in a write session is `SandboxEscape`, and the card says "Always allow is unavailable for Codex write sessions."
+20c. **Network rules.** A network-domain rule matches the exact host only, with no wildcards. It is kept for each agent in each project.
+20d. **Main checkout with Codex.** The main checkout contains `.git` inside the session root. If a spike shows that Codex's `workspace-write` sandbox does not keep `.git` read-only, Codex agents cannot get main-checkout grants. The request fails with that reason.
+
 ### Moving a conversation (slice C)
 
 20. Only the project's Primary/Moderator agent can call `conversation_request_move`. Other agents can suggest a move in text.
