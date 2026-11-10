@@ -456,7 +456,8 @@ impl AppCore {
                 }
                 .into(),
                 turn_running: ui.turn_running(),
-                autorun: AutorunDto::from_profile(&ui.session_profile),
+                // The indicator describes a running response only, like the plugin slot state.
+                autorun: if ui.turn_running() { AutorunDto::from_profile(&ui.session_profile) } else { None },
                 notice: ui.notice().map(str::to_owned),
                 live_blocks: ui.live_blocks().to_vec(),
                 prompts: ui
@@ -989,8 +990,23 @@ mod read_tests {
         let (commands, _) = tokio::sync::mpsc::unbounded_channel();
         let mut ui = UiState::new(ChannelId::new(), vec![]);
         ui.apply(Update::SessionProfile(workspace(AutorunState::Unavailable("r".into()))));
+        ui.response_started();
         let core = AppCore::new(CoreInit { state: ui, commands, project: "P".into(), channel: "C".into(), agent: "A".into(), provider: "fake".into() });
         assert_eq!(serde_json::to_value(core.snapshot()).unwrap()["autorun"], serde_json::json!({"state": "unavailable", "reason": "r"}));
+    }
+
+    #[test]
+    fn snapshot_has_no_autorun_after_the_turn_finishes() {
+        use discard_core::ui_state::{AutorunState, SessionProfile};
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut ui = UiState::new(ChannelId::new(), vec![]);
+        ui.apply(Update::SessionProfile(SessionProfile::Workspace { root: "/w".into(), autorun: AutorunState::On }));
+        ui.response_started();
+        ui.apply(Update::TurnFinished(discard_core::driver::TurnOutcome::Completed));
+        assert!(!ui.turn_running());
+        let core = AppCore::new(CoreInit { state: ui, commands, project: "P".into(), channel: "C".into(), agent: "A".into(), provider: "fake".into() });
+        assert!(core.snapshot().autorun.is_none());
+        assert_eq!(serde_json::to_value(core.snapshot()).unwrap()["autorun"], serde_json::Value::Null);
     }
 
     #[test]
