@@ -107,6 +107,16 @@ impl Timeline {
             EventKind::ApprovalRequest { approval_id, call_id, tool, input, kind, .. } => {
                 self.text_open = false;
                 self.approved_calls.push(call_id.clone());
+                if *kind == crate::approval::ApprovalKind::NetworkDomain {
+                    // A network request may carry its own call id. It belongs to an open shell call.
+                    for block in &self.blocks {
+                        if let Block::ToolCall { call_id: id, name, output: None, .. } = block
+                            && matches!(name.as_str(), "Bash" | "command")
+                        {
+                            self.approved_calls.push(id.clone());
+                        }
+                    }
+                }
                 let summary = summarize_input(tool, input);
                 self.blocks.push(Block::Approval {
                     kind: *kind,
@@ -286,6 +296,30 @@ mod tests {
         assert!(matches!(&t.blocks()[3], Block::ToolCall { sandboxed: Some(true), .. }));
         assert_eq!(serde_json::to_value(&t.blocks()[0]).unwrap()["sandboxed"], true);
         assert!(serde_json::to_value(&t.blocks()[1]).unwrap().get("sandboxed").is_none());
+    }
+
+    #[test]
+    fn a_network_approval_unmarks_the_open_shell_call() {
+        // Claude's SandboxNetworkAccess request carries its own tool_use_id, not the shell call's.
+        let mut t = Timeline::new();
+        t.set_autorun(true);
+        t.apply(&started("c1", "Bash"));
+        t.apply(&finished("c1"));
+        t.apply(&started("c2", "Bash"));
+        t.apply(&EventKind::ApprovalRequest {
+            kind: crate::approval::ApprovalKind::NetworkDomain,
+            paths: vec![],
+            approval_id: ApprovalId::new(),
+            call_id: "unrelated-network-id".into(),
+            tool: "SandboxNetworkAccess".into(),
+            input: json!({"host": "example.com"}),
+        });
+        t.apply(&finished("c2"));
+        t.apply(&started("c3", "Bash"));
+        t.apply(&finished("c3"));
+        assert!(matches!(&t.blocks()[0], Block::ToolCall { sandboxed: Some(true), .. }), "a finished call keeps its mark");
+        assert!(matches!(&t.blocks()[1], Block::ToolCall { sandboxed: None, .. }), "the open call asked for network access");
+        assert!(matches!(&t.blocks()[3], Block::ToolCall { sandboxed: Some(true), .. }), "a later call is marked again");
     }
 
     #[test]
