@@ -23,6 +23,9 @@ pub struct AgentConfig {
     /// May edit the bound branch or worktree. Off by default.
     #[serde(default)]
     pub workspace_write: bool,
+    /// May run sandboxed shell commands without approval cards. Needs `workspace_write`. Off by default.
+    #[serde(default)]
+    pub sandbox_autorun: bool,
 }
 
 /// Generate an editable human name without using a model as identity.
@@ -90,6 +93,7 @@ pub enum AgentChange {
     SetPolicy { agent: AgentId, from: ApprovalPolicy, to: ApprovalPolicy },
     SetPluginWrite { agent: AgentId, enabled: bool },
     SetWorkspaceWrite { agent: AgentId, enabled: bool },
+    SetSandboxAutorun { agent: AgentId, enabled: bool },
 }
 
 /// Strictness rank. Higher is stricter.
@@ -107,7 +111,7 @@ impl AgentChange {
         match (initiator, self) {
             (Initiator::User, AgentChange::Create { .. }) => false,
             (Initiator::User, AgentChange::SetPolicy { from, to, .. }) => strictness(*to) < strictness(*from),
-            (Initiator::User, AgentChange::SetPluginWrite { enabled, .. } | AgentChange::SetWorkspaceWrite { enabled, .. }) => *enabled,
+            (Initiator::User, AgentChange::SetPluginWrite { enabled, .. } | AgentChange::SetWorkspaceWrite { enabled, .. } | AgentChange::SetSandboxAutorun { enabled, .. }) => *enabled,
             (Initiator::Plugin(_) | Initiator::Agent(_), _) => true,
         }
     }
@@ -127,13 +131,27 @@ mod tests {
     }
 
     #[test]
+    fn enabling_sandbox_autorun_needs_user_approval() {
+        let on = AgentChange::SetSandboxAutorun { agent: AgentId("a".into()), enabled: true };
+        assert!(on.needs_user_approval(&Initiator::User));
+        let off = AgentChange::SetSandboxAutorun { agent: AgentId("a".into()), enabled: false };
+        assert!(!off.needs_user_approval(&Initiator::User));
+        assert!(off.needs_user_approval(&Initiator::Plugin("p".into())));
+    }
+
+    #[test]
+    fn old_agent_toml_reads_sandbox_autorun_as_false() {
+        assert!(!AgentConfig::from_toml("name = 'A'\nprovider = 'claude'\npolicy = 'ask'\n").unwrap().sandbox_autorun);
+    }
+
+    #[test]
     fn old_agent_toml_reads_workspace_write_as_false() {
         assert!(!AgentConfig::from_toml("name = 'A'\nprovider = 'claude'\npolicy = 'ask'\n").unwrap().workspace_write);
     }
 
     fn cfg(policy: ApprovalPolicy) -> AgentConfig {
         AgentConfig {
-            workspace_write: false,
+            workspace_write: false, sandbox_autorun: false,
             reasoning_effort: None,
             name: "Scout".into(),
             avatar: None,

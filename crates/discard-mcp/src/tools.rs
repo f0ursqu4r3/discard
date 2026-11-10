@@ -777,7 +777,7 @@ mod tests {
         use discard_core::{agent::AgentConfig, capability::ApprovalPolicy, model::{Channel, ChannelId, Project, WorkspaceMode}, store::{Store, WorktreeRecord}};
         let mut r = rig();
         let store = Store::open_in_memory().unwrap();
-        let config = AgentConfig { workspace_write: false, name:"Agent".into(), provider:"fake".into(), model:Some("test".into()), avatar:None, reasoning_effort:None, system_prompt:String::new(), policy:ApprovalPolicy::Ask, plugin_write:false };
+        let config = AgentConfig { workspace_write: false, sandbox_autorun: false, name:"Agent".into(), provider:"fake".into(), model:Some("test".into()), avatar:None, reasoning_effort:None, system_prompt:String::new(), policy:ApprovalPolicy::Ask, plugin_write:false };
         let agent = store.create_agent(&config).unwrap();
         let project = Project { id:ProjectId::new(), name:"Project".into(), path:"/unused".into() };
         store.insert_project(&project).unwrap();
@@ -811,7 +811,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("README.md"), "A project description").unwrap();
         let store = Store::open_in_memory().unwrap();
-        let agent = store.create_agent(&AgentConfig { workspace_write: false, name:"Agent".into(), provider:"fake".into(), model:Some("test".into()), avatar:None, reasoning_effort:None, system_prompt:String::new(), policy:ApprovalPolicy::Ask, plugin_write:false }).unwrap();
+        let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, name:"Agent".into(), provider:"fake".into(), model:Some("test".into()), avatar:None, reasoning_effort:None, system_prompt:String::new(), policy:ApprovalPolicy::Ask, plugin_write:false }).unwrap();
         let project = store.import_project_folder(dir.path()).unwrap();
         let channel = store.ensure_project_general_channel(&project.id, &agent).unwrap();
         r.handler = r.handler.with_worktrees(Arc::new(WorktreeAccess::new(Arc::new(std::sync::Mutex::new(store)))));

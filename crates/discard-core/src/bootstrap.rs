@@ -78,7 +78,7 @@ pub fn ensure_workspace(store: &Store, project_dir: &Path, provider: &str, role:
                 existing
             } else {
             let agent = AgentConfig {
-                workspace_write: false,
+                workspace_write: false, sandbox_autorun: false,
                 reasoning_effort: None,
                 name: if role == Role::Builder { "Builder".to_string() } else { crate::agent::generated_name() },
                 avatar: None,

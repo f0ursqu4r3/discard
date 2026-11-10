@@ -570,7 +570,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn configured_agent(store: &Store) -> AgentId {
-        store.create_agent(&AgentConfig { workspace_write: false, reasoning_effort: None, name: "Project agent".into(), provider: "codex".into(), model: Some("model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap()
+        store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "Project agent".into(), provider: "codex".into(), model: Some("model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap()
     }
 
     fn launcher() -> Launcher {
@@ -900,7 +900,7 @@ mod tests {
         let project = Project { id: ProjectId::new(), name: "Project".into(), path: dir.path().to_string_lossy().into_owned() };
         store.insert_project(&project).unwrap();
         let agent = AgentId::new();
-        store.insert_agent(&agent, &AgentConfig { workspace_write: false, reasoning_effort: None, name: "Builder".into(), provider: "codex".into(), model: Some("agent-model".into()), avatar: None, system_prompt: "Review changes".into(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        store.insert_agent(&agent, &AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "Builder".into(), provider: "codex".into(), model: Some("agent-model".into()), avatar: None, system_prompt: "Review changes".into(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         let first = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "general".into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::MainCheckout };
         store.create_named_channel(&first, None, None).unwrap();
         let store = Arc::new(Mutex::new(store));
@@ -937,7 +937,7 @@ mod tests {
         let project = Project { id: ProjectId::new(), name: "p".into(), path: dir.path().to_string_lossy().into_owned() };
         let agent = AgentId::new();
         store.insert_project(&project).unwrap();
-        store.insert_agent(&agent, &AgentConfig { workspace_write: false, reasoning_effort: None, name: "Builder".into(), provider: "codex".into(), model: None, avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        store.insert_agent(&agent, &AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "Builder".into(), provider: "codex".into(), model: None, avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         store.set_project_main_agent(&project.id, &agent).unwrap();
         let first = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "old".into(), agent_id: agent, workspace_mode: WorkspaceMode::Worktree };
         let manager = WorktreeManager::new(dir.path());
@@ -948,7 +948,7 @@ mod tests {
         let core = core(&first, dir.path());
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
         service.activate_project(&project.id).unwrap();
-        let direct_agent = store.lock().unwrap().create_agent(&AgentConfig { workspace_write: false, reasoning_effort: None, name: "Direct".into(), provider: "codex".into(), model: Some("direct-model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        let direct_agent = store.lock().unwrap().create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "Direct".into(), provider: "codex".into(), model: Some("direct-model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         service.open_agent(&direct_agent).unwrap();
         git(&["checkout", "-b", "new"]);
         let new = service.open_branch("new").unwrap();
@@ -1023,7 +1023,7 @@ mod tests {
 
         assert_eq!(service.activate_project(&project_id).unwrap(), general_id.0);
         let unrelated = store.lock().unwrap().create_agent(&AgentConfig {
-            workspace_write: false,
+            workspace_write: false, sandbox_autorun: false,
             reasoning_effort: None,
             name: "Direct agent".into(),
             provider: "codex".into(),
@@ -1210,7 +1210,7 @@ mod tests {
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let project = store.lock().unwrap().import_project_folder(dir.path()).unwrap();
         let old_agent = configured_agent(&store.lock().unwrap());
-        let new_agent = store.lock().unwrap().create_agent(&AgentConfig { workspace_write: false, reasoning_effort: None, name: "New main".into(), provider: "claude".into(), model: Some("new-model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        let new_agent = store.lock().unwrap().create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "New main".into(), provider: "claude".into(), model: Some("new-model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         store.lock().unwrap().set_project_main_agent(&project.id, &old_agent).unwrap();
         let general = store.lock().unwrap().ensure_project_general_channel(&project.id, &old_agent).unwrap();
         let retry_receivers = Arc::new(Mutex::new(Vec::new()));
@@ -1259,8 +1259,8 @@ mod tests {
             let first = store.import_project_folder(first_dir.path()).unwrap();
             let second = store.import_project_folder(second_dir.path()).unwrap();
             let old = configured_agent(&store);
-            let first_replacement = store.create_agent(&AgentConfig { workspace_write: false, reasoning_effort: None, name: "Replacement one".into(), provider: "codex".into(), model: Some("one".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
-            let second_replacement = store.create_agent(&AgentConfig { workspace_write: false, reasoning_effort: None, name: "Replacement two".into(), provider: "codex".into(), model: Some("two".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+            let first_replacement = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "Replacement one".into(), provider: "codex".into(), model: Some("one".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+            let second_replacement = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "Replacement two".into(), provider: "codex".into(), model: Some("two".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
             store.set_project_main_agent(&first.id, &old).unwrap();
             store.set_project_main_agent(&second.id, &old).unwrap();
             let first_general = store.ensure_project_general_channel(&first.id, &old).unwrap();

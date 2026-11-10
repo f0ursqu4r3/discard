@@ -37,7 +37,7 @@ impl Harness {
             .insert_agent(
                 &agent,
                 &AgentConfig {
-                    workspace_write: false,
+                    workspace_write: false, sandbox_autorun: false,
                     reasoning_effort: None,
                     name: "A".into(),
                     avatar: None,

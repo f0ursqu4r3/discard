@@ -82,7 +82,7 @@ mod tests {
         git(&repo, &["worktree", "add", "--detach", worktree.to_str().unwrap()]);
         let store = Store::open(&dir.path().join("store.db")).unwrap();
         let agent = store.create_agent(&AgentConfig {
-            workspace_write: false,
+            workspace_write: false, sandbox_autorun: false,
             name: "Agent".into(), avatar: None, provider: "codex".into(), model: Some("test".into()),
             reasoning_effort: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false,
         }).unwrap();

@@ -6,7 +6,7 @@ mod tests {
     fn loosening_policy_requires_confirmation() {
         let store = Store::open_in_memory().unwrap();
         let id = AgentId::new();
-        let cfg = AgentConfig { workspace_write: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "p".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::DenyAll, plugin_write: false };
+        let cfg = AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "p".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::DenyAll, plugin_write: false };
         store.insert_agent(&id, &cfg).unwrap();
         let matrix = CapabilityMatrix { provider: "p".into(), matrix_version: 1, cli_version: "1".into(), capabilities: Capabilities { interactive_approvals: true, tool_call_visibility: true, per_session_mcp: true, session_resume: true, cancellation: true, pre_execution_blocking: true } };
         let mut draft = AgentDraft::from(&cfg); draft.policy = ApprovalPolicy::Ask;
@@ -15,7 +15,7 @@ mod tests {
     }
     #[test]
     fn omitted_avatar_is_preserved_and_explicit_null_clears_it() {
-        let current=AgentConfig { workspace_write: false, reasoning_effort: None, name:"A".into(),avatar:Some("avatar.png".into()),provider:"p".into(),model:Some("m".into()),system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false };
+        let current=AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name:"A".into(),avatar:Some("avatar.png".into()),provider:"p".into(),model:Some("m".into()),system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false };
         let mut value=serde_json::json!({"model":"m","systemPrompt":"","policy":"ask","workspaceWrite":false,"pluginWrite":false});
         let draft:Draft=serde_json::from_value(value.clone()).unwrap();
         assert_eq!(draft.into_core(&current).unwrap().avatar,current.avatar);
@@ -43,7 +43,7 @@ mod tests {
         assert!(!defaults["name"].as_str().unwrap().trim().is_empty());
         assert_eq!(defaults["model"], "");
         assert_eq!(defaults["systemPrompt"], "");
-        let cfg = AgentConfig { workspace_write: false, reasoning_effort: None, name: "A".into(), avatar: Some("keep.png".into()), provider: "old".into(), model: Some("old-model".into()), system_prompt: String::new(), policy: ApprovalPolicy::DenyAll, plugin_write: false };
+        let cfg = AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "A".into(), avatar: Some("keep.png".into()), provider: "old".into(), model: Some("old-model".into()), system_prompt: String::new(), policy: ApprovalPolicy::DenyAll, plugin_write: false };
         let value = serde_json::json!({"name":"Human name", "provider":"new", "model":"provider/exact-ID:1", "systemPrompt":"", "policy":"deny", "workspaceWrite":false,"pluginWrite":false});
         let draft = serde_json::from_value::<Draft>(value).unwrap().into_core(&cfg).unwrap();
         let matrix = CapabilityMatrix { provider: "new".into(), matrix_version: 1, cli_version: "1".into(), capabilities: Capabilities { interactive_approvals: true, tool_call_visibility: true, per_session_mcp: true, session_resume: true, cancellation: true, pre_execution_blocking: true } };
@@ -77,7 +77,7 @@ fn deserialize_avatar<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Resu
 impl Draft {
     pub(crate) fn into_core(self, current: &discard_core::agent::AgentConfig) -> Result<AgentDraft, String> {
         let policy = match self.policy.as_str() { "ask" => ApprovalPolicy::Ask, "deny" => ApprovalPolicy::DenyAll, _ => return Err("Unknown policy".into()) };
-        Ok(AgentDraft { reasoning_effort: self.reasoning_effort.unwrap_or_else(|| current.reasoning_effort.clone()), name:self.name.unwrap_or_else(||current.name.clone()), avatar:self.avatar.unwrap_or_else(||current.avatar.clone()), provider:self.provider.unwrap_or_else(||current.provider.clone()), model: if self.model.is_empty() { None } else { Some(self.model) }, system_prompt: self.system_prompt, policy, plugin_write: self.plugin_write, workspace_write: self.workspace_write.unwrap_or(current.workspace_write) })
+        Ok(AgentDraft { reasoning_effort: self.reasoning_effort.unwrap_or_else(|| current.reasoning_effort.clone()), name:self.name.unwrap_or_else(||current.name.clone()), avatar:self.avatar.unwrap_or_else(||current.avatar.clone()), provider:self.provider.unwrap_or_else(||current.provider.clone()), model: if self.model.is_empty() { None } else { Some(self.model) }, system_prompt: self.system_prompt, policy, plugin_write: self.plugin_write, workspace_write: self.workspace_write.unwrap_or(current.workspace_write), sandbox_autorun: current.sandbox_autorun })
     }
 }
 fn selected_provider<'a>(providers: &'a [crate::desktop::actions::ProviderInfo], draft: &AgentDraft) -> Result<&'a crate::desktop::actions::ProviderInfo, String> {
@@ -155,14 +155,14 @@ pub fn settings_agent_defaults() -> serde_json::Value {
 }
 #[tauri::command]
 pub fn settings_agent_create(app: tauri::AppHandle, context: tauri::State<'_, super::SettingsContext>, draft: Draft) -> Result<String, String> {
-    let blank = discard_core::agent::AgentConfig { workspace_write: false, reasoning_effort: None, name: discard_core::agent::generated_name(), avatar: None, provider: String::new(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::DenyAll, plugin_write: false };
+    let blank = discard_core::agent::AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: discard_core::agent::generated_name(), avatar: None, provider: String::new(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::DenyAll, plugin_write: false };
     let draft = draft.into_core(&blank)?;
     if draft.workspace_write { return Err("Create the agent first. Then review Workspace writes permission.".into()); }
     if draft.plugin_write { return Err("Create the agent first. Then review plugin.write permission.".into()); }
     let provider = selected_provider(&context.providers, &draft)?;
     require_connected(provider)?;
     provider.matrix.enforcement_for(draft.policy).map_err(|e| e.to_string())?;
-    let cfg = discard_core::agent::AgentConfig { workspace_write: false, reasoning_effort: draft.reasoning_effort, name: draft.name, avatar: draft.avatar, provider: draft.provider, model: draft.model, system_prompt: draft.system_prompt, policy: draft.policy, plugin_write: false };
+    let cfg = discard_core::agent::AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: draft.reasoning_effort, name: draft.name, avatar: draft.avatar, provider: draft.provider, model: draft.model, system_prompt: draft.system_prompt, policy: draft.policy, plugin_write: false };
     let id = context.store.lock().unwrap_or_else(|e| e.into_inner()).create_agent(&cfg).map_err(|e| e.to_string())?;
     agents_changed(&app); context.core.changed.notify_one(); Ok(id.0)
 }

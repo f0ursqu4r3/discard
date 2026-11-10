@@ -1460,7 +1460,7 @@ impl Store {
         tx.execute("DELETE FROM always_allow_rules WHERE agent_id=?1", params![id.0])?;
         // Keep a minimal tombstone so retained history still has a readable author.
         let tombstone = AgentConfig {
-            workspace_write: false,
+            workspace_write: false, sandbox_autorun: false,
             reasoning_effort: None,
             name: "Deleted agent".into(),
             avatar: None,
@@ -2428,7 +2428,7 @@ mod tests {
             .insert_agent(
                 &agent,
                 &AgentConfig {
-                    workspace_write: false,
+                    workspace_write: false, sandbox_autorun: false,
                     reasoning_effort: None,
                     name: "Scout".into(),
                     avatar: None,
@@ -2944,7 +2944,7 @@ mod tests {
                 .insert_agent(
                     &agent,
                     &AgentConfig {
-                        workspace_write: false,
+                        workspace_write: false, sandbox_autorun: false,
                         reasoning_effort: None,
                         name: "Friend".into(),
                         avatar: None,
@@ -3047,7 +3047,7 @@ mod tests {
                 .insert_agent(
                     &agent,
                     &AgentConfig {
-                        workspace_write: false,
+                        workspace_write: false, sandbox_autorun: false,
                         reasoning_effort: None,
                         name: "A".into(),
                         avatar: None,
@@ -3198,7 +3198,7 @@ mod agent_lifecycle_tests {
     }
     fn config() -> AgentConfig {
         AgentConfig {
-            workspace_write: false,
+            workspace_write: false, sandbox_autorun: false,
             reasoning_effort: None,
             name: crate::agent::generated_name(),
             avatar: None,
