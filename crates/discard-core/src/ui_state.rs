@@ -199,12 +199,17 @@ impl UiState {
             AgentStatus::AwaitingApproval => "awaiting_approval",
             AgentStatus::Offline => "offline",
         };
+        // The responder can differ from the saved channel agent. Name the agent that owns the running turn.
+        let (id, name, provider) = match self.responder.as_ref().filter(|_| self.turn_running) {
+            Some(author) => (author.agent_id.0.as_str(), author.name.as_str(), author.provider.as_str()),
+            None => (labels.agent_id.as_str(), labels.agent_name.as_str(), labels.provider.as_str()),
+        };
         serde_json::json!({
             "project": labels.project,
             "channel": labels.channel,
             "pending_approvals": self.pending_approvals(),
             "turn_running": self.turn_running,
-            "agent": { "id": labels.agent_id, "name": labels.agent_name, "provider": labels.provider, "status": status },
+            "agent": { "id": id, "name": name, "provider": provider, "status": status },
         })
     }
 }
@@ -407,6 +412,15 @@ mod tests {
         assert_eq!(v["pending_approvals"], 1);
         assert_eq!(v["agent"]["status"], "awaiting_approval");
         assert_eq!(v["turn_running"], true);
+    }
+
+    #[test]
+    fn slot_state_names_the_responder_while_a_turn_runs() {
+        let mut s = state();
+        let labels = SlotLabels { project: "demo".into(), channel: "general".into(), agent_id: "agent-jordan".into(), agent_name: "Jordan".into(), provider: "codex".into() };
+        s.user_sent("hi");
+        s.apply(Update::Responding(crate::model::MessageAuthor { agent_id: crate::model::AgentId("agent-casey".into()), name: "Casey".into(), provider: "claude".into(), avatar: None }));
+        assert_eq!(s.slot_state(&labels)["agent"], serde_json::json!({ "id": "agent-casey", "name": "Casey", "provider": "claude", "status": "working" }));
     }
 
     #[test]

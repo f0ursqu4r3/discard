@@ -83,7 +83,7 @@ pub const NAMESPACES: &[ApiNamespace] = &[
 
 pub const CONSTANTS: &[(&str, &str, &str)] = &[("api_version", "string", "The plugin API version this Discard implements.")];
 
-pub const SLOT_STATE_DOC: &str = "`state` for the built-in slots: `{ project: string, channel: string, pending_approvals: number, turn_running: boolean, agent: { id: string, name: string, provider: string, status: \"idle\" | \"working\" | \"awaiting_approval\" | \"offline\" } }`. `state.agent.id` is the active conversation agent's stored ID. Pass this string to `agent` on `row`, `column`, or `avatar` to use that agent's identity.";
+pub const SLOT_STATE_DOC: &str = "`state` for the built-in slots: `{ project: string, channel: string, pending_approvals: number, turn_running: boolean, agent: { id: string, name: string, provider: string, status: \"idle\" | \"working\" | \"awaiting_approval\" | \"offline\" } }`. `state.agent` is the agent that owns the running turn, or the conversation's saved agent when no turn runs. `state.agent.id` is that agent's stored ID. Pass this string to `agent` on `row`, `column`, or `avatar` to use that agent's identity.";
 
 const TEXT_COLOR_DOC: &str = "Text color from the element color tokens. `agent` uses the nearest agent container's readable identity text color (`--agent-text`), or `primary` outside one.";
 
