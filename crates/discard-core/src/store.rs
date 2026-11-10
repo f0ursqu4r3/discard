@@ -13,7 +13,7 @@ use crate::model::{
 use crate::turn::{Turn, TurnState};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -423,6 +423,14 @@ impl Store {
                 id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES agents(id), project_id TEXT NOT NULL,
                 target_json TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(agent_id, project_id, target_json));")?;
             tx.pragma_update(None, "user_version", 9)?;
+            tx.commit()?;
+        }
+        if self.schema_version()? < 10 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS autorun_responses (
+                response_id TEXT PRIMARY KEY REFERENCES messages(id), channel_id TEXT NOT NULL REFERENCES channels(id),
+                agent_id TEXT NOT NULL REFERENCES agents(id), provider TEXT NOT NULL, root TEXT NOT NULL, created_at INTEGER NOT NULL);")?;
+            tx.pragma_update(None, "user_version", 10)?;
             tx.commit()?;
         }
         self.conn.execute_batch("CREATE TABLE IF NOT EXISTS direct_message_list (agent_id TEXT PRIMARY KEY REFERENCES agents(id));")?;
@@ -1429,6 +1437,7 @@ impl Store {
                 }
                 for sql in [
                     "DELETE FROM agent_commits WHERE channel_id=?1",
+                    "DELETE FROM autorun_responses WHERE channel_id=?1",
                     "DELETE FROM approval_audit WHERE approval_id IN (SELECT a.id FROM approvals a JOIN turns t ON a.turn_id=t.id JOIN sessions s ON t.session_id=s.id WHERE s.channel_id=?1)",
                     "DELETE FROM approvals WHERE turn_id IN (SELECT t.id FROM turns t JOIN sessions s ON t.session_id=s.id WHERE s.channel_id=?1)",
                     "DELETE FROM turns WHERE session_id IN (SELECT id FROM sessions WHERE channel_id=?1)",
@@ -1987,6 +1996,19 @@ impl Store {
         self.conn.execute("INSERT INTO agent_commits(commit_id,repo,channel_id,agent_id) VALUES(?1,?2,?3,?4)", params![commit, repo, channel.0, agent.0])?;
         Ok(())
     }
+    /// Audit row for a response that ran shell commands under sandbox autorun.
+    pub fn record_autorun_response(&self, response: &MessageId, channel: &ChannelId, agent: &AgentId, provider: &str, root: &Path) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO autorun_responses(response_id,channel_id,agent_id,provider,root,created_at) VALUES(?1,?2,?3,?4,?5,strftime('%s','now'))",
+            params![response.0, channel.0, agent.0, provider, root.to_string_lossy()],
+        )?;
+        Ok(())
+    }
+    pub fn autorun_responses(&self, channel: &ChannelId) -> Result<Vec<(MessageId, AgentId, String, PathBuf)>> {
+        let mut stmt = self.conn.prepare("SELECT response_id,agent_id,provider,root FROM autorun_responses WHERE channel_id=?1 ORDER BY created_at, rowid")?;
+        let rows = stmt.query_map(params![channel.0], |r| Ok((MessageId(r.get(0)?), AgentId(r.get(1)?), r.get(2)?, PathBuf::from(r.get::<_, String>(3)?))))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
     pub fn link_agent_commits(&self, channel: &ChannelId, response: &MessageId) -> Result<usize> {
         Ok(self.conn.execute("UPDATE agent_commits SET response=?2 WHERE channel_id=?1 AND response IS NULL", params![channel.0, response.0])?)
     }
@@ -2393,8 +2415,38 @@ mod tests {
         let f = fixture();
         f.store.conn.execute_batch("DROP TABLE always_allow_rules; PRAGMA user_version=8;").unwrap();
         f.store.migrate().unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 9);
+        assert_eq!(f.store.schema_version().unwrap(), 10);
         assert!(f.store.always_allow_rules(&f.project.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn migration_creates_autorun_responses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store.conn.execute_batch("DROP TABLE autorun_responses; PRAGMA user_version=9;").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 10);
+        let columns: Vec<String> = store.conn.prepare("PRAGMA table_info(autorun_responses)").unwrap()
+            .query_map([], |r| r.get::<_, String>(1)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(columns, ["response_id", "channel_id", "agent_id", "provider", "root", "created_at"]);
+    }
+
+    #[test]
+    fn autorun_response_rows_record_the_root_and_go_with_the_channel() {
+        let f = fixture();
+        let response = Message { id: MessageId::new(), channel_id: f.channel.id.clone(), role: Role::Agent, blocks: vec![] };
+        f.store.insert_message(&response).unwrap();
+        f.store.record_autorun_response(&response.id, &f.channel.id, &f.agent, "claude", std::path::Path::new("/tmp/demo/wt")).unwrap();
+        let row: (String, String, String, String) = f.store.conn.query_row(
+            "SELECT channel_id, agent_id, provider, root FROM autorun_responses WHERE response_id=?1",
+            params![response.id.0], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+        assert_eq!(row, (f.channel.id.0.clone(), f.agent.0.clone(), "claude".to_string(), "/tmp/demo/wt".to_string()));
+        f.store.delete_agent(&f.agent, DeleteAgentOptions { delete_conversations: true, delete_private_memory: false }).unwrap();
+        let rows: i64 = f.store.conn.query_row("SELECT COUNT(*) FROM autorun_responses", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 0);
     }
 
     #[test]
@@ -2558,7 +2610,7 @@ mod tests {
         let v1 = Store::open(&path).unwrap().schema_version().unwrap();
         let v2 = Store::open(&path).unwrap().schema_version().unwrap();
         assert!(v1 >= 2);
-        assert_eq!(v1, 9);
+        assert_eq!(v1, 10);
         assert_eq!(v1, v2);
     }
 
@@ -2602,7 +2654,7 @@ mod tests {
             conn.execute("INSERT INTO channels (id, project_id, name, agent_id, workspace_mode) VALUES ('c', 'p', 'general', 'a', 'main_checkout')", []).unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 9);
+        assert_eq!(store.schema_version().unwrap(), 10);
         let channels = store.channels_for_project(&ProjectId("p".into())).unwrap();
         assert_eq!(channels.len(), 1);
         assert_eq!(
@@ -2768,11 +2820,11 @@ mod tests {
         let f = fixture(); let turn = Turn::new(f.session.clone()); f.store.insert_turn(&turn).unwrap();
         let a = Approval::new(turn.id, "Bash", json!({})); f.store.save_approval(&a).unwrap();
         f.store.conn.execute_batch("ALTER TABLE approvals DROP COLUMN kind; DROP TABLE agent_commits; DROP TABLE always_allow_rules;").unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 9);
+        assert_eq!(f.store.schema_version().unwrap(), 10);
         f.store.migrate().unwrap();
         assert_eq!(f.store.load_approval(&a.id).unwrap().kind, crate::approval::ApprovalKind::ProviderTool);
         f.store.migrate().unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 9);
+        assert_eq!(f.store.schema_version().unwrap(), 10);
     }
 
     #[test]

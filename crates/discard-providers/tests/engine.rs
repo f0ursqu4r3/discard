@@ -806,6 +806,51 @@ async fn sandbox_fallback_turns_autorun_off() {
 }
 
 #[tokio::test]
+async fn autorun_response_records_audit_row() {
+    let provider = FakeProvider::new(vec![Step::working(), Step::text("done"), Step::idle()]).with_sandbox_autorun(discard_core::provider::SandboxAutorun::Supported);
+    let (dir, engine, probe) = workspace_engine(provider, true);
+    opt_in_to_autorun(&engine);
+    let agent = engine.agent_id.clone();
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::Send("Edit".into())).unwrap(); rig.until_finished().await;
+    let response = rig.messages().into_iter().rev().find(|m| m.role == Role::Agent).unwrap();
+    let rows = rig.store.lock().unwrap().autorun_responses(&rig.channel).unwrap();
+    assert_eq!(rows, vec![(response.id, agent, "fake".to_string(), dir.path().join("worktree").canonicalize().unwrap())]);
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn sandbox_fallback_records_no_autorun_audit() {
+    let provider = FakeProvider::new(vec![Step::working(), Step::text("done"), Step::idle()]).with_sandbox_autorun(discard_core::provider::SandboxAutorun::Supported).with_workspace_error("test unavailable");
+    let (_dir, engine, probe) = workspace_engine(provider, true);
+    opt_in_to_autorun(&engine);
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::Send("Edit".into())).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(rig.store.lock().unwrap().autorun_responses(&rig.channel).unwrap().is_empty());
+    let profile = updates.iter().rev().find_map(|u| match u { Update::SessionProfile(p) => Some(p), _ => None }).unwrap();
+    assert!(matches!(profile, discard_core::ui_state::SessionProfile::ReadOnly { .. }), "{profile:?}");
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn autorun_marks_shell_calls_in_the_saved_response() {
+    let provider = FakeProvider::new(vec![
+        Step::working(),
+        Step::Emit(EventKind::ToolCallStart { call_id: "c1".into(), name: "Bash".into(), input: json!({"command": "ls"}) }),
+        Step::Emit(EventKind::ToolCallResult { call_id: "c1".into(), output: "ok".into(), is_error: false }),
+        Step::idle(),
+    ]).with_sandbox_autorun(discard_core::provider::SandboxAutorun::Supported);
+    let (_dir, engine, probe) = workspace_engine(provider, true);
+    opt_in_to_autorun(&engine);
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::Send("Edit".into())).unwrap(); rig.until_finished().await;
+    let response = rig.messages().into_iter().rev().find(|m| m.role == Role::Agent).unwrap();
+    assert!(matches!(&response.blocks[0], Block::ToolCall { sandboxed: Some(true), .. }), "{:?}", response.blocks);
+    rig.task.abort();
+}
+
+#[tokio::test]
 async fn ineligible_channel_states_the_reason() {
     let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::working(), Step::idle()]), false);
     let mut rig = launch_workspace(engine, probe);

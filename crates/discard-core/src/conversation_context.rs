@@ -207,13 +207,13 @@ mod tests {
     use super::*;
     #[test]
     fn tool_call_replays_name_target_status_and_first_kib() {
-        let blocks = vec![crate::model::Block::ToolCall { call_id: "call".into(), name: "Edit".into(), input: serde_json::json!({"file_path":"a.rs","old_string":"x".repeat(9216),"new_string":"y".repeat(9216)}), output: Some("z".repeat(10240)), is_error: Some(false) }];
+        let blocks = vec![crate::model::Block::ToolCall { call_id: "call".into(), name: "Edit".into(), input: serde_json::json!({"file_path":"a.rs","old_string":"x".repeat(9216),"new_string":"y".repeat(9216)}), output: Some("z".repeat(10240)), is_error: Some(false), sandboxed: None }];
         let compact = compact_blocks(&blocks);
         assert_eq!(compact[0]["name"], "Edit");
         assert_eq!(compact[0]["input"], serde_json::json!({"file_path":"a.rs"}));
         assert_eq!(compact[0]["is_error"], false);
         assert_eq!(compact[0]["output"], format!("{}…[truncated 9216 bytes]", "z".repeat(1024)));
-        let unicode = vec![crate::model::Block::ToolCall { call_id: "c".into(), name: "x".into(), input: serde_json::json!({}), output: Some("€".repeat(500)), is_error: None }];
+        let unicode = vec![crate::model::Block::ToolCall { call_id: "c".into(), name: "x".into(), input: serde_json::json!({}), output: Some("€".repeat(500)), is_error: None, sandboxed: None }];
         assert_eq!(compact_blocks(&unicode)[0]["output"], format!("{}…[truncated 477 bytes]", "€".repeat(341)));
     }
     #[test]

@@ -567,6 +567,8 @@ impl Engine {
             mcp_config: prepared.as_ref().map(|p| p.mcp_config.clone()),
             sandbox_autorun: session_mode == SessionMode::Workspace && self.autorun == AutorunState::On,
         };
+        // True only when the started session has autorun. The read-only fallback clears it.
+        let mut autorun_started = spec.sandbox_autorun;
         let mut started = self.provider.start_session(spec.clone()).await;
         if let Err(ProviderError::SandboxUnavailable(detail)) = &started && session_mode == SessionMode::Workspace {
             let reason = ReadOnlyReason::SandboxUnavailable(detail.clone());
@@ -588,6 +590,7 @@ impl Engine {
             let base_system = prepared.as_ref().map(|p| p.system_prompt.clone()).or_else(|| self.system_prompt.clone()).unwrap_or_default();
             session_mode = SessionMode::Conversation;
             spec.sandbox_autorun = false;
+            autorun_started = false;
             spec.mode = session_mode; spec.cwd = self.cwd.clone(); spec.system_prompt = Some(format!("{base_system}\n\n{}", reason.note()));
             started = self.provider.start_session(spec).await;
         }
@@ -636,6 +639,7 @@ impl Engine {
         let driver = run_turn_with_images(ctx, &mut *session, &input, &images, TurnInputs { decisions: decisions_rx, cancel: cancel_rx });
 
         let mut timeline = Timeline::new();
+        timeline.set_autorun(autorun_started);
         // Tool events need a provider that shows tool calls. Without it they are never sent.
         let tool_events = self.provider.capabilities().hook_mode(HookKind::ObserveEvents) == HookMode::Active;
         let pump = async {
@@ -771,6 +775,8 @@ impl Engine {
                 }
             };
             if session_mode == SessionMode::Workspace && let Err(e) = crate::driver::lock(&self.store).link_agent_commits(&self.channel_id, &response.id) { send(updates, Update::Error(e.to_string())); }
+            if autorun_started && let Ok(grant) = &self.write_access
+                && let Err(e) = crate::driver::lock(&self.store).record_autorun_response(&response.id, &self.channel_id, &self.agent_id, self.provider.id(), &grant.root) { send(updates, Update::Error(e.to_string())); }
             if session_mode.replays_transcript() { send(updates, Update::ResponseCompleted(response.clone())); }
             let mut recorded = Vec::new();
             for change in changes {

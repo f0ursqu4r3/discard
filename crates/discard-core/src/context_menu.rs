@@ -73,7 +73,7 @@ mod tests {
     #[test]
     fn resolve_copy_finds_diff_tool_input_and_tool_output_and_none_for_the_wrong_block_type() {
         use crate::model::{ChannelId,MessageId,Role};
-        let messages=vec![Message{id:MessageId("m".into()),channel_id:ChannelId("c".into()),role:Role::User,blocks:vec![Block::Diff{text:"diff".into()},Block::ToolCall{call_id:"c".into(),name:"run".into(),input:serde_json::json!({"a":1}),output:Some("done".into()),is_error:None}]}];
+        let messages=vec![Message{id:MessageId("m".into()),channel_id:ChannelId("c".into()),role:Role::User,blocks:vec![Block::Diff{text:"diff".into()},Block::ToolCall{call_id:"c".into(),name:"run".into(),input:serde_json::json!({"a":1}),output:Some("done".into()),is_error:None,sandboxed:None}]}];
         let diff=ContextTarget::DiffBlock{message_id:"m".into(),block:0}; let tool=ContextTarget::ToolCall{message_id:"m".into(),block:1,has_output:true};
         assert_eq!(resolve_copy(&messages,"",&diff,Action::CopyDiff).as_deref(),Some("diff"));
         assert_eq!(resolve_copy(&messages,"",&tool,Action::CopyToolOutput).as_deref(),Some("done"));
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn message_text_joins_text_blocks_and_skips_tool_calls_and_approvals() {
-        let blocks = vec![Block::Markdown { text: "hello".into() }, Block::Code { language: None, text: "code".into() }, Block::Diff { text: "diff".into() }, Block::ToolCall { call_id: "c".into(), name: "n".into(), input: serde_json::Value::Null, output: None, is_error: None }, Block::Approval { kind: crate::approval::ApprovalKind::ProviderTool, approval_id: "a".into(), tool: "t".into(), summary: "s".into() }];
+        let blocks = vec![Block::Markdown { text: "hello".into() }, Block::Code { language: None, text: "code".into() }, Block::Diff { text: "diff".into() }, Block::ToolCall { call_id: "c".into(), name: "n".into(), input: serde_json::Value::Null, output: None, is_error: None, sandboxed: None }, Block::Approval { kind: crate::approval::ApprovalKind::ProviderTool, approval_id: "a".into(), tool: "t".into(), summary: "s".into() }];
         assert_eq!(message_text(&blocks), "hello\n\ncode\n\ndiff");
     }
 

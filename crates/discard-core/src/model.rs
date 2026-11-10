@@ -152,6 +152,9 @@ pub enum Block {
         output: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
+        /// `Some(true)` when a shell call ran under sandbox autorun without an approval card.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sandboxed: Option<bool>,
     },
     /// Rendered by Rust. Not overridable by plugins.
     Approval {
