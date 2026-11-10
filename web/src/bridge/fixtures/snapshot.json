@@ -16,6 +16,7 @@
   "responder": null,
   "agentStatus": "working",
   "turnRunning": true,
+  "autorun": null,
   "notice": null,
   "liveBlocks": [
     {

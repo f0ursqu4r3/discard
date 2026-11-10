@@ -59,6 +59,49 @@ mod tests {
         assert!(require_connected(&providers[0]).is_err());
     }
 
+    fn provider_info(id: &str, provider: discard_providers::fake::FakeProvider) -> crate::desktop::actions::ProviderInfo {
+        let matrix = CapabilityMatrix { provider: id.into(), matrix_version: 1, cli_version: "1".into(), capabilities: Capabilities { interactive_approvals: true, tool_call_visibility: true, per_session_mcp: true, session_resume: true, cancellation: true, pre_execution_blocking: true } };
+        crate::desktop::actions::ProviderInfo { provider: std::sync::Arc::new(provider), id: id.into(), matrix, setup: std::sync::Arc::new(std::sync::Mutex::new(Some(discard_core::provider::SetupStatus::Ready))) }
+    }
+
+    #[test]
+    fn agent_rows_report_autorun_support() {
+        use discard_core::provider::SandboxAutorun;
+        use discard_providers::fake::FakeProvider;
+        let cfg = |provider: &str, autorun: bool| AgentConfig { workspace_write: true, sandbox_autorun: autorun, reasoning_effort: None, name: "A".into(), avatar: None, provider: provider.into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false };
+        let providers = [
+            provider_info("blocked", FakeProvider::new(vec![]).with_sandbox_autorun(SandboxAutorun::Unsupported("x".into()))),
+            provider_info("ready", FakeProvider::new(vec![]).with_sandbox_autorun(SandboxAutorun::Supported)),
+        ];
+        let rows = agent_rows(vec![(AgentId::new(), cfg("blocked", false), false), (AgentId::new(), cfg("ready", true), false), (AgentId::new(), cfg("gone", false), false)], &providers);
+        assert_eq!(rows[0]["sandboxAutorun"], false);
+        assert_eq!(rows[0]["sandboxAutorunUnavailable"], "x");
+        assert_eq!(rows[1]["sandboxAutorun"], true);
+        assert_eq!(rows[1]["sandboxAutorunUnavailable"], serde_json::Value::Null);
+        assert_eq!(rows[2]["sandboxAutorunUnavailable"], "This provider is not available.");
+    }
+
+    #[test]
+    fn create_rejects_autorun() {
+        let draft = |extra: serde_json::Value| {
+            let mut value = serde_json::json!({"model":"m","systemPrompt":"","policy":"ask","workspaceWrite":false,"pluginWrite":false});
+            value.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let blank = AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "p".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::DenyAll, plugin_write: false };
+            serde_json::from_value::<Draft>(value).unwrap().into_core(&blank).unwrap()
+        };
+        assert_eq!(check_create_draft(&draft(serde_json::json!({"sandboxAutorun": true}))).unwrap_err(), "Create the agent first. Then review Sandbox autorun permission.");
+        check_create_draft(&draft(serde_json::json!({}))).unwrap();
+    }
+
+    #[test]
+    fn omitted_autorun_keeps_the_saved_value_and_explicit_values_replace_it() {
+        let current = AgentConfig { workspace_write: true, sandbox_autorun: true, reasoning_effort: None, name: "A".into(), avatar: None, provider: "p".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false };
+        let mut value = serde_json::json!({"model":"m","systemPrompt":"","policy":"ask","workspaceWrite":true,"pluginWrite":false});
+        assert!(serde_json::from_value::<Draft>(value.clone()).unwrap().into_core(&current).unwrap().sandbox_autorun);
+        value["sandboxAutorun"] = serde_json::json!(false);
+        assert!(!serde_json::from_value::<Draft>(value).unwrap().into_core(&current).unwrap().sandbox_autorun);
+    }
+
 }
 
 use discard_core::{agent_edit::{self, AgentDraft}, capability::{ApprovalPolicy, CapabilityMatrix}, model::AgentId, store::Store};
@@ -69,7 +112,7 @@ pub fn save_agent(store: &Store, id: &AgentId, draft: &AgentDraft, matrix: &Capa
 }
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Draft { name: Option<String>, #[serde(default, deserialize_with = "deserialize_avatar")] avatar: Option<Option<String>>, provider: Option<String>, model: String, #[serde(default, deserialize_with = "deserialize_avatar")] reasoning_effort: Option<Option<String>>, system_prompt: String, policy: String, plugin_write: bool, workspace_write: Option<bool> }
+pub struct Draft { name: Option<String>, #[serde(default, deserialize_with = "deserialize_avatar")] avatar: Option<Option<String>>, provider: Option<String>, model: String, #[serde(default, deserialize_with = "deserialize_avatar")] reasoning_effort: Option<Option<String>>, system_prompt: String, policy: String, plugin_write: bool, workspace_write: Option<bool>, #[serde(default)] sandbox_autorun: Option<bool> }
 // Preserve an omitted avatar in existing forms. Explicit null clears it.
 fn deserialize_avatar<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Option<String>>, D::Error> {
     <Option<String> as serde::Deserialize>::deserialize(deserializer).map(Some)
@@ -77,7 +120,7 @@ fn deserialize_avatar<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Resu
 impl Draft {
     pub(crate) fn into_core(self, current: &discard_core::agent::AgentConfig) -> Result<AgentDraft, String> {
         let policy = match self.policy.as_str() { "ask" => ApprovalPolicy::Ask, "deny" => ApprovalPolicy::DenyAll, _ => return Err("Unknown policy".into()) };
-        Ok(AgentDraft { reasoning_effort: self.reasoning_effort.unwrap_or_else(|| current.reasoning_effort.clone()), name:self.name.unwrap_or_else(||current.name.clone()), avatar:self.avatar.unwrap_or_else(||current.avatar.clone()), provider:self.provider.unwrap_or_else(||current.provider.clone()), model: if self.model.is_empty() { None } else { Some(self.model) }, system_prompt: self.system_prompt, policy, plugin_write: self.plugin_write, workspace_write: self.workspace_write.unwrap_or(current.workspace_write), sandbox_autorun: current.sandbox_autorun })
+        Ok(AgentDraft { reasoning_effort: self.reasoning_effort.unwrap_or_else(|| current.reasoning_effort.clone()), name:self.name.unwrap_or_else(||current.name.clone()), avatar:self.avatar.unwrap_or_else(||current.avatar.clone()), provider:self.provider.unwrap_or_else(||current.provider.clone()), model: if self.model.is_empty() { None } else { Some(self.model) }, system_prompt: self.system_prompt, policy, plugin_write: self.plugin_write, workspace_write: self.workspace_write.unwrap_or(current.workspace_write), sandbox_autorun: self.sandbox_autorun.unwrap_or(current.sandbox_autorun) })
     }
 }
 fn selected_provider<'a>(providers: &'a [crate::desktop::actions::ProviderInfo], draft: &AgentDraft) -> Result<&'a crate::desktop::actions::ProviderInfo, String> {
@@ -88,7 +131,17 @@ fn policy_name(policy: ApprovalPolicy) -> &'static str { match policy { Approval
 pub fn settings_agent_get(context: tauri::State<'_, super::SettingsContext>) -> Result<Vec<serde_json::Value>, String> {
     let store = context.store.lock().unwrap_or_else(|e| e.into_inner());
     let rows = store.all_agents().map_err(|e| e.to_string())?;
-    Ok(rows.into_iter().map(|(id, cfg, archived)| serde_json::json!({"id": id.0, "name": cfg.name, "avatar": cfg.avatar, "archived": archived, "provider": cfg.provider, "model": cfg.model.unwrap_or_default(), "reasoningEffort": cfg.reasoning_effort, "systemPrompt": cfg.system_prompt, "policy": policy_name(cfg.policy), "workspaceWrite": cfg.workspace_write, "pluginWrite": cfg.plugin_write})).collect())
+    Ok(agent_rows(rows, &context.providers))
+}
+/// Settings rows. `sandboxAutorunUnavailable` carries the provider's reason when it cannot run autorun.
+fn agent_rows(rows: Vec<(AgentId, discard_core::agent::AgentConfig, bool)>, providers: &[crate::desktop::actions::ProviderInfo]) -> Vec<serde_json::Value> {
+    rows.into_iter().map(|(id, cfg, archived)| {
+        let unavailable = match providers.iter().find(|p| p.id == cfg.provider) {
+            Some(info) => match info.provider.sandbox_autorun() { discard_core::provider::SandboxAutorun::Supported => None, discard_core::provider::SandboxAutorun::Unsupported(reason) => Some(reason) },
+            None => Some("This provider is not available.".to_string()),
+        };
+        serde_json::json!({"id": id.0, "name": cfg.name, "avatar": cfg.avatar, "archived": archived, "provider": cfg.provider, "model": cfg.model.unwrap_or_default(), "reasoningEffort": cfg.reasoning_effort, "systemPrompt": cfg.system_prompt, "policy": policy_name(cfg.policy), "workspaceWrite": cfg.workspace_write, "sandboxAutorun": cfg.sandbox_autorun, "sandboxAutorunUnavailable": unavailable, "pluginWrite": cfg.plugin_write})
+    }).collect()
 }
 #[tauri::command]
 pub fn settings_agent_review(context: tauri::State<'_, super::SettingsContext>, id: String, draft: Draft) -> Result<serde_json::Value, String> {
@@ -153,12 +206,18 @@ fn require_connected(provider: &crate::desktop::actions::ProviderInfo) -> Result
 pub fn settings_agent_defaults() -> serde_json::Value {
     serde_json::json!({"name": discard_core::agent::generated_name(), "avatar": null, "provider": "", "model": "", "reasoningEffort": null, "systemPrompt": "", "policy": "deny", "pluginWrite": false})
 }
+/// New agents start without elevated permissions. The user reviews each one after creation.
+fn check_create_draft(draft: &AgentDraft) -> Result<(), String> {
+    if draft.workspace_write { return Err("Create the agent first. Then review Workspace writes permission.".into()); }
+    if draft.sandbox_autorun { return Err("Create the agent first. Then review Sandbox autorun permission.".into()); }
+    if draft.plugin_write { return Err("Create the agent first. Then review plugin.write permission.".into()); }
+    Ok(())
+}
 #[tauri::command]
 pub fn settings_agent_create(app: tauri::AppHandle, context: tauri::State<'_, super::SettingsContext>, draft: Draft) -> Result<String, String> {
     let blank = discard_core::agent::AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: discard_core::agent::generated_name(), avatar: None, provider: String::new(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::DenyAll, plugin_write: false };
     let draft = draft.into_core(&blank)?;
-    if draft.workspace_write { return Err("Create the agent first. Then review Workspace writes permission.".into()); }
-    if draft.plugin_write { return Err("Create the agent first. Then review plugin.write permission.".into()); }
+    check_create_draft(&draft)?;
     let provider = selected_provider(&context.providers, &draft)?;
     require_connected(provider)?;
     provider.matrix.enforcement_for(draft.policy).map_err(|e| e.to_string())?;

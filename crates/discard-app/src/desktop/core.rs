@@ -456,6 +456,11 @@ impl AppCore {
                 }
                 .into(),
                 turn_running: ui.turn_running(),
+                autorun: match &ui.session_profile {
+                    discard_core::ui_state::SessionProfile::Workspace { autorun: discard_core::ui_state::AutorunState::On, .. } => Some(AutorunDto { state: "on".into(), reason: None }),
+                    discard_core::ui_state::SessionProfile::Workspace { autorun: discard_core::ui_state::AutorunState::Unavailable(reason), .. } => Some(AutorunDto { state: "unavailable".into(), reason: Some(reason.clone()) }),
+                    _ => None,
+                },
                 notice: ui.notice().map(str::to_owned),
                 live_blocks: ui.live_blocks().to_vec(),
                 prompts: ui

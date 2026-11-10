@@ -204,11 +204,13 @@ impl UiState {
             Some(author) => (author.agent_id.0.as_str(), author.name.as_str(), author.provider.as_str()),
             None => (labels.agent_id.as_str(), labels.agent_name.as_str(), labels.provider.as_str()),
         };
+        let autorun = self.turn_running && matches!(self.session_profile, SessionProfile::Workspace { autorun: AutorunState::On, .. });
         serde_json::json!({
             "project": labels.project,
             "channel": labels.channel,
             "pending_approvals": self.pending_approvals(),
             "turn_running": self.turn_running,
+            "autorun": autorun,
             "agent": { "id": id, "name": name, "provider": provider, "status": status },
             "agents": self.slot_agents(labels, id, status),
         })
@@ -427,7 +429,7 @@ mod tests {
             s.slot_state(&labels),
             serde_json::json!({
                 "project": "demo", "channel": "general", "pending_approvals": 0,
-                "turn_running": false,
+                "turn_running": false, "autorun": false,
                 "agent": { "id": "agent-claude", "name": "Claude", "provider": "claude", "status": "idle" },
                 "agents": [{ "id": "agent-claude", "name": "Claude", "provider": "claude", "status": "idle" }],
             })
@@ -443,6 +445,21 @@ mod tests {
         assert_eq!(v["pending_approvals"], 1);
         assert_eq!(v["agent"]["status"], "awaiting_approval");
         assert_eq!(v["turn_running"], true);
+    }
+
+    #[test]
+    fn slot_state_reports_autorun_while_running() {
+        let mut s = state();
+        let labels = SlotLabels { project: "demo".into(), channel: "general".into(), agent_id: "a".into(), agent_name: "A".into(), provider: "claude".into() };
+        s.apply(Update::SessionProfile(SessionProfile::Workspace { root: "/w".into(), autorun: AutorunState::On }));
+        assert_eq!(s.slot_state(&labels)["autorun"], false);
+        s.user_sent("hi");
+        assert_eq!(s.slot_state(&labels)["autorun"], true);
+        s.apply(Update::TurnFinished(TurnOutcome::Completed));
+        assert_eq!(s.slot_state(&labels)["autorun"], false);
+        s.apply(Update::SessionProfile(SessionProfile::Workspace { root: "/w".into(), autorun: AutorunState::Unavailable("r".into()) }));
+        s.user_sent("again");
+        assert_eq!(s.slot_state(&labels)["autorun"], false);
     }
 
     #[test]

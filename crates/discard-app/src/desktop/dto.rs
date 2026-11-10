@@ -171,6 +171,14 @@ pub struct BannersDto {
     pub archive: Option<ArchiveNoticeDto>,
     pub safe_mode: bool,
 }
+/// Sandbox autorun for the running write response. Absent when the agent did not opt in.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AutorunDto {
+    /// `on` or `unavailable`.
+    pub state: String,
+    pub reason: Option<String>,
+}
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotDto {
@@ -191,6 +199,7 @@ pub struct SnapshotDto {
     pub responder: Option<discard_core::model::MessageAuthor>,
     pub agent_status: String,
     pub turn_running: bool,
+    pub autorun: Option<AutorunDto>,
     pub notice: Option<String>,
     pub live_blocks: Vec<BlockDto>,
     pub prompts: Vec<PromptDto>,
@@ -263,6 +272,7 @@ fn sample_snapshot() -> SnapshotDto {
         responder: None,
         agent_status: "working".into(),
         turn_running: true,
+        autorun: None,
         notice: None,
         live_blocks: vec![Block::Markdown {
             text: "Hello".into(),
