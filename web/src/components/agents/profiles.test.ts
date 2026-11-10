@@ -16,6 +16,8 @@ const original = {
   policy: 'deny',
   pluginWrite: false,
   workspaceWrite: false,
+  sandboxAutorun: false,
+  sandboxAutorunUnavailable: null as string | null,
   archived: false,
 }
 const rows = { agents: [structuredClone(original)] }
@@ -225,5 +227,46 @@ test('permission expansion still requires confirmation in the profile', async ()
     expect.objectContaining({ id: 'a', confirmed: true }),
   )
   expect(view.emitted('saved')).toHaveLength(1)
+  view.unmount()
+})
+
+test('disables autorun until file edits are on', async () => {
+  const view = await editor()
+  const autorun = view.get('#agent-sandbox-autorun')
+  expect(autorun.attributes('disabled')).toBeDefined()
+  expect(view.text()).toContain('Turn on file edits first.')
+  await view.get('#agent-workspace-write').trigger('click')
+  await flushPromises()
+  expect(view.get('#agent-sandbox-autorun').attributes('disabled')).toBeUndefined()
+  expect(view.text()).not.toContain('Turn on file edits first.')
+})
+test('shows autorun off and sends no autorun value while file edits are off', async () => {
+  const agent = { ...original, workspaceWrite: false, sandboxAutorun: true }
+  const view = mount(AgentProfileEditor, { props: { agent } })
+  await flushPromises()
+  expect(view.get('#agent-sandbox-autorun').attributes('aria-checked')).toBe('false')
+  const review = vi.mocked(invoke).mock.calls.filter(([name]) => name === 'settings_agent_review')
+  for (const [, args] of review)
+    expect((args as { draft: Record<string, unknown> }).draft).not.toHaveProperty('sandboxAutorun')
+  view.unmount()
+})
+test('sends the autorun choice once file edits are on', async () => {
+  const agent = { ...original, workspaceWrite: true, sandboxAutorun: true }
+  const view = mount(AgentProfileEditor, { props: { agent } })
+  await flushPromises()
+  expect(view.get('#agent-sandbox-autorun').attributes('aria-checked')).toBe('true')
+  expect(invoke).toHaveBeenCalledWith(
+    'settings_agent_review',
+    expect.objectContaining({ draft: expect.objectContaining({ sandboxAutorun: true }) }),
+  )
+  view.unmount()
+})
+test('labels autorun Soon for providers without support', async () => {
+  const agent = { ...original, workspaceWrite: true, sandboxAutorunUnavailable: 'No sandbox.' }
+  const view = mount(AgentProfileEditor, { props: { agent } })
+  await flushPromises()
+  expect(view.get('#agent-sandbox-autorun').attributes('disabled')).toBeDefined()
+  expect(view.text()).toContain('Soon')
+  expect(view.text()).toContain('No sandbox.')
   view.unmount()
 })

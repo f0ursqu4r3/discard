@@ -30,6 +30,7 @@ export type BlockDto =
       input: unknown
       output: string | null
       is_error?: boolean
+      sandboxed?: boolean
     }
   | { type: 'approval'; kind?: string; approval_id: string; tool: string; summary: string }
 export interface MessageAuthorDto {
@@ -177,6 +178,7 @@ export interface SnapshotDto {
   provider: string
   responder?: MessageAuthorDto | null
   agentStatus: string
+  autorun: { state: 'on' | 'unavailable'; reason: string | null } | null
   turnRunning: boolean
   notice: string | null
   liveBlocks: BlockDto[]

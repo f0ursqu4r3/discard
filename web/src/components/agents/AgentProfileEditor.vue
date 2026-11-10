@@ -28,6 +28,7 @@ import ReasoningSelect from './ReasoningSelect.vue'
 import type { ProviderModel } from '@/bridge/api'
 import { Textarea } from '@/components/ui/textarea'
 import { Switch } from '@/components/ui/switch'
+import { Badge } from '@/components/ui/badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 const props = defineProps<{ agent: AgentEntry }>()
 const emit = defineEmits<{
@@ -170,16 +171,25 @@ watch(
   { immediate: true, flush: 'sync' },
 )
 watch(busy, (value) => emit('busy', value), { flush: 'sync' })
+const autorunUnavailable = computed(() => props.agent.sandboxAutorunUnavailable ?? null)
+const autorunOn = computed(
+  () => draft.value.workspaceWrite && !autorunUnavailable.value && !!draft.value.sandboxAutorun,
+)
+// While file edits are off, the backend clears autorun on save. Do not send the stale value.
+function draftPayload() {
+  const { sandboxAutorun, ...rest } = draft.value
+  return draft.value.workspaceWrite ? { ...rest, sandboxAutorun } : rest
+}
 watch(
   draft,
-  async (value) => {
+  async () => {
     const current = ++generation
     review.value = null
     confirm.value = false
     try {
       const result = await invoke<Review>('settings_agent_review', {
         id: props.agent.id,
-        draft: { ...value },
+        draft: draftPayload(),
       })
       if (!disposed && current === generation) review.value = result
     } catch (cause) {
@@ -222,7 +232,7 @@ async function save(confirmed = false) {
   try {
     await invoke('settings_agent_save', {
       id: props.agent.id,
-      draft: { ...draft.value },
+      draft: draftPayload(),
       confirmed,
     })
     await currentAgent()
@@ -446,6 +456,28 @@ async function remove() {
             v-model="draft.workspaceWrite"
             :disabled="busy"
             aria-describedby="agent-workspace-write-description"
+          />
+        </Field>
+        <Field orientation="horizontal">
+          <FieldContent>
+            <FieldLabel for="agent-sandbox-autorun">
+              Run sandboxed commands without asking
+              <!-- TODO: Enable when the provider passes the autorun sandbox check. -->
+              <Badge v-if="autorunUnavailable" variant="secondary">Soon</Badge>
+            </FieldLabel>
+            <FieldDescription id="agent-sandbox-autorun-description">
+              Shell commands in the worktree run without approval. The sandbox blocks writes outside
+              the worktree and network access. It does not block reads.
+              <span v-if="autorunUnavailable" class="block">{{ autorunUnavailable }}</span>
+              <span v-else-if="!draft.workspaceWrite" class="block">Turn on file edits first.</span>
+            </FieldDescription>
+          </FieldContent>
+          <Switch
+            id="agent-sandbox-autorun"
+            :model-value="autorunOn"
+            :disabled="busy || !draft.workspaceWrite || !!autorunUnavailable"
+            aria-describedby="agent-sandbox-autorun-description"
+            @update:model-value="draft.sandboxAutorun = $event === true"
           />
         </Field>
         <Field orientation="horizontal">

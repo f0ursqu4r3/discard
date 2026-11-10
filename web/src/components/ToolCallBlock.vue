@@ -13,6 +13,7 @@ const props = withDefaults(
     output: string | null
     isError?: boolean
     running?: boolean
+    sandboxed?: boolean
   }>(),
   { isError: undefined },
 )
@@ -43,6 +44,7 @@ const isDiff = computed(() => !!props.output && looksLikeUnifiedDiff(props.outpu
       <span class="min-w-0 truncate font-medium" :title="name">{{ label }}</span>
       <span v-if="summary" class="min-w-0 flex-1 truncate" :title="summary">{{ summary }}</span>
       <span class="ml-auto flex shrink-0 items-center gap-1.5 pl-2 text-xs">
+        <span v-if="sandboxed" class="text-muted-foreground">Ran in sandbox</span>
         <BrailleSpinner v-if="output === null && running" label="Running" />
         <Clock3
           v-else-if="output === null"

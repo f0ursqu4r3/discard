@@ -17,6 +17,8 @@ const original = {
   policy: 'deny',
   pluginWrite: false,
   workspaceWrite: false,
+  sandboxAutorun: false,
+  sandboxAutorunUnavailable: null,
   archived: false,
 }
 let generate: () => Promise<string>

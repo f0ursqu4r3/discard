@@ -135,6 +135,8 @@ export interface AgentEntry {
   policy: string
   pluginWrite: boolean
   workspaceWrite: boolean
+  sandboxAutorun: boolean
+  sandboxAutorunUnavailable: string | null
   archived: boolean
 }
 export interface ConversationEntry {
