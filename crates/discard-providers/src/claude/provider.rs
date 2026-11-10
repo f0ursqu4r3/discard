@@ -139,6 +139,9 @@ impl Provider for ClaudeProvider {
         &self.matrix
     }
 
+    /// Every model Claude Code offers has a window of at least 200,000 tokens.
+    fn model_context_window(&self, _model: &str) -> Option<u64> { Some(200_000) }
+
     /// Checks that the CLI exists and reports a login. Reads only the `loggedIn` flag.
     /// Discard never reads, stores, or logs credentials.
     async fn models(&self) -> Result<Vec<discard_core::provider::ModelInfo>, ProviderError> {
@@ -569,5 +572,10 @@ mod tests {
         let c = &p.capabilities().capabilities;
         assert_eq!(p.capabilities().provider, "claude");
         assert!(c.interactive_approvals && c.session_resume && c.cancellation);
+    }
+
+    #[test]
+    fn claude_reports_a_200k_context_window() {
+        assert_eq!(ClaudeProvider::new("claude").model_context_window("any-model"), Some(200_000));
     }
 }

@@ -2,11 +2,17 @@
 use crate::model::{Block, Message, MessageId, Role};
 use serde::{Deserialize, Serialize};
 
-/// 24k input tokens and 8k output/headroom when exact provider metadata is unavailable.
-/// One UTF-8 byte counts as one token: conservative for text and structured tool payloads.
+/// Context window in tokens when exact provider metadata is unavailable.
 pub const UNKNOWN_CONTEXT: u64 = 32_768;
+/// Tokens held back for output and headroom.
 pub const OUTPUT_RESERVE: usize = 8_192;
-pub const SUMMARY_LIMIT: usize = 4_096;
+/// Tokens. Every turn replays the whole budget, so larger windows are capped to bound cost and latency.
+pub const MAX_CONTEXT: u64 = 200_000;
+/// Conservative: prose is 3-4 bytes per token; hex and dense JSON are about 2.
+pub const BYTES_PER_TOKEN: usize = 2;
+/// Bytes.
+pub const MIN_SUMMARY_LIMIT: usize = 4_096;
+pub const MAX_SUMMARY_LIMIT: usize = 32_768;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConversationContext {
     pub provider: Option<String>,
@@ -15,8 +21,14 @@ pub struct ConversationContext {
     pub through: Option<MessageId>,
 }
 
+/// Replay budget in bytes for a context window in tokens.
 pub fn input_budget(window: Option<u64>) -> usize {
-    (window.unwrap_or(UNKNOWN_CONTEXT).min(131_072) as usize).saturating_sub(OUTPUT_RESERVE)
+    (window.unwrap_or(UNKNOWN_CONTEXT).min(MAX_CONTEXT) as usize).saturating_sub(OUTPUT_RESERVE) * BYTES_PER_TOKEN
+}
+
+/// Rolling summary limit in bytes: 5% of the budget, within fixed bounds.
+pub fn summary_limit(budget: usize) -> usize {
+    (budget / 20).clamp(MIN_SUMMARY_LIMIT, MAX_SUMMARY_LIMIT)
 }
 
 /// Bound provider replay without changing the saved transcript.
@@ -110,7 +122,7 @@ pub fn required_fits(system: &str, current: &str, budget: usize) -> Result<(), S
     if system
         .len()
         .saturating_add(compose(None, &[], current).len())
-        .saturating_add(SUMMARY_LIMIT + 512)
+        .saturating_add(summary_limit(budget) + 512)
         > budget
     {
         Err("The current request and required memory exceed this model's context budget. Shorten the request, edit applicable memory, or select a model with a larger context window.".into())
@@ -142,6 +154,7 @@ pub async fn summarize(
     provider: &dyn crate::provider::Provider,
     spec: crate::provider::SessionSpec,
     prompt: &str,
+    limit: usize,
     commands: &mut tokio::sync::mpsc::UnboundedReceiver<crate::ui_state::Command>,
 ) -> Result<String, ContextError> {
     use crate::{event::EventKind, ui_state::Command};
@@ -166,7 +179,7 @@ pub async fn summarize(
             tokio::select! {
                 event = session.next_event() => match event {
                     Some(event) => match event.kind {
-                        EventKind::TextDelta { text } => { summary.push_str(&text); if summary.len() > crate::conversation_context::SUMMARY_LIMIT { return Err("History summary exceeded its limit. Retry or select another model.".into()); } },
+                        EventKind::TextDelta { text } => { summary.push_str(&text); if summary.len() > limit { return Err("History summary exceeded its limit. Retry or select another model.".into()); } },
                         EventKind::StatusChange { status: crate::event::AgentStatus::Idle } => return Ok(summary),
                         EventKind::Error { message } => return Err(ContextError::Failed(crate::redact::redact(&message))),
                         EventKind::ApprovalRequest { .. } | EventKind::ToolCallStart { .. } => return Err("The summary model attempted to use a tool. Retry or select another model.".into()),
@@ -220,8 +233,14 @@ mod tests {
     }
     #[test]
     fn budget_is_conservative_and_current_input_is_never_truncated() {
-        assert_eq!(input_budget(None), 24576);
-        assert!(required_fits("", &"x".repeat(24576), 24576).is_err());
+        assert_eq!(input_budget(None), 49_152);
+        assert_eq!(input_budget(Some(200_000)), 383_616);
+        assert_eq!(input_budget(Some(MAX_CONTEXT + 800_000)), input_budget(Some(MAX_CONTEXT)));
+        assert_eq!(input_budget(Some(1_000_000)), 383_616);
+        assert_eq!(summary_limit(49_152), 4_096);
+        assert_eq!(summary_limit(383_616), 19_180);
+        assert_eq!(summary_limit(1_000_000), MAX_SUMMARY_LIMIT);
+        assert!(required_fits("", &"x".repeat(49_152), 49_152).is_err());
         assert!(compose(None, &[], "keep all").contains("keep all"));
     }
     #[test]

@@ -27,6 +27,10 @@ struct Rig {
     task: tokio::task::JoinHandle<()>,
     _dir: tempfile::TempDir,
 }
+/// Count of 4000-byte messages that overflow the default budget `batches` times over.
+fn messages_over_budget(batches: usize) -> usize {
+    batches * discard_core::conversation_context::input_budget(None) / 4000 + 2
+}
 impl Rig {
     async fn new(script: Vec<Step>) -> Self {
         let provider = Arc::new(FakeProvider::new(script).with_resume_handle("must-not-resume"));
@@ -494,7 +498,7 @@ async fn active_response_keeps_configuration_snapshot_and_next_response_sees_edi
 #[tokio::test]
 async fn summary_is_semantic_reusable_and_does_not_delete_original_messages() {
     let mut rig = Rig::new(vec![Step::text("A semantic summary."), Step::idle()]).await;
-    for i in 0..10 {
+    for i in 0..messages_over_budget(1) {
         rig.store
             .lock()
             .unwrap()
@@ -570,7 +574,7 @@ async fn summary_is_semantic_reusable_and_does_not_delete_original_messages() {
 #[tokio::test]
 async fn summary_cancellation_revokes_tokens_and_keeps_boundary_unmodified() {
     let mut rig = Rig::new(vec![Step::Hang]).await;
-    for _ in 0..10 {
+    for _ in 0..messages_over_budget(1) {
         rig.store
             .lock()
             .unwrap()
@@ -620,7 +624,7 @@ async fn summary_cancellation_revokes_tokens_and_keeps_boundary_unmodified() {
 #[tokio::test]
 async fn oversized_current_request_is_an_actionable_error_without_provider_call() {
     let mut rig = Rig::new(vec![Step::idle()]).await;
-    rig.commands.send(Command::Send("x".repeat(30000))).unwrap();
+    rig.commands.send(Command::Send("x".repeat(discard_core::conversation_context::input_budget(None)))).unwrap();
     let updates = rig.done().await;
     assert!(
         updates
@@ -1027,7 +1031,7 @@ async fn later_summary_batch_failure_or_cancel_keeps_original_boundary_and_clean
             .unwrap()
             .set_conversation_context(&rig.channel, &old)
             .unwrap();
-        for _ in 0..15 {
+        for _ in 0..messages_over_budget(2) {
             rig.store
                 .lock()
                 .unwrap()
