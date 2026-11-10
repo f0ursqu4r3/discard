@@ -175,7 +175,7 @@ async fn real_claude_autorun_runs_sandboxed_commands_and_denies_credential_reads
          5. Bash tool: `curl -m 3 -sI https://example.com`\n\
          6. Grep tool: pattern {SECRET_PATTERN}, path {home}, output_mode content\n\
          7. Glob tool: pattern *, path {ssh}\n\
-         8. Bash tool: `security find-generic-password -s DISCARD_PROBE_NONEXISTENT 2>&1; echo exit=$?`\n\
+         8. Bash tool: `security find-generic-password -s DISCARD_PROBE_NONEXISTENT; echo exit=$?`\n\
          9. Bash tool: `seq 1 200000`\n\
          10. If step 9 saved its full output to a file, Read tool: that file with offset 199995 and limit 3.\n\
          Then say done.",
@@ -241,9 +241,12 @@ async fn real_claude_autorun_runs_sandboxed_commands_and_denies_credential_reads
     // 7. A native Glob in the credential directory does not return the file name.
     let (output, is_error) = find("Glob", ".ssh").expect("a result for the native glob");
     assert!(is_error && !output.contains("probe_credential"), "native glob result: {output}");
-    // 8. Keychain access. Recorded, not asserted: the probe item does not exist.
+    // 8. The `Bash(security:*)` deny rule blocks the Keychain command, even though sandboxed Bash is auto-allowed.
     let (output, is_error) = find("Bash", "DISCARD_PROBE_NONEXISTENT").expect("a result for the Keychain query");
     println!("KEYCHAIN is_error={is_error} output={output}");
+    assert!(is_error, "the security command must be denied: {output}");
+    // The denial message echoes the command, so check the message text, not the command's own output.
+    assert!(output.contains("has been denied") && !output.contains("could not be found in the keychain"), "the security command must be denied by the permission rule: {output}");
     // 9-10. Claude saves a large output under its configuration directory. The session can read it back.
     let project = discard_core::sandbox_reads::claude_project_dir_name(&root).expect("a short project name");
     assert!(real_claude.join("projects").join(&project).is_dir(), "Claude's project directory name must be {project}");

@@ -231,6 +231,39 @@ test('permission expansion still requires confirmation in the profile', async ()
   view.unmount()
 })
 
+const keychainWarning =
+  'Autorun commands can read your macOS Keychain. Discard cannot block this. Do not turn on autorun if your Keychain holds tokens this agent must not see.'
+test('the autorun switch says it cannot block Keychain access', async () => {
+  const view = await editor()
+  const toggle = view.get('#agent-sandbox-autorun')
+  const description = view.get(`#${toggle.attributes('aria-describedby')}`)
+  expect(description.text()).toContain('It cannot block Keychain access.')
+  view.unmount()
+})
+test('confirming autorun shows the Keychain warning', async () => {
+  const agent = { ...original, workspaceWrite: true, sandboxAutorun: false }
+  const view = mount(AgentProfileEditor, { props: { agent } })
+  await flushPromises()
+  await view.get('#agent-sandbox-autorun').trigger('click')
+  await flushPromises()
+  vi.mocked(invoke).mockRejectedValueOnce('Confirmation is required')
+  await view.get('form').trigger('submit')
+  await flushPromises()
+  expect(view.get('[data-protected="true"]').text()).toContain(keychainWarning)
+  view.unmount()
+})
+test('confirming another loosening does not show the Keychain warning', async () => {
+  const view = await editor()
+  await view.get('#agent-workspace-write').trigger('click')
+  await flushPromises()
+  vi.mocked(invoke).mockRejectedValueOnce('Confirmation is required')
+  await view.get('form').trigger('submit')
+  await flushPromises()
+  const alert = view.get('[data-protected="true"]')
+  expect(alert.text()).toContain('This lets the agent do more without asking.')
+  expect(view.text()).not.toContain(keychainWarning)
+  view.unmount()
+})
 test('disables autorun until file edits are on', async () => {
   const view = await editor()
   const autorun = view.get('#agent-sandbox-autorun')

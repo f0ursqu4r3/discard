@@ -36,6 +36,15 @@ const MATRIX_JSON: &str = include_str!("../../fixtures/claude.capabilities.json"
 const AUTORUN_GIT_ENV: &[(&str, &str)] =
     &[("GIT_TERMINAL_PROMPT", "0"), ("GIT_CONFIG_COUNT", "1"), ("GIT_CONFIG_KEY_0", "credential.helper"), ("GIT_CONFIG_VALUE_0", "")];
 
+/// Token variables that autorun sessions must not inherit. They stop `gh` and Git from
+/// finding a GitHub token in the environment.
+const AUTORUN_TOKEN_ENV: &[&str] = &["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
+
+/// Environment variables to remove from the Claude child process for a session.
+fn env_removals(autorun: bool) -> &'static [&'static str] {
+    if autorun { AUTORUN_TOKEN_ENV } else { &[] }
+}
+
 pub struct ClaudeProvider {
     executable: PathBuf,
     matrix: CapabilityMatrix,
@@ -130,7 +139,11 @@ pub fn build_args(spec: &SessionSpec, protected_git_paths: &[PathBuf], read_deni
                 }
                 settings["sandbox"]["filesystem"]["denyRead"] = json!(denials.paths);
                 // The sandbox covers Bash only. These rules block native Read, Glob, and Grep.
-                settings["permissions"] = json!({"deny":denials.rules});
+                // `Bash(security:*)` is a partial Keychain mitigation: the sandbox always
+                // allows the Keychain service, so a script can still reach it directly.
+                let mut deny: Vec<String> = denials.rules.iter().map(|r| r.to_string()).collect();
+                deny.push("Bash(security:*)".into());
+                settings["permissions"] = json!({"deny":deny});
             }
         }
         args.extend(["--settings".into(), settings.to_string()]);
@@ -286,6 +299,7 @@ impl Provider for ClaudeProvider {
         }
         if workspace { command.env("GIT_OPTIONAL_LOCKS", "0"); }
         if autorun { command.envs(AUTORUN_GIT_ENV.iter().copied()); }
+        for key in env_removals(autorun) { command.env_remove(key); }
         let mut child = spawn_tokio(command
             .args(build_args(&spec, &protected_git_paths, read_denials.as_ref())?)
             .current_dir(&spec.cwd)
@@ -556,9 +570,29 @@ mod tests {
     fn autorun_denies_native_reads_of_credentials() {
         let settings = autorun_settings(true);
         let deny = settings["permissions"]["deny"].as_array().unwrap();
-        assert!(deny.iter().all(|r| r.as_str().unwrap().starts_with("Read(//")));
-        assert!(deny.iter().any(|r| r.as_str().unwrap().starts_with("Read(") && r.as_str().unwrap().contains(".ssh")));
-        assert_eq!(deny.len(), settings["sandbox"]["filesystem"]["denyRead"].as_array().unwrap().len());
+        let reads: Vec<&str> = deny.iter().map(|r| r.as_str().unwrap()).filter(|r| r.starts_with("Read(")).collect();
+        assert!(reads.iter().all(|r| r.starts_with("Read(//")));
+        assert!(reads.iter().any(|r| r.contains(".ssh")));
+        assert_eq!(reads.len(), settings["sandbox"]["filesystem"]["denyRead"].as_array().unwrap().len());
+    }
+
+    #[test]
+    fn autorun_denies_the_security_command() {
+        let settings = autorun_settings(true);
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        assert!(deny.iter().any(|r| r == "Bash(security:*)"), "{deny:?}");
+        assert!(autorun_settings(false).get("permissions").is_none());
+    }
+
+    #[test]
+    fn autorun_removes_github_token_variables_from_the_child() {
+        let expected = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
+        assert_eq!(env_removals(true), expected);
+        assert!(env_removals(false).is_empty());
+        let settings = autorun_settings(true);
+        for key in expected {
+            assert!(settings["env"].get(key).is_none(), "{key} must not be set through --settings");
+        }
     }
 
     #[test]

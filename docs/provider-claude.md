@@ -154,6 +154,9 @@ whole `projects` directory stays denied for such a root.
 Autorun sessions also set `GIT_TERMINAL_PROMPT=0`, `GIT_CONFIG_COUNT=1`,
 `GIT_CONFIG_KEY_0=credential.helper` and `GIT_CONFIG_VALUE_0=` (empty). Git then reads no
 credential helper, such as the macOS Keychain helper, and never prompts.
+Autorun sessions also add `Bash(security:*)` to `permissions.deny` and remove the GitHub
+token variables from the child environment. Both are partial Keychain mitigations. The
+settings `env` never sets those variables.
 The session still needs the Discard data directory. Without it, `start_session`
 returns `SandboxUnavailable`. Local managed settings that set `autoAllowBashIfSandboxed`
 still fail the managed-settings check.
@@ -181,14 +184,18 @@ passes the version gate with a notice.
 | Native Grep | `Grep` with path `<temporary home>` returned "... is outside <root>; --restricted confines the file tools to the working directory." `--restricted` refuses it before the deny rules. |
 | Native Glob | `Glob` with path `<temporary home>/.ssh` returned "Permission to read <temporary home>/.ssh has been denied." No file names. |
 | Network | `curl -m 3 https://example.com` sent `SandboxNetworkAccess` with `input.host=example.com`, although `<root>/.claude/settings.local.json` allowed the domain. The probe denied it. |
-| Keychain | `security find-generic-password -s DISCARD_PROBE_NONEXISTENT` printed "The specified item could not be found in the keychain." and `exit=44`. The sandbox does not block Keychain queries. |
+| Keychain (before the deny rule) | `security find-generic-password -s DISCARD_PROBE_NONEXISTENT` printed "The specified item could not be found in the keychain." and `exit=44`. The sandbox does not block Keychain queries. |
+| Keychain (with `Bash(security:*)` denied) | `security find-generic-password -s DISCARD_PROBE_NONEXISTENT; echo exit=$?` returned an error: "Permission to use Bash with command ... has been denied." The command did not run. The deny rule is enforced although sandboxed Bash is auto-allowed. No approval request. |
 | Large output | `seq 1 200000` saved its output to `~/.claude/projects/-private-var-folders-...-discard-worktrees-probe/<session>/tool-results/<id>.txt`. `Read` with offset 199995 returned lines 199995 to 199997. |
 | Nonexistent denial paths | Accepted. The temporary home had no `.aws`, `.gnupg`, and so on. The session started. |
 | Secret leakage | The secret text appeared in no event. |
 
 Not probed live: reads of files outside the denied list. The sandbox does not limit those reads.
-The Keychain probe queried only a nonexistent item. A shell command can query the user's
-login Keychain. macOS may show its own access prompt for a protected item.
+The Keychain probe queried only a nonexistent item. Claude's sandbox always allows the
+Keychain service. Discard denies `Bash(security:*)` and removes `GH_TOKEN`, `GITHUB_TOKEN`,
+`GH_ENTERPRISE_TOKEN`, and `GITHUB_ENTERPRISE_TOKEN` from the Claude process. A script can
+still call the Keychain directly, for example through another tool or language runtime.
+macOS may show its own access prompt for a protected item.
 
 ### Slice B spike results
 

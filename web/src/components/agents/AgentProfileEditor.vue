@@ -178,6 +178,9 @@ const autorunPlanned = computed(
 const autorunOn = computed(
   () => draft.value.workspaceWrite && !autorunUnavailable.value && !!draft.value.sandboxAutorun,
 )
+const enablesAutorun = computed(
+  () => autorunOn.value && !(props.agent.workspaceWrite && props.agent.sandboxAutorun),
+)
 // While file edits are off, the backend clears autorun on save. Do not send the stale value.
 function draftPayload() {
   const { sandboxAutorun, ...rest } = draft.value
@@ -470,7 +473,8 @@ async function remove() {
             </FieldLabel>
             <FieldDescription id="agent-sandbox-autorun-description">
               Shell commands in the worktree run without approval. The sandbox blocks writes outside
-              the worktree and network access. It does not block reads.
+              the worktree and network access. It does not block reads. It cannot block Keychain
+              access.
               <span v-if="autorunUnavailable" class="block">{{ autorunUnavailable }}</span>
               <span v-else-if="!draft.workspaceWrite" class="block">Turn on file edits first.</span>
             </FieldDescription>
@@ -510,6 +514,10 @@ async function remove() {
     <Alert v-if="confirm" data-protected="true">
       <AlertDescription class="flex flex-col items-start gap-3">
         <p>This lets the agent do more without asking.</p>
+        <p v-if="enablesAutorun">
+          Autorun commands can read your macOS Keychain. Discard cannot block this. Do not turn on
+          autorun if your Keychain holds tokens this agent must not see.
+        </p>
         <Button type="button" variant="destructive" :disabled="busy" @click="save(true)">
           Confirm and save
         </Button>
