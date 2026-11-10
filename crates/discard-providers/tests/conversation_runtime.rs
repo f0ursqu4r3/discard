@@ -1323,3 +1323,32 @@ async fn invalid_mentions_fail_before_saving_or_calling_a_provider() {
     assert!(rig.store.lock().unwrap().messages_for_channel(&rig.channel).unwrap().is_empty());
     rig.close().await;
 }
+
+#[tokio::test]
+async fn provider_notice_is_saved_once_across_two_turns() {
+    let notice = "Codex 0.167.0 is newer than the tested version 0.166.0. Discard verified the isolation controls before this response.";
+    let provider = Arc::new(FakeProvider::new(vec![Step::text("answer"), Step::idle()]).with_notice(notice));
+    let probe = provider.probe.clone();
+    let mut rig = Rig::with_provider(provider, probe).await;
+    let mut markers = Vec::new();
+    for text in ["first turn", "second turn"] {
+        rig.commands.send(Command::Send(text.into())).unwrap();
+        let updates = rig.done().await;
+        assert!(updates.iter().any(|u| matches!(u, Update::TurnFinished(discard_core::driver::TurnOutcome::Completed))));
+        markers.extend(updates.into_iter().filter_map(|u| match u { Update::ConversationMarker(m) => Some(m), _ => None }));
+    }
+    // Marker storage runs independently of the turn. Wait only in the test.
+    if markers.is_empty() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(update) = rig.updates.recv().await {
+                if let Update::ConversationMarker(message) = update { markers.push(message); break; }
+            }
+        }).await.unwrap();
+    }
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].role, Role::System);
+    assert_eq!(markers[0].blocks, vec![Block::Markdown { text: notice.into() }]);
+    let messages = rig.store.lock().unwrap().messages_for_channel(&rig.channel).unwrap();
+    assert_eq!(messages.iter().filter(|m| m.role == Role::System && m.blocks == markers[0].blocks).count(), 1);
+    rig.close().await;
+}

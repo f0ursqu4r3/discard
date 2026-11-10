@@ -101,6 +101,32 @@ pub fn settings_agent_review(context: tauri::State<'_, super::SettingsContext>, 
     Ok(serde_json::json!({"changes": review.changes.into_iter().map(|c| serde_json::json!({"field": c.field, "before": c.before, "after": c.after})).collect::<Vec<_>>(), "needsConfirm": review.needs_confirm, "blocked": review.blocked, "choices": choices.into_iter().map(|c| serde_json::json!({"policy": policy_name(c.policy), "enabled": c.enabled, "reason": c.reason})).collect::<Vec<_>>() }))
 }
 #[tauri::command]
+pub async fn settings_agent_generate_personality(
+    context: tauri::State<'_, super::SettingsContext>,
+    provider: String, model: String, reasoning_effort: Option<String>,
+    name: String, description: String, current: String,
+) -> Result<String, String> {
+    let info = context.providers.iter().find(|info| info.id == provider).ok_or("Unknown provider")?;
+    let provider = info.provider.clone();
+    generate_personality(provider.as_ref(), model, reasoning_effort, &name, &description, &current).await
+}
+
+async fn generate_personality(
+    provider: &dyn discard_core::provider::Provider, model: String, reasoning_effort: Option<String>,
+    name: &str, description: &str, current: &str,
+) -> Result<String, String> {
+    use discard_core::{personality, provider::TextRequest};
+    if model.trim().is_empty() { return Err("Choose a model first.".into()); }
+    let request = TextRequest {
+        model, reasoning_effort,
+        instructions: personality::instructions(),
+        prompt: personality::request_prompt(name, description, current)?,
+    };
+    let output = provider.generate_text(request).await.map_err(|error| error.to_string())?;
+    personality::clean(&output)
+}
+
+#[tauri::command]
 pub fn settings_agent_save(app: tauri::AppHandle, context: tauri::State<'_, super::SettingsContext>, id: String, draft: Draft, confirmed: bool) -> Result<(), String> {
     let (cfg, archived) = {
         let store = context.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -215,4 +241,36 @@ pub async fn settings_agent_delete(app: tauri::AppHandle, channels: tauri::State
         reconcile
     }).await.map_err(|e| e.to_string()).and_then(|result| result);
     guard_core.end_agent_change(&guard_id); result
+}
+
+#[cfg(test)]
+mod personality_tests {
+    use super::generate_personality;
+    use discard_core::personality;
+    use discard_providers::fake::FakeProvider;
+
+    #[tokio::test]
+    async fn generation_uses_draft_values_and_cleans_the_result_without_a_session() {
+        let provider = FakeProvider::new(vec![]).with_generated_text(Ok("```text\n\"You are concise.\"\n```".into()));
+        let result = generate_personality(&provider, "draft-model".into(), Some("high".into()), "River", "brief", "You are patient.").await.unwrap();
+        assert_eq!(result, "You are concise.");
+        let requests = provider.probe.text_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].model, "draft-model");
+        assert_eq!(requests[0].reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(requests[0].instructions, personality::instructions());
+        assert_eq!(requests[0].prompt, personality::request_prompt("River", "brief", "You are patient.").unwrap());
+        assert!(provider.probe.specs.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_input_never_reaches_the_provider_and_generation_errors_are_returned() {
+        let provider = FakeProvider::new(vec![]).with_generated_text(Err("generation failed".into()));
+        assert_eq!(generate_personality(&provider, "  ".into(), None, "", "brief", "").await.unwrap_err(), "Choose a model first.");
+        assert_eq!(generate_personality(&provider, "m".into(), None, "", "  ", "").await.unwrap_err(), "Describe the personality first.");
+        assert!(provider.probe.text_requests.lock().unwrap().is_empty());
+        assert!(generate_personality(&provider, "m".into(), None, "", "brief", "").await.unwrap_err().contains("generation failed"));
+        let empty = FakeProvider::new(vec![]).with_generated_text(Ok("  ".into()));
+        assert_eq!(generate_personality(&empty, "m".into(), None, "", "brief", "").await.unwrap_err(), "The model returned no text. Try again.");
+    }
 }

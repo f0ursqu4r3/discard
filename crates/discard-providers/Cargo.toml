@@ -11,7 +11,7 @@ nix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net"] }
 tracing.workspace = true
 uuid.workspace = true
 tempfile = "3"

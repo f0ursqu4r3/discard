@@ -386,3 +386,78 @@ async fn claude_main_checkout_file_tools_require_full_access_cards() {
         assert_eq!(approval.audit[0].decider, discard_core::approval::Decider::User);
     }
 }
+
+#[tokio::test]
+async fn newer_claude_verifies_every_emitted_flag_and_exposes_notice() {
+    let rig = Rig::new();
+    let mut s = conversation_spec(&rig);
+    s.reasoning_effort = Some("high".into());
+    let session = rig.provider("approval").with_env("FAKE_CLAUDE_VERSION", "2.1.321 (Claude Code)").start_session(s).await.unwrap();
+    assert_eq!(session.notice().as_deref(), Some("Claude Code 2.1.321 is newer than the tested version 2.1.318. Discard verified the isolation controls before this response."));
+}
+
+#[tokio::test]
+async fn newer_claude_rejects_each_missing_emitted_flag() {
+    let rig = Rig::new();
+    let mut s = conversation_spec(&rig);
+    s.reasoning_effort = Some("high".into());
+    let args = discard_providers::claude::build_args(&s, &[]).unwrap();
+    let flags: Vec<_> = args.iter().filter(|arg| arg.starts_with("--")).collect();
+    for missing in &flags {
+        let help = flags.iter().filter(|flag| flag != &missing).map(|flag| flag.as_str()).collect::<Vec<_>>().join(" ");
+        // A flag with a longer name must not count as the missing flag.
+        let help = format!("{help} {missing}-unsupported");
+        let error = rig.provider("approval").with_env("FAKE_CLAUDE_VERSION", "2.1.321 (Claude Code)")
+            .with_env("FAKE_CLAUDE_HELP", help).start_session(s.clone()).await.err().unwrap();
+        assert!(matches!(error, ProviderError::Setup(_)));
+        let message = error.to_string();
+        assert!(message.contains(missing.as_str()) && message.contains("2.1.321") && message.contains("2.1.318"), "{message}");
+    }
+    assert!(!rig.log_text().contains("ARGS"));
+}
+
+#[tokio::test]
+async fn older_and_unknown_claude_versions_fail_before_session() {
+    let rig = Rig::new();
+    for (version, expected) in [("2.1.317 (Claude Code)", "Claude Code 2.1.317 is older than the tested version 2.1.318. Update Claude Code, then retry."), ("unreadable", "version could not be read")] {
+        let error = rig.provider("approval").with_env("FAKE_CLAUDE_VERSION", version).start_session(conversation_spec(&rig)).await.err().unwrap();
+        assert!(matches!(error, ProviderError::Setup(_)));
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+    assert!(!rig.log_text().contains("ARGS"));
+}
+
+#[tokio::test]
+async fn unreachable_claude_api_blocks_all_session_modes_before_cli_start() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let rig = Rig::new();
+    for mode in [discard_core::provider::SessionMode::Coding, discard_core::provider::SessionMode::Conversation, discard_core::provider::SessionMode::Workspace] {
+        let mut s = conversation_spec(&rig); s.mode = mode;
+        let start = std::time::Instant::now();
+        let error = rig.provider("approval").with_env("ANTHROPIC_BASE_URL", format!("http://user:secret@127.0.0.1:{port}/private"))
+            .start_session(s).await.err().unwrap();
+        assert!(start.elapsed() < Duration::from_secs(3));
+        assert!(matches!(error, ProviderError::Setup(_)));
+        assert!(error.to_string().contains(&format!("http://127.0.0.1:{port} (ANTHROPIC_BASE_URL)")));
+        assert!(!error.to_string().contains("secret") && !error.to_string().contains("private"));
+    }
+    assert!(!rig.log().exists());
+}
+
+#[tokio::test]
+async fn failed_claude_version_probe_does_not_accept_valid_stdout() {
+    let rig = Rig::new();
+    let error = rig.provider("approval").with_env("FAKE_CLAUDE_VERSION_EXIT", "1")
+        .start_session(conversation_spec(&rig)).await.err().unwrap();
+    assert!(matches!(error, ProviderError::Setup(_)));
+    assert!(error.to_string().contains("version could not be read"), "{error}");
+}
+
+#[tokio::test]
+async fn tested_claude_version_has_no_notice() {
+    let rig = Rig::new();
+    let session = rig.provider("approval").start_session(conversation_spec(&rig)).await.unwrap();
+    assert_eq!(session.notice(), None);
+}

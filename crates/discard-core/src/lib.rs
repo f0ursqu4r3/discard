@@ -15,6 +15,7 @@ pub mod model;
 pub mod store;
 pub mod driver;
 pub mod provider;
+pub mod personality;
 pub mod redact;
 pub mod logging;
 pub mod timeline;

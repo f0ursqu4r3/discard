@@ -1,0 +1,6 @@
+{"method":"turn/started","params":{"turn":{"id":"turn-text","status":"inProgress"}}}
+{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"comment","phase":"commentary","text":"I will draft the personality."}}}
+{"method":"item/agentMessage/delta","params":{"itemId":"answer","delta":"You are direct."}}
+{"method":"item/agentMessage/delta","params":{"itemId":"answer","delta":" You check assumptions."}}
+{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"answer","phase":"final_answer","text":"You are direct. You check assumptions."}}}
+{"method":"turn/completed","params":{"turn":{"id":"turn-text","status":"completed","error":null}}}

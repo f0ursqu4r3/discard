@@ -8,7 +8,8 @@ import {
   SelectGroup,
   SelectItem,
 } from '@/components/ui/select'
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { Sparkles } from '@lucide/vue'
 import { invoke } from '@tauri-apps/api/core'
 import { getAgents, type AgentEntry } from '@/bridge/api'
 import {
@@ -52,7 +53,68 @@ const deleteConversations = ref(false),
   deletePrivateMemory = ref(false)
 let generation = 0,
   modelGeneration = 0,
+  personalityGeneration = 0,
   disposed = false
+const personalityOpen = ref(false),
+  personalityDescription = ref(''),
+  personalityRunning = ref(false),
+  personalityError = ref(''),
+  previousPersonality = ref<string | null>(null)
+const personalityField = ref<HTMLElement | null>(null)
+async function openPersonality() {
+  personalityOpen.value = true
+  personalityError.value = ''
+  await nextTick()
+  personalityField.value?.querySelector<HTMLInputElement>('#agent-personality-description')?.focus()
+}
+function cancelPersonality() {
+  personalityGeneration++
+  personalityRunning.value = false
+  personalityOpen.value = false
+  personalityError.value = ''
+}
+async function generatePersonality() {
+  if (
+    busy.value ||
+    personalityRunning.value ||
+    !validModel.value ||
+    !personalityDescription.value.trim()
+  )
+    return
+  const current = ++personalityGeneration
+  const { provider, model, reasoningEffort, name, systemPrompt } = draft.value
+  personalityRunning.value = true
+  personalityError.value = ''
+  try {
+    const result = await invoke<string>('settings_agent_generate_personality', {
+      provider,
+      model,
+      reasoningEffort,
+      name,
+      description: personalityDescription.value,
+      current: systemPrompt,
+    })
+    if (disposed || current !== personalityGeneration) return
+    previousPersonality.value = systemPrompt
+    draft.value.systemPrompt = result
+    personalityOpen.value = false
+    personalityDescription.value = ''
+    personalityRunning.value = false
+    await nextTick()
+    if (!disposed && current === personalityGeneration) {
+      personalityField.value?.querySelector<HTMLTextAreaElement>('#agent-prompt')?.focus()
+    }
+  } catch (cause) {
+    if (!disposed && current === personalityGeneration) personalityError.value = String(cause)
+  } finally {
+    if (!disposed && current === personalityGeneration) personalityRunning.value = false
+  }
+}
+function undoPersonality() {
+  if (previousPersonality.value === null) return
+  draft.value.systemPrompt = previousPersonality.value
+  previousPersonality.value = null
+}
 type Model = ProviderModel
 const models = ref<Model[]>([]),
   modelsLoading = ref(false),
@@ -78,6 +140,9 @@ watch(
   () => [draft.value.provider, draft.value.model],
   () => {
     draft.value.reasoningEffort = null
+    personalityGeneration++
+    personalityRunning.value = false
+    personalityError.value = ''
   },
   { flush: 'sync' },
 )
@@ -134,6 +199,7 @@ onUnmounted(() => {
   disposed = true
   generation++
   modelGeneration++
+  personalityGeneration++
   emit('busy', false)
 })
 async function currentAgent() {
@@ -278,12 +344,70 @@ async function remove() {
       />
       <Field>
         <FieldLabel for="agent-prompt">Personality (optional)</FieldLabel>
-        <Textarea
-          id="agent-prompt"
-          v-model="draft.systemPrompt"
-          :disabled="busy"
-          placeholder="How should this agent communicate and work?"
-        />
+        <div ref="personalityField" class="flex flex-col gap-2">
+          <Textarea
+            id="agent-prompt"
+            v-model="draft.systemPrompt"
+            :disabled="busy || personalityRunning"
+            @update:model-value="previousPersonality = null"
+            placeholder="How should this agent communicate and work?"
+          />
+          <div class="flex gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              :disabled="busy || personalityRunning || !validModel"
+              @click="openPersonality"
+            >
+              <Sparkles aria-hidden="true" />
+              Generate
+            </Button>
+            <Button
+              v-if="previousPersonality !== null"
+              type="button"
+              variant="ghost"
+              size="sm"
+              :disabled="busy || personalityRunning"
+              @click="undoPersonality"
+            >
+              Undo
+            </Button>
+          </div>
+          <FieldDescription v-if="!validModel">
+            Choose a model to generate a personality.
+          </FieldDescription>
+          <div v-if="personalityOpen" class="flex flex-col gap-2">
+            <FieldLabel for="agent-personality-description" class="sr-only">
+              Describe the personality
+            </FieldLabel>
+            <div class="flex flex-wrap gap-2">
+              <Input
+                id="agent-personality-description"
+                v-model="personalityDescription"
+                class="min-w-48 flex-1"
+                placeholder="For example: terse senior reviewer who asks before large changes"
+                maxlength="2000"
+                @keydown.enter.stop.prevent="generatePersonality"
+                @keydown.esc.stop.prevent="cancelPersonality"
+              />
+              <Button
+                type="button"
+                :disabled="
+                  busy || !validModel || !personalityDescription.trim() || personalityRunning
+                "
+                :aria-busy="personalityRunning"
+                @click="generatePersonality"
+              >
+                {{ personalityRunning ? 'Generating…' : 'Generate' }}
+              </Button>
+              <Button type="button" variant="ghost" @click="cancelPersonality">Cancel</Button>
+            </div>
+          </div>
+          <p v-if="personalityError" role="alert" class="text-sm text-destructive">
+            {{ personalityError }}
+          </p>
+        </div>
       </Field>
     </FieldGroup>
     <details>

@@ -1,6 +1,7 @@
 //! Process management for the Claude CLI.
 
 use discard_core::process::spawn_tokio;
+use crate::version::{self, CLAUDE_TESTED};
 use crate::claude::parse::{Item, PendingRequest, StreamParser};
 use async_trait::async_trait;
 use discard_core::approval::Decision;
@@ -144,6 +145,10 @@ impl Provider for ClaudeProvider {
         crate::models::claude(self.command()).await
     }
 
+    async fn generate_text(&self, request: discard_core::provider::TextRequest) -> Result<String, ProviderError> {
+        super::text::generate(self.command(), request).await
+    }
+
     async fn check_setup(&self) -> SetupStatus {
         let version = spawn_tokio(self.command().arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true));
         match tokio::time::timeout(SETUP_TIMEOUT, async { version?.wait().await }).await {
@@ -165,6 +170,8 @@ impl Provider for ClaudeProvider {
     }
 
     async fn start_session(&self, mut spec: SessionSpec) -> Result<Box<dyn ProviderSession>, ProviderError> {
+        super::api::check_api_address(&self.command()).await?;
+        let mut notice = None;
         let workspace = spec.mode == SessionMode::Workspace;
         let protected_git_paths = if workspace {
             if !cfg!(target_os = "macos") || spec.enforcement != EnforcementMode::HostPrompts {
@@ -189,34 +196,29 @@ impl Provider for ClaudeProvider {
             let version = spawn_tokio(self.command().arg("--version").kill_on_drop(true).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()));
             let version = tokio::time::timeout(SETUP_TIMEOUT, async { version?.wait_with_output().await })
                 .await
-                .map_err(|_| setup("Claude version check timed out".into()))?
-                .map_err(|e| setup(e.to_string()))?;
-            if !version.status.success() || !String::from_utf8_lossy(&version.stdout).starts_with("2.1.318 ") {
-                return Err(setup("Claude Code 2.1.318 is required for the verified conversation controls".into()));
-            }
+                .map_err(|_| setup("Claude Code version could not be read: version check timed out".into()))?
+                .map_err(|_| setup("Claude Code version could not be read".into()))?;
+            let output = String::from_utf8_lossy(&version.stdout);
+            let running = version::require(if version.status.success() { &output } else { "" }, "Claude Code", CLAUDE_TESTED)?;
             let help = spawn_tokio(self.command().arg("--help").kill_on_drop(true).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()));
             let help = tokio::time::timeout(SETUP_TIMEOUT, async { help?.wait_with_output().await })
                 .await
-                .map_err(|_| setup("Claude control check timed out".into()))?
-                .map_err(|e| setup(e.to_string()))?;
+                .map_err(|_| setup(format!("Claude Code {running} control check timed out (tested version {CLAUDE_TESTED})")))?
+                .map_err(|_| setup(format!("Claude Code {running} could not verify conversation controls (tested version {CLAUDE_TESTED})")))?;
             let help_text = String::from_utf8_lossy(&help.stdout);
-            if !help.status.success()
-                || [
-                    "--tools",
-                    "--allowedTools",
-                    "--strict-mcp-config",
-                    "--restricted",
-                    "--disable-slash-commands",
-                    "--system-prompt-snapshot",
-                    "--settings",
-                ]
-                .iter()
-                .any(|flag| !help_text.contains(flag))
-            {
-                return Err(setup("Claude is missing a required conversation control".into()));
+            if !help.status.success() {
+                return Err(setup(format!("Claude Code {running} could not verify conversation controls (tested version {CLAUDE_TESTED})")));
+            }
+            let args = build_args(&spec, &protected_git_paths)?;
+            let minimum = ["--tools", "--allowedTools", "--strict-mcp-config", "--restricted", "--disable-slash-commands", "--system-prompt-snapshot", "--settings"];
+            for flag in minimum.into_iter().chain(args.iter().map(String::as_str).filter(|arg| arg.starts_with("--"))) {
+                if !help_text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-').any(|token| token == flag) {
+                    return Err(setup(format!("Claude Code {running} is missing required conversation control {flag} (tested version {CLAUDE_TESTED})")));
+                }
             }
             // Managed policy remains authoritative. Reject known local conflicts; never change policy.
-            crate::conversation::check_claude_managed_files(workspace)?;
+            crate::conversation::check_claude_managed_files(workspace).map_err(|e| version::verification_error(e, "Claude Code", &running, CLAUDE_TESTED))?;
+            notice = version::notice("Claude Code", &running, CLAUDE_TESTED);
             if workspace { None } else {
                 let owned = crate::conversation::ConversationFiles::new()?;
                 spec.cwd = owned.cwd.clone(); Some(owned)
@@ -303,7 +305,7 @@ impl Provider for ClaudeProvider {
             });
         }
 
-        Ok(Box::new(ClaudeSession { child, pgid, stdin, events, shared, _conversation_files: files }))
+        Ok(Box::new(ClaudeSession { notice, child, pgid, stdin, events, shared, _conversation_files: files }))
     }
 }
 
@@ -314,6 +316,7 @@ struct Shared {
 }
 
 struct ClaudeSession {
+    notice: Option<String>,
     _conversation_files: Option<crate::conversation::ConversationFiles>,
     child: Child,
     pgid: Option<i32>,
@@ -362,6 +365,7 @@ impl Drop for ClaudeSession {
 
 #[async_trait]
 impl ProviderSession for ClaudeSession {
+    fn notice(&self) -> Option<String> { self.notice.clone() }
     fn resume_handle(&self) -> Option<String> {
         self.shared.session_id.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }

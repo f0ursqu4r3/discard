@@ -458,7 +458,7 @@ async fn unsupported_codex_version_never_attempts_catalog_recovery() {
         .with_env("CODEX_HOME", rig.dir.path())
         .with_env("FAKE_CODEX_VERSION", "codex-cli 0.164.0")
         .start_session(s).await.err().unwrap().to_string();
-    assert!(error.contains("Codex 0.166.0 is required"), "{error}");
+    assert!(error.contains("Codex 0.164.0 is older than the tested version 0.166.0. Update Codex, then retry."), "{error}");
     assert!(rig.received().is_empty());
 }
 
@@ -519,4 +519,62 @@ async fn workspace_missing_model_keeps_setup_error() {
     let error = rig.provider("approval").with_env("CODEX_HOME", rig.dir.path()).start_session(s).await.err().unwrap();
     assert!(matches!(error, ProviderError::Setup(_)), "{error:?}");
     assert!(error.to_string().contains("select an exact Codex model"));
+}
+
+#[tokio::test]
+async fn newer_codex_refreshes_tested_cache_and_exposes_notice_after_verification() {
+    let rig = Rig::new();
+    let s = conversation_spec(&rig);
+    let mut cache: Value = serde_json::from_slice(&std::fs::read(rig.dir.path().join("models_cache.json")).unwrap()).unwrap();
+    cache["client_version"] = json!("0.167.0");
+    let refreshed = rig.dir.path().join("refreshed.json");
+    std::fs::write(&refreshed, cache.to_string()).unwrap();
+    let session = rig.provider("approval").with_env("CODEX_HOME", rig.dir.path())
+        .with_env("FAKE_CODEX_VERSION", "codex-cli 0.167.0").with_env("FAKE_CODEX_REFRESH_CACHE", &refreshed)
+        .start_session(s).await.unwrap();
+    assert_eq!(session.notice().as_deref(), Some("Codex 0.167.0 is newer than the tested version 0.166.0. Discard verified the isolation controls before this response."));
+    assert_eq!(rig.received().iter().filter(|v| v["method"] == "model/list").count(), 1);
+    assert_eq!(rig.request("thread/start")["params"]["config"]["features"]["shell_tool"], false);
+}
+
+#[tokio::test]
+async fn newer_codex_still_rejects_overridden_controls_with_both_versions() {
+    let rig = Rig::new();
+    let s = conversation_spec(&rig);
+    let path = rig.dir.path().join("models_cache.json");
+    let mut cache: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    cache["client_version"] = json!("0.167.0");
+    std::fs::write(path, cache.to_string()).unwrap();
+    let error = rig.provider("control_override").with_env("CODEX_HOME", rig.dir.path())
+        .with_env("FAKE_CODEX_VERSION", "codex-cli 0.167.0").start_session(s).await.err().unwrap();
+    let message = error.to_string();
+    assert!(message.contains("0.167.0") && message.contains("0.166.0"), "{message}");
+    assert!(!rig.received().iter().any(|v| v["method"] == "thread/start"));
+}
+
+#[tokio::test]
+async fn unknown_codex_version_fails_before_catalog_recovery() {
+    let rig = Rig::new();
+    let s = conversation_spec(&rig);
+    let error = rig.provider("approval").with_env("CODEX_HOME", rig.dir.path())
+        .with_env("FAKE_CODEX_VERSION", "unreadable").start_session(s).await.err().unwrap();
+    assert!(matches!(error, ProviderError::Setup(_)));
+    assert!(error.to_string().contains("version could not be read"));
+    assert!(rig.received().is_empty());
+}
+
+#[tokio::test]
+async fn failed_codex_version_probe_does_not_accept_valid_stdout() {
+    let rig = Rig::new();
+    let error = rig.provider("approval").with_env("CODEX_HOME", rig.dir.path()).with_env("FAKE_CODEX_VERSION_EXIT", "1")
+        .start_session(conversation_spec(&rig)).await.err().unwrap();
+    assert!(matches!(error, ProviderError::Setup(_)));
+    assert!(error.to_string().contains("version could not be read"), "{error}");
+}
+
+#[tokio::test]
+async fn tested_codex_version_has_no_notice() {
+    let rig = Rig::new();
+    let session = rig.provider("approval").with_env("CODEX_HOME", rig.dir.path()).start_session(conversation_spec(&rig)).await.unwrap();
+    assert_eq!(session.notice(), None);
 }

@@ -69,13 +69,15 @@ See `docs/provider-codex.md`. The Codex matrix was verified against a live `code
 
 ## Conversation sessions
 
-`SessionMode::Conversation` requires Claude Code 2.1.318 and the documented conversation controls. It uses a fresh, empty Discard-owned working directory and rejects native resume handles. Discard supplies the selected model and refreshed system instructions for a new transcript replay.
+`SessionMode::Conversation` and Workspace use Claude Code 2.1.318 as the tested version. A newer CLI may run only after all required isolation controls pass verification. Older versions stay blocked with an update message. An unreadable version also stays blocked. It uses a fresh, empty Discard-owned working directory and rejects native resume handles. Discard supplies the selected model and refreshed system instructions for a new transcript replay.
 
 The adapter passes `--tools ""`, `--strict-mcp-config`, `--disable-slash-commands`, `--restricted` and `--system-prompt-snapshot off`. It accepts only the scoped Discard memory MCP configuration. It forces `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` in both process environment and explicit session settings. It disables hooks and removes inherited explicit plugin directories. Authentication uses the existing CLI login; Discard does not use `--bare`, copy credentials or change user settings.
 
 Conversation sessions pass `--allowedTools` with the exact scoped Discard tool names: six memory tools, two worktree tools, and three project-file tools. The server further limits the listed tools by conversation scope. This lets private saves, reads, shared proposals, and scoped project inspection run even when the session has no permission prompt. It also avoids duplicate host prompts in HostPrompts mode. Built-in tools remain absent. Discard's memory service still controls scope access and shared-write approval; a shared save remains a pending proposal. Coding sessions receive no new tool grant.
 
-The adapter checks the CLI version and required help controls before sending instructions. It rejects detected local managed settings that conflict with memory, hooks or plugin restrictions. Managed policy remains authoritative. Claude can receive remote or MDM policy that the CLI does not expose through an effective-settings API. Discard cannot independently verify that opaque policy, and does not claim administrator or operating-system isolation.
+The adapter checks the CLI version and every `--flag` emitted for the session against `claude --help`, with the fixed isolation-control list as a minimum, before sending instructions. A missing flag stops setup and the error names the flag, running version, and tested version. It rejects detected local managed settings that conflict with memory, hooks or plugin restrictions. Managed policy remains authoritative. Claude can receive remote or MDM policy that the CLI does not expose through an effective-settings API. Discard cannot independently verify that opaque policy, and does not claim administrator or operating-system isolation.
+
+After a newer CLI starts, Discard adds a conversation marker with the running and tested versions. Each distinct notice appears at most once per engine instance. Notice storage does not block the turn. A newer CLI can change the behavior of a control without removing it; these checks cannot detect every such change.
 
 The opt-in synthetic probe at `crates/discard-providers/tests/probes/claude_conversation.py` checks the actual model-facing tools and executes a synthetic private save, read and shared proposal against local test endpoints. It verifies tool-call receipt, result delivery and a pending shared proposal with no shared write. The tested version exposed only the six Discard memory tools. The probe uses a temporary configuration directory and a synthetic API key. Process-fixture tests cover flags, environment overrides, fresh instructions and cleanup.
 
@@ -158,3 +160,34 @@ Discard saves simple command-prefix rules and exact network-host rules per agent
 and project. The user chooses the prefix cut. Rules approve one provider request
 at a time and record their rule ID in the audit. Project settings support revocation.
 Compound shell syntax and sandbox escapes cannot use these rules.
+
+## Text generation
+
+Personality generation uses a separate non-interactive request in an empty temporary
+working directory. It sends the draft model and optional effort, replaces the system
+prompt with `--system-prompt`, writes the description on stdin, and reads the JSON
+result. It uses `--tools ""`, strict empty MCP configuration, no session persistence,
+no slash commands, no user/project/local settings sources, and `--restricted`.
+Hooks and automatic memory are off. The memory and instruction-discovery environment
+controls are set to `1`; inherited plugin directories are removed. Detected conflicting
+local managed settings stop the request. The process group is killed when the request
+completes, its future is dropped, or the 120-second timeout expires. The editor’s
+Cancel button discards the result. The backend request can continue until completion
+or timeout. Generation does not log prompts or results.
+
+
+## Custom API address reachability
+
+Before any Claude session or text-generation CLI starts, Discard checks an explicit
+`ANTHROPIC_BASE_URL`. A provider environment override takes priority over the process
+environment. An explicit removal counts as unset. For a URL with a host and a port,
+Discard opens a TCP connection with a two-second timeout. The default port is 443
+for HTTPS and 80 for HTTP. It sends no data. An unset or unparseable address skips
+the check.
+
+If the connection fails, setup stops and names the address. The error includes only
+the scheme, host, and port; it excludes user information, paths, and queries. Start
+that service or remove the variable, then retry. Discard does not change the address
+or environment. This check does not cover proxy variables or settings-file values.
+A reachable address can still fail later; the text-generation timeout message remains
+as a fallback. Claude text generation has no CLI version gate.

@@ -77,3 +77,19 @@ async fn real_claude_does_not_run_a_denied_command() {
     assert_eq!(outcome, TurnOutcome::Completed);
     assert!(!dir.path().join("denied.txt").exists(), "a denied command must not run");
 }
+
+#[tokio::test]
+#[ignore = "uses the real claude CLI and the logged-in subscription"]
+async fn real_claude_generates_text_without_a_session() {
+    let p = ClaudeProvider::new("claude");
+    let request = discard_core::provider::TextRequest {
+        model: "haiku".into(),
+        reasoning_effort: None,
+        instructions: "Answer with the single word the user asks for. No other text.".into(),
+        prompt: "Say: ready".into(),
+    };
+    let started = std::time::Instant::now();
+    let text = p.generate_text(request).await.expect("text generation");
+    assert!(text.to_lowercase().contains("ready"), "unexpected text: {text}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(60), "took {:?}", started.elapsed());
+}

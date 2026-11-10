@@ -2,5 +2,6 @@
 
 pub mod parse;
 mod provider;
+mod text;
 
 pub use provider::{CodexProvider, thread_params};

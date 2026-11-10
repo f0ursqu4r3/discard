@@ -12,6 +12,7 @@ use crate::redact::redact;
 use crate::store::Store;
 use crate::timeline::{ApprovalView, Timeline};
 use crate::ui_state::{Command, Update};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -126,6 +127,12 @@ pub struct Engine {
     pub reasoning_effort: Option<String>,
     pub system_prompt: Option<String>,
     pub policy: ApprovalPolicy,
+}
+
+/// State shared by turns in one engine run, including per-turn configuration snapshots.
+struct RunState {
+    sequencer: Sequencer,
+    notices: HashSet<String>,
 }
 
 struct RevokeOnDrop {
@@ -299,9 +306,9 @@ impl Engine {
         mut commands: mpsc::UnboundedReceiver<Command>,
         updates: mpsc::UnboundedSender<Update>,
     ) {
-        let mut sequencer = Sequencer::new();
+        let mut state = RunState { sequencer: Sequencer::new(), notices: HashSet::new() };
         match crate::driver::lock(&self.store).last_seq(&self.session_id) {
-            Ok(last) => sequencer.resume(&self.session_id, last),
+            Ok(last) => state.sequencer.resume(&self.session_id, last),
             Err(e) => warn!(error = %e, "could not read the last event sequence"),
         }
         while let Some(command) = commands.recv().await {
@@ -311,10 +318,10 @@ impl Engine {
                     // A failed or cancelled follow-up must not leave authority for a later Send.
                     let _revoke = RevokeMainCheckoutOnDrop { grants: &self.main_checkout_grants, channel: &self.channel_id, agent: agent.clone() };
                     let text = format!("The user approved your request in the app: {note} Continue the user's latest request in this channel. Do not repeat work that is already done.");
-                    self.turn(&mut sequencer, text, Vec::new(), Some(agent), &mut commands, &updates).await;
+                    self.turn(&mut state, text, Vec::new(), Some(agent), &mut commands, &updates).await;
                 }
-                Command::Send(text) => self.turn(&mut sequencer, text, Vec::new(), None, &mut commands, &updates).await,
-                Command::SendAttachments { text, attachments } => self.turn(&mut sequencer, text, attachments, None, &mut commands, &updates).await,
+                Command::Send(text) => self.turn(&mut state, text, Vec::new(), None, &mut commands, &updates).await,
+                Command::SendAttachments { text, attachments } => self.turn(&mut state, text, attachments, None, &mut commands, &updates).await,
                 _ => {}
             }
         }
@@ -342,7 +349,7 @@ impl Engine {
 
     async fn turn(
         &self,
-        sequencer: &mut Sequencer,
+        state: &mut RunState,
         text: String,
         attachments: Vec<crate::attachments::Attachment>,
         recipient: Option<AgentId>,
@@ -369,7 +376,7 @@ impl Engine {
         };
         send(updates, Update::Responding(author.clone()));
         send(updates, Update::SessionProfile(snapshot.session_profile()));
-        snapshot.turn_snapshot(&author, sequencer, text, attachments, store_user_message, commands, updates).await;
+        snapshot.turn_snapshot(&author, state, text, attachments, store_user_message, commands, updates).await;
     }
 
     fn changes_block(&self, start: &Result<crate::workspace_changes::StartSnapshot, String>, state: crate::workspace_changes::ChangesState) -> Block {
@@ -390,7 +397,8 @@ impl Engine {
     }
 
     #[expect(clippy::too_many_arguments, reason = "Keep replay and message storage separate.")]
-    async fn turn_snapshot(&self, author: &crate::model::MessageAuthor, sequencer: &mut Sequencer, text: String, attachments: Vec<crate::attachments::Attachment>, store_user_message: bool, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) {
+    async fn turn_snapshot(&self, author: &crate::model::MessageAuthor, state: &mut RunState, text: String, attachments: Vec<crate::attachments::Attachment>, store_user_message: bool, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) {
+        let RunState { sequencer, notices } = state;
         let mut session_mode = if self.mode == SessionMode::Conversation && self.write_access.is_ok() { SessionMode::Workspace } else { self.mode };
         let history = crate::driver::lock(&self.store).messages_for_channel(&self.channel_id);
         let previous_changes = self.memory.as_ref().map(|m| m.changes(&self.channel_id)).transpose();
@@ -593,6 +601,17 @@ impl Engine {
                 return;
             }
         };
+
+        if let Some(notice) = session.notice() && notices.insert(notice.clone()) {
+            // Marker storage must not hold up or fail the provider turn.
+            let engine = self.clone();
+            let updates = updates.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(error) = engine.marker(notice, &updates) {
+                    warn!(%error, "could not save provider notice");
+                }
+            });
+        }
 
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
         let (decisions_tx, decisions_rx) = mpsc::unbounded_channel();

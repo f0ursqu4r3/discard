@@ -86,6 +86,10 @@ pub trait Provider: Send + Sync {
     async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         Err(ProviderError::Setup("This provider does not expose a model list.".into()))
     }
+    /// One request, one text answer. No tools, MCP, memory, or saved session.
+    async fn generate_text(&self, _request: TextRequest) -> Result<String, ProviderError> {
+        Err(ProviderError::Setup("This provider cannot generate text.".into()))
+    }
     /// Catalog context limit for the exact model, when the provider publishes one.
     fn model_context_window(&self, _model: &str) -> Option<u64> {
         None
@@ -94,8 +98,19 @@ pub trait Provider: Send + Sync {
     async fn start_session(&self, spec: SessionSpec) -> Result<Box<dyn ProviderSession>, ProviderError>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextRequest {
+    pub model: String,
+    pub reasoning_effort: Option<String>,
+    /// Replaces the provider's default system prompt where the CLI allows it.
+    pub instructions: String,
+    pub prompt: String,
+}
+
 #[async_trait]
 pub trait ProviderSession: Send {
+    /// A best-effort conversation marker after verified session setup.
+    fn notice(&self) -> Option<String> { None }
     /// The provider-native session ID, once known. Stored as a resume handle only.
     fn resume_handle(&self) -> Option<String>;
     /// Send one user message and begin a turn.

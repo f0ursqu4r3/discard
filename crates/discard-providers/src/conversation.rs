@@ -68,10 +68,10 @@ pub(crate) fn read_memory_config(spec: &SessionSpec) -> Result<Value, ProviderEr
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CatalogTools { None, Workspace }
 
-pub(crate) fn sanitize_catalog(cache: Value, selected: &str, tools: CatalogTools) -> Result<(Value, Option<u64>), ProviderError> {
-    if cache.get("client_version").and_then(Value::as_str) != Some("0.166.0") {
+pub(crate) fn sanitize_catalog(cache: Value, selected: &str, tools: CatalogTools, running: &str) -> Result<(Value, Option<u64>), ProviderError> {
+    if cache.get("client_version").and_then(Value::as_str) != Some(running) {
         let actual = cache.get("client_version").and_then(Value::as_str).unwrap_or("unknown");
-        return Err(setup(format!("The Codex model cache was written by version {actual}, but Discard requires 0.166.0. Refresh the model list with Codex 0.166.0, then retry.")));
+        return Err(setup(format!("The Codex model cache was written by version {actual}, but the running Codex version is {running}. Refresh the model list with Codex {running}, then retry.")));
     }
     let mut models = cache
         .get("models")
@@ -102,12 +102,12 @@ pub(crate) fn sanitize_catalog(cache: Value, selected: &str, tools: CatalogTools
     Ok((json!({"models":models}), window))
 }
 
-pub(crate) fn load_catalog(home: &Path, selected: &str, tools: CatalogTools) -> Result<(Value, Option<u64>), ProviderError> {
+pub(crate) fn load_catalog(home: &Path, selected: &str, tools: CatalogTools, running: &str) -> Result<(Value, Option<u64>), ProviderError> {
     let bytes = std::fs::read(home.join("models_cache.json")).map_err(|e| {
         setup(format!("could not read Codex model cache: {e}. Open Codex once and refresh its model list, then retry with the same model"))
     })?;
     let doc = serde_json::from_slice(&bytes).map_err(|e| setup(format!("invalid Codex model cache: {e}")))?;
-    sanitize_catalog(doc, selected, tools)
+    sanitize_catalog(doc, selected, tools, running)
 }
 
 pub(crate) fn codex_controls(effective: &Value, tools: CatalogTools) -> Result<Value, ProviderError> {
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn workspace_catalog_keeps_shell_and_patch() {
-        let (out, _) = sanitize_catalog(catalog(), "chosen", CatalogTools::Workspace).unwrap();
+        let (out, _) = sanitize_catalog(catalog(), "chosen", CatalogTools::Workspace, crate::version::CODEX_TESTED).unwrap();
         assert_eq!(out["models"][0]["shell_type"], "local");
         assert_eq!(out["models"][0]["apply_patch_tool_type"], "freeform");
         assert_eq!(out["models"][0]["experimental_supported_tools"], json!([]));
@@ -290,7 +290,7 @@ mod tests {
     }
 
     fn catalog() -> serde_json::Value {
-        json!({"client_version":"0.166.0", "identity":{"secret":"must-not-copy"}, "models":[{
+        json!({"client_version":crate::version::CODEX_TESTED, "identity":{"secret":"must-not-copy"}, "models":[{
             "slug":"chosen", "display_name":"Chosen", "context_window":123456,
             "apply_patch_tool_type":"freeform", "shell_type":"local", "unrelated":{"preserve":true}
         }]})
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn catalog_preserves_complete_records_and_exact_model() {
-        let (out, window) = sanitize_catalog(catalog(), "chosen", CatalogTools::None).unwrap();
+        let (out, window) = sanitize_catalog(catalog(), "chosen", CatalogTools::None, crate::version::CODEX_TESTED).unwrap();
         assert_eq!(window, Some(123456));
         assert_eq!(out["models"][0]["slug"], "chosen");
         assert_eq!(out["models"][0]["unrelated"], json!({"preserve":true}));
@@ -310,14 +310,24 @@ mod tests {
 
     #[test]
     fn missing_exact_model_and_incompatible_catalog_fail() {
-        assert!(sanitize_catalog(catalog(), "other", CatalogTools::None).is_err());
-        assert!(sanitize_catalog(json!({"models":[]}), "chosen", CatalogTools::None).is_err());
-        assert!(sanitize_catalog(json!({"models":[{}]}), "chosen", CatalogTools::None).is_err());
+        assert!(sanitize_catalog(catalog(), "other", CatalogTools::None, crate::version::CODEX_TESTED).is_err());
+        assert!(sanitize_catalog(json!({"models":[]}), "chosen", CatalogTools::None, crate::version::CODEX_TESTED).is_err());
+        assert!(sanitize_catalog(json!({"models":[{}]}), "chosen", CatalogTools::None, crate::version::CODEX_TESTED).is_err());
         let mut old = catalog();
         old["client_version"] = json!("0.1.0");
-        let error = sanitize_catalog(old, "chosen", CatalogTools::None).unwrap_err().to_string();
+        let error = sanitize_catalog(old, "chosen", CatalogTools::None, crate::version::CODEX_TESTED).unwrap_err().to_string();
         assert!(error.contains("written by version 0.1.0"));
-        assert!(error.contains("Refresh the model list with Codex 0.166.0, then retry."));
+        assert!(error.contains(&format!("Refresh the model list with Codex {}, then retry.", crate::version::CODEX_TESTED)));
+    }
+
+    #[test]
+    fn catalog_version_must_match_running_cli_in_both_directions() {
+        let mut newer = catalog();
+        newer["client_version"] = json!("0.167.0");
+        assert!(sanitize_catalog(newer.clone(), "chosen", CatalogTools::None, "0.167.0").is_ok());
+        assert!(sanitize_catalog(newer, "chosen", CatalogTools::None, crate::version::CODEX_TESTED).is_err());
+        let error = sanitize_catalog(catalog(), "chosen", CatalogTools::Workspace, "0.167.0").unwrap_err().to_string();
+        assert!(error.contains("running Codex version is 0.167.0"));
     }
 
     #[test]

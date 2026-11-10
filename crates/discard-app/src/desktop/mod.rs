@@ -271,6 +271,7 @@ pub fn run(
             settings::providers::settings_provider_models,
             settings::agents::settings_agent_get,
             settings::agents::settings_agent_review,
+            settings::agents::settings_agent_generate_personality,
             settings::agents::settings_agent_save,
             settings::agents::settings_agent_defaults, settings::agents::settings_agent_create, settings::agents::settings_agent_archive, settings::agents::settings_agent_delete,
             settings::memory::memory_fresh_conversation, settings::memory::memory_get, settings::memory::memory_create, settings::memory::memory_mutate, settings::memory::memory_resolve, settings::memory::memory_resume, settings::memory::memory_reconcile, settings::memory::memory_reveal_item,

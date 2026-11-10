@@ -1218,3 +1218,28 @@ async fn main_checkout_requests_and_grants_follow_the_responding_provider() {
         rig.task.abort();
     }
 }
+
+#[tokio::test]
+async fn provider_notice_is_saved_once_without_blocking_two_turns() {
+    let notice = "Verified newer CLI controls.";
+    let provider = FakeProvider::new(vec![Step::text("answer"), Step::idle()]).with_notice(notice);
+    let mut rig = start(provider, ApprovalPolicy::Ask);
+    let mut markers = Vec::new();
+    for text in ["first", "second"] {
+        rig.commands.send(Command::Send(text.into())).unwrap();
+        let updates = rig.until_finished().await;
+        assert!(matches!(updates.last(), Some(Update::TurnFinished(TurnOutcome::Completed))));
+        markers.extend(updates.into_iter().filter_map(|u| match u { Update::ConversationMarker(m) => Some(m), _ => None }));
+    }
+    if markers.is_empty() {
+        loop {
+            if let Update::ConversationMarker(message) = rig.next().await { markers.push(message); break; }
+        }
+    }
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].role, Role::System);
+    assert_eq!(markers[0].blocks, vec![Block::Markdown { text: notice.into() }]);
+    assert_eq!(rig.messages().iter().filter(|m| m.role == Role::System && m.blocks == markers[0].blocks).count(), 1);
+    drop(rig.commands);
+    rig.task.await.unwrap();
+}
