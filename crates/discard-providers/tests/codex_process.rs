@@ -81,6 +81,7 @@ fn spec() -> SessionSpec {
         enforcement: EnforcementMode::HostPrompts,
         resume_handle: None,
         mcp_config: None,
+        sandbox_autorun: false,
     }
 }
 

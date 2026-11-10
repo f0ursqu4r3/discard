@@ -58,6 +58,16 @@ pub struct SessionSpec {
     pub resume_handle: Option<String>,
     /// Per-session MCP config file (mode 0600, outside the project). Used from milestone M3.
     pub mcp_config: Option<PathBuf>,
+    /// Run sandboxed shell commands without approval. Only a Workspace session reads this.
+    pub sandbox_autorun: bool,
+}
+
+/// Whether a provider adapter can run sandboxed commands without approval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxAutorun {
+    Supported,
+    /// The reason is shown to the user.
+    Unsupported(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -81,6 +91,10 @@ pub trait Provider: Send + Sync {
     fn capabilities(&self) -> &CapabilityMatrix;
     /// The provider can protect main-checkout Git metadata during write responses.
     fn supports_main_checkout_writes(&self) -> bool { false }
+    /// The adapter can run sandboxed shell commands without approval in a Workspace session.
+    fn sandbox_autorun(&self) -> SandboxAutorun {
+        SandboxAutorun::Unsupported("this provider has not been verified for autorun".into())
+    }
     async fn check_setup(&self) -> SetupStatus;
     /// Available models reported by this provider, without starting a conversation.
     async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {

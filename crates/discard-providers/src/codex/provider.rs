@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use discard_core::approval::Decision;
 use discard_core::capability::{CapabilityMatrix, EnforcementMode};
 use discard_core::event::{ApprovalId, EventKind, RawEvent};
-use discard_core::provider::{Provider, ProviderError, ProviderSession, SessionMode, SessionSpec, SetupStatus};
+use discard_core::provider::{Provider, ProviderError, ProviderSession, SandboxAutorun, SessionMode, SessionSpec, SetupStatus};
 use discard_core::redact::redact;
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
@@ -189,6 +189,11 @@ fn mcp_thread_config(path: &Path) -> Result<Value, ProviderError> {
 
 #[async_trait]
 impl Provider for CodexProvider {
+    // TODO: Run the Codex on-request sandbox spike (spec decision 12) and support autorun if it passes.
+    fn sandbox_autorun(&self) -> SandboxAutorun {
+        SandboxAutorun::Unsupported("Codex autorun needs a sandbox check first.".into())
+    }
+
     fn id(&self) -> &str {
         "codex"
     }
@@ -241,6 +246,9 @@ impl Provider for CodexProvider {
 
     async fn start_session(&self, mut spec: SessionSpec) -> Result<Box<dyn ProviderSession>, ProviderError> {
         let workspace = spec.mode == SessionMode::Workspace;
+        if workspace && spec.sandbox_autorun {
+            return Err(ProviderError::SandboxUnavailable("Codex does not support autorun".into()));
+        }
         if workspace && spec.cwd.join(".git").is_dir() {
             return Err(ProviderError::SandboxUnavailable("Codex cannot protect Git metadata in the main checkout".into()));
         }
@@ -608,7 +616,22 @@ mod tests {
             enforcement,
             resume_handle: None,
             mcp_config: None,
+            sandbox_autorun: false,
         }
+    }
+
+    #[test]
+    fn codex_reports_autorun_unsupported() {
+        assert!(matches!(CodexProvider::new("unused").sandbox_autorun(), SandboxAutorun::Unsupported(_)));
+    }
+
+    #[tokio::test]
+    async fn codex_refuses_to_start_an_autorun_session() {
+        let mut s = spec(EnforcementMode::HostPrompts);
+        s.mode = SessionMode::Workspace;
+        s.sandbox_autorun = true;
+        let error = CodexProvider::new("unused").start_session(s).await.err().unwrap();
+        assert!(matches!(&error, ProviderError::SandboxUnavailable(m) if m == "Codex does not support autorun"), "{error:?}");
     }
 
     #[tokio::test]

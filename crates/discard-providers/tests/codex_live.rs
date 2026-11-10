@@ -12,7 +12,7 @@ use discard_core::provider::{Provider, SessionSpec, SetupStatus};
 use discard_providers::codex::CodexProvider;
 
 fn spec(dir: &std::path::Path) -> SessionSpec {
-    SessionSpec { reasoning_effort: None, mode: discard_core::provider::SessionMode::Coding, cwd: dir.to_path_buf(), model: None, system_prompt: None, enforcement: EnforcementMode::HostPrompts, resume_handle: None, mcp_config: None }
+    SessionSpec { reasoning_effort: None, mode: discard_core::provider::SessionMode::Coding, cwd: dir.to_path_buf(), model: None, system_prompt: None, enforcement: EnforcementMode::HostPrompts, resume_handle: None, mcp_config: None, sandbox_autorun: false }
 }
 
 #[tokio::test]

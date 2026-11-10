@@ -296,7 +296,7 @@ impl Engine {
             mode: crate::provider::SessionMode::Conversation, cwd: self.cwd.clone(), model: self.model.clone(),
             system_prompt: Some("Summarize only the supplied history. Do not use tools or capture memory.".into()),
             enforcement: self.provider.capabilities().enforcement_for(self.policy).map_err(|e| e.to_string())?,
-            resume_handle: None, mcp_config: Some(prepared.mcp_config),
+            resume_handle: None, mcp_config: Some(prepared.mcp_config), sandbox_autorun: false,
         };
         crate::conversation_context::summarize(&*self.provider, spec, prompt, limit, commands).await
     }
@@ -559,6 +559,7 @@ impl Engine {
             enforcement,
             resume_handle,
             mcp_config: prepared.as_ref().map(|p| p.mcp_config.clone()),
+            sandbox_autorun: false,
         };
         let mut started = self.provider.start_session(spec.clone()).await;
         if let Err(ProviderError::SandboxUnavailable(detail)) = &started && session_mode == SessionMode::Workspace {

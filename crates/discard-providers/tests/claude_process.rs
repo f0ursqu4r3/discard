@@ -66,6 +66,7 @@ fn spec() -> SessionSpec {
         enforcement: EnforcementMode::HostPrompts,
         resume_handle: None,
         mcp_config: None,
+        sandbox_autorun: false,
     }
 }
 
@@ -401,7 +402,7 @@ async fn newer_claude_rejects_each_missing_emitted_flag() {
     let rig = Rig::new();
     let mut s = conversation_spec(&rig);
     s.reasoning_effort = Some("high".into());
-    let args = discard_providers::claude::build_args(&s, &[]).unwrap();
+    let args = discard_providers::claude::build_args(&s, &[], None).unwrap();
     let flags: Vec<_> = args.iter().filter(|arg| arg.starts_with("--")).collect();
     for missing in &flags {
         let help = flags.iter().filter(|flag| flag != &missing).map(|flag| flag.as_str()).collect::<Vec<_>>().join(" ");

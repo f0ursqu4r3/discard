@@ -252,6 +252,7 @@ mod tests {
             enforcement,
             resume_handle: None,
             mcp_config: None,
+            sandbox_autorun: false,
         }
     }
 

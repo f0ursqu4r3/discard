@@ -48,6 +48,7 @@ pub mod project_context;
 pub mod worktree_access;
 
 pub mod workspace_session;
+pub mod sandbox_reads;
 pub mod workspace_commit;
 pub mod workspace_lock;
 pub mod workspace_changes;

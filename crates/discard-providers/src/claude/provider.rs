@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use discard_core::approval::Decision;
 use discard_core::capability::{CapabilityMatrix, EnforcementMode};
 use discard_core::event::{ApprovalId, EventKind, RawEvent};
-use discard_core::provider::{Provider, ProviderError, ProviderSession, SessionMode, SessionSpec, SetupStatus};
+use discard_core::provider::{Provider, ProviderError, ProviderSession, SandboxAutorun, SessionMode, SessionSpec, SetupStatus};
+use discard_core::sandbox_reads::ReadDenials;
 use discard_core::redact::redact;
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
@@ -34,6 +35,8 @@ pub struct ClaudeProvider {
     executable: PathBuf,
     matrix: CapabilityMatrix,
     env: Vec<(OsString, OsString)>,
+    /// `DISCARD_HOME`. Autorun sessions deny reads of its files except the session's own.
+    discard_home: Option<PathBuf>,
 }
 
 impl ClaudeProvider {
@@ -43,7 +46,7 @@ impl ClaudeProvider {
     }
 
     pub fn with_matrix(executable: impl Into<PathBuf>, matrix: CapabilityMatrix) -> Self {
-        Self { executable: executable.into(), matrix, env: Vec::new() }
+        Self { executable: executable.into(), matrix, env: Vec::new(), discard_home: None }
     }
 
     /// Extra environment for the child process (used by tests).
@@ -51,12 +54,23 @@ impl ClaudeProvider {
         self.env.push((key.into(), value.into()));
         self
     }
+
+    /// The Discard data directory. Autorun needs it to protect files outside the session root.
+    pub fn with_discard_home(mut self, discard_home: impl Into<PathBuf>) -> Self {
+        self.discard_home = Some(discard_home.into());
+        self
+    }
 }
 
 /// Command-line arguments for a Claude session. Never includes credentials.
-pub fn build_args(spec: &SessionSpec, protected_git_paths: &[PathBuf]) -> Result<Vec<String>, ProviderError> {
+/// A Workspace session with `sandbox_autorun` needs `read_denials`, or it fails closed.
+pub fn build_args(spec: &SessionSpec, protected_git_paths: &[PathBuf], read_denials: Option<&ReadDenials>) -> Result<Vec<String>, ProviderError> {
     if spec.mode == SessionMode::Workspace && protected_git_paths.is_empty() {
         return Err(ProviderError::SandboxUnavailable("workspace Git write protection is unavailable".into()));
+    }
+    let autorun = spec.mode == SessionMode::Workspace && spec.sandbox_autorun;
+    if autorun && read_denials.is_none_or(|d| d.paths.is_empty()) {
+        return Err(ProviderError::SandboxUnavailable("autorun read protection is unavailable".into()));
     }
     let mut args: Vec<String> = [
         "-p",
@@ -99,6 +113,12 @@ pub fn build_args(spec: &SessionSpec, protected_git_paths: &[PathBuf]) -> Result
             settings["env"]["GIT_OPTIONAL_LOCKS"] = json!("0");
             settings["sandbox"] = json!({"enabled":true,"allowUnsandboxedCommands":false,"autoAllowBashIfSandboxed":false});
             settings["sandbox"]["filesystem"] = json!({"denyWrite":protected_git_paths});
+            if let (true, Some(denials)) = (autorun, read_denials) {
+                settings["sandbox"]["autoAllowBashIfSandboxed"] = json!(true);
+                settings["sandbox"]["filesystem"]["denyRead"] = json!(denials.paths);
+                // The sandbox covers Bash only. These rules block native Read, Glob, and Grep.
+                settings["permissions"] = json!({"deny":denials.rules});
+            }
         }
         args.extend(["--settings".into(), settings.to_string()]);
     }
@@ -131,6 +151,7 @@ impl ClaudeProvider {
 #[async_trait]
 impl Provider for ClaudeProvider {
     fn supports_main_checkout_writes(&self) -> bool { true }
+    fn sandbox_autorun(&self) -> SandboxAutorun { SandboxAutorun::Supported }
     fn id(&self) -> &str {
         "claude"
     }
@@ -176,6 +197,12 @@ impl Provider for ClaudeProvider {
         super::api::check_api_address(&self.command()).await?;
         let mut notice = None;
         let workspace = spec.mode == SessionMode::Workspace;
+        let autorun = workspace && spec.sandbox_autorun;
+        let read_denials = if autorun {
+            let discard_home = self.discard_home.as_deref().ok_or_else(|| ProviderError::SandboxUnavailable("autorun needs the Discard data directory".into()))?;
+            let home = std::env::home_dir().ok_or_else(|| ProviderError::SandboxUnavailable("autorun needs the home directory".into()))?;
+            Some(ReadDenials::new(&home, discard_home, &spec.cwd))
+        } else { None };
         let protected_git_paths = if workspace {
             if !cfg!(target_os = "macos") || spec.enforcement != EnforcementMode::HostPrompts {
                 return Err(ProviderError::SandboxUnavailable("Claude workspace sessions require macOS and host approvals".into()));
@@ -212,7 +239,7 @@ impl Provider for ClaudeProvider {
             if !help.status.success() {
                 return Err(setup(format!("Claude Code {running} could not verify conversation controls (tested version {CLAUDE_TESTED})")));
             }
-            let args = build_args(&spec, &protected_git_paths)?;
+            let args = build_args(&spec, &protected_git_paths, read_denials.as_ref())?;
             let minimum = ["--tools", "--allowedTools", "--strict-mcp-config", "--restricted", "--disable-slash-commands", "--system-prompt-snapshot", "--settings"];
             for flag in minimum.into_iter().chain(args.iter().map(String::as_str).filter(|arg| arg.starts_with("--"))) {
                 if !help_text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-').any(|token| token == flag) {
@@ -238,7 +265,7 @@ impl Provider for ClaudeProvider {
         }
         if workspace { command.env("GIT_OPTIONAL_LOCKS", "0"); }
         let mut child = spawn_tokio(command
-            .args(build_args(&spec, &protected_git_paths)?)
+            .args(build_args(&spec, &protected_git_paths, read_denials.as_ref())?)
             .current_dir(&spec.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -453,6 +480,7 @@ mod tests {
             enforcement,
             resume_handle: None,
             mcp_config: None,
+            sandbox_autorun: false,
         }
     }
 
@@ -460,7 +488,7 @@ mod tests {
     fn workspace_args_enable_only_the_write_tools_and_the_sandbox() {
         let mut s = spec(EnforcementMode::HostPrompts); s.mode = SessionMode::Workspace;
         let paths = vec![PathBuf::from("/worktree/.git"), PathBuf::from("/repo/.git")];
-        let args = build_args(&s, &paths).unwrap();
+        let args = build_args(&s, &paths, None).unwrap();
         assert!(has_pair(&args, "--tools", "Read,Glob,Grep,Edit,Write,Bash"));
         let value = |key| &args[args.iter().position(|a| a == key).unwrap() + 1];
         assert!(value("--allowedTools").contains("mcp__discard-memory__worktree_commit"));
@@ -476,10 +504,73 @@ mod tests {
         assert!(args.contains(&"--restricted".into()));
         assert!(!args.iter().any(|a| a == "acceptEdits" || a == "--resume"));
     }
+    fn autorun_settings(autorun: bool) -> Value {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let discard_home = tmp.path().join("discard");
+        let root = discard_home.join("worktrees").join("w1");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(discard_home.join("other")).unwrap();
+        let mut s = spec(EnforcementMode::HostPrompts);
+        s.mode = SessionMode::Workspace;
+        s.cwd = root.clone();
+        s.sandbox_autorun = autorun;
+        let denials = ReadDenials::new(&home, &discard_home, &root);
+        let args = build_args(&s, &[root.join(".git")], Some(&denials)).unwrap();
+        serde_json::from_str(&args[args.iter().position(|a| a == "--settings").unwrap() + 1]).unwrap()
+    }
+
+    #[test]
+    fn autorun_session_auto_allows_sandboxed_bash() {
+        let settings = autorun_settings(true);
+        assert_eq!(settings["sandbox"]["autoAllowBashIfSandboxed"], true);
+        assert_eq!(settings["sandbox"]["allowUnsandboxedCommands"], false);
+        assert_eq!(settings["sandbox"]["enabled"], true);
+        assert!(settings["sandbox"]["filesystem"]["denyWrite"].as_array().unwrap().iter().any(|p| p.as_str().unwrap().ends_with(".git")));
+        assert!(!settings["sandbox"]["filesystem"]["denyRead"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn autorun_denies_native_reads_of_credentials() {
+        let settings = autorun_settings(true);
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        assert!(deny.iter().any(|r| r.as_str().unwrap().starts_with("Read(") && r.as_str().unwrap().contains(".ssh")));
+        assert_eq!(deny.len(), settings["sandbox"]["filesystem"]["denyRead"].as_array().unwrap().len());
+    }
+
+    #[test]
+    fn workspace_without_autorun_keeps_bash_prompts() {
+        let settings = autorun_settings(false);
+        assert_eq!(settings["sandbox"]["autoAllowBashIfSandboxed"], false);
+        assert!(settings["sandbox"]["filesystem"].get("denyRead").is_none());
+        assert!(settings.get("permissions").is_none());
+    }
+
+    #[test]
+    fn autorun_without_read_denials_fails_closed() {
+        let mut s = spec(EnforcementMode::HostPrompts);
+        s.mode = SessionMode::Workspace;
+        s.sandbox_autorun = true;
+        assert!(matches!(build_args(&s, &[PathBuf::from("/w/.git")], None), Err(ProviderError::SandboxUnavailable(_))));
+    }
+
+    #[tokio::test]
+    async fn autorun_without_the_discard_home_fails_closed() {
+        let mut s = spec(EnforcementMode::HostPrompts);
+        s.mode = SessionMode::Workspace;
+        s.sandbox_autorun = true;
+        assert!(matches!(ClaudeProvider::new("unused").start_session(s).await, Err(ProviderError::SandboxUnavailable(_))));
+    }
+
+    #[test]
+    fn claude_supports_sandbox_autorun() {
+        assert_eq!(ClaudeProvider::new("unused").sandbox_autorun(), SandboxAutorun::Supported);
+    }
+
     #[test]
     fn workspace_args_refuse_missing_git_protection() {
         let mut s = spec(EnforcementMode::HostPrompts); s.mode = SessionMode::Workspace;
-        assert!(matches!(build_args(&s, &[]), Err(ProviderError::SandboxUnavailable(_))));
+        assert!(matches!(build_args(&s, &[], None), Err(ProviderError::SandboxUnavailable(_))));
     }
     #[tokio::test]
     async fn workspace_mode_requires_host_prompts() {
@@ -493,7 +584,7 @@ mod tests {
 
     #[test]
     fn streams_json_both_ways() {
-        let args = build_args(&spec(EnforcementMode::HostPrompts), &[]).unwrap();
+        let args = build_args(&spec(EnforcementMode::HostPrompts), &[], None).unwrap();
         assert!(args.contains(&"-p".to_string()));
         assert!(has_pair(&args, "--input-format", "stream-json"));
         assert!(has_pair(&args, "--output-format", "stream-json"));
@@ -502,14 +593,14 @@ mod tests {
 
     #[test]
     fn host_prompts_route_permission_requests_to_the_host() {
-        let args = build_args(&spec(EnforcementMode::HostPrompts), &[]).unwrap();
+        let args = build_args(&spec(EnforcementMode::HostPrompts), &[], None).unwrap();
         assert!(has_pair(&args, "--permission-prompts", "host"));
         assert!(has_pair(&args, "--permission-prompt-tool", "stdio"));
     }
 
     #[test]
     fn provider_denies_mode_never_asks_the_host() {
-        let args = build_args(&spec(EnforcementMode::ProviderDenies), &[]).unwrap();
+        let args = build_args(&spec(EnforcementMode::ProviderDenies), &[], None).unwrap();
         assert!(has_pair(&args, "--permission-prompts", "none"));
         assert!(!args.contains(&"--permission-prompt-tool".to_string()));
     }
@@ -522,7 +613,7 @@ mod tests {
         s.system_prompt = Some("Be brief.".into());
         s.resume_handle = Some("sess-1".into());
         s.mcp_config = Some(PathBuf::from("/run/discard/mcp.json"));
-        let args = build_args(&s, &[]).unwrap();
+        let args = build_args(&s, &[], None).unwrap();
         assert!(has_pair(&args, "--model", "haiku"));
         assert!(has_pair(&args, "--effort", "high"));
         assert!(has_pair(&args, "--append-system-prompt", "Be brief."));
@@ -532,7 +623,7 @@ mod tests {
 
     #[test]
     fn omitted_settings_add_no_flags() {
-        let args = build_args(&spec(EnforcementMode::HostPrompts), &[]).unwrap();
+        let args = build_args(&spec(EnforcementMode::HostPrompts), &[], None).unwrap();
         for flag in ["--effort", "--model", "--append-system-prompt", "--resume", "--mcp-config"] {
             assert!(!args.contains(&flag.to_string()), "{flag}");
         }
@@ -542,9 +633,9 @@ mod tests {
     fn conversation_memory_permissions_allow_only_the_exact_scoped_tools() {
         for enforcement in [EnforcementMode::HostPrompts, EnforcementMode::ProviderDenies] {
             let mut s = spec(enforcement);
-            assert!(!build_args(&s, &[]).unwrap().iter().any(|arg| arg == "--allowedTools"));
+            assert!(!build_args(&s, &[], None).unwrap().iter().any(|arg| arg == "--allowedTools"));
             s.mode = SessionMode::Conversation;
-            let args = build_args(&s, &[]).unwrap();
+            let args = build_args(&s, &[], None).unwrap();
             let allowed = args.iter().position(|arg| arg == "--allowedTools").expect("scoped memory permission list");
             assert_eq!(
                 args[allowed + 1],
@@ -558,7 +649,7 @@ mod tests {
     fn conversation_mode_removes_native_tools_and_provider_context() {
         let mut s = spec(EnforcementMode::HostPrompts);
         s.mode = discard_core::provider::SessionMode::Conversation;
-        let args = build_args(&s, &[]).unwrap();
+        let args = build_args(&s, &[], None).unwrap();
         for flag in ["--strict-mcp-config", "--restricted", "--disable-slash-commands"] {
             assert!(args.iter().any(|arg| arg == flag), "{flag}");
         }

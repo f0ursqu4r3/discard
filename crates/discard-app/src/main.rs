@@ -43,9 +43,9 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// The provider implementation for an agent's `provider` name.
-fn provider_for(name: &str) -> Result<Arc<dyn Provider>, String> {
+fn provider_for(name: &str, data_dir: &Path) -> Result<Arc<dyn Provider>, String> {
     match name {
-        "claude" => Ok(Arc::new(ClaudeProvider::new("claude"))),
+        "claude" => Ok(Arc::new(ClaudeProvider::new("claude").with_discard_home(data_dir))),
         "codex" => Ok(Arc::new(CodexProvider::new("codex"))),
         other => Err(format!("unknown provider `{other}`")),
     }
@@ -131,7 +131,7 @@ fn run_app(
     let mut provider_checks = Vec::new();
     let mut providers = Vec::new();
     for id in discard_core::bootstrap::PROVIDERS {
-        let provider = provider_for(id)?;
+        let provider = provider_for(id, data_dir)?;
         let setup = Arc::new(Mutex::new(None));
         providers.push(ProviderInfo { provider: provider.clone(), id: (*id).into(), matrix: provider.capabilities().clone(), setup: setup.clone() });
         provider_checks.push(((*id).to_string(), provider, setup));
@@ -195,6 +195,7 @@ fn run_app(
         let main_checkout_grants = main_checkout_grants.clone();
         let manager = manager.clone(); let handle = runtime.handle().clone();
         let conversation_dir = data_dir.join("conversations");
+        let data_dir = data_dir.to_path_buf();
         let session_mode = if options.builder { discard_core::provider::SessionMode::Coding } else { discard_core::provider::SessionMode::Conversation };
         Arc::new(move |channel| {
             let project = channel.project_id.as_ref().map(|id| {
@@ -218,7 +219,7 @@ fn run_app(
                 let (_, updates) = mpsc::unbounded_channel();
                 return Ok((CoreInit { state: UiState::new(channel.id.clone(), history).with_authors(authors), commands, project: project.as_ref().map(|p| p.name.clone()).unwrap_or_default(), channel: channel.name.clone(), agent: agent.name, provider: agent.provider }, updates));
             }
-            let provider = provider_for(&agent.provider)?;
+            let provider = provider_for(&agent.provider, &data_dir)?;
             let (commands_tx, commands_rx) = mpsc::unbounded_channel();
             let (updates_tx, updates_rx) = mpsc::unbounded_channel();
             let engine = Engine {
@@ -226,7 +227,7 @@ fn run_app(
         workspace_locks: workspace_locks.clone(),
         write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
         reasoning_effort: agent.reasoning_effort.clone(),
-        mode: session_mode, providers: discard_core::bootstrap::PROVIDERS.iter().filter_map(|id| provider_for(id).ok()).collect(),
+        mode: session_mode, providers: discard_core::bootstrap::PROVIDERS.iter().filter_map(|id| provider_for(id, &data_dir).ok()).collect(),
                 store: store.clone(), agent_id: channel.agent_id.clone(), project_id: channel.project_id.clone(),
                 memory: Some(memory.clone()), plugin_write: agent.plugin_write,
                 workspace_mode: channel.workspace_mode, workspace: Some(git_workspace.clone()),

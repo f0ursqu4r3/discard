@@ -27,6 +27,7 @@ async fn real_claude_asks_for_approval_and_runs_the_approved_command() {
         enforcement: EnforcementMode::HostPrompts,
         resume_handle: None,
         mcp_config: None,
+        sandbox_autorun: false,
     };
     let mut h = Harness::new();
     let mut seen = Vec::new();
@@ -62,6 +63,7 @@ async fn real_claude_does_not_run_a_denied_command() {
         enforcement: EnforcementMode::HostPrompts,
         resume_handle: None,
         mcp_config: None,
+        sandbox_autorun: false,
     };
     let mut h = Harness::new();
     let (_, outcome) = drive_with(
