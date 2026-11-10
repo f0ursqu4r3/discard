@@ -225,7 +225,7 @@ fn run_app(
             let engine = Engine {
         main_checkout_grants: main_checkout_grants.clone(),
         workspace_locks: workspace_locks.clone(),
-        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel), autorun: discard_core::workspace_session::AutorunState::Off,
         reasoning_effort: agent.reasoning_effort.clone(),
         mode: session_mode, providers: discard_core::bootstrap::PROVIDERS.iter().filter_map(|id| provider_for(id, &data_dir).ok()).collect(),
                 store: store.clone(), agent_id: channel.agent_id.clone(), project_id: channel.project_id.clone(),

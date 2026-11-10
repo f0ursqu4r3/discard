@@ -49,7 +49,7 @@ async fn run(provider: Arc<dyn Provider>, model: Option<&str>) {
     let engine = Engine {
         main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
-        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel), autorun: discard_core::workspace_session::AutorunState::Off,
         reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::clone(&store),

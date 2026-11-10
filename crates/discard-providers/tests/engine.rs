@@ -70,7 +70,7 @@ fn start_full(
     let engine = Engine {
         main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
-        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel), autorun: discard_core::workspace_session::AutorunState::Off,
         reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::clone(&store),
@@ -513,7 +513,7 @@ fn start_workspace(
     let engine = Engine {
         main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
-        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel), autorun: discard_core::workspace_session::AutorunState::Off,
         reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::clone(&store),
@@ -709,7 +709,7 @@ fn workspace_engine(provider: FakeProvider, eligible: bool) -> (tempfile::TempDi
     let probe = provider.probe.clone();
     let engine = Engine {
         main_checkout_grants: Arc::default(),
-        workspace_locks: Arc::default(), mode: discard_core::provider::SessionMode::Conversation, providers: vec![], store: Arc::new(Mutex::new(store)), agent_id: agent, project_id: Some(project.id), memory: Some(FakeMemory::new(false)), plugin_write: false, workspace_mode: WorkspaceMode::Worktree, workspace: None, observer: None, channel_name: channel.name, provider: Arc::new(provider), channel_id: channel.id, session_id: session, cwd: repo, model: Some("test".into()), reasoning_effort: None, system_prompt: None, policy: ApprovalPolicy::Ask, write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel) };
+        workspace_locks: Arc::default(), mode: discard_core::provider::SessionMode::Conversation, providers: vec![], store: Arc::new(Mutex::new(store)), agent_id: agent, project_id: Some(project.id), memory: Some(FakeMemory::new(false)), plugin_write: false, workspace_mode: WorkspaceMode::Worktree, workspace: None, observer: None, channel_name: channel.name, provider: Arc::new(provider), channel_id: channel.id, session_id: session, cwd: repo, model: Some("test".into()), reasoning_effort: None, system_prompt: None, policy: ApprovalPolicy::Ask, write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel), autorun: discard_core::workspace_session::AutorunState::Off };
     (dir, engine, probe)
 }
 
@@ -730,6 +730,78 @@ async fn eligible_branch_channel_starts_a_workspace_session() {
     assert_eq!(spec.cwd, dir.path().join("worktree").canonicalize().unwrap());
     assert_eq!(spec.resume_handle, None);
     assert!(spec.system_prompt.as_ref().unwrap().contains("Commit through worktree_commit"));
+    rig.task.abort();
+}
+
+fn opt_in_to_autorun(engine: &Engine) {
+    let store = engine.store.lock().unwrap();
+    let mut config = store.load_agent(&engine.agent_id).unwrap();
+    config.sandbox_autorun = true;
+    store.update_agent(&engine.agent_id, &config).unwrap();
+}
+
+#[tokio::test]
+async fn autorun_agent_starts_session_with_autorun_flag() {
+    let provider = FakeProvider::new(vec![Step::working(), Step::idle()]).with_sandbox_autorun(discard_core::provider::SandboxAutorun::Supported);
+    let (_dir, engine, probe) = workspace_engine(provider, true);
+    opt_in_to_autorun(&engine);
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::Send("Edit".into())).unwrap();
+    let updates = rig.until_finished().await;
+    let specs = rig.probe.specs.lock().unwrap(); let spec = &specs[0];
+    assert_eq!(spec.mode, discard_core::provider::SessionMode::Workspace);
+    assert!(spec.sandbox_autorun);
+    let prompt = spec.system_prompt.as_ref().unwrap();
+    assert!(prompt.contains("Shell commands inside this directory run without asking."));
+    assert!(!prompt.contains("Autorun is off"));
+    let profile = updates.iter().find_map(|u| match u { Update::SessionProfile(p) => Some(p), _ => None }).unwrap();
+    assert!(matches!(profile, discard_core::ui_state::SessionProfile::Workspace { autorun: discard_core::ui_state::AutorunState::On, .. }), "{profile:?}");
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn autorun_unavailable_starts_session_without_flag() {
+    let provider = FakeProvider::new(vec![Step::working(), Step::idle()]).with_sandbox_autorun(discard_core::provider::SandboxAutorun::Unsupported("not verified".into()));
+    let (_dir, engine, probe) = workspace_engine(provider, true);
+    opt_in_to_autorun(&engine);
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::Send("Edit".into())).unwrap();
+    let updates = rig.until_finished().await;
+    let specs = rig.probe.specs.lock().unwrap(); let spec = &specs[0];
+    assert_eq!(spec.mode, discard_core::provider::SessionMode::Workspace);
+    assert!(!spec.sandbox_autorun);
+    let prompt = spec.system_prompt.as_ref().unwrap();
+    assert!(prompt.contains("Shell commands ask for approval."));
+    assert_eq!(prompt.matches("Autorun is off for this response: not verified.").count(), 1);
+    let profile = updates.iter().find_map(|u| match u { Update::SessionProfile(p) => Some(p), _ => None }).unwrap();
+    assert!(matches!(profile, discard_core::ui_state::SessionProfile::Workspace { autorun: discard_core::ui_state::AutorunState::Unavailable(reason), .. } if reason == "not verified"), "{profile:?}");
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn agent_without_autorun_reports_off() {
+    let provider = FakeProvider::new(vec![Step::working(), Step::idle()]).with_sandbox_autorun(discard_core::provider::SandboxAutorun::Supported);
+    let (_dir, engine, probe) = workspace_engine(provider, true);
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::Send("Edit".into())).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(!rig.probe.specs.lock().unwrap()[0].sandbox_autorun);
+    let profile = updates.iter().find_map(|u| match u { Update::SessionProfile(p) => Some(p), _ => None }).unwrap();
+    assert!(matches!(profile, discard_core::ui_state::SessionProfile::Workspace { autorun: discard_core::ui_state::AutorunState::Off, .. }), "{profile:?}");
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn sandbox_fallback_turns_autorun_off() {
+    let provider = FakeProvider::new(vec![Step::working(), Step::idle()]).with_sandbox_autorun(discard_core::provider::SandboxAutorun::Supported).with_workspace_error("test unavailable");
+    let (_dir, engine, probe) = workspace_engine(provider, true);
+    opt_in_to_autorun(&engine);
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::Send("Edit".into())).unwrap(); rig.until_finished().await;
+    let specs = rig.probe.specs.lock().unwrap(); assert_eq!(specs.len(), 2);
+    assert!(specs[0].sandbox_autorun);
+    assert_eq!(specs[1].mode, discard_core::provider::SessionMode::Conversation);
+    assert!(!specs[1].sandbox_autorun);
     rig.task.abort();
 }
 

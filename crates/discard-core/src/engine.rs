@@ -7,7 +7,7 @@ use crate::event::{EventKind, Sequencer, SessionId};
 use crate::observer::{self, EventObserver};
 use crate::model::{AgentId, Block, ChannelId, Message, MessageId, ProjectId, Role, WorkspaceMode};
 use crate::provider::{Provider, ProviderError, SessionMode, SessionSpec, SetupStatus};
-use crate::workspace_session::{self, ReadOnlyReason, WorkspaceGrant, SessionProfile};
+use crate::workspace_session::{self, AutorunState, ReadOnlyReason, WorkspaceGrant, SessionProfile};
 use crate::redact::redact;
 use crate::store::Store;
 use crate::timeline::{ApprovalView, Timeline};
@@ -105,6 +105,8 @@ pub struct Engine {
     pub main_checkout_grants: Arc<crate::workspace_grants::MainCheckoutGrants>,
     pub mode: crate::provider::SessionMode,
     pub write_access: Result<WorkspaceGrant, ReadOnlyReason>,
+    /// Sandbox autorun for this response. `Off` unless the agent opted in and the grant is eligible.
+    pub autorun: AutorunState,
     pub workspace_locks: Arc<crate::workspace_lock::WorkspaceLocks>,
     pub providers: Vec<Arc<dyn Provider>>,
     pub store: Arc<Mutex<Store>>,
@@ -172,7 +174,7 @@ fn policy_name(policy: ApprovalPolicy) -> &'static str {
 
 impl Engine {
     async fn snapshot(&self, text: &str, recipient: Option<AgentId>) -> Result<(Self, crate::model::MessageAuthor), String> {
-        let (mut snapshot, author, binding) = {
+        let (mut snapshot, author, binding, agent_opted_in) = {
             let store = crate::driver::lock(&self.store);
             let channel = store.load_channel(&self.channel_id).map_err(|e| e.to_string())?;
             if store.channel_archived(&self.channel_id).map_err(|e| e.to_string())? { return Err("This conversation is archived.".into()); }
@@ -198,7 +200,7 @@ impl Engine {
             snapshot.reasoning_effort = config.reasoning_effort;
             snapshot.policy = config.policy;
             snapshot.plugin_write = false;
-            (snapshot, author, binding)
+            (snapshot, author, binding, config.sandbox_autorun)
         };
         snapshot.write_access = match binding {
             Ok(binding) => {
@@ -215,6 +217,10 @@ impl Engine {
                 }).await.map_err(|e| e.to_string())?
             },
             Err(reason) => Err(reason),
+        };
+        snapshot.autorun = match &snapshot.write_access {
+            Ok(grant) => workspace_session::autorun_state(agent_opted_in, grant, snapshot.provider.sandbox_autorun()),
+            Err(_) => AutorunState::Off,
         };
         Ok((snapshot, author))
     }
@@ -388,7 +394,7 @@ impl Engine {
     fn session_profile(&self) -> SessionProfile {
         if self.mode == SessionMode::Coding { return SessionProfile::Coding; }
         match &self.write_access {
-            Ok(grant) => SessionProfile::Workspace { root: grant.root.clone() },
+            Ok(grant) => SessionProfile::Workspace { root: grant.root.clone(), autorun: self.autorun.clone() },
             Err(reason) => {
                 let store = crate::driver::lock(&self.store);
                 let direct_without_opt_in = self.project_id.is_none() && store.load_agent(&self.agent_id).is_ok_and(|a| !a.workspace_write);
@@ -524,7 +530,7 @@ impl Engine {
         let mut system = base_system.clone();
         if session_mode == SessionMode::Workspace {
             let grant = self.write_access.as_ref().unwrap();
-            system.push_str("\n\n"); system.push_str(&workspace_session::workspace_prompt(grant));
+            system.push_str("\n\n"); system.push_str(&workspace_session::workspace_prompt(grant, &self.autorun));
             if let Some(instructions) = workspace_session::repository_instructions(&grant.root) { system.push_str("\n\n"); system.push_str(&instructions); }
         } else if session_mode == SessionMode::Conversation && let SessionProfile::ReadOnly { reason: Some(reason) } = self.session_profile() {
             system.push_str("\n\n"); system.push_str(&reason.note());
@@ -559,7 +565,7 @@ impl Engine {
             enforcement,
             resume_handle,
             mcp_config: prepared.as_ref().map(|p| p.mcp_config.clone()),
-            sandbox_autorun: false,
+            sandbox_autorun: session_mode == SessionMode::Workspace && self.autorun == AutorunState::On,
         };
         let mut started = self.provider.start_session(spec.clone()).await;
         if let Err(ProviderError::SandboxUnavailable(detail)) = &started && session_mode == SessionMode::Workspace {
@@ -581,6 +587,7 @@ impl Engine {
             spec.mcp_config = prepared.as_ref().map(|p| p.mcp_config.clone());
             let base_system = prepared.as_ref().map(|p| p.system_prompt.clone()).or_else(|| self.system_prompt.clone()).unwrap_or_default();
             session_mode = SessionMode::Conversation;
+            spec.sandbox_autorun = false;
             spec.mode = session_mode; spec.cwd = self.cwd.clone(); spec.system_prompt = Some(format!("{base_system}\n\n{}", reason.note()));
             started = self.provider.start_session(spec).await;
         }

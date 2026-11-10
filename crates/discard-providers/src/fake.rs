@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use discard_core::approval::Decision;
 use discard_core::capability::{Capabilities, CapabilityMatrix};
 use discard_core::event::{AgentStatus, ApprovalId, EventKind, RawEvent};
-use discard_core::provider::{Provider, ProviderError, ProviderSession, SessionSpec, SetupStatus, TextRequest};
+use discard_core::provider::{Provider, ProviderError, ProviderSession, SandboxAutorun, SessionSpec, SetupStatus, TextRequest};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,6 +54,7 @@ pub struct FakeProvider {
     generated_text: Option<Result<String, String>>,
     main_checkout_writes: bool,
     workspace_error: Option<String>,
+    sandbox_autorun: Option<SandboxAutorun>,
     matrix: CapabilityMatrix,
     script: Vec<Step>,
     setup: SetupStatus,
@@ -72,6 +73,7 @@ impl FakeProvider {
             generated_text: None,
             main_checkout_writes: false,
             workspace_error: None,
+            sandbox_autorun: None,
             matrix: CapabilityMatrix {
                 provider: "fake".into(),
                 matrix_version: 1,
@@ -94,6 +96,9 @@ impl FakeProvider {
     }
 
     pub fn with_notice(mut self, notice: impl Into<String>) -> Self { self.notice = Some(notice.into()); self }
+
+    /// What `sandbox_autorun()` reports. Without this, the fake keeps the trait default (unsupported).
+    pub fn with_sandbox_autorun(mut self, answer: SandboxAutorun) -> Self { self.sandbox_autorun = Some(answer); self }
 
     pub fn with_workspace_error(mut self, error: &str) -> Self { self.workspace_error = Some(error.into()); self }
 
@@ -126,6 +131,9 @@ impl FakeProvider {
 #[async_trait]
 impl Provider for FakeProvider {
     fn supports_main_checkout_writes(&self) -> bool { self.main_checkout_writes }
+    fn sandbox_autorun(&self) -> SandboxAutorun {
+        self.sandbox_autorun.clone().unwrap_or_else(|| SandboxAutorun::Unsupported("this provider has not been verified for autorun".into()))
+    }
     fn id(&self) -> &str {
         "fake"
     }

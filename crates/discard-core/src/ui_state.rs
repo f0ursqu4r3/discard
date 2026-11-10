@@ -1,6 +1,6 @@
 //! UI protocol and the state the views render. Pure logic: no GUI, no I/O.
 
-pub use crate::workspace_session::SessionProfile;
+pub use crate::workspace_session::{AutorunState, SessionProfile};
 
 use crate::approval::{ApprovalState, Decision};
 use crate::driver::TurnOutcome;

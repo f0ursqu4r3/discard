@@ -967,7 +967,7 @@ mod read_tests {
     }
     #[test]
     fn workspace_approvals_offer_prefix_controls() {
-        let prompt = approval_snapshot(discard_core::ui_state::SessionProfile::Workspace { root: "/worktree".into() });
+        let prompt = approval_snapshot(discard_core::ui_state::SessionProfile::Workspace { root: "/worktree".into(), autorun: discard_core::ui_state::AutorunState::Off });
         assert_eq!(prompt.always_allow, "available");
         assert_eq!(prompt.rule_words.unwrap(), ["cargo", "test", "-p", "x"]);
         assert_eq!(prompt.default_cut, Some(2));
