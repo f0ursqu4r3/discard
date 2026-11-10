@@ -4,7 +4,7 @@ use crate::{agent::AgentConfig, capability::ApprovalPolicy, model::{ChannelId, P
 use std::{io::Read, path::{Path, PathBuf}};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkspaceGrant { pub root: PathBuf, pub channel: ChannelId, pub branch: Option<String> }
+pub struct WorkspaceGrant { pub main_checkout: bool, pub root: PathBuf, pub channel: ChannelId, pub branch: Option<String> }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadOnlyReason {
@@ -27,11 +27,11 @@ impl ReadOnlyReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionProfile { ReadOnly { reason: Option<ReadOnlyReason> }, Workspace { root: PathBuf } }
+pub enum SessionProfile { Coding, ReadOnly { reason: Option<ReadOnlyReason> }, Workspace { root: PathBuf } }
 impl Default for SessionProfile { fn default() -> Self { Self::ReadOnly { reason: None } } }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkspaceBinding { pub record: crate::store::WorktreeRecord, branch_channel: bool }
+pub struct WorkspaceBinding { pub record: crate::store::WorktreeRecord, branch_channel: bool, expected_branch: Option<String> }
 
 /// Read saved authority only. This function performs no filesystem or process work.
 pub fn eligibility(store: &Store, channel: &ChannelId, agent: &AgentConfig) -> Result<WorkspaceBinding, ReadOnlyReason> {
@@ -46,13 +46,13 @@ pub fn eligibility(store: &Store, channel: &ChannelId, agent: &AgentConfig) -> R
     let record = record.ok_or(NoWorktree)?;
     if !agent.workspace_write { return Err(AgentNotOptedIn); }
     if agent.policy == ApprovalPolicy::DenyAll { return Err(PolicyDenyAll); }
-    Ok(WorkspaceBinding { record, branch_channel })
+    Ok(WorkspaceBinding { record, branch_channel, expected_branch: metadata.and_then(|m| m.branch) })
 }
 
 /// Verify the saved binding outside the Store lock, on a blocking worker.
-pub fn verify_binding(binding: WorkspaceBinding) -> Result<WorkspaceGrant, ReadOnlyReason> {
+pub fn verify_binding(binding: WorkspaceBinding, main_checkout_granted: bool) -> Result<WorkspaceGrant, ReadOnlyReason> {
     use ReadOnlyReason::*;
-    let WorkspaceBinding { record, branch_channel } = binding;
+    let WorkspaceBinding { record, branch_channel, expected_branch } = binding;
     let root = Path::new(&record.path).canonicalize().map_err(|_| WorktreeMissing)?;
     if !root.is_dir() { return Err(WorktreeMissing); }
     let checked = |args: &[&str]| git(&root, args).map_err(|e| WorktreeUnverified(format!("cannot verify the worktree: {e}")));
@@ -60,18 +60,21 @@ pub fn verify_binding(binding: WorkspaceBinding) -> Result<WorkspaceGrant, ReadO
     if root != actual_root { return Err(WorktreeUnverified("the binding is not a worktree root".into())); }
     let git_dir = PathBuf::from(checked(&["rev-parse", "--absolute-git-dir"])?).canonicalize().map_err(|_| WorktreeMissing)?;
     let common = PathBuf::from(checked(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?).canonicalize().map_err(|_| WorktreeMissing)?;
-    if git_dir == common || common.starts_with(&root) { return Err(MainCheckout); }
+    let main_checkout = git_dir == common || common.starts_with(&root);
+    if main_checkout && !main_checkout_granted { return Err(MainCheckout); }
     let repo_common = git(Path::new(&record.repo), &["rev-parse", "--path-format=absolute", "--git-common-dir"]).map_err(WorktreeUnverified)?;
     if Path::new(&repo_common).canonicalize().map_err(|_| WorktreeMissing)? != common { return Err(WorktreeUnverified("the repository binding changed".into())); }
     let branch = checked(&["rev-parse", "--abbrev-ref", "HEAD"])?;
     let branch = (branch != "HEAD").then_some(branch);
+    if main_checkout && (!branch_channel || branch.as_deref() != Some(record.branch.as_str()) || branch != expected_branch) { return Err(WorktreeUnverified("the main-checkout branch changed".into())); }
     // Detached worktree channels predate a distinct channel kind.
     if !branch_channel && branch.is_some() { return Err(NotProjectChannel); }
-    Ok(WorkspaceGrant { root, channel: record.channel_id, branch })
+    Ok(WorkspaceGrant { main_checkout, root, channel: record.channel_id, branch })
 }
 
 pub fn workspace_prompt(grant: &WorkspaceGrant) -> String {
     let mut prompt = format!("Workspace writes: Your writable directory is {}. File edits inside this directory are approved automatically. Shell commands ask for approval. Commit through worktree_commit. Do not push or merge unless the user asks. The OS sandbox blocks writes outside this directory, Git metadata writes, and network access unless the user approves a separate request. Put results in your reply. The changes card carries the file and commit details.", grant.root.display());
+    if grant.main_checkout { prompt.push_str(" You are writing in the main checkout for this response only. The user may also be editing these files."); }
     if grant.branch.is_none() { prompt.push_str(" This worktree has a detached HEAD. You can edit files, but commits are unavailable until it has a branch."); }
     prompt
 }
@@ -132,7 +135,19 @@ mod tests {
     use std::path::PathBuf;
 
     fn eligibility(store: &Store, channel: &ChannelId, agent: &AgentConfig) -> Result<WorkspaceGrant, ReadOnlyReason> {
-        super::eligibility(store, channel, agent).and_then(verify_binding)
+        super::eligibility(store, channel, agent).and_then(|binding| verify_binding(binding, false))
+    }
+
+    #[test]
+    fn main_checkout_needs_a_grant() {
+        let r = rig(false); let mut record = r.store.worktree_for(&r.channel).unwrap().unwrap();
+        record.path = r.repo.to_string_lossy().into(); record.branch = "main".into();
+        r.store.save_worktree(&record).unwrap();
+        let project = r.store.load_channel(&r.channel).unwrap().project_id.unwrap();
+        r.store.rename_project_branch(&project, &r.channel, "main").unwrap();
+        let binding = super::eligibility(&r.store, &r.channel, &r.agent).unwrap();
+        assert_eq!(verify_binding(binding.clone(), false), Err(ReadOnlyReason::MainCheckout));
+        assert!(verify_binding(binding, true).unwrap().main_checkout);
     }
 
     #[test]

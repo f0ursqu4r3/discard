@@ -282,10 +282,11 @@ mod tests {
             conn.execute("DELETE FROM channel_agents WHERE channel_id=?1", [&channel_id.0]).unwrap();
             conn.execute("DELETE FROM project_agents WHERE project_id=(SELECT project_id FROM channels WHERE id=?1)", [&channel_id.0]).unwrap();
             conn.execute_batch("ALTER TABLE projects DROP COLUMN avatar; ALTER TABLE messages DROP COLUMN author_json;").unwrap();
+            conn.execute_batch("DROP TABLE always_allow_rules;").unwrap();
             conn.pragma_update(None, "user_version", 4).unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 8);
+        assert_eq!(store.schema_version().unwrap(), 9);
         let metadata = store.project_channel_metadata(&channel_id).unwrap().unwrap();
         assert_eq!(metadata.kind, crate::model::ProjectChannelKind::Legacy);
         assert_eq!(store.load_channel(&channel_id).unwrap().workspace_mode, mode);
@@ -301,11 +302,10 @@ mod tests {
     fn git_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let run = |args: &[&str]| {
-            let ok = std::process::Command::new("git")
+            let ok = crate::process::spawn_std(std::process::Command::new("git")
                 .args(["-c", "user.name=T", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
                 .args(args)
-                .current_dir(dir.path())
-                .status()
+                .current_dir(dir.path())).and_then(|mut child| child.wait())
                 .unwrap()
                 .success();
             assert!(ok, "git {args:?}");

@@ -61,7 +61,7 @@ pub fn settings_plugin_modified_diff(context: tauri::State<'_, super::SettingsCo
     let root = context.home.join("plugins");
     let current = Snapshot::capture(&root.join(&name)).map_err(|e| e.to_string())?;
     let git = |args: &[&str]| -> Result<Vec<u8>, String> {
-        let output = Command::new("git").args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]).args(args).current_dir(&root).env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_TERMINAL_PROMPT", "0").output().map_err(|e| e.to_string())?;
+        let output = discard_core::process::spawn_std(Command::new("git").args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]).args(args).current_dir(&root).env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_TERMINAL_PROMPT", "0").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output()).map_err(|e| e.to_string())?;
         if output.status.success() { Ok(output.stdout) } else { Err(String::from_utf8_lossy(&output.stderr).into_owned()) }
     };
     let prefix = format!("{name}/");

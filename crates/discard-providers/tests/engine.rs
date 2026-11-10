@@ -68,6 +68,7 @@ fn start_full(
     let store = Arc::new(Mutex::new(store));
     let probe = provider.probe.clone();
     let engine = Engine {
+        main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
         write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
         reasoning_effort: None,
@@ -184,7 +185,7 @@ async fn approvals_flow_through_commands_and_report_the_decision() {
             break approval_id;
         }
     };
-    rig.commands.send(Command::Decide { approval_id: approval_id.clone(), decision: Decision::Approve }).unwrap();
+    rig.commands.send(Command::Decide { rule_cut: None, approval_id: approval_id.clone(), decision: Decision::Approve }).unwrap();
     seen.extend(rig.until_finished().await);
     assert!(seen.contains(&Update::ApprovalState { approval_id: approval_id.clone(), state: ApprovalState::Decided(Decision::Approve) }));
     assert!(matches!(seen.last(), Some(Update::TurnFinished(TurnOutcome::Completed))));
@@ -203,7 +204,7 @@ async fn a_second_decision_for_the_same_approval_is_not_reported_again() {
         }
     };
     for d in [Decision::Approve, Decision::Deny] {
-        rig.commands.send(Command::Decide { approval_id: approval_id.clone(), decision: d }).unwrap();
+        rig.commands.send(Command::Decide { rule_cut: None, approval_id: approval_id.clone(), decision: d }).unwrap();
     }
     let updates = rig.until_finished().await;
     let states = updates.iter().filter(|u| matches!(u, Update::ApprovalState { .. })).count();
@@ -240,7 +241,7 @@ async fn sending_during_a_turn_is_refused_without_disturbing_it() {
     rig.commands.send(Command::Send("second".into())).unwrap();
     let busy = rig.next().await;
     assert!(matches!(&busy, Update::Error(m) if m.contains("already running")), "{busy:?}");
-    rig.commands.send(Command::Decide { approval_id, decision: Decision::Approve }).unwrap();
+    rig.commands.send(Command::Decide { rule_cut: None, approval_id, decision: Decision::Approve }).unwrap();
     let updates = rig.until_finished().await;
     assert!(matches!(updates.last(), Some(Update::TurnFinished(TurnOutcome::Completed))));
     assert_eq!(rig.messages().iter().filter(|m| m.role == Role::User).count(), 1, "the refused message is not stored");
@@ -253,6 +254,7 @@ async fn missing_login_tells_the_user_the_command_to_run() {
     let mut rig = start(provider, ApprovalPolicy::Ask);
     rig.commands.send(Command::Send("hello".into())).unwrap();
     assert!(matches!(rig.next().await, Update::Responding(_)));
+    assert_eq!(rig.next().await, Update::SessionProfile(discard_core::ui_state::SessionProfile::Coding));
     let Update::SetupNeeded(text) = rig.next().await else { panic!("expected SetupNeeded") };
     assert!(text.contains("claude auth login"), "{text}");
     assert!(rig.probe.started_with.lock().unwrap().is_empty(), "no session may start");
@@ -402,7 +404,7 @@ async fn other_tools_still_wait_for_the_user_even_with_memory_on() {
     };
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(rig.probe.responses.lock().unwrap().is_empty(), "a shell command must not be auto-approved");
-    rig.commands.send(Command::Decide { approval_id, decision: Decision::Deny }).unwrap();
+    rig.commands.send(Command::Decide { rule_cut: None, approval_id, decision: Decision::Deny }).unwrap();
     rig.until_finished().await;
 }
 
@@ -421,7 +423,7 @@ async fn a_lookalike_tool_from_another_server_is_not_auto_approved() {
     };
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(rig.probe.responses.lock().unwrap().is_empty());
-    rig.commands.send(Command::Decide { approval_id, decision: Decision::Deny }).unwrap();
+    rig.commands.send(Command::Decide { rule_cut: None, approval_id, decision: Decision::Deny }).unwrap();
     rig.until_finished().await;
 }
 
@@ -438,7 +440,7 @@ async fn without_a_memory_service_even_a_memory_named_tool_waits_for_the_user() 
     };
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(rig.probe.responses.lock().unwrap().is_empty());
-    rig.commands.send(Command::Decide { approval_id, decision: Decision::Deny }).unwrap();
+    rig.commands.send(Command::Decide { rule_cut: None, approval_id, decision: Decision::Deny }).unwrap();
     rig.until_finished().await;
 }
 
@@ -509,6 +511,7 @@ fn start_workspace(
     let store = Arc::new(Mutex::new(store));
     let probe = provider.probe.clone();
     let engine = Engine {
+        main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
         write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
         reasoning_effort: None,
@@ -650,7 +653,7 @@ async fn an_observer_sees_the_approval_request_without_its_input() {
             break approval_id;
         }
     };
-    rig.commands.send(Command::Decide { approval_id, decision: Decision::Deny }).unwrap();
+    rig.commands.send(Command::Decide { rule_cut: None, approval_id, decision: Decision::Deny }).unwrap();
     rig.until_finished().await;
     let seen = rec.0.lock().unwrap().clone();
     let (_, payload) = seen.iter().find(|(n, _)| n == "approval_requested").expect("an approval_requested event");
@@ -682,7 +685,7 @@ async fn tool_events_are_not_sent_when_the_provider_cannot_show_tool_calls() {
             break approval_id;
         }
     };
-    rig.commands.send(Command::Decide { approval_id, decision: Decision::Deny }).unwrap();
+    rig.commands.send(Command::Decide { rule_cut: None, approval_id, decision: Decision::Deny }).unwrap();
     rig.until_finished().await;
     let names = rec.names();
     assert!(!names.iter().any(|n| n == "approval_requested" || n == "tool_call" || n == "tool_result"), "{names:?}");
@@ -692,7 +695,7 @@ async fn tool_events_are_not_sent_when_the_provider_cannot_show_tool_calls() {
 fn workspace_engine(provider: FakeProvider, eligible: bool) -> (tempfile::TempDir, Engine, Probe) {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("repo"); std::fs::create_dir(&repo).unwrap();
-    let git = |args: &[&str]| { let out = std::process::Command::new("git").current_dir(&repo).args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]).args(args).output().unwrap(); assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr)); };
+    let git = |args: &[&str]| { let out = discard_core::process::spawn_std(std::process::Command::new("git").current_dir(&repo).args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]).args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output()).unwrap(); assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr)); };
     git(&["init", "-q", "-b", "main"]);
     git(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "initial"]);
     let root = dir.path().join("worktree"); git(&["worktree", "add", "-b", "feature", root.to_str().unwrap()]);
@@ -704,7 +707,9 @@ fn workspace_engine(provider: FakeProvider, eligible: bool) -> (tempfile::TempDi
     store.create_named_channel(&channel, eligible.then_some("feature"), eligible.then_some(&discard_core::store::WorktreeRecord { channel_id: channel.id.clone(), path: root.to_string_lossy().into(), repo: repo.to_string_lossy().into(), branch: "feature".into(), base_commit: String::new(), owned: false })).unwrap();
     let session = SessionId::new(); store.create_session(&session, &channel.id).unwrap();
     let probe = provider.probe.clone();
-    let engine = Engine { workspace_locks: Arc::default(), mode: discard_core::provider::SessionMode::Conversation, providers: vec![], store: Arc::new(Mutex::new(store)), agent_id: agent, project_id: Some(project.id), memory: Some(FakeMemory::new(false)), plugin_write: false, workspace_mode: WorkspaceMode::Worktree, workspace: None, observer: None, channel_name: channel.name, provider: Arc::new(provider), channel_id: channel.id, session_id: session, cwd: repo, model: Some("test".into()), reasoning_effort: None, system_prompt: None, policy: ApprovalPolicy::Ask, write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel) };
+    let engine = Engine {
+        main_checkout_grants: Arc::default(),
+        workspace_locks: Arc::default(), mode: discard_core::provider::SessionMode::Conversation, providers: vec![], store: Arc::new(Mutex::new(store)), agent_id: agent, project_id: Some(project.id), memory: Some(FakeMemory::new(false)), plugin_write: false, workspace_mode: WorkspaceMode::Worktree, workspace: None, observer: None, channel_name: channel.name, provider: Arc::new(provider), channel_id: channel.id, session_id: session, cwd: repo, model: Some("test".into()), reasoning_effort: None, system_prompt: None, policy: ApprovalPolicy::Ask, write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel) };
     (dir, engine, probe)
 }
 
@@ -760,14 +765,14 @@ async fn out_of_root_edit_waits_for_the_user() {
 }
 
 #[tokio::test]
-async fn always_allow_in_a_workspace_session_is_refused_and_not_forwarded() {
-    let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::Approval { tool: "Bash".into(), input: json!({"command":"test"}) }, Step::idle()]), true);
+async fn always_allow_for_unparseable_command_is_refused() {
+    let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::Approval { tool: "Bash".into(), input: json!({"command":"cargo test; rm x"}) }, Step::idle()]), true);
     let mut rig = launch_workspace(engine, probe); rig.commands.send(Command::Send("Run".into())).unwrap();
     let id = loop { if let Update::Event(e) = rig.next().await && let EventKind::ApprovalRequest { approval_id, .. } = e.kind { break approval_id; } };
-    rig.commands.send(Command::Decide { approval_id: id.clone(), decision: Decision::AlwaysAllow }).unwrap();
-    assert_eq!(rig.next().await, Update::Error("Always allow is not available in write sessions yet. Approve this request once.".into()));
+    rig.commands.send(Command::Decide { rule_cut: None, approval_id: id.clone(), decision: Decision::AlwaysAllow }).unwrap();
+    assert_eq!(rig.next().await, Update::Error("This command uses shell syntax that Always allow cannot match. Approve it once.".into()));
     assert!(rig.probe.responses.lock().unwrap().is_empty());
-    rig.commands.send(Command::Decide { approval_id: id, decision: Decision::Approve }).unwrap(); rig.until_finished().await; rig.task.abort();
+    rig.commands.send(Command::Decide { rule_cut: None, approval_id: id, decision: Decision::Approve }).unwrap(); rig.until_finished().await; rig.task.abort();
 }
 
 #[tokio::test]
@@ -826,12 +831,12 @@ async fn commits_made_during_a_response_link_to_that_response() {
     let access = discard_core::worktree_access::WorktreeAccess::new(engine.store.clone()).with_locks(engine.workspace_locks.clone()); let agent = engine.agent_id.clone();
     let root = dir.path().join("worktree");
     for (key, value) in [("user.name", "Test"), ("user.email", "test@example.invalid"), ("commit.gpgsign", "false")] {
-        assert!(std::process::Command::new("git").current_dir(&root).args(["config", key, value]).status().unwrap().success());
+        assert!(discard_core::process::spawn_std(std::process::Command::new("git").current_dir(&root).args(["config", key, value])).and_then(|mut child| child.wait()).unwrap().success());
     }
     let mut rig = launch_workspace(engine, probe); rig.commands.send(Command::Send("commit".into())).unwrap();
     loop { if matches!(rig.next().await, Update::Event(_)) { break; } }
     std::fs::write(root.join("a"), "new").unwrap();
-    access.commit(&agent, &rig.channel, &root, &discard_core::workspace_commit::CommitRequest { message: "Change".into(), paths: None }).unwrap();
+    access.commit(&agent, &rig.channel, &root, &discard_core::workspace_commit::CommitRequest { message: "Change".into(), paths: None }, false).unwrap();
     rig.commands.send(Command::Cancel).unwrap(); rig.until_finished().await;
     let store = rig.store.lock().unwrap(); let messages = store.messages_for_channel(&rig.channel).unwrap();
     let response = messages.iter().find(|m| m.role == Role::Agent).unwrap();
@@ -897,7 +902,7 @@ async fn stopped_response_waits_for_active_commit_before_saving_changes() {
     std::fs::write(&script, format!("#!/bin/sh\nif [ ! -e '{}' ]; then\n touch '{}'\n while [ ! -e '{}' ]; do sleep 0.01; done\nfi\ncat\n", entered.display(), entered.display(), release.display())).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     for (key, value) in [("user.name", "Test"), ("user.email", "test@example.invalid"), ("commit.gpgsign", "false"), ("filter.delay.clean", script.to_str().unwrap())] {
-        assert!(std::process::Command::new("git").current_dir(&root).args(["config", key, value]).status().unwrap().success());
+        assert!(discard_core::process::spawn_std(std::process::Command::new("git").current_dir(&root).args(["config", key, value])).and_then(|mut child| child.wait()).unwrap().success());
     }
     std::fs::write(root.join(".gitattributes"), "gated.txt filter=delay\n").unwrap();
     let access = Arc::new(discard_core::worktree_access::WorktreeAccess::new(engine.store.clone()).with_locks(engine.workspace_locks.clone()));
@@ -905,7 +910,7 @@ async fn stopped_response_waits_for_active_commit_before_saving_changes() {
     loop { if matches!(rig.next().await, Update::Event(_)) { break; } }
     std::fs::write(root.join("gated.txt"), "new\n").unwrap();
     let commit_root = root.clone(); let channel = rig.channel.clone();
-    let commit = tokio::task::spawn_blocking(move || access.commit(&agent, &channel, &commit_root, &discard_core::workspace_commit::CommitRequest { message: "Delayed commit".into(), paths: None }));
+    let commit = tokio::task::spawn_blocking(move || access.commit(&agent, &channel, &commit_root, &discard_core::workspace_commit::CommitRequest { message: "Delayed commit".into(), paths: None }, false));
     tokio::time::timeout(Duration::from_secs(5), async { while !entered.exists() { tokio::time::sleep(Duration::from_millis(10)).await; } }).await.unwrap();
     let gate = release.clone(); std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(500)); std::fs::write(gate, "release").unwrap(); });
     rig.commands.send(Command::Cancel).unwrap();
@@ -915,4 +920,301 @@ async fn stopped_response_waits_for_active_commit_before_saving_changes() {
     assert!(response.blocks.iter().any(|b| matches!(b, Block::Changes { commits, state: discard_core::workspace_changes::ChangesState::Stopped, .. } if commits.iter().any(|c| c.id == committed.commit))));
     assert_eq!(rig.store.lock().unwrap().link_agent_commits(&rig.channel, &response.id).unwrap(), 0);
     rig.until_finished().await; rig.task.abort();
+}
+
+
+async fn next_approval(rig: &mut Rig) -> ApprovalId {
+    loop { if let Update::Event(e) = rig.next().await && let EventKind::ApprovalRequest { approval_id, .. } = e.kind { return approval_id; } }
+}
+
+fn command_step(command: &str) -> Step {
+    Step::Approval { tool: "Bash".into(), input: json!({"command": command}) }
+}
+
+fn save_command_rule(engine: &Engine) -> discard_core::always_allow::AlwaysAllowRule {
+    engine.store.lock().unwrap().insert_always_allow_rule(&engine.agent_id, engine.project_id.as_ref().unwrap(), &discard_core::always_allow::RuleTarget::Command { words: vec!["cargo".into(), "test".into()] }).unwrap()
+}
+
+#[tokio::test]
+async fn matching_command_rule_auto_approves_in_workspace_sessions() {
+    let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![command_step("cargo test -p x"), Step::idle()]), true);
+    let rule = save_command_rule(&engine);
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::Send("run".into())).unwrap();
+    rig.until_finished().await;
+    let id = rig.probe.responses.lock().unwrap()[0].0.clone();
+    let a = rig.store.lock().unwrap().load_approval(&id).unwrap();
+    assert_eq!(a.audit[0].decider, discard_core::approval::Decider::Policy(format!("always_allow:{}", rule.id)));
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn compound_command_never_matches_a_rule() {
+    let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![command_step("cargo test; rm x"), Step::idle()]), true);
+    save_command_rule(&engine);
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::Send("run".into())).unwrap(); next_approval(&mut rig).await;
+    assert!(rig.probe.responses.lock().unwrap().is_empty());
+    rig.commands.send(Command::Cancel).unwrap(); rig.until_finished().await; rig.task.abort();
+}
+
+async fn saves_cut(cut: Option<usize>) {
+    let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![command_step("cargo test -p x"), Step::idle()]), true);
+    let project = engine.project_id.clone().unwrap();
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::Send("run".into())).unwrap(); let id = next_approval(&mut rig).await;
+    rig.commands.send(Command::Decide { approval_id: id.clone(), decision: Decision::AlwaysAllow, rule_cut: cut }).unwrap();
+    rig.until_finished().await;
+    assert_eq!(rig.probe.responses.lock().unwrap().as_slice(), [(id, Decision::Approve)]);
+    let rules = rig.store.lock().unwrap().always_allow_rules(&project).unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].target, discard_core::always_allow::RuleTarget::Command { words: vec!["cargo".into(), "test".into()] });
+    rig.task.abort();
+}
+#[tokio::test]
+async fn always_allow_saves_the_chosen_cut_and_approves_once() { saves_cut(Some(2)).await; }
+#[tokio::test]
+async fn always_allow_without_a_cut_uses_the_default() { saves_cut(None).await; }
+
+#[tokio::test]
+async fn revoked_rule_stops_matching_in_a_running_response() {
+    let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![command_step("cargo test"), command_step("barrier"), command_step("cargo test"), Step::idle()]), true);
+    let rule = save_command_rule(&engine);
+    let mut rig = launch_workspace(engine, probe); rig.commands.send(Command::Send("run".into())).unwrap();
+    next_approval(&mut rig).await;
+    let barrier = next_approval(&mut rig).await;
+    rig.store.lock().unwrap().delete_always_allow_rule(&rule.project, &rule.id).unwrap();
+    rig.commands.send(Command::Decide { approval_id: barrier, decision: Decision::Approve, rule_cut: None }).unwrap();
+    let last = next_approval(&mut rig).await;
+    assert_eq!(rig.store.lock().unwrap().load_approval(&last).unwrap().state, ApprovalState::Pending);
+    rig.commands.send(Command::Cancel).unwrap(); rig.until_finished().await; rig.task.abort();
+}
+
+#[tokio::test]
+async fn coding_sessions_keep_provider_session_always_allow() {
+    for rule_cut in [None, Some(1)] {
+        let mut rig = start(FakeProvider::new(vec![bash(), Step::idle()]), ApprovalPolicy::Ask);
+        rig.commands.send(Command::Send("run".into())).unwrap();
+        let mut coding_profile = false;
+        let id = loop {
+            match rig.next().await {
+                Update::SessionProfile(discard_core::ui_state::SessionProfile::Coding) => coding_profile = true,
+                Update::Event(e) => if let EventKind::ApprovalRequest { approval_id, .. } = e.kind { break approval_id; },
+                _ => {}
+            }
+        };
+        assert!(coding_profile);
+        rig.commands.send(Command::Decide { approval_id: id.clone(), decision: Decision::AlwaysAllow, rule_cut }).unwrap();
+        rig.until_finished().await;
+        assert_eq!(rig.probe.responses.lock().unwrap().as_slice(), [(id, Decision::AlwaysAllow)]);
+        let store = rig.store.lock().unwrap();
+        let project = store.load_channel(&rig.channel).unwrap().project_id.unwrap();
+        assert!(store.always_allow_rules(&project).unwrap().is_empty());
+        rig.task.abort();
+    }
+}
+
+#[tokio::test]
+async fn matching_host_rule_auto_approves_network_requests() {
+    use discard_core::approval::{ApprovalKind, Decider};
+    let id = ApprovalId::new();
+    let event = EventKind::ApprovalRequest { approval_id: id.clone(), kind: ApprovalKind::NetworkDomain, call_id: "network".into(), tool: "SandboxNetworkAccess".into(), input: json!({"host":"REGISTRY.NPMJS.ORG"}), paths: vec![] };
+    let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::Emit(event), Step::Hang]), true);
+    let rule = engine.store.lock().unwrap().insert_always_allow_rule(&engine.agent_id, engine.project_id.as_ref().unwrap(), &discard_core::always_allow::RuleTarget::Host { host: "registry.npmjs.org".into() }).unwrap();
+    let mut rig = launch_workspace(engine, probe); rig.commands.send(Command::Send("run".into())).unwrap();
+    loop { if let Update::ApprovalState { state: ApprovalState::Decided(Decision::Approve), .. } = rig.next().await { break; } }
+    rig.commands.send(Command::Cancel).unwrap(); rig.until_finished().await;
+    assert_eq!(rig.store.lock().unwrap().load_approval(&id).unwrap().audit[0].decider, Decider::Policy(format!("always_allow:{}", rule.id))); rig.task.abort();
+}
+
+#[tokio::test]
+async fn rules_never_apply_to_escapes_or_other_agents() {
+    for escape in [true, false] {
+        let id = ApprovalId::new();
+        let event = EventKind::ApprovalRequest { approval_id: id.clone(), kind: if escape { discard_core::approval::ApprovalKind::SandboxEscape } else { Default::default() }, call_id: "shell".into(), tool: "Bash".into(), input: json!({"command":"cargo test"}), paths: vec![] };
+        let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::Emit(event), Step::Hang]), true);
+        let rule = save_command_rule(&engine);
+        if !escape {
+            let store = engine.store.lock().unwrap();
+            store.delete_always_allow_rule(&rule.project, &rule.id).unwrap();
+            let other = store.create_agent(&store.load_agent(&engine.agent_id).unwrap()).unwrap();
+            store.insert_always_allow_rule(&other, &rule.project, &rule.target).unwrap();
+        }
+        let mut rig = launch_workspace(engine, probe); rig.commands.send(Command::Send("run".into())).unwrap(); next_approval(&mut rig).await;
+        rig.commands.send(Command::Cancel).unwrap(); rig.until_finished().await;
+        assert!(rig.probe.responses.lock().unwrap().is_empty()); rig.task.abort();
+    }
+}
+
+#[tokio::test]
+async fn continue_answers_as_the_given_agent_without_a_new_user_message() {
+    let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::text("done"), Step::idle()]), true);
+    let agent = engine.agent_id.clone();
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::Continue { agent: agent.clone(), note: "Created worktree.".into() }).unwrap();
+    rig.until_finished().await;
+    assert!(rig.messages().iter().all(|m| m.role != Role::User));
+    assert!(rig.messages().iter().any(|m| m.role == Role::Agent));
+    assert!(rig.probe.sent.lock().unwrap()[0].trim_end().ends_with("The user approved your request in the app: Created worktree. Continue the user's latest request in this channel. Do not repeat work that is already done.\n</current_user_request>"));
+    assert!(rig.store.lock().unwrap().message_authors(&rig.channel).unwrap().values().all(|a| a.agent_id == agent));
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn continue_ignores_mentions_in_history() {
+    let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::text("done"), Step::idle()]), true);
+    let agent = engine.agent_id.clone();
+    engine.store.lock().unwrap().insert_message(&discard_core::model::Message { id: discard_core::model::MessageId::new(), channel_id: engine.channel_id.clone(), role: Role::User, blocks: vec![Block::Markdown { text: "@missing please edit".into() }] }).unwrap();
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::Continue { agent, note: "@missing approved".into() }).unwrap();
+    rig.until_finished().await;
+    assert_eq!(rig.probe.specs.lock().unwrap().len(), 1);
+    assert_eq!(rig.messages().iter().filter(|m| m.role == Role::User).count(), 1);
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn continue_uses_current_eligibility() {
+    let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::text("done"), Step::idle()]), true);
+    let agent = engine.agent_id.clone();
+    let record = engine.store.lock().unwrap().worktree_for(&engine.channel_id).unwrap().unwrap();
+    engine.store.lock().unwrap().delete_worktree(&engine.channel_id).unwrap();
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::Send("edit".into())).unwrap(); rig.until_finished().await;
+    rig.store.lock().unwrap().save_worktree(&record).unwrap();
+    rig.commands.send(Command::Continue { agent, note: "Created worktree.".into() }).unwrap(); rig.until_finished().await;
+    let specs = rig.probe.specs.lock().unwrap();
+    assert_eq!(specs[0].mode, discard_core::provider::SessionMode::Conversation);
+    assert_eq!(specs[1].mode, discard_core::provider::SessionMode::Workspace);
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn continue_with_an_archived_agent_fails_with_the_normal_error() {
+    let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::idle()]), true);
+    let agent = engine.agent_id.clone();
+    engine.store.lock().unwrap().set_agent_archived(&agent, true).unwrap();
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::Continue { agent, note: "Approved.".into() }).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(updates.contains(&Update::Error("This agent is archived. Restore it before sending a message.".into())));
+    assert!(rig.probe.specs.lock().unwrap().is_empty()); rig.task.abort();
+}
+
+fn main_checkout_engine() -> (tempfile::TempDir, Engine, Probe) {
+    let (dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::text("done"), Step::idle()]).with_main_checkout_writes(true), true);
+    { let store = engine.store.lock().unwrap(); let mut record = store.worktree_for(&engine.channel_id).unwrap().unwrap(); record.path = dir.path().join("repo").to_string_lossy().into_owned(); record.branch = "main".into(); store.save_worktree(&record).unwrap(); store.rename_project_branch(engine.project_id.as_ref().unwrap(), &engine.channel_id, "main").unwrap(); }
+    (dir, engine, probe)
+}
+#[tokio::test]
+async fn granted_response_writes_in_the_main_checkout_once() {
+    let (dir, engine, probe) = main_checkout_engine();
+    engine.main_checkout_grants.grant(&engine.channel_id, &engine.agent_id);
+    let mut rig = launch_workspace(engine, probe);
+    for _ in 0..2 { rig.commands.send(Command::Send("edit".into())).unwrap(); rig.until_finished().await; }
+    let specs = rig.probe.specs.lock().unwrap();
+    assert_eq!(specs[0].mode, discard_core::provider::SessionMode::Workspace);
+    assert_eq!(specs[0].cwd, dir.path().join("repo").canonicalize().unwrap());
+    assert!(specs[0].system_prompt.as_ref().unwrap().contains("You are writing in the main checkout for this response only. The user may also be editing these files."));
+    assert_eq!(specs[1].mode, discard_core::provider::SessionMode::Conversation);
+    assert!(specs[1].system_prompt.as_ref().unwrap().contains("agents do not write in the main checkout")); rig.task.abort();
+}
+#[tokio::test]
+async fn a_mentioned_agent_does_not_use_another_agents_grant() {
+    let (_dir, engine, probe) = main_checkout_engine();
+    engine.main_checkout_grants.grant(&engine.channel_id, &engine.agent_id);
+    { let store = engine.store.lock().unwrap(); let mut config = store.load_agent(&engine.agent_id).unwrap(); config.name = "Other".into(); store.create_agent(&config).unwrap(); }
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::Send("@Other edit".into())).unwrap(); rig.until_finished().await;
+    rig.commands.send(Command::Send("edit".into())).unwrap(); rig.until_finished().await;
+    let specs = rig.probe.specs.lock().unwrap();
+    assert_eq!(specs[0].mode, discard_core::provider::SessionMode::Conversation);
+    assert_eq!(specs[1].mode, discard_core::provider::SessionMode::Workspace); rig.task.abort();
+}
+
+#[tokio::test]
+async fn failed_continue_does_not_leave_main_checkout_grant_for_later_send() {
+    for unavailable_provider in [true, false] {
+        let (_dir, engine, probe) = main_checkout_engine();
+        let agent = engine.agent_id.clone();
+        engine.main_checkout_grants.grant(&engine.channel_id, &agent);
+        { let store = engine.store.lock().unwrap(); let mut config = store.load_agent(&agent).unwrap();
+            if unavailable_provider { config.provider = "unavailable".into(); } else { config.workspace_write = false; }
+            store.update_agent(&agent, &config).unwrap();
+        }
+        let mut rig = launch_workspace(engine, probe);
+        rig.commands.send(Command::Continue { agent: agent.clone(), note: "Approved.".into() }).unwrap(); rig.until_finished().await;
+        { let store = rig.store.lock().unwrap(); let mut config = store.load_agent(&agent).unwrap(); config.provider = "fake".into(); config.workspace_write = true; store.update_agent(&agent, &config).unwrap(); }
+        rig.commands.send(Command::Send("edit".into())).unwrap(); rig.until_finished().await;
+        assert_eq!(rig.probe.specs.lock().unwrap().last().unwrap().mode, discard_core::provider::SessionMode::Conversation);
+        rig.task.abort();
+    }
+}
+
+#[tokio::test]
+async fn main_checkout_requests_and_grants_follow_the_responding_provider() {
+    use discard_core::provider::{Provider, SessionMode};
+    use discard_mcp::{service::MemoryRuntime, tools::McpHandler};
+    assert!(discard_providers::claude::ClaudeProvider::new("unused").supports_main_checkout_writes());
+    assert!(!discard_providers::codex::CodexProvider::new("unused").supports_main_checkout_writes());
+    assert!(!FakeProvider::new(vec![]).supports_main_checkout_writes());
+    for supported in [false, true] {
+        let (dir, mut engine, _) = main_checkout_engine();
+        let provider = Arc::new(FakeProvider::new(vec![Step::working(), Step::Hang]).with_main_checkout_writes(supported));
+        let probe = provider.probe.clone();
+        // The responding provider comes from the current registry, not the engine's old provider.
+        engine.provider = Arc::new(FakeProvider::new(vec![]).with_main_checkout_writes(!supported));
+        engine.providers = vec![provider];
+        let memory = Arc::new(discard_core::memory::MemoryStore::open_in_memory_index(&dir.path().join("memory")).unwrap());
+        let requests = Arc::new(discard_core::write_requests::WriteRequests::default());
+        let workspace = Arc::new(discard_core::workspace::GitWorkspace::new(&dir.path().join("owned"), engine.store.clone()));
+        let access = Arc::new(discard_core::worktree_access::WorktreeAccess::new(engine.store.clone()).with_locks(engine.workspace_locks.clone()));
+        let runtime = MemoryRuntime::start_with_write_services(memory.clone(), &dir.path().join("run"), None, Some(access.clone()), Some((requests.clone(), workspace.clone()))).await.unwrap();
+        let handler = McpHandler::new(memory).with_worktrees(access).with_write_requests(requests.clone(), workspace);
+        engine.memory = Some(runtime.clone());
+        let grants = engine.main_checkout_grants.clone(); let agent = engine.agent_id.clone();
+        let mut rig = launch_workspace(engine, probe);
+        let identity = |spec: &discard_core::provider::SessionSpec| {
+            let config: serde_json::Value = serde_json::from_slice(&std::fs::read(spec.mcp_config.as_ref().unwrap()).unwrap()).unwrap();
+            let token = config["mcpServers"]["discard-memory"]["headers"]["Authorization"].as_str().unwrap().strip_prefix("Bearer ").unwrap();
+            runtime.registry().lookup(token).unwrap()
+        };
+        rig.commands.send(Command::Send("edit".into())).unwrap();
+        loop { if matches!(rig.next().await, Update::Event(_)) { break; } }
+        let spec = rig.probe.specs.lock().unwrap().last().unwrap().clone();
+        assert_eq!(spec.mode, SessionMode::Conversation);
+        let who = identity(&spec);
+        assert_eq!(who.main_checkout_requests, supported);
+        assert!(!who.main_checkout_grant);
+        let tools = handler.handle(&who, &json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})).unwrap();
+        assert_eq!(tools.to_string().contains("main_checkout_request_write"), supported);
+        let prompt = spec.system_prompt.as_deref().unwrap();
+        if supported {
+            assert!(prompt.contains("This branch is checked out in the main checkout. Call main_checkout_request_write to ask for write access for one response."));
+        } else {
+            assert!(prompt.contains("This branch is checked out in the main checkout. This agent's provider cannot write there. If the user asks for changes, explain this once."));
+            assert!(!prompt.contains("main_checkout_request_write"));
+        }
+        let reply = handler.handle(&who, &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"main_checkout_request_write","arguments":{}}})).unwrap();
+        assert_eq!(reply["result"]["isError"].as_bool().unwrap_or(false), !supported);
+        assert_eq!(requests.list(&rig.channel).len(), usize::from(supported));
+        rig.commands.send(Command::Cancel).unwrap(); rig.until_finished().await;
+        // Also reject a stale app approval after the provider loses support.
+        grants.grant(&rig.channel, &agent);
+        rig.commands.send(Command::Continue { agent: agent.clone(), note: "Approved in the app.".into() }).unwrap();
+        loop { if matches!(rig.next().await, Update::Event(_)) { break; } }
+        let spec = rig.probe.specs.lock().unwrap().last().unwrap().clone();
+        assert_eq!(spec.mode, if supported { SessionMode::Workspace } else { SessionMode::Conversation });
+        if supported { assert_eq!(spec.cwd, dir.path().join("repo").canonicalize().unwrap()); }
+        assert_eq!(identity(&spec).main_checkout_grant, supported);
+        assert!(!grants.take(&rig.channel, &agent));
+        rig.commands.send(Command::Cancel).unwrap(); rig.until_finished().await;
+        // Old memory entry points must never infer provider support.
+        let prepared = runtime.prepare_turn(&agent, who.project.as_ref(), &rig.channel, None, false, "edit").unwrap();
+        let legacy = runtime.registry().lookup(&prepared.token).unwrap();
+        assert!(!legacy.main_checkout_requests);
+        assert!(!handler.handle(&legacy, &json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}})).unwrap().to_string().contains("main_checkout_request_write"));
+        runtime.finish(&prepared.token);
+        rig.task.abort();
+    }
 }

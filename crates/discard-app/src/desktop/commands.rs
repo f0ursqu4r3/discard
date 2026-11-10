@@ -50,8 +50,8 @@ pub async fn decide_worktree_removal(
     }).await.map_err(|e| e.to_string())?
 }
 #[tauri::command]
-pub fn decide_approval(core: State<'_, Arc<AppCore>>, channel_id: String, approval_id: String, decision: String) {
-    core.decide_in(Some(&channel_id), approval_id, decision);
+pub fn decide_approval(core: State<'_, Arc<AppCore>>, channel_id: String, approval_id: String, decision: String, rule_cut: Option<usize>) {
+    core.decide_in(Some(&channel_id), approval_id, decision, rule_cut);
 }
 #[tauri::command]
 pub fn cancel_turn(core: State<'_, Arc<AppCore>>, channel_id: String) {
@@ -310,4 +310,47 @@ pub async fn open_agent_chat(app: tauri::AppHandle, channels: State<'_, Arc<supe
 pub async fn restore_conversation(channels: State<'_, Arc<super::channels::Channels>>, channel_id: String) -> Result<(), String> {
     let channels = channels.inner().clone();
     tauri::async_runtime::spawn_blocking(move || channels.restore_conversation(&channel_id)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn get_always_allow_rules(channels: State<'_, Arc<super::channels::Channels>>, project_id: String) -> Result<Vec<super::dto::RuleDto>, String> {
+    let store = channels.store.lock().unwrap_or_else(|e| e.into_inner());
+    store.always_allow_rules(&discard_core::model::ProjectId(project_id)).map_err(|e| e.to_string())?.into_iter().map(|rule| {
+        let agent = store.load_agent(&rule.agent).map_err(|e| e.to_string())?;
+        let (kind, text) = match rule.target {
+            discard_core::always_allow::RuleTarget::Command { words } => ("command", words.join(" ")),
+            discard_core::always_allow::RuleTarget::Host { host } => ("host", host),
+        };
+        Ok(super::dto::RuleDto {
+            id: rule.id,
+            agent_id: rule.agent.0,
+            agent_name: agent.name,
+            kind: kind.into(),
+            text,
+            created_at: rule.created_at,
+        })
+    }).collect()
+}
+
+#[tauri::command]
+pub fn revoke_always_allow_rule(channels: State<'_, Arc<super::channels::Channels>>, project_id: String, rule_id: String) -> Result<bool, String> {
+    channels.store.lock().unwrap_or_else(|e| e.into_inner()).delete_always_allow_rule(&discard_core::model::ProjectId(project_id), &rule_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_write_requests(requests: State<'_, Arc<discard_core::write_requests::WriteRequests>>, channel_id: String) -> Vec<discard_core::write_requests::WriteRequest> {
+    requests.list(&discard_core::model::ChannelId(channel_id))
+}
+
+#[tauri::command]
+pub async fn decide_write_request(
+    grants: State<'_, Arc<discard_core::workspace_grants::MainCheckoutGrants>>,
+    requests: State<'_, Arc<discard_core::write_requests::WriteRequests>>,
+    workspace: State<'_, Arc<discard_core::workspace::GitWorkspace>>,
+    channels: State<'_, Arc<super::channels::Channels>>,
+    channel_id: String, request_id: String, approve: bool,
+) -> Result<discard_core::write_requests::WriteRequest, String> {
+    let grants = grants.inner().clone();
+    let requests = requests.inner().clone(); let workspace = workspace.inner().clone(); let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.decide_write_request(&requests, &workspace, &grants, &channel_id, &request_id, approve)).await.map_err(|e| e.to_string())?
 }

@@ -244,7 +244,7 @@ fn git_cmd(dir: &Path, args: &[&str]) -> Command {
 
 /// Run git and return stdout. A failure carries git's own message.
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = git_cmd(dir, args).output().map_err(|e| WorktreeError::Git(format!("could not run git: {e}")))?;
+    let out = crate::process::spawn_std(git_cmd(dir, args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output()).map_err(|e| WorktreeError::Git(format!("could not run git: {e}")))?;
     if !out.status.success() {
         return Err(WorktreeError::Git(String::from_utf8_lossy(&out.stderr).trim().to_string()));
     }
@@ -283,11 +283,10 @@ fn unmerged_commits(repo: &Path, branch: &str) -> usize {
     for other in refs.lines().filter(|r| *r != own) {
         input.push_str(&format!("^{other}\n"));
     }
-    let Ok(mut child) = git_cmd(repo, &["rev-list", "--count", "--stdin"])
+    let Ok(mut child) = crate::process::spawn_std(git_cmd(repo, &["rev-list", "--count", "--stdin"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+        .stderr(std::process::Stdio::null()))
     else {
         return 0;
     };
@@ -316,12 +315,24 @@ impl WorktreeManager {
 
     /// Create the worktree for a channel, or return the existing one. `channel_id` makes the names unique.
     pub fn prepare(&self, project_dir: &Path, channel_id: &str, channel_name: &str) -> Result<Prepared> {
-        self.prepare_with_branch(project_dir, channel_id, channel_name, None)
+        self.prepare_with_branch(project_dir, channel_id, channel_name, None, false)
     }
     pub fn prepare_branch(&self, project_dir: &Path, channel_id: &str, branch: &str) -> Result<Prepared> {
         git(project_dir, &["check-ref-format", "--branch", branch])?;
         git(project_dir, &["rev-parse", "--verify", &format!("refs/heads/{branch}")])?;
-        self.prepare_with_branch(project_dir, channel_id, branch, Some(branch))
+        self.prepare_with_branch(project_dir, channel_id, branch, Some(branch), false)
+    }
+    pub fn prepare_owned_branch(&self, project_dir: &Path, channel_id: &str, branch: &str) -> Result<Prepared> {
+        git(project_dir, &["check-ref-format", "--branch", branch])?;
+        git(project_dir, &["rev-parse", "--verify", &format!("refs/heads/{branch}")])?;
+        self.prepare_with_branch(project_dir, channel_id, branch, Some(branch), true)
+    }
+    pub fn target_for_branch(&self, project_dir: &Path, channel_id: &str, branch: &str) -> Result<PathBuf> {
+        let repo = PathBuf::from(git(project_dir, &["rev-parse", "--show-toplevel"])?).canonicalize().map_err(io_err)?;
+        let name = format!("{}-{}", Some(slug(branch, 24)).filter(|s| !s.is_empty()).unwrap_or_else(|| "channel".into()), short_id(channel_id));
+        let repo_key = format!("{}-{}", Some(slug(&repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), 24)).filter(|s| !s.is_empty()).unwrap_or_else(|| "repo".into()),
+            Sha256::digest(repo.to_string_lossy().as_bytes()).iter().take(4).map(|b| format!("{b:02x}")).collect::<String>());
+        Ok(self.base.join(repo_key).join(name))
     }
     /// Validate a recorded directory instead of silently resuming a session in a different checkout.
     pub fn recorded(&self, project_dir: &Path, root: &Path, branch: &str) -> Result<Prepared> {
@@ -335,7 +346,7 @@ impl WorktreeManager {
         if !cwd.is_dir() { return Err(WorktreeError::Git("The project directory is missing in this worktree.".into())); }
         Ok(Prepared { cwd, worktree: Worktree { root: root.to_path_buf(), branch: branch.into(), base_commit: git(root, &["rev-parse", "HEAD"])? , repo: project_dir.into() }, created: false, notes: vec![] })
     }
-    fn prepare_with_branch(&self, project_dir: &Path, channel_id: &str, channel_name: &str, existing_branch: Option<&str>) -> Result<Prepared> {
+    fn prepare_with_branch(&self, project_dir: &Path, channel_id: &str, channel_name: &str, existing_branch: Option<&str>, require_created: bool) -> Result<Prepared> {
         if !Self::is_repo(project_dir) {
             return Err(WorktreeError::NotARepo(project_dir.display().to_string()));
         }
@@ -348,6 +359,7 @@ impl WorktreeManager {
 
         if let Some(branch) = existing_branch
             && let Some(root) = list_branches(&repo)?.into_iter().find(|entry| entry.branch == branch).and_then(|entry| entry.worktree) {
+                if require_created { return Err(WorktreeError::Git("This branch is checked out in another folder. Ask again after it is free.".into())); }
                 return self.recorded(project_dir, &root, branch);
             }
         let head = git(&repo, &["rev-parse", "--verify", "HEAD"]).map_err(|_| WorktreeError::NoCommits)?;
@@ -358,6 +370,7 @@ impl WorktreeManager {
         let parent = self.base.join(repo_key);
         let root = parent.join(&name);
         let base_file = parent.join(format!(".{name}.base"));
+        if require_created && fs::symlink_metadata(&root).is_ok() { return Err(WorktreeError::Git("The target folder already exists. No worktree was created.".into())); }
         let cwd = |root: &Path| if prefix.is_empty() { root.to_path_buf() } else { root.join(prefix.trim_end_matches('/')) };
 
         // A directory deleted by hand leaves a stale registration. Clear it before looking.
@@ -378,13 +391,14 @@ impl WorktreeManager {
         fs::create_dir_all(&parent).map_err(io_err)?;
         let root_str = root.to_string_lossy().into_owned();
         let branch_exists = git(&repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok();
+        if require_created && !branch_exists { return Err(WorktreeError::Git("This branch no longer exists.".into())); }
         let added = if branch_exists {
             git(&repo, &["worktree", "add", &root_str, &branch])
         } else {
             git(&repo, &["worktree", "add", "-b", &branch, &root_str, &head])
         };
         if let Err(e) = added {
-            let _ = fs::remove_dir_all(&root);
+            if !require_created { let _ = fs::remove_dir_all(&root); }
             let _ = git(&repo, &["worktree", "prune"]);
             return Err(e);
         }
@@ -540,13 +554,12 @@ mod tests {
     }
 
     fn git(dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
+        let out = crate::process::spawn_std(Command::new("git")
             .args(["-c", "user.name=T", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
             .args(args)
             .current_dir(dir)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .output()
+            .env("GIT_CONFIG_NOSYSTEM", "1").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output())
             .unwrap();
         assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8_lossy(&out.stdout).trim().to_string()

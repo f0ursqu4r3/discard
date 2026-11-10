@@ -65,12 +65,11 @@ pub fn spawn(argv: &[String], safe_mode: bool) -> std::io::Result<()> {
         command
     };
     // stderr is inherited, so the relaunched instance keeps writing its JSON logs where this one does.
-    command
+    discard_core::process::spawn_std(command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
-        .spawn()
-        .map(drop)
+    ).map(drop)
 }
 
 #[cfg(test)]
@@ -174,13 +173,12 @@ mod tests {
     #[cfg(unix)]
     fn the_script_waits_for_the_pid_then_execs_the_arguments_verbatim() {
         // A PID that has exited, so the loop ends at once. The child then prints its arguments one per line.
-        let mut done = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let mut done = discard_core::process::spawn_std(&mut std::process::Command::new("/usr/bin/true")).unwrap();
         let pid = done.id();
         done.wait().unwrap();
-        let output = std::process::Command::new("/bin/sh")
+        let output = discard_core::process::spawn_std(std::process::Command::new("/bin/sh")
             .args(["-c", WAIT_SCRIPT, "sh", &pid.to_string()])
-            .args(["/usr/bin/printf", "%s\\n", "a b", r#"c"d'e"#])
-            .output()
+            .args(["/usr/bin/printf", "%s\\n", "a b", r#"c"d'e"#]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output())
             .unwrap();
         assert_eq!(String::from_utf8(output.stdout).unwrap(), "a b\nc\"d'e\n");
     }

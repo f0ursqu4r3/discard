@@ -11,15 +11,16 @@ from workspace_execution import WorkspaceExecution, WorkspaceProtocol, prepare, 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--claude", default=os.environ.get("DISCARD_CLAUDE_BIN", "claude"))
+    parser.add_argument("--main-checkout", action="store_true")
     options = parser.parse_args()
     version = subprocess.check_output([options.claude, "--version"], text=True, timeout=10).strip()
     assert version.startswith("2.1.318 "), version
     reports, transcript = [], []
-    for restricted, protect_git in [(True, False), (False, False), (True, True)]:
+    for restricted, protect_git in ([(True, True)] if options.main_checkout else [(True, False), (False, False), (True, True)]):
         with tempfile.TemporaryDirectory(prefix="discard-claude-workspace-") as temporary:
             root = pathlib.Path(temporary).resolve()
             home, cwd, env = prepare(root)
-            with WorkspaceExecution("claude", cwd) as execution:
+            with WorkspaceExecution("claude", cwd, options.main_checkout) as execution:
                 env.update(ANTHROPIC_API_KEY="synthetic", ANTHROPIC_BASE_URL=f"http://127.0.0.1:{execution.port}", CLAUDE_CODE_DISABLE_AUTO_MEMORY="1", CLAUDE_CODE_DISABLE_CLAUDE_MDS="1")
                 settings = {"disableAllHooks": True, "autoMemoryEnabled": False, "sandbox": {"enabled": True, "allowUnsandboxedCommands": False, "autoAllowBashIfSandboxed": False}, "env": {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1", "CLAUDE_CODE_PLUGIN_DIRS": "", "GIT_OPTIONAL_LOCKS": "0"}}
                 if protect_git:
@@ -32,7 +33,7 @@ def main():
                     protocol = WorkspaceProtocol(process, "claude")
                     try:
                         protocol.send({"type": "user", "message": {"role": "user", "content": "Run the synthetic workspace sequence."}})
-                        execution.finished.wait(50)
+                        execution.finished.wait(55)
                     finally:
                         stop(process)
                     result = report(execution, protocol, root, home, cwd)
@@ -42,8 +43,9 @@ def main():
                     result["stderr"] = stderr.read()[-2000:]
                 reports.append(scrub(result, root))
                 transcript.extend(scrub(protocol.transcript, root))
-    save_transcript("claude", transcript)
-    print(json.dumps({"provider": "claude", "version": version, "runs": reports}, indent=2))
+    if not options.main_checkout:
+        save_transcript("claude", transcript)
+    print(json.dumps({"provider": "claude", "version": version, "claude_protects_git_in_root": all(run["protects_git_in_root"] for run in reports), "runs": reports}, indent=2))
     assert all(run["completed"] for run in reports), "Synthetic sequence did not finish"
 
 

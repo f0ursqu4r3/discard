@@ -61,6 +61,8 @@ pub struct DesktopConfig {
     pub providers: Vec<actions::ProviderInfo>,
     pub recheck: actions::Recheck,
     pub memory: Arc<discard_core::memory::MemoryStore>,
+    pub main_checkout_grants: Arc<discard_core::workspace_grants::MainCheckoutGrants>,
+    pub write_requests: Arc<discard_core::write_requests::WriteRequests>,
     pub worktree_access: Arc<discard_core::worktree_access::WorktreeAccess>,
 }
 pub fn run(
@@ -88,7 +90,7 @@ pub fn run(
     if config.startup_channel.is_none()
         && let Err(error) = channels.restore() { core.notice(format!("Could not restore conversation: {error}")); }
     core.refresh_branches(core.request_branch_refresh());
-    let actions = Arc::new(actions::DesktopActions { settings: settings.clone(), workspace: config.workspace, relaunch: config.relaunch, exiting: AtomicBool::new(false) });
+    let actions = Arc::new(actions::DesktopActions { settings: settings.clone(), workspace: config.workspace.clone(), relaunch: config.relaunch, exiting: AtomicBool::new(false) });
     let refresh_core = core.clone();
     runtime.spawn(async move {
         loop {
@@ -113,6 +115,9 @@ pub fn run(
         .manage(core.clone())
         .manage(channels)
         .manage(config.worktree_access)
+        .manage(config.write_requests)
+        .manage(config.main_checkout_grants)
+        .manage(config.workspace)
         .manage(actions.clone())
         .manage(windows::SettingsRoute::default())
         .manage(settings::SettingsContext { home: data_dir.clone(), plugins: plugins.clone(), providers: config.providers, recheck: config.recheck, store: config.store, memory: config.memory, core: core.clone(), load_report: config.load_report, trusted_reviews: Mutex::new(std::collections::HashSet::new()), logs: Mutex::new(settings::logs::LogState::open(&data_dir)) })
@@ -227,6 +232,8 @@ pub fn run(
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::get_write_requests, commands::decide_write_request,
+            commands::get_always_allow_rules, commands::revoke_always_allow_rule,
             commands::get_snapshot, commands::choose_project_folder, commands::get_projects, commands::update_project_profile, commands::select_project, commands::remove_project,
             commands::get_project_channels, commands::get_project_members, commands::get_channel_details, commands::update_channel_topic, commands::set_project_main_agent,
             commands::invite_channel_member, commands::select_canonical_branch, commands::select_canonical_project_channel,

@@ -50,3 +50,11 @@ pub mod workspace_session;
 pub mod workspace_commit;
 pub mod workspace_lock;
 pub mod workspace_changes;
+
+pub mod always_allow;
+
+pub mod write_requests;
+
+pub mod workspace_grants;
+
+pub mod process;

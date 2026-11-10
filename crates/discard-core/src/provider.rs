@@ -79,6 +79,8 @@ pub struct ReasoningOption {
 pub trait Provider: Send + Sync {
     fn id(&self) -> &str;
     fn capabilities(&self) -> &CapabilityMatrix;
+    /// The provider can protect main-checkout Git metadata during write responses.
+    fn supports_main_checkout_writes(&self) -> bool { false }
     async fn check_setup(&self) -> SetupStatus;
     /// Available models reported by this provider, without starting a conversation.
     async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {

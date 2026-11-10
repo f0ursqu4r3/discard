@@ -73,6 +73,7 @@ impl Rig {
             .unwrap();
         let memory_service = decorate(runtime.clone(), memory.clone());
         let engine = Engine {
+        main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
         write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
             reasoning_effort: None,
@@ -263,9 +264,9 @@ async fn worktree_facts_reach_each_reply_without_entering_history_or_direct_chat
     let repo = rig._dir.path().join("repo");
     std::fs::create_dir(&repo).unwrap();
     for args in [vec!["init", "-q", "-b", "main"], vec!["commit", "--allow-empty", "-m", "Initial commit"], vec!["checkout", "--detach"]] {
-        let output = std::process::Command::new("git")
+        let output = discard_core::process::spawn_std(std::process::Command::new("git")
             .args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
-            .args(args).current_dir(&repo).output().unwrap();
+            .args(args).current_dir(&repo).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output()).unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     }
     let (channel, session) = {
@@ -282,6 +283,7 @@ async fn worktree_facts_reach_each_reply_without_entering_history_or_direct_chat
     let provider = Arc::new(FakeProvider::new(vec![Step::text("worktree answer"), Step::idle()]));
     let probe = provider.probe.clone();
     let engine = Engine {
+        main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
         write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
         reasoning_effort: None, mode: SessionMode::Conversation, providers: vec![provider.clone()],
@@ -337,6 +339,7 @@ async fn general_project_context_reaches_followups_without_polluting_history() {
     let provider = Arc::new(FakeProvider::new(vec![Step::text("project answer"), Step::idle()]));
     let probe = provider.probe.clone();
     let engine = Engine {
+        main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
         write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
         reasoning_effort: None, mode: SessionMode::Conversation, providers: vec![provider.clone()],
@@ -819,6 +822,7 @@ async fn provider_switch_preserves_conversation_and_records_visible_marker() {
         .unwrap()
         .unwrap();
     let engine = Engine {
+        main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
         write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
         reasoning_effort: None,
@@ -1234,6 +1238,7 @@ async fn explicit_mention_routes_one_reply_and_persists_its_author() {
     let probe = provider.probe.clone();
     let session = rig.store.lock().unwrap().latest_session(&channel.id).unwrap().unwrap();
     let engine = Engine {
+        main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
         write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
         reasoning_effort: None, mode: SessionMode::Conversation, providers: vec![provider.clone()],

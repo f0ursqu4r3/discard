@@ -79,15 +79,14 @@ impl PluginRepo {
     }
 
     fn git_output(&self, args: &[&str]) -> Result<Vec<u8>> {
-        let out = Command::new("git")
+        let out = discard_core::process::spawn_std(Command::new("git")
             .args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "core.fsmonitor=false"])
             .args(args)
             .current_dir(&self.root)
             // The user's global and system git config must not change how plugin history is written.
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .output()
+            .env("GIT_TERMINAL_PROMPT", "0").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output())
             .map_err(|e| RepoError::Git(format!("could not run git: {e}")))?;
         if !out.status.success() {
             return Err(RepoError::Git(String::from_utf8_lossy(&out.stderr).trim().to_string()));
@@ -289,7 +288,7 @@ mod tests {
     }
 
     fn git(d: &Path, args: &[&str]) -> String {
-        let out = std::process::Command::new("git").args(args).current_dir(d).output().unwrap();
+        let out = discard_core::process::spawn_std(std::process::Command::new("git").args(args).current_dir(d).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output()).unwrap();
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 

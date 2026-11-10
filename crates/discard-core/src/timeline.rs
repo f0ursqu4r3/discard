@@ -15,6 +15,8 @@ pub enum ApprovalView {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApprovalPrompt {
+    pub rule_words: Option<Vec<String>>,
+    pub rule_host: Option<String>,
     pub kind: crate::approval::ApprovalKind,
     pub approval_id: ApprovalId,
     pub tool: String,
@@ -99,6 +101,8 @@ impl Timeline {
                     summary: summary.clone(),
                 });
                 self.prompts.push(ApprovalPrompt {
+                    rule_words: if *kind == crate::approval::ApprovalKind::ProviderTool && matches!(tool.as_str(), "Bash" | "command") { input.get("command").and_then(|v| v.as_str()).and_then(crate::always_allow::command_words) } else { None },
+                    rule_host: if *kind == crate::approval::ApprovalKind::NetworkDomain { input.get("host").and_then(|v| v.as_str()).and_then(crate::always_allow::normalize_host) } else { None },
                     kind: *kind,
                     approval_id: approval_id.clone(),
                     tool: tool.clone(),

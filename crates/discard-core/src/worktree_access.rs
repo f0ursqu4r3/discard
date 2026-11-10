@@ -48,10 +48,9 @@ pub(crate) fn git(directory: &Path, args: &[&str]) -> Result<String, String> {
 
 pub(crate) fn git_bounded(directory: &Path, args: &[&str], limit: usize, timeout: Duration) -> Result<(String, bool), String> {
     use std::os::unix::process::CommandExt;
-    let mut child = Command::new("git").current_dir(directory)
+    let mut child = crate::process::spawn_std(Command::new("git").current_dir(directory)
         .args(["--no-pager", "--no-optional-locks", "--literal-pathspecs", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"])
-        .args(args).env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0)
-        .spawn().map_err(|_| "Could not start Git.".to_string())?;
+        .args(args).env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0)).map_err(|_| "Could not start Git.".to_string())?;
     let read = |mut pipe: Box<dyn Read + Send>| std::thread::spawn(move || -> std::io::Result<(Vec<u8>, bool)> {
         let mut data = Vec::new(); let mut buffer = [0; 8192]; let mut truncated = false;
         loop { let n = pipe.read(&mut buffer)?; if n == 0 { break; } let keep = n.min(limit.saturating_sub(data.len())); data.extend_from_slice(&buffer[..keep]); truncated |= keep < n; }
@@ -64,7 +63,7 @@ pub(crate) fn git_bounded(directory: &Path, args: &[&str], limit: usize, timeout
             Ok(Some(status)) => break Ok(status),
             Ok(None) if started.elapsed() < timeout => std::thread::sleep(Duration::from_millis(10)),
             _ => {
-                let _ = Command::new("/bin/kill").args(["-KILL", &format!("-{}", child.id())]).status();
+                let _ = crate::process::spawn_std(Command::new("/bin/kill").args(["-KILL", &format!("-{}", child.id())])).and_then(|mut child| child.wait());
                 let _ = child.kill(); let _ = child.wait(); break Err("Git did not finish. Inspect the worktree before retrying.".to_string());
             }
         }
@@ -79,7 +78,7 @@ pub(crate) fn git_bounded(directory: &Path, args: &[&str], limit: usize, timeout
 impl WorktreeAccess {
     pub fn new(store: Arc<Mutex<Store>>) -> Self { Self { store, requests: Mutex::new(HashMap::new()), operation: Mutex::new(()), locks: Arc::default() } }
     pub fn with_locks(mut self, locks: Arc<crate::workspace_lock::WorkspaceLocks>) -> Self { self.locks = locks; self }
-    pub fn commit(&self, agent: &AgentId, channel: &ChannelId, root: &Path, request: &crate::workspace_commit::CommitRequest) -> Result<crate::workspace_commit::CommitResult, String> {
+    pub fn commit(&self, agent: &AgentId, channel: &ChannelId, root: &Path, request: &crate::workspace_commit::CommitRequest, main_checkout_granted: bool) -> Result<crate::workspace_commit::CommitResult, String> {
         self.locks.with_holder(root, channel, || {
             let _operation = lock(&self.operation);
             let binding = {
@@ -89,9 +88,9 @@ impl WorktreeAccess {
                 crate::workspace_session::eligibility(&store, channel, &config).map_err(|r| r.note())?
             };
             let repository = binding.record.repo.clone();
-            let grant = crate::workspace_session::verify_binding(binding).map_err(|r| r.note())?;
+            let grant = crate::workspace_session::verify_binding(binding, main_checkout_granted).map_err(|r| r.note())?;
             if root.canonicalize().map_err(|e| e.to_string())? != grant.root { return Err("The workspace binding changed.".into()); }
-            let result = crate::workspace_commit::commit(root, request)?;
+            let result = crate::workspace_commit::commit(root, request, grant.main_checkout)?;
             lock(&self.store).record_agent_commit(&result.commit, &repository, channel, agent).map_err(|e| format!("Commit {} succeeded, but its audit could not be saved: {e}", result.commit))?;
             Ok(result)
         })

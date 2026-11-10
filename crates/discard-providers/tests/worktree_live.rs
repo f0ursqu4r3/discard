@@ -21,7 +21,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 fn git(dir: &Path, args: &[&str]) {
-    let ok = Proc::new("git").args(["-c", "user.name=T", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).current_dir(dir).status().unwrap().success();
+    let ok = discard_core::process::spawn_std(Proc::new("git").args(["-c", "user.name=T", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).current_dir(dir)).and_then(|mut child| child.wait()).unwrap().success();
     assert!(ok, "git {args:?}");
 }
 
@@ -47,6 +47,7 @@ async fn run(provider: Arc<dyn Provider>, model: Option<&str>) {
     let workspace = Arc::new(GitWorkspace::new(&dir.path().join("worktrees"), Arc::clone(&store)));
 
     let engine = Engine {
+        main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
         write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
         reasoning_effort: None,
@@ -77,7 +78,7 @@ async fn run(provider: Arc<dyn Provider>, model: Option<&str>) {
         match update {
             Update::Event(e) => {
                 if let EventKind::ApprovalRequest { approval_id, .. } = e.kind {
-                    commands.send(Command::Decide { approval_id, decision: Decision::Approve }).unwrap();
+                    commands.send(Command::Decide { rule_cut: None, approval_id, decision: Decision::Approve }).unwrap();
                 }
             }
             Update::TurnFinished(outcome) => break outcome,

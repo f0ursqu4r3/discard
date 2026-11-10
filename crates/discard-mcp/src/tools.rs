@@ -17,6 +17,7 @@ pub struct McpHandler {
     store: Arc<MemoryStore>,
     plugins: Option<Arc<PluginService>>,
     worktrees: Option<Arc<discard_core::worktree_access::WorktreeAccess>>,
+    writes: Option<(Arc<discard_core::write_requests::WriteRequests>, Arc<discard_core::workspace::GitWorkspace>)>,
 }
 
 impl McpHandler {
@@ -33,6 +34,14 @@ impl McpHandler {
                         tools.extend(project_tool_list());
                     }
                 }
+                if identity.can_write && let Some((_, workspace)) = &self.writes && let Some(channel) = &identity.source_conversation {
+                    if workspace.write_request_target(channel, &identity.agent, identity.project.as_ref(), discard_core::write_requests::WriteRequestKind::WorktreeCreate).is_ok() {
+                        tools.push(creation_tool());
+                    }
+                    if identity.main_checkout_requests && workspace.write_request_target(channel, &identity.agent, identity.project.as_ref(), discard_core::write_requests::WriteRequestKind::MainCheckoutWrite).is_ok() {
+                        tools.push(main_checkout_tool());
+                    }
+                }
                 tools
             }
             Surface::Plugins if self.plugins.is_some() => plugin_tool_list(identity),
@@ -41,10 +50,27 @@ impl McpHandler {
     }
 
     pub fn new(store: Arc<MemoryStore>) -> Self {
-        Self { store, plugins: None, worktrees: None }
+        Self { store, plugins: None, worktrees: None, writes: None }
     }
 
     pub fn with_worktrees(mut self, worktrees: Arc<discard_core::worktree_access::WorktreeAccess>) -> Self { self.worktrees = Some(worktrees); self }
+
+    pub fn with_write_requests(mut self, requests: Arc<discard_core::write_requests::WriteRequests>, workspace: Arc<discard_core::workspace::GitWorkspace>) -> Self {
+        self.writes = Some((requests, workspace)); self
+    }
+    fn run_write_request(&self, identity: &Identity, name: &str, args: &Value) -> Result<String, String> {
+        if name == "main_checkout_request_write" && !identity.main_checkout_requests {
+            return Err("This agent's provider cannot protect Git metadata in the main checkout. The user can move this branch to a worktree, or use another branch.".into());
+        }
+        let (requests, workspace) = self.writes.as_ref().ok_or("Write requests are unavailable.")?;
+        if !identity.can_write { return Err("Write requests are unavailable during summarization.".into()); }
+        if args.as_object().is_none_or(|a| !a.is_empty()) { return Err("This tool accepts no arguments.".into()); }
+        let channel = identity.source_conversation.as_ref().ok_or("A branch channel is required.")?;
+        let kind = if name == "worktree_request_creation" { discard_core::write_requests::WriteRequestKind::WorktreeCreate } else { discard_core::write_requests::WriteRequestKind::MainCheckoutWrite };
+        let (_, branch, path) = workspace.write_request_target(channel, &identity.agent, identity.project.as_ref(), kind)?;
+        let request = requests.request(kind, channel, &identity.agent, branch, path.to_string_lossy().into_owned())?;
+        Ok(json!({"approvalRequired":true,"request":request,"message":if name == "worktree_request_creation" { "Worktree creation is pending in the app. No folder exists yet. You cannot approve this request." } else { "Main-checkout write access is pending in the app. You cannot approve this request." }}).to_string())
+    }
 
     fn run_worktree_tool(&self, identity: &Identity, name: &str, args: &Value) -> Result<String, String> {
         let service = self.worktrees.as_ref().ok_or("Worktree access is unavailable.")?;
@@ -58,7 +84,7 @@ impl McpHandler {
             "worktree_commit" => {
                 let root = identity.workspace_root.as_ref().ok_or("This response has no workspace write grant.")?;
                 let request = serde_json::from_value::<discard_core::workspace_commit::CommitRequest>(Value::Object(args.clone())).map_err(|e| e.to_string())?;
-                service.commit(&identity.agent, channel, root, &request).map(|result| json!(result).to_string())
+                service.commit(&identity.agent, channel, root, &request, identity.main_checkout_grant).map(|result| json!(result).to_string())
             }
             "worktree_inspect" => service.inspect(channel, args.get("view").and_then(Value::as_str).unwrap_or("status")).map(|data| data.to_string()),
             "worktree_request_removal" => {
@@ -139,7 +165,7 @@ impl McpHandler {
     fn call(&self, identity: &Identity, id: &Value, params: &Value) -> Value {
         let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
         let known = match identity.surface {
-            Surface::Memory => ALL_TOOLS.contains(&name) || (self.worktrees.is_some() && identity.project.is_some() && identity.can_write && (WORKTREE_TOOLS.contains(&name) || PROJECT_TOOLS.contains(&name))),
+            Surface::Memory => (matches!(name, "worktree_request_creation" | "main_checkout_request_write") && self.writes.is_some() && identity.can_write && identity.project.is_some()) || ALL_TOOLS.contains(&name) || (self.worktrees.is_some() && identity.project.is_some() && identity.can_write && (WORKTREE_TOOLS.contains(&name) || PROJECT_TOOLS.contains(&name))),
             Surface::Plugins => self.plugins.is_some() && PLUGIN_ALL_TOOLS.contains(&name),
         };
         if !known {
@@ -147,6 +173,7 @@ impl McpHandler {
         }
         let args = params.get("arguments").unwrap_or(&Value::Null);
         let outcome = match identity.surface {
+            Surface::Memory if matches!(name, "worktree_request_creation" | "main_checkout_request_write") => self.run_write_request(identity, name, args),
             Surface::Memory if PROJECT_TOOLS.contains(&name) => self.run_project_tool(identity, name, args),
             Surface::Memory if WORKTREE_TOOLS.contains(&name) => self.run_worktree_tool(identity, name, args),
             Surface::Memory => self.run_tool(identity, name, args),
@@ -533,6 +560,15 @@ impl McpHandler {
     }
 }
 
+
+fn creation_tool() -> Value {
+    json!({"name":"worktree_request_creation","description":"Ask the user to create a worktree for this branch channel. Does nothing until the user approves in the app. After approval, the app starts a new response with file edits enabled.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}})
+}
+
+fn main_checkout_tool() -> Value {
+    json!({"name":"main_checkout_request_write","description":"Ask the user to let you write in the main checkout for one response. Does nothing until the user approves in the app.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,7 +587,10 @@ mod tests {
     }
 
     fn id(scopes: &[ScopeKindOrd], can_write: bool) -> Identity {
-        Identity { workspace_root: None,
+        Identity {
+            main_checkout_requests: false,
+            main_checkout_grant: false,
+            workspace_root: None,
             agent: AgentId("a1".into()),
             project: None,
             source_conversation: Some(discard_core::model::ChannelId("chat".into())),
@@ -618,6 +657,104 @@ mod tests {
             assert!(t["description"].as_str().is_some_and(|d| !d.is_empty()));
             assert_eq!(t["inputSchema"]["type"], "object");
         }
+    }
+
+    fn creation_rig(main: bool) -> (Rig, Identity, Arc<std::sync::Mutex<discard_core::store::Store>>, tempfile::TempDir) {
+        use discard_core::{model::{Channel, ChannelId, WorkspaceMode}, store::Store};
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo"); std::fs::create_dir(&repo).unwrap();
+        for args in [vec!["init", "-q", "-b", "main"], vec!["-c", "user.name=T", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "init"], vec!["branch", "feature"]] {
+            assert!(discard_core::process::spawn_std(std::process::Command::new("git").current_dir(&repo).args(["-c", "core.hooksPath=/dev/null"]).args(args)).and_then(|mut child| child.wait()).unwrap().success());
+        }
+        let store = Store::open_in_memory().unwrap();
+        let config = discard_core::agent::AgentConfig::from_toml("name='A'\nprovider='fake'\nmodel='test'\npolicy='ask'\nworkspace_write=true").unwrap();
+        let agent = store.create_agent(&config).unwrap(); let project = store.import_project_folder(&repo).unwrap();
+        let branch = if main { "main" } else { "feature" };
+        let channel = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: branch.into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+        store.create_named_channel(&channel, Some(branch), None).unwrap();
+        let store = Arc::new(std::sync::Mutex::new(store));
+        let workspace = Arc::new(discard_core::workspace::GitWorkspace::new(&dir.path().join("worktrees"), store.clone()));
+        let mut r = rig(); r.handler = r.handler.with_write_requests(Arc::default(), workspace);
+        let mut who = full(); who.agent = agent; who.project = Some(project.id); who.source_conversation = Some(channel.id);
+        (r, who, store, dir)
+    }
+    #[test]
+    fn main_checkout_tool_is_listed_only_where_the_binding_is_the_main_checkout() {
+        let (r, mut who, store, dir) = creation_rig(true);
+        who.main_checkout_requests = true;
+        let listed = || r.handler.handle(&who, &rpc("tools/list", json!({}))).unwrap().to_string().contains("main_checkout_request_write");
+        assert!(!listed());
+        let root = dir.path().join("repo").to_string_lossy().into_owned();
+        store.lock().unwrap().save_worktree(&discard_core::store::WorktreeRecord {
+            channel_id: who.source_conversation.clone().unwrap(),
+            path: root.clone(),
+            branch: "main".into(),
+            repo: root,
+            base_commit: String::new(),
+            owned: false,
+        }).unwrap();
+        assert!(listed());
+        assert!(!is_error(&call(&r, &who, "main_checkout_request_write", json!({}))));
+    }
+
+    fn main_checkout_rig() -> (Rig, Identity, Arc<std::sync::Mutex<discard_core::store::Store>>, tempfile::TempDir) {
+        let (r, who, store, dir) = creation_rig(true);
+        let root = dir.path().join("repo").to_string_lossy().into_owned();
+        store.lock().unwrap().save_worktree(&discard_core::store::WorktreeRecord {
+            channel_id: who.source_conversation.clone().unwrap(),
+            path: root.clone(),
+            branch: "main".into(),
+            repo: root,
+            base_commit: String::new(),
+            owned: false,
+        }).unwrap();
+        (r, who, store, dir)
+    }
+
+    #[test]
+    fn main_checkout_tool_hidden_for_providers_without_support() {
+        let (r, who, _store, _dir) = main_checkout_rig();
+        let reply = r.handler.handle(&who, &rpc("tools/list", json!({}))).unwrap();
+        assert!(!reply.to_string().contains("main_checkout_request_write"));
+    }
+
+    #[test]
+    fn main_checkout_tool_listed_for_claude_capability() {
+        let (r, mut who, _store, _dir) = main_checkout_rig();
+        who.main_checkout_requests = true;
+        assert!(r.handler.handle(&who, &rpc("tools/list", json!({}))).unwrap().to_string().contains("main_checkout_request_write"));
+        assert!(!is_error(&call(&r, &who, "main_checkout_request_write", json!({}))));
+        who.main_checkout_requests = false;
+        assert!(!r.handler.handle(&who, &rpc("tools/list", json!({}))).unwrap().to_string().contains("main_checkout_request_write"));
+    }
+
+    #[test]
+    fn main_checkout_call_refused_without_capability() {
+        let (r, who, _store, _dir) = main_checkout_rig();
+        let reply = call(&r, &who, "main_checkout_request_write", json!({}));
+        assert!(is_error(&reply));
+        assert_eq!(text(&reply), "This agent's provider cannot protect Git metadata in the main checkout. The user can move this branch to a worktree, or use another branch.");
+        assert!(r.handler.writes.as_ref().unwrap().0.list(who.source_conversation.as_ref().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn creation_tool_is_listed_only_for_unbound_branch_channels_with_opted_in_agents() {
+        let (r, mut who, store, _dir) = creation_rig(false);
+        let listed = |who: &Identity| r.handler.handle(who, &rpc("tools/list", json!({}))).unwrap().to_string().contains("worktree_request_creation");
+        assert!(listed(&who));
+        assert!(!is_error(&call(&r, &who, "worktree_request_creation", json!({}))));
+        assert!(is_error(&call(&r, &who, "worktree_request_creation", json!({"approve":true}))));
+        who.can_write = false; assert!(!listed(&who)); who.can_write = true;
+        let mut config = store.lock().unwrap().load_agent(&who.agent).unwrap(); config.workspace_write = false;
+        store.lock().unwrap().update_agent(&who.agent, &config).unwrap(); assert!(!listed(&who));
+        who.project = None; assert!(!listed(&who));
+    }
+    #[test]
+    fn creation_tool_refuses_a_branch_checked_out_in_the_main_checkout() {
+        let (r, who, _store, _dir) = creation_rig(true);
+        let reply = call(&r, &who, "worktree_request_creation", json!({}));
+        assert!(is_error(&reply));
+        assert!(reply.to_string().contains("This branch is checked out in the main checkout. Use main_checkout_request_write instead."));
     }
 
     #[test]

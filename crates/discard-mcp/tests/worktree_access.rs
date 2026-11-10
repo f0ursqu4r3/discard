@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::{path::Path, sync::{Arc, Mutex}};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream};
 fn git(path: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git").args(["-c","user.name=Test","-c","user.email=test@example.com","-c","commit.gpgsign=false","-c","core.hooksPath=/dev/null"]).args(args).current_dir(path).output().unwrap();
+    let output = discard_core::process::spawn_std(std::process::Command::new("git").args(["-c","user.name=Test","-c","user.email=test@example.com","-c","commit.gpgsign=false","-c","core.hooksPath=/dev/null"]).args(args).current_dir(path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output()).unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 }
 async fn call(config: &Value, name: &str) -> Value {

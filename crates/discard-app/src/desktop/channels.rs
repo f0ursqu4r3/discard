@@ -1,4 +1,5 @@
 //! Real project channels. Git and storage work run off the webview thread.
+use discard_core::model::AgentId;
 use super::core::{AppCore, CoreInit};
 use discard_core::{model::{Channel, ChannelId, ProjectId, WorkspaceMode}, store::{Store, WorktreeRecord}, ui_state::Update, worktree::{list_branch_tree, WorktreeManager}};
 use std::{path::PathBuf, sync::{Arc, Mutex}};
@@ -423,6 +424,69 @@ impl Channels {
         self.select_inner(&channel.id.0)?;
         Ok(channel.id.0)
     }
+    pub fn decide_write_request(&self, requests: &discard_core::write_requests::WriteRequests, workspace: &discard_core::workspace::GitWorkspace, grants: &discard_core::workspace_grants::MainCheckoutGrants, channel: &str, id: &str, approve: bool) -> Result<discard_core::write_requests::WriteRequest, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        if approve {
+            if self.core.active_channel_id() != channel { return Err("Open this channel before approving.".into()); }
+            self.core.begin_write_approval(channel)?;
+        }
+        let result: Result<_, String> = (|| {
+            let channel_id = ChannelId(channel.into());
+            let request = requests.begin(&channel_id, id, approve)?;
+            let mut note = None;
+            let request = if approve {
+                let action = (|| {
+                    let project = self.store.lock().unwrap_or_else(|e| e.into_inner()).load_channel(&channel_id).map_err(|e| e.to_string())?.project_id;
+                    let (repo, branch, path) = workspace.write_request_target(&channel_id, &AgentId(request.agent_id.clone()), project.as_ref(), request.kind)?;
+                    if request.branch != branch || std::path::Path::new(&request.path) != path { return Err("The request target changed. Ask again.".into()); }
+                    match request.kind {
+                        discard_core::write_requests::WriteRequestKind::WorktreeCreate => {
+                            let record = workspace.create_for_branch(&repo, &channel_id, &branch)?;
+                            note = Some(format!("Discard created a worktree for {branch} at {}.", record.path));
+                            Ok(format!("Created a worktree for `{branch}` at `{}`.", record.path))
+                        }
+                        discard_core::write_requests::WriteRequestKind::MainCheckoutWrite => {
+                            note = Some("The user allowed writes in the main checkout for one response.".into());
+                            Ok("The user allowed writes in the main checkout for one response.".into())
+                        }
+                    }
+                })().map_err(|error: String| match request.kind {
+                    discard_core::write_requests::WriteRequestKind::WorktreeCreate => format!("Worktree creation failed: {error}"),
+                    discard_core::write_requests::WriteRequestKind::MainCheckoutWrite => format!("Main-checkout write access failed: {error}"),
+                });
+                requests.finish(id, action)
+            } else { request };
+            let message = discard_core::model::Message {
+                id: discard_core::model::MessageId::new(),
+                channel_id,
+                role: discard_core::model::Role::System,
+                blocks: vec![discard_core::model::Block::Markdown { text: request.result.clone().unwrap_or_else(|| request.state.clone()) }],
+            };
+            self.store.lock().unwrap_or_else(|e| e.into_inner()).insert_message(&message).map_err(|e| e.to_string())?;
+            self.core.apply_channel(channel, discard_core::ui_state::Update::ConversationMarker(message));
+            self.core.refresh_branches(self.core.request_branch_refresh());
+            Ok((request, note))
+        })();
+        if approve { self.core.end_project_change(); }
+        let (request, note) = result?;
+        // Keep the channel operation lock until the follow-up is queued, so Send cannot race approval.
+        if let Some(note) = note {
+            let agent = AgentId(request.agent_id.clone()); let channel_id = ChannelId(channel.into());
+            let main = request.kind == discard_core::write_requests::WriteRequestKind::MainCheckoutWrite;
+            if main { grants.grant(&channel_id, &agent); }
+            if let Err(error) = self.core.continue_in(channel, agent.clone(), note) {
+                if main { grants.take(&channel_id, &agent); }
+                return Err(error);
+            }
+        }
+        Ok(request)
+    }
+
+    pub fn continue_after_approval(&self, channel: &str, agent: AgentId, note: String) -> Result<(), String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        self.core.continue_in(channel, agent, note)
+    }
+
     pub fn send_message(&self, channel: &str, text: String) -> Result<(), String> {
         self.send_with_attachments(channel, text, Vec::new())
     }
@@ -524,6 +588,61 @@ mod tests {
         core
     }
     #[tokio::test]
+    async fn write_approval_queues_one_scoped_continue_and_no_user_message() {
+        use discard_core::{write_requests::{WriteRequests, WriteRequestKind}, workspace::GitWorkspace, workspace_grants::MainCheckoutGrants, ui_state::Command};
+        for kind in [WriteRequestKind::WorktreeCreate, WriteRequestKind::MainCheckoutWrite] {
+            for approve in [false, true] {
+                let dir = tempfile::tempdir().unwrap(); let repo = dir.path().join("repo"); std::fs::create_dir(&repo).unwrap();
+                for args in [vec!["init", "-q", "-b", "main"], vec!["commit", "--allow-empty", "-qm", "init"], vec!["branch", "feature"]] {
+                    let out = discard_core::process::spawn_std(std::process::Command::new("git").current_dir(&repo).args(["-c", "core.hooksPath=/dev/null", "-c", "user.name=T", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output()).unwrap(); assert!(out.status.success());
+                }
+                let store = Store::open_in_memory().unwrap();
+                let mut config = AgentConfig::from_toml("name='A'\nprovider='fake'\nmodel='test'\npolicy='ask'").unwrap(); config.workspace_write = true;
+                let agent = store.create_agent(&config).unwrap(); let project = store.import_project_folder(&repo).unwrap();
+                let branch = if kind == WriteRequestKind::WorktreeCreate { "feature" } else { "main" };
+                let channel = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: branch.into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+                store.create_named_channel(&channel, Some(branch), None).unwrap();
+                if kind == WriteRequestKind::MainCheckoutWrite {
+                    store.save_worktree(&WorktreeRecord {
+                        channel_id: channel.id.clone(),
+                        path: repo.to_string_lossy().into(),
+                        branch: branch.into(),
+                        repo: repo.to_string_lossy().into(),
+                        base_commit: String::new(),
+                        owned: false,
+                    }).unwrap();
+                }
+                let store = Arc::new(Mutex::new(store)); let workspace = GitWorkspace::new(&dir.path().join("worktrees"), store.clone());
+                let requests = WriteRequests::default(); let grants = MainCheckoutGrants::default();
+                let (_, branch, path) = workspace.write_request_target(&channel.id, &agent, Some(&project.id), kind).unwrap();
+                let request = requests.request(kind, &channel.id, &agent, branch, path.to_string_lossy().into()).unwrap();
+                let (commands, mut received) = mpsc::unbounded_channel();
+                let core = Arc::new(AppCore::new(CoreInit { state: UiState::new(channel.id.clone(), vec![]), commands, project: "P".into(), channel: channel.name.clone(), agent: "A".into(), provider: "fake".into() }));
+                core.configure_targets(project.id.0.clone(), &repo, agent.0.clone());
+                let channels = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
+                assert!(channels.decide_write_request(&requests, &workspace, &grants, "other", &request.id, true).is_err());
+                core.send_to(Some(&channel.id.0), "initial request".into()).unwrap();
+                assert!(matches!(received.try_recv(), Ok(Command::Send(_))));
+                assert_eq!(channels.decide_write_request(&requests, &workspace, &grants, &channel.id.0, &request.id, true).unwrap_err(), "Wait for the current response to finish.");
+                core.apply(Update::TurnFinished(discard_core::driver::TurnOutcome::Completed));
+                let result = channels.decide_write_request(&requests, &workspace, &grants, &channel.id.0, &request.id, approve).unwrap();
+                assert_eq!(result.state, if approve { "completed" } else { "denied" });
+                if approve {
+                    assert!(matches!(received.try_recv(), Ok(Command::Continue { agent: recipient, .. }) if recipient == agent));
+                    if kind == WriteRequestKind::WorktreeCreate { assert!(store.lock().unwrap().worktree_for(&channel.id).unwrap().unwrap().owned); }
+                    else { assert!(grants.take(&channel.id, &agent)); assert!(!grants.take(&channel.id, &agent)); }
+                }
+                assert!(received.try_recv().is_err());
+                core.apply(Update::TurnFinished(discard_core::driver::TurnOutcome::Completed));
+                assert!(channels.decide_write_request(&requests, &workspace, &grants, &channel.id.0, &request.id, true).is_err());
+                assert!(received.try_recv().is_err());
+                let messages = store.lock().unwrap().messages_for_channel(&channel.id).unwrap();
+                assert_eq!(messages.len(), 1); assert_eq!(messages[0].role, discard_core::model::Role::System);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn projects_switch_in_place_and_import_never_changes_another_folder() {
         let first_dir = tempfile::tempdir().unwrap();
         let second_dir = tempfile::tempdir().unwrap();
@@ -573,9 +692,9 @@ mod tests {
         let repo = dir.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         let git = |args: &[&str]| {
-            let output = std::process::Command::new("git")
+            let output = discard_core::process::spawn_std(std::process::Command::new("git")
                 .args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
-                .args(args).current_dir(&repo).output().unwrap();
+                .args(args).current_dir(&repo).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output()).unwrap();
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
             String::from_utf8(output.stdout).unwrap().trim().to_owned()
         };
@@ -638,7 +757,7 @@ mod tests {
         assert_eq!(restored.open_branch(&rows[1].key).unwrap(), second);
         // A stale key cannot silently open the same path on a different checkout.
         let path = rows[0].worktree.as_ref().unwrap();
-        let output = std::process::Command::new("git").args(["-C", path, "checkout", "-b", "changed"]).output().unwrap();
+        let output = discard_core::process::spawn_std(std::process::Command::new("git").args(["-C", path, "checkout", "-b", "changed"]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output()).unwrap();
         assert!(output.status.success());
         assert!(restored.open_branch(&rows[0].key).is_err());
         assert!(workspace.prepare(&repo, &ChannelId(first), &rows[0].label).is_err());
@@ -662,9 +781,9 @@ mod tests {
             let repo = dir.path().join(name);
             std::fs::create_dir(&repo).unwrap();
             for args in [vec!["init", "-q", "-b", "main"], vec!["commit", "--allow-empty", "-m", "initial"], vec!["branch", "feature"]] {
-                let output = std::process::Command::new("git")
+                let output = discard_core::process::spawn_std(std::process::Command::new("git")
                     .args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
-                    .args(args).current_dir(&repo).output().unwrap();
+                    .args(args).current_dir(&repo).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output()).unwrap();
                 assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
             }
         }
@@ -732,9 +851,9 @@ mod tests {
             vec!["commit", "--allow-empty", "-m", "initial"],
             vec!["branch", "feature"],
         ] {
-            let output = std::process::Command::new("git")
+            let output = discard_core::process::spawn_std(std::process::Command::new("git")
                 .args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
-                .args(args).current_dir(repo.path()).output().unwrap();
+                .args(args).current_dir(repo.path()).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output()).unwrap();
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         }
         let store = Store::open_in_memory().unwrap();
@@ -809,7 +928,7 @@ mod tests {
     async fn canonical_branch_channels_reuse_saved_identity_with_an_unrelated_active_agent() {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
-            let output = std::process::Command::new("git").args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"]).args(args).current_dir(dir.path()).output().unwrap();
+            let output = discard_core::process::spawn_std(std::process::Command::new("git").args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"]).args(args).current_dir(dir.path()).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output()).unwrap();
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         };
         git(&["init", "-q", "-b", "old"]);
@@ -847,11 +966,10 @@ mod tests {
     async fn migrated_project_branch_and_topic_survive_service_reload() {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
-            let output = std::process::Command::new("git")
+            let output = discard_core::process::spawn_std(std::process::Command::new("git")
                 .args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"])
                 .args(args)
-                .current_dir(dir.path())
-                .output()
+                .current_dir(dir.path()).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output())
                 .unwrap();
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         };
@@ -891,6 +1009,7 @@ mod tests {
                 CREATE TABLE channel_branches (channel_id TEXT PRIMARY KEY REFERENCES channels(id), branch TEXT NOT NULL);").unwrap();
             connection.execute("INSERT INTO channel_branches(channel_id,branch) VALUES(?1,'feature/persisted')", [&branch_id.0]).unwrap();
             connection.execute_batch("ALTER TABLE projects DROP COLUMN avatar; ALTER TABLE messages DROP COLUMN author_json;").unwrap();
+            connection.execute_batch("DROP TABLE always_allow_rules;").unwrap();
             connection.pragma_update(None, "user_version", 3).unwrap();
         }
 
@@ -992,6 +1111,7 @@ mod tests {
         {
             let conn = rusqlite::Connection::open(&db).unwrap();
             conn.execute_batch("ALTER TABLE projects DROP COLUMN avatar; ALTER TABLE messages DROP COLUMN author_json;").unwrap();
+            conn.execute_batch("DROP TABLE always_allow_rules;").unwrap();
             conn.pragma_update(None, "user_version", 4).unwrap();
         }
         let store = Arc::new(Mutex::new(Store::open(&db).unwrap()));

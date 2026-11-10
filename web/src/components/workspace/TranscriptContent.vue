@@ -18,6 +18,7 @@ import { Empty, EmptyHeader, EmptyMedia, EmptyTitle } from '../ui/empty'
 import MessageRow from '../MessageRow.vue'
 import { useAppearance } from '@/bridge/appearance'
 import WorktreeApprovals from './WorktreeApprovals.vue'
+import WriteAccessApprovals from './WriteAccessApprovals.vue'
 import MemoryResponse from '../memory/MemoryResponse.vue'
 import MemoryCaptureStatus from '../memory/MemoryCaptureStatus.vue'
 import { useMemory } from '../memory/useMemory'
@@ -277,6 +278,7 @@ onUnmounted(() => window.removeEventListener('focus', read))
             />
           </MessageScrollerItem>
           <WorktreeApprovals v-if="projectId" :channel-id="conversationId" :running="running" />
+          <WriteAccessApprovals v-if="projectId" :channel-id="conversationId" :running="running" />
           <Empty v-if="!messages.length && !hasLiveRow(running, live.length)" class="m-auto">
             <EmptyHeader>
               <EmptyMedia variant="icon"><MessageSquare /></EmptyMedia>

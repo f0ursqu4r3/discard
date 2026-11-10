@@ -125,3 +125,29 @@ Eligible project worktree responses use `SessionMode::Workspace`. They replay sa
 Replay keeps each tool name, error status, and target fields (`command`, `cmd`, `file_path`, `path`, `paths`, `notebook_path`, `pattern`). It limits tool output to the first 1024 bytes on a UTF-8 boundary and reports the omitted byte count. Changes cards replay their state, file paths and statuses, and commit IDs. Other blocks stay unchanged. Store retains all original tool inputs, outputs, and changes cards.
 
 Compaction can reduce a message's fragment count. If the saved summary boundary no longer exists, replay starts after the last fragment of that same message. If the message is absent, replay retains the existing fallback and includes all available fragments.
+
+
+## Approved write requests
+
+`Command::Continue { agent, note }` starts a fresh response for the requesting
+agent. It reads current configuration and workspace eligibility. It skips mention
+resolution and stores no new user message. The current input explains the app
+approval and tells the agent to continue the latest user request without repeating
+completed work. The existing transcript framing stays in place.
+
+Worktree creation approval binds an owned worktree before Continue. Main-checkout
+approval uses an in-memory grant for one agent, one channel, and one response.
+The engine consumes it when verifying that response's main-checkout binding.
+The token carries the grant to `worktree_commit`. Provider protection checks still
+apply. Claude enables main-checkout writes: `denyWrite` blocks shell writes to
+`.git`, and file-tool edits under `.git` require a full-access card. Codex cannot
+protect `.git` after approval, so it gets no main-checkout request tool or grant.
+The engine uses the responding provider's capability when it prepares the MCP
+identity and when it verifies a pending grant. Legacy memory preparation methods
+default to no main-checkout requests.
+
+Workspace approvals consult the current Always-allow rule table for each request.
+Command rules match parsed word prefixes. Host rules match exact normalized hosts.
+The audit uses `Policy("always_allow:<id>")`. Saving a rule sends a single Approve
+to the provider. Coding keeps its provider-session Always allow behavior. Rules do
+not approve sandbox escapes or app-owned write requests.

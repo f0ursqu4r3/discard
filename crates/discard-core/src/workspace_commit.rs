@@ -10,16 +10,16 @@ pub struct CommitRequest { pub message: String, pub paths: Option<Vec<String>> }
 #[derive(Debug, Clone, Serialize)]
 pub struct CommitResult { pub commit: String, pub branch: String, pub files: Vec<String>, #[serde(skip_serializing_if = "Option::is_none")] pub warning: Option<String> }
 
-pub fn commit(root: &Path, request: &CommitRequest) -> Result<CommitResult, String> {
-    commit_with_file_limit(root, request, 1024 * 1024)
+pub fn commit(root: &Path, request: &CommitRequest, main_checkout_granted: bool) -> Result<CommitResult, String> {
+    commit_with_file_limit(root, request, 1024 * 1024, main_checkout_granted)
 }
-fn commit_with_file_limit(root: &Path, request: &CommitRequest, file_limit: usize) -> Result<CommitResult, String> {
+fn commit_with_file_limit(root: &Path, request: &CommitRequest, file_limit: usize, main_checkout_granted: bool) -> Result<CommitResult, String> {
     if request.message.trim().is_empty() || request.message.len() > 4096 || request.message.contains('\0') { return Err("Enter a commit message of 1 to 4096 bytes.".into()); }
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     if PathBuf::from(git(&root, &["rev-parse", "--show-toplevel"])?).canonicalize().map_err(|e| e.to_string())? != root { return Err("The commit root is not a worktree root.".into()); }
     let git_dir = PathBuf::from(git(&root, &["rev-parse", "--absolute-git-dir"])?).canonicalize().map_err(|e| e.to_string())?;
     let common = PathBuf::from(git(&root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?).canonicalize().map_err(|e| e.to_string())?;
-    if git_dir == common || common.starts_with(&root) { return Err("Agents do not write in the main checkout.".into()); }
+    if (git_dir == common || common.starts_with(&root)) && !main_checkout_granted { return Err("Agents do not write in the main checkout.".into()); }
     let branch = git(&root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     if branch == "HEAD" { return Err("Create a branch before committing. This worktree has a detached HEAD.".into()); }
     let all = vec![".".to_owned()]; let paths = request.paths.as_ref().unwrap_or(&all);
@@ -56,9 +56,26 @@ pub(crate) mod tests {
     }
     fn request() -> CommitRequest { CommitRequest { message: "Change files".into(), paths: None } }
     #[test]
+    fn main_checkout_commit_needs_a_grant() {
+        let (_dir, repo, _root) = repository(); std::fs::write(repo.join("new"), "new").unwrap();
+        assert!(commit(&repo, &request(), false).is_err());
+        assert_eq!(commit(&repo, &request(), true).unwrap().branch, "main");
+    }
+    #[test]
+    fn main_checkout_commit_still_runs_no_hooks() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, repo, _root) = repository();
+        let hook = repo.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\ntouch hook-ran\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(repo.join("new"), "new").unwrap();
+        assert!(commit(&repo, &request(), true).is_ok()); assert!(!repo.join("hook-ran").exists());
+    }
+
+    #[test]
     fn successful_commit_survives_file_list_truncation() {
         let (_dir, _repo, root) = repository(); std::fs::write(root.join("long-filename"), "new").unwrap();
-        let result = commit_with_file_limit(&root, &request(), 2).unwrap();
+        let result = commit_with_file_limit(&root, &request(), 2, false).unwrap();
         assert_eq!(result.commit, git(&root, &["rev-parse", "HEAD"]).unwrap());
         assert!(result.warning.as_deref().unwrap().contains("file list"));
         assert!(result.files.is_empty());
@@ -66,7 +83,7 @@ pub(crate) mod tests {
     #[test]
     fn commits_all_changes_with_the_users_identity() {
         let (_dir, _repo, root) = repository(); std::fs::write(root.join("a"), "new").unwrap();
-        let result = commit(&root, &request()).unwrap();
+        let result = commit(&root, &request(), false).unwrap();
         assert_eq!(result.branch, "feature"); assert_eq!(result.files, ["a"]);
         assert_eq!(git(&root, &["log", "-1", "--format=%an <%ae>%n%B"]).unwrap(), "Workspace User <workspace@example.invalid>\nChange files");
     }
@@ -74,28 +91,28 @@ pub(crate) mod tests {
     fn commits_only_listed_paths() {
         let (_dir, _repo, root) = repository();
         std::fs::write(root.join("a"), "a").unwrap(); std::fs::write(root.join("b"), "b").unwrap(); git(&root, &["add", "b"]).unwrap();
-        let result = commit(&root, &CommitRequest { paths: Some(vec!["a".into()]), ..request() }).unwrap();
+        let result = commit(&root, &CommitRequest { paths: Some(vec!["a".into()]), ..request() }, false).unwrap();
         assert_eq!(result.files, ["a"]); assert_eq!(git(&root, &["diff", "--cached", "--name-only"]).unwrap(), "b");
     }
     #[test]
     fn refuses_detached_head() {
         let (_dir, _repo, root) = repository(); git(&root, &["checkout", "--detach"]).unwrap();
-        assert_eq!(commit(&root, &request()).unwrap_err(), "Create a branch before committing. This worktree has a detached HEAD.");
+        assert_eq!(commit(&root, &request(), false).unwrap_err(), "Create a branch before committing. This worktree has a detached HEAD.");
     }
     #[test]
     fn refuses_empty_and_oversized_messages() {
         let (_dir, _repo, root) = repository();
-        for message in [" ".into(), "x".repeat(4097)] { assert!(commit(&root, &CommitRequest { message, paths: None }).is_err()); }
+        for message in [" ".into(), "x".repeat(4097)] { assert!(commit(&root, &CommitRequest { message, paths: None }, false).is_err()); }
     }
     #[test]
     fn refuses_paths_outside_the_root() {
         let (_dir, repo, root) = repository();
-        assert!(commit(&repo, &request()).is_err());
-        for path in ["../outside", "/outside", ":(top)*"] { assert!(commit(&root, &CommitRequest { paths: Some(vec![path.into()]), ..request() }).is_err()); }
+        assert!(commit(&repo, &request(), false).is_err());
+        for path in ["../outside", "/outside", ":(top)*"] { assert!(commit(&root, &CommitRequest { paths: Some(vec![path.into()]), ..request() }, false).is_err()); }
     }
     #[test]
     fn nothing_to_commit_is_an_error() {
-        let (_dir, _repo, root) = repository(); assert!(commit(&root, &request()).is_err());
+        let (_dir, _repo, root) = repository(); assert!(commit(&root, &request(), false).is_err());
     }
     #[test]
     fn does_not_run_hooks() {
@@ -103,7 +120,7 @@ pub(crate) mod tests {
         let (_dir, _repo, root) = repository(); std::fs::create_dir(root.join(".husky")).unwrap();
         let hook = root.join(".husky/pre-commit"); std::fs::write(&hook, "#!/bin/sh\ntouch hook-ran\n").unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        git(&root, &["config", "core.hooksPath", ".husky"]).unwrap(); commit(&root, &request()).unwrap();
+        git(&root, &["config", "core.hooksPath", ".husky"]).unwrap(); commit(&root, &request(), false).unwrap();
         assert!(!root.join("hook-ran").exists());
     }
 }

@@ -105,6 +105,10 @@ export interface ChannelDetailsDto {
 export interface PromptDto {
   kind: string
   alwaysAllow: string
+  ruleWords?: string[] | null
+  defaultCut?: number | null
+  ruleHost?: string | null
+  alwaysAllowNote?: string | null
   approvalId: string
   tool: string
   summary: string

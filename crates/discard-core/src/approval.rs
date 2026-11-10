@@ -99,9 +99,14 @@ impl Approval {
         decider: Decider,
         policy: &str,
     ) -> Result<DecisionOutcome, DecisionError> {
-        if self.kind != ApprovalKind::ProviderTool {
-            if !matches!(decider, Decider::User) { return Err(DecisionError::NotPermitted("Only the user can decide this approval.")); }
-            if decision == Decision::AlwaysAllow { return Err(DecisionError::NotPermitted("Always allow is unavailable for this approval.")); }
+        let permitted = match decider {
+            Decider::User => true,
+            Decider::Plugin(_) => self.kind == ApprovalKind::ProviderTool,
+            Decider::Policy(_) => matches!(self.kind, ApprovalKind::ProviderTool | ApprovalKind::NetworkDomain),
+        };
+        if !permitted { return Err(DecisionError::NotPermitted("Only the user can decide this approval.")); }
+        if decision == Decision::AlwaysAllow && self.kind != ApprovalKind::ProviderTool {
+            return Err(DecisionError::NotPermitted("Always allow is unavailable for this approval."));
         }
         match self.state {
             ApprovalState::Stale => Err(DecisionError::Stale),
@@ -145,6 +150,16 @@ mod tests {
         for kind in [ApprovalKind::SandboxEscape, ApprovalKind::NetworkDomain, ApprovalKind::MainCheckoutWrite, ApprovalKind::WorktreeCreate, ApprovalKind::ConversationMove, ApprovalKind::BranchCreate] {
             let mut a = pending(); a.kind = kind;
             assert!(matches!(a.decide(Decision::AlwaysAllow, Decider::User, "ask"), Err(DecisionError::NotPermitted(_))));
+        }
+    }
+
+    #[test]
+    fn policy_may_decide_network_domain_but_not_escapes() {
+        for kind in [ApprovalKind::NetworkDomain, ApprovalKind::SandboxEscape, ApprovalKind::MainCheckoutWrite, ApprovalKind::WorktreeCreate] {
+            let mut a = pending(); a.kind = kind;
+            assert_eq!(a.decide(Decision::Approve, Decider::Policy("always_allow:r1".into()), "ask").is_ok(), kind == ApprovalKind::NetworkDomain);
+            let mut a = pending(); a.kind = kind;
+            assert!(a.decide(Decision::Approve, Decider::Plugin("p".into()), "ask").is_err());
         }
     }
 

@@ -378,7 +378,7 @@ fn deletion_preflights_every_owned_checkout_and_preserves_dirty_and_borrowed_wor
     let repo = dir.path().join("repo");
     std::fs::create_dir(&repo).unwrap();
     let git = |args: &[&str]| {
-        let output = std::process::Command::new("git")
+        let output = discard_core::process::spawn_std(std::process::Command::new("git")
             .args([
                 "-c",
                 "user.name=Test",
@@ -388,8 +388,7 @@ fn deletion_preflights_every_owned_checkout_and_preserves_dirty_and_borrowed_wor
                 "commit.gpgsign=false",
             ])
             .args(args)
-            .current_dir(&repo)
-            .output()
+            .current_dir(&repo).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output())
             .unwrap();
         assert!(
             output.status.success(),

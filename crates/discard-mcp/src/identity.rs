@@ -15,6 +15,8 @@ pub enum Surface {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
+    pub main_checkout_requests: bool,
+    pub main_checkout_grant: bool,
     pub workspace_root: Option<std::path::PathBuf>,
     pub agent: AgentId,
     pub project: Option<ProjectId>,
@@ -102,7 +104,10 @@ mod tests {
     use super::*;
 
     fn identity(surface: Surface) -> Identity {
-        Identity { workspace_root: None,
+        Identity {
+            main_checkout_requests: false,
+            main_checkout_grant: false,
+            workspace_root: None,
             agent: AgentId("a1".into()),
             project: Some(ProjectId("p1".into())),
             source_conversation: Some(ChannelId("chat".into())),

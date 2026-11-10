@@ -145,14 +145,14 @@ pub(crate) async fn codex(mut command: Command) -> Result<Vec<ModelInfo>> {
 async fn probe(mut command: Command, claude: bool, timeout: Duration) -> Result<Vec<ModelInfo>> {
     let cwd = tempfile::tempdir().map_err(|e| ProviderError::Io(e.to_string()))?;
     let mut child = Probe(
-        command
+        discard_core::process::spawn_tokio(command
             .current_dir(cwd.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .process_group(0)
-            .spawn()
+        )
             .map_err(|e| ProviderError::Spawn(e.to_string()))?,
     );
     let mut stdin = child

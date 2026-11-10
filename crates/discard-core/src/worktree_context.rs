@@ -6,10 +6,10 @@ use tokio::io::AsyncReadExt;
 const OUTPUT_LIMIT: u64 = 4096;
 
 async fn git_snapshot(path: &Path, args: &[&str]) -> Result<String, String> {
-    let mut child = tokio::process::Command::new("git")
+    let mut child = crate::process::spawn_tokio(tokio::process::Command::new("git")
         .args(["--no-pager", "--no-optional-locks", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"])
         .args(args).current_dir(path).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
-        .kill_on_drop(true).spawn().map_err(|_| "Git snapshot unavailable".to_string())?;
+        .kill_on_drop(true)).map_err(|_| "Git snapshot unavailable".to_string())?;
     let stdout = child.stdout.take().ok_or("Git output unavailable")?;
     let result = tokio::time::timeout(Duration::from_secs(2), async {
         let mut bytes = Vec::new();
@@ -63,9 +63,9 @@ mod tests {
     use crate::{agent::AgentConfig, capability::ApprovalPolicy, model::{Channel, WorkspaceMode}, store::WorktreeRecord};
 
     fn git(repo: &Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
+        let output = crate::process::spawn_std(std::process::Command::new("git")
             .args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
-            .args(args).current_dir(repo).output().unwrap();
+            .args(args).current_dir(repo).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output()).unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         String::from_utf8(output.stdout).unwrap().trim().into()
     }

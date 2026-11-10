@@ -7,13 +7,14 @@ import re
 import subprocess
 import tempfile
 from codex_conversation import require_controls
-from workspace_execution import WorkspaceExecution, WorkspaceProtocol, prepare, report, save_transcript, scrub, stop
+from workspace_execution import WorkspaceExecution, WorkspaceProtocol, command_marker, prepare, report, save_transcript, scrub, stop
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--codex", default=os.environ.get("DISCARD_CODEX_BIN", "codex"))
     parser.add_argument("--codex-home", type=pathlib.Path, default=pathlib.Path(os.environ.get("CODEX_HOME", str(pathlib.Path.home() / ".codex"))))
+    parser.add_argument("--main-checkout", action="store_true")
     options = parser.parse_args()
     version = subprocess.check_output([options.codex, "--version"], text=True, timeout=10).strip()
     assert version == "codex-cli 0.166.0", version
@@ -33,7 +34,7 @@ def main():
         catalog = root / "models.json"
         catalog.write_text(json.dumps({"models": models}))
         controls["model_catalog_json"] = str(catalog)
-        with WorkspaceExecution("codex", cwd) as execution:
+        with WorkspaceExecution("codex", cwd, options.main_checkout) as execution:
             config = dict(controls)
             config.update(model_provider="discard_synthetic", model_providers={"discard_synthetic": {"name": "Synthetic test", "base_url": f"http://127.0.0.1:{execution.port}/v1", "wire_api": "responses", "requires_openai_auth": False}})
             def toml_value(value):
@@ -63,14 +64,17 @@ def main():
                     thread = protocol.response(3)["thread"]["id"]
                     protocol.send({"id": 4, "method": "turn/start", "params": {"threadId": thread, "input": [{"type": "text", "text": "Run the synthetic workspace sequence."}]}})
                     protocol.response(4)
-                    execution.finished.wait(50)
+                    execution.finished.wait(55)
                 finally:
                     stop(process)
                 result = report(execution, protocol, root, home, cwd)
+                result.update(command_marker(protocol))
+                result["codex_protects_git_in_root"] = result["protects_git_in_root"]
                 result.update(provider="codex", version=version, cache_version=cache_version, sandbox_workspace_write=effective.get("sandbox_workspace_write"), shell_type=models[0].get("shell_type"), apply_patch_tool_type=models[0].get("apply_patch_tool_type"))
                 stderr.seek(0)
                 result["stderr"] = stderr.read()[-2000:]
-            save_transcript("codex", scrub(protocol.transcript, root))
+            if not options.main_checkout:
+                save_transcript("codex", scrub(protocol.transcript, root))
             print(json.dumps(scrub(result, root), indent=2))
             assert result["completed"], "Synthetic sequence did not finish"
 

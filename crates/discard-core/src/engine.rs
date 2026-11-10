@@ -62,8 +62,23 @@ pub struct PreparedMemory {
     pub token: String,
 }
 
+/// Response authority comes from the selected provider and verified workspace binding.
+#[derive(Default)]
+pub struct MemoryOptions<'a> {
+    pub query: &'a str,
+    pub workspace: Option<&'a WorkspaceGrant>,
+    pub main_checkout_requests: bool,
+}
+
 /// Provides memory to provider sessions. Implemented by the MCP crate.
 pub trait MemoryService: Send + Sync {
+    /// Legacy services do not expose provider-specific request tools by default.
+    fn prepare_response(&self, agent: &AgentId, project: Option<&ProjectId>, source: &ChannelId, base_prompt: Option<&str>, plugin_write: bool, options: MemoryOptions<'_>) -> Result<PreparedMemory, String> {
+        match options.workspace {
+            Some(grant) => self.prepare_workspace_turn(agent, project, source, base_prompt, grant, options.query),
+            None => self.prepare_turn(agent, project, source, base_prompt, plugin_write, options.query),
+        }
+    }
     /// `plugin_write` adds the plugin-authoring tools (a second MCP server with its own token).
     fn prepare(&self, agent: &AgentId, project: Option<&ProjectId>, source: &ChannelId, base_prompt: Option<&str>, plugin_write: bool) -> Result<PreparedMemory, String>;
     /// Refresh mandatory memory and select facts relevant to this turn.
@@ -86,6 +101,7 @@ pub trait MemoryService: Send + Sync {
 
 #[derive(Clone)]
 pub struct Engine {
+    pub main_checkout_grants: Arc<crate::workspace_grants::MainCheckoutGrants>,
     pub mode: crate::provider::SessionMode,
     pub write_access: Result<WorkspaceGrant, ReadOnlyReason>,
     pub workspace_locks: Arc<crate::workspace_lock::WorkspaceLocks>,
@@ -123,6 +139,18 @@ impl Drop for RevokeOnDrop {
     }
 }
 
+struct RevokeMainCheckoutOnDrop<'a> {
+    grants: &'a crate::workspace_grants::MainCheckoutGrants,
+    channel: &'a ChannelId,
+    agent: AgentId,
+}
+
+impl Drop for RevokeMainCheckoutOnDrop<'_> {
+    fn drop(&mut self) {
+        self.grants.take(self.channel, &self.agent);
+    }
+}
+
 fn send(updates: &mpsc::UnboundedSender<Update>, update: Update) {
     // The UI may have closed already. Nothing else to do then.
     let _ = updates.send(update);
@@ -136,13 +164,13 @@ fn policy_name(policy: ApprovalPolicy) -> &'static str {
 }
 
 impl Engine {
-    async fn snapshot(&self, text: &str) -> Result<(Self, crate::model::MessageAuthor), String> {
+    async fn snapshot(&self, text: &str, recipient: Option<AgentId>) -> Result<(Self, crate::model::MessageAuthor), String> {
         let (mut snapshot, author, binding) = {
             let store = crate::driver::lock(&self.store);
             let channel = store.load_channel(&self.channel_id).map_err(|e| e.to_string())?;
             if store.channel_archived(&self.channel_id).map_err(|e| e.to_string())? { return Err("This conversation is archived.".into()); }
-            let mentioned = crate::mentions::resolve(&store, &self.channel_id, text)?;
-            let recipient = match &mentioned { Some(agent) => agent.clone(), None => crate::mentions::default_agent(&store, &channel)? };
+            let mentioned = if recipient.is_some() { None } else { crate::mentions::resolve(&store, &self.channel_id, text)? };
+            let recipient = match recipient.or_else(|| mentioned.clone()) { Some(agent) => agent, None => crate::mentions::default_agent(&store, &channel)? };
             if store.agent_archived(&recipient).map_err(|e| e.to_string())? { return Err("This agent is archived. Restore it before sending a message.".into()); }
             let config = store.load_agent(&recipient).map_err(|e| e.to_string())?;
             let provider = self.providers.iter().find(|p| p.id() == config.provider).cloned()
@@ -166,7 +194,19 @@ impl Engine {
             (snapshot, author, binding)
         };
         snapshot.write_access = match binding {
-            Ok(binding) => tokio::task::spawn_blocking(move || workspace_session::verify_binding(binding)).await.map_err(|e| e.to_string())?,
+            Ok(binding) => {
+                let grants = self.main_checkout_grants.clone(); let channel = self.channel_id.clone(); let recipient = snapshot.agent_id.clone();
+                let supported = snapshot.provider.supports_main_checkout_writes();
+                tokio::task::spawn_blocking(move || {
+                    match workspace_session::verify_binding(binding.clone(), false) {
+                        Err(workspace_session::ReadOnlyReason::MainCheckout) => {
+                            let granted = grants.take(&channel, &recipient) && supported;
+                            workspace_session::verify_binding(binding, granted)
+                        }
+                        result => result,
+                    }
+                }).await.map_err(|e| e.to_string())?
+            },
             Err(reason) => Err(reason),
         };
         Ok((snapshot, author))
@@ -267,8 +307,14 @@ impl Engine {
         while let Some(command) = commands.recv().await {
             // Decisions and cancels have no meaning without a running turn.
             match command {
-                Command::Send(text) => self.turn(&mut sequencer, text, Vec::new(), &mut commands, &updates).await,
-                Command::SendAttachments { text, attachments } => self.turn(&mut sequencer, text, attachments, &mut commands, &updates).await,
+                Command::Continue { agent, note } => {
+                    // A failed or cancelled follow-up must not leave authority for a later Send.
+                    let _revoke = RevokeMainCheckoutOnDrop { grants: &self.main_checkout_grants, channel: &self.channel_id, agent: agent.clone() };
+                    let text = format!("The user approved your request in the app: {note} Continue the user's latest request in this channel. Do not repeat work that is already done.");
+                    self.turn(&mut sequencer, text, Vec::new(), Some(agent), &mut commands, &updates).await;
+                }
+                Command::Send(text) => self.turn(&mut sequencer, text, Vec::new(), None, &mut commands, &updates).await,
+                Command::SendAttachments { text, attachments } => self.turn(&mut sequencer, text, attachments, None, &mut commands, &updates).await,
                 _ => {}
             }
         }
@@ -299,11 +345,13 @@ impl Engine {
         sequencer: &mut Sequencer,
         text: String,
         attachments: Vec<crate::attachments::Attachment>,
+        recipient: Option<AgentId>,
         commands: &mut mpsc::UnboundedReceiver<Command>,
         updates: &mpsc::UnboundedSender<Update>,
     ) {
+        let store_user_message = recipient.is_none();
         let (snapshot, author) = if self.mode == crate::provider::SessionMode::Conversation {
-            match self.snapshot(&text).await {
+            match self.snapshot(&text, recipient).await {
                 Ok(snapshot) => snapshot,
                 Err(error) => { send(updates, Update::Error(error)); self.finish(updates, crate::driver::TurnOutcome::Failed); return; }
             }
@@ -320,8 +368,8 @@ impl Engine {
             }
         };
         send(updates, Update::Responding(author.clone()));
-        if snapshot.mode == SessionMode::Conversation { send(updates, Update::SessionProfile(snapshot.session_profile())); }
-        snapshot.turn_snapshot(&author, sequencer, text, attachments, commands, updates).await;
+        send(updates, Update::SessionProfile(snapshot.session_profile()));
+        snapshot.turn_snapshot(&author, sequencer, text, attachments, store_user_message, commands, updates).await;
     }
 
     fn changes_block(&self, start: &Result<crate::workspace_changes::StartSnapshot, String>, state: crate::workspace_changes::ChangesState) -> Block {
@@ -330,6 +378,7 @@ impl Engine {
     }
 
     fn session_profile(&self) -> SessionProfile {
+        if self.mode == SessionMode::Coding { return SessionProfile::Coding; }
         match &self.write_access {
             Ok(grant) => SessionProfile::Workspace { root: grant.root.clone() },
             Err(reason) => {
@@ -340,16 +389,19 @@ impl Engine {
         }
     }
 
-    async fn turn_snapshot(&self, author: &crate::model::MessageAuthor, sequencer: &mut Sequencer, text: String, attachments: Vec<crate::attachments::Attachment>, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) {
+    #[expect(clippy::too_many_arguments, reason = "Keep replay and message storage separate.")]
+    async fn turn_snapshot(&self, author: &crate::model::MessageAuthor, sequencer: &mut Sequencer, text: String, attachments: Vec<crate::attachments::Attachment>, store_user_message: bool, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) {
         let mut session_mode = if self.mode == SessionMode::Conversation && self.write_access.is_ok() { SessionMode::Workspace } else { self.mode };
         let history = crate::driver::lock(&self.store).messages_for_channel(&self.channel_id);
         let previous_changes = self.memory.as_ref().map(|m| m.changes(&self.channel_id)).transpose();
+        if store_user_message {
         if let Err(error) = self.store_message(Role::User, crate::attachments::blocks(&text, &attachments), None) {
             send(updates, Update::Error(format!("{error}. Retry after resolving the storage error.")));
             self.finish(updates, crate::driver::TurnOutcome::Failed);
             return;
         }
         self.observe(observer::message_sent(&self.channel_id.0, &text));
+        }
 
         let enforcement = match self.provider.capabilities().enforcement_for(self.policy) {
             Ok(mode) => mode,
@@ -436,9 +488,11 @@ impl Engine {
         };
         // Memory: issue a session token and build the prompt. If this fails, no session starts.
         let mut prepared = match &self.memory {
-            Some(service) => match if session_mode == SessionMode::Workspace {
-                service.prepare_workspace_turn(&self.agent_id, self.project_id.as_ref(), &self.channel_id, self.system_prompt.as_deref(), self.write_access.as_ref().unwrap(), &memory_query)
-            } else { service.prepare_turn(&self.agent_id, self.project_id.as_ref(), &self.channel_id, self.system_prompt.as_deref(), self.plugin_write && self.mode == crate::provider::SessionMode::Coding, &memory_query) } {
+            Some(service) => match service.prepare_response(&self.agent_id, self.project_id.as_ref(), &self.channel_id, self.system_prompt.as_deref(), self.plugin_write && self.mode == SessionMode::Coding, MemoryOptions {
+                query: &memory_query,
+                workspace: (session_mode == SessionMode::Workspace).then(|| self.write_access.as_ref().unwrap()),
+                main_checkout_requests: self.mode == SessionMode::Conversation && self.provider.supports_main_checkout_writes(),
+            }) {
                 Ok(p) => Some(p),
                 Err(e) => {
                     send(updates, Update::Error(redact(&e)));
@@ -505,7 +559,11 @@ impl Engine {
             start_snapshot = None;
             drop(workspace_guard.take());
             drop(revoke.take());
-            prepared = match self.memory.as_ref().map(|service| service.prepare_turn(&self.agent_id, self.project_id.as_ref(), &self.channel_id, self.system_prompt.as_deref(), false, &memory_query)).transpose() {
+            prepared = match self.memory.as_ref().map(|service| service.prepare_response(&self.agent_id, self.project_id.as_ref(), &self.channel_id, self.system_prompt.as_deref(), false, MemoryOptions {
+                query: &memory_query,
+                workspace: None,
+                main_checkout_requests: self.provider.supports_main_checkout_writes(),
+            })).transpose() {
                 Ok(prepared) => prepared,
                 Err(e) => { send(updates, Update::Error(e)); self.finish(updates, crate::driver::TurnOutcome::Failed); return; }
             };
@@ -565,22 +623,37 @@ impl Engine {
                             self.observe(mapped);
                         }
                         // Discard's own memory tools are approved by policy, and the decision is audited.
-                        let automatic_approval = match &event.kind {
+                        let mut automatic_approval = match &event.kind {
                             EventKind::ApprovalRequest { approval_id, tool, kind: crate::approval::ApprovalKind::ProviderTool, paths, .. }
-                                if session_mode == SessionMode::Workspace && workspace_session::is_edit_tool(tool) && workspace_session::paths_inside(&self.write_access.as_ref().unwrap().root, paths) => Some((approval_id.clone(), "workspace_edit")),
+                                if session_mode == SessionMode::Workspace && workspace_session::is_edit_tool(tool) && workspace_session::paths_inside(&self.write_access.as_ref().unwrap().root, paths) => Some((approval_id.clone(), "workspace_edit".to_owned())),
                             EventKind::ApprovalRequest { approval_id, tool, kind: crate::approval::ApprovalKind::ProviderTool, .. }
                                 if self.memory.is_some() && auto_approved_tool(tool) =>
                             {
-                                Some((approval_id.clone(), "builtin-discard-tools"))
+                                Some((approval_id.clone(), "builtin-discard-tools".to_owned()))
                             }
                             _ => None,
                         };
+                        if automatic_approval.is_none() && session_mode == SessionMode::Workspace
+                            && let EventKind::ApprovalRequest { approval_id, .. } = &event.kind
+                            && let Some(project) = &self.project_id
+                            && let Some(prompt) = timeline.prompts().iter().find(|p| p.approval_id == *approval_id)
+                        {
+                            let request = prompt.rule_words.as_deref().map(crate::always_allow::RuleRequest::Command)
+                                .or_else(|| prompt.rule_host.as_deref().map(crate::always_allow::RuleRequest::Host));
+                            if let Some(request) = request {
+                                match crate::driver::lock(&self.store).matching_always_allow_rule(&self.agent_id, project, &request) {
+                                    Ok(Some(rule)) => automatic_approval = Some((approval_id.clone(), format!("always_allow:{}", rule.id))),
+                                    Ok(None) => {},
+                                    Err(error) => send(updates, Update::Error(error.to_string())),
+                                }
+                            }
+                        }
                         send(updates, Update::Event(Box::new(event)));
                         if let Some((approval_id, policy)) = automatic_approval {
                             let _ = decisions_tx.send(DecisionMsg {
                                 approval_id: approval_id.clone(),
                                 decision: Decision::Approve,
-                                decider: Decider::Policy(policy.into()),
+                                decider: Decider::Policy(policy),
                             });
                             let state = ApprovalState::Decided(Decision::Approve);
                             timeline.mark_approval(&approval_id, state);
@@ -589,10 +662,25 @@ impl Engine {
                     }
                     command = commands.recv(), if commands_open => match command {
                         None => commands_open = false,
-                        Some(Command::Decide { approval_id, decision }) => {
+                        Some(Command::Decide { approval_id, mut decision, rule_cut }) => {
                             if session_mode == SessionMode::Workspace && decision == Decision::AlwaysAllow {
-                                send(updates, Update::Error("Always allow is not available in write sessions yet. Approve this request once.".into()));
-                                continue;
+                                let prompt = timeline.prompts().iter().find(|p| p.approval_id == approval_id && p.view == ApprovalView::Pending);
+                                let target = prompt.and_then(|p| {
+                                    if let Some(words) = &p.rule_words {
+                                        let cut = rule_cut.unwrap_or_else(|| crate::always_allow::default_cut(words)).clamp(1, words.len());
+                                        Some(crate::always_allow::RuleTarget::Command { words: words[..cut].to_vec() })
+                                    } else { p.rule_host.as_ref().map(|host| crate::always_allow::RuleTarget::Host { host: host.clone() }) }
+                                });
+                                let Some(target) = target else {
+                                    send(updates, Update::Error("This command uses shell syntax that Always allow cannot match. Approve it once.".into()));
+                                    continue;
+                                };
+                                let Some(project) = &self.project_id else { continue; };
+                                let saved = crate::driver::lock(&self.store).insert_always_allow_rule(&self.agent_id, project, &target);
+                                if let Err(error) = saved { send(updates, Update::Error(error.to_string())); continue; }
+                                let text = match target { crate::always_allow::RuleTarget::Command { words } => words.join(" "), crate::always_allow::RuleTarget::Host { host } => host };
+                                send(updates, Update::Notice(format!("Saved an Always-allow rule for `{text}` in this project.")));
+                                decision = Decision::Approve;
                             }
                             if decision == Decision::AlwaysAllow && timeline.prompts().iter().any(|p| p.approval_id == approval_id && p.kind != crate::approval::ApprovalKind::ProviderTool) {
                                 send(updates, Update::Error("Always allow is unavailable for this approval.".into())); continue;
@@ -615,7 +703,7 @@ impl Engine {
                         Some(Command::Cancel) => {
                             let _ = cancel_tx.send(());
                         }
-                        Some(Command::Send(_) | Command::SendAttachments { .. }) => send(
+                        Some(Command::Send(_) | Command::SendAttachments { .. } | Command::Continue { .. }) => send(
                             updates,
                             Update::Error("A turn is already running. Wait for it to finish or cancel it.".into()),
                         ),

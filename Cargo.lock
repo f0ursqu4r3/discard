@@ -808,6 +808,7 @@ dependencies = [
 name = "discard-lua"
 version = "0.1.0"
 dependencies = [
+ "discard-core",
  "hmac",
  "mlua",
  "pbkdf2",

@@ -93,6 +93,10 @@ pub struct MessageDto {
 pub struct PromptDto {
     pub kind: String,
     pub always_allow: String,
+    pub rule_words: Option<Vec<String>>,
+    pub default_cut: Option<usize>,
+    pub rule_host: Option<String>,
+    pub always_allow_note: Option<String>,
     pub approval_id: String,
     pub tool: String,
     pub summary: String,
@@ -424,4 +428,15 @@ impl MenuEntryDto {
             _ => None,
         }
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleDto {
+    pub id: String,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub kind: String,
+    pub text: String,
+    pub created_at: i64,
 }

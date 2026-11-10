@@ -1,5 +1,6 @@
 //! Process management and the JSON-RPC client for `codex app-server`.
 
+use discard_core::process::spawn_tokio;
 use crate::codex::parse::{Item, Mapper, PendingRequest, approval_response};
 use async_trait::async_trait;
 use discard_core::approval::Decision;
@@ -87,7 +88,7 @@ impl CodexProvider {
     }
 
     async fn read_effective_config(&self, cwd: &Path, args: &[String]) -> Result<Value, ProviderError> {
-        let mut child = self
+        let mut child = spawn_tokio(self
             .command()
             .args(args)
             .args(["app-server", "--listen", "stdio://"])
@@ -97,7 +98,7 @@ impl CodexProvider {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .process_group(0)
-            .spawn()
+        )
             .map_err(|e| crate::conversation::setup(e.to_string()))?;
         let mut stdin = child.stdin.take().ok_or_else(|| crate::conversation::setup("no configuration probe input"))?;
         let mut lines =
@@ -189,23 +190,21 @@ impl Provider for CodexProvider {
     }
 
     async fn check_setup(&self) -> SetupStatus {
-        let version =
-            self.command().arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true).status();
-        match tokio::time::timeout(SETUP_TIMEOUT, version).await {
+        let version = spawn_tokio(self.command().arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true));
+        match tokio::time::timeout(SETUP_TIMEOUT, async { version?.wait().await }).await {
             Ok(Ok(_)) => {}
             _ => {
                 return SetupStatus::NotInstalled { install_hint: "Install the Codex CLI and make sure `codex` is on your PATH.".into() };
             }
         }
-        let status = self
+        let status = spawn_tokio(self
             .command()
             .args(["login", "status"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .status();
-        match tokio::time::timeout(SETUP_TIMEOUT, status).await {
+            .kill_on_drop(true));
+        match tokio::time::timeout(SETUP_TIMEOUT, async { status?.wait().await }).await {
             Ok(Ok(s)) if s.success() => SetupStatus::Ready,
             _ => SetupStatus::NotLoggedIn { login_command: "codex login".into() },
         }
@@ -217,6 +216,9 @@ impl Provider for CodexProvider {
 
     async fn start_session(&self, mut spec: SessionSpec) -> Result<Box<dyn ProviderSession>, ProviderError> {
         let workspace = spec.mode == SessionMode::Workspace;
+        if workspace && spec.cwd.join(".git").is_dir() {
+            return Err(ProviderError::SandboxUnavailable("Codex cannot protect Git metadata in the main checkout".into()));
+        }
         if workspace && (spec.enforcement != EnforcementMode::HostPrompts || !spec.cwd.is_absolute() || !spec.cwd.is_dir()) {
             return Err(ProviderError::SandboxUnavailable("workspace sessions require host approvals and an existing absolute directory".into()));
         }
@@ -232,7 +234,8 @@ impl Provider for CodexProvider {
                 return Err(setup("Codex conversation sessions require a fresh replay, not a native resume"));
             }
             let model = spec.model.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| setup("select an exact Codex model"))?;
-            let version = tokio::time::timeout(SETUP_TIMEOUT, self.command().arg("--version").kill_on_drop(true).output())
+            let version = spawn_tokio(self.command().arg("--version").kill_on_drop(true).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()));
+            let version = tokio::time::timeout(SETUP_TIMEOUT, async { version?.wait_with_output().await })
                 .await
                 .map_err(|_| setup("Codex version check timed out"))?
                 .map_err(|e| setup(e.to_string()))?;
@@ -279,7 +282,7 @@ impl Provider for CodexProvider {
 
         let mut command = self.command();
         if workspace { command.env("GIT_OPTIONAL_LOCKS", "0"); }
-        let mut child = command
+        let mut child = spawn_tokio(command
             .args(&startup_args)
             .args(["app-server", "--listen", "stdio://"])
             .current_dir(&spec.cwd)
@@ -289,7 +292,7 @@ impl Provider for CodexProvider {
             .kill_on_drop(true)
             // Own process group, so cancel can kill codex and everything it started.
             .process_group(0)
-            .spawn()
+        )
             .map_err(|e| ProviderError::Spawn(format!("{}: {e}", self.executable.display())))?;
         let pgid = child.id().and_then(|p| i32::try_from(p).ok());
         let mut stdin = child.stdin.take().ok_or_else(|| ProviderError::Spawn("no stdin pipe".into()))?;
@@ -578,6 +581,14 @@ mod tests {
             resume_handle: None,
             mcp_config: None,
         }
+    }
+
+    #[tokio::test]
+    async fn codex_main_checkout_fails_closed_without_git_protection() {
+        let dir = tempfile::tempdir().unwrap(); std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let mut s = spec(EnforcementMode::HostPrompts); s.mode = SessionMode::Workspace; s.cwd = dir.path().canonicalize().unwrap();
+        let error = CodexProvider::new("unused").start_session(s).await.err().unwrap();
+        assert!(matches!(&error, ProviderError::SandboxUnavailable(message) if message == "Codex cannot protect Git metadata in the main checkout"), "{error:?}");
     }
 
     #[test]

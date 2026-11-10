@@ -27,7 +27,10 @@ async fn rig() -> Rig {
 }
 
 fn identity(agent: &str) -> Identity {
-    Identity { workspace_root: None,
+    Identity {
+            main_checkout_requests: false,
+            main_checkout_grant: false,
+            workspace_root: None,
         agent: AgentId(agent.into()),
         project: None, source_conversation: Some(discard_core::model::ChannelId("chat".into())), write_scopes: [ScopeKindOrd::Agent].into(),
         surface: Surface::Memory,

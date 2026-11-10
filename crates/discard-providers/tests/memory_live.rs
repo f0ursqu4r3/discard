@@ -69,6 +69,7 @@ async fn save_and_recall(provider: Arc<dyn Provider>, model: Option<&str>) {
     let memory: Arc<dyn MemoryService> = runtime.clone();
 
     let engine = Engine {
+        main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
         write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
         reasoning_effort: None,

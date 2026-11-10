@@ -134,3 +134,35 @@ found no reliable escalation marker. File-change paths come from preceding item 
 unknown paths never receive automatic edit approval. Coding approvals keep their existing behavior.
 
 Supplemental synthetic review probes found that a file move supplies its destination in `changes[].kind.move_path`. The source can be inside the root while the destination is outside it, with `grantRoot: null`. Discard checks both paths. Incomplete path records cannot receive automatic approval. Outside or protected targets use full-access cards, and the normalized paths appear in the approval input.
+
+### Slice B spike results
+
+The synthetic main-checkout probe uses a normal temporary repository, a temporary
+provider home, and a local model endpoint. Run:
+`python3 crates/discard-providers/tests/probes/codex_workspace.py --main-checkout`.
+All approval requests are accepted to measure provider protection itself.
+
+Tested codex-cli 0.166.0. `codex_in_sandbox_marker = none`.
+Three in-sandbox requests and three explicit escalation requests differ in command
+text, item IDs, timestamps, suggested command rules, and reason. The reason is null
+for in-sandbox requests and model-supplied for escalation. None is a reliable,
+non-absent sandbox marker. Workspace command approvals keep `SandboxEscape`.
+
+`codex_protects_git_in_root = false`: `touch .git/marker`, `git add -A`,
+`git commit -m x`, and native `apply_patch` to `.git/config` all succeeded after
+approval. Main-checkout Workspace setup must fail closed.
+
+
+Slice B adds `worktree_request_creation` to scoped Conversation tools. The MCP
+server checks the agent and channel before listing or running it. App approval
+starts a fresh Continue response. Under decision 20e, Codex does not support
+main-checkout writes. Its MCP identity hides `main_checkout_request_write` and
+refuses direct calls. Its prompt explains the limit instead of offering a request
+that cannot succeed. The engine also refuses main-checkout grants for unsupported
+providers. The adapter still rejects Workspace roots containing a `.git`
+directory. Linked-worktree writes keep their existing protection checks. Coding
+behavior stays unchanged.
+
+The marker result remains `none`. Every Workspace command approval therefore
+remains SandboxEscape. Its card says "Always allow is unavailable for Codex write
+sessions." Discard's durable rule system does not approve these requests.

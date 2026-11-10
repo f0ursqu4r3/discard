@@ -179,16 +179,20 @@ fn run_app(
 
     let workspace_locks = Arc::new(discard_core::workspace_lock::WorkspaceLocks::default());
     let worktree_access = Arc::new(discard_core::worktree_access::WorktreeAccess::new(store.clone()).with_locks(workspace_locks.clone()));
-    let memory = runtime.block_on(MemoryRuntime::start_with_services(
+    let git_workspace = Arc::new(GitWorkspace::new(&data_dir.join("worktrees"), Arc::clone(&store)));
+    let main_checkout_grants = Arc::new(discard_core::workspace_grants::MainCheckoutGrants::default());
+    let write_requests = Arc::new(discard_core::write_requests::WriteRequests::default());
+    let memory = runtime.block_on(MemoryRuntime::start_with_write_services(
         Arc::clone(&memory_store),
         &data_dir.join("run"),
         Some(Arc::clone(&plugins)),
         Some(worktree_access.clone()),
+        Some((write_requests.clone(), git_workspace.clone())),
     ))?;
 
-    let git_workspace = Arc::new(GitWorkspace::new(&data_dir.join("worktrees"), Arc::clone(&store)));
     let launcher: desktop::channels::Launcher = {
         let store = store.clone(); let git_workspace = git_workspace.clone(); let memory = memory.clone();
+        let main_checkout_grants = main_checkout_grants.clone();
         let manager = manager.clone(); let handle = runtime.handle().clone();
         let conversation_dir = data_dir.join("conversations");
         let session_mode = if options.builder { discard_core::provider::SessionMode::Coding } else { discard_core::provider::SessionMode::Conversation };
@@ -218,6 +222,7 @@ fn run_app(
             let (commands_tx, commands_rx) = mpsc::unbounded_channel();
             let (updates_tx, updates_rx) = mpsc::unbounded_channel();
             let engine = Engine {
+        main_checkout_grants: main_checkout_grants.clone(),
         workspace_locks: workspace_locks.clone(),
         write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
         reasoning_effort: agent.reasoning_effort.clone(),
@@ -246,7 +251,10 @@ fn run_app(
         let (_, updates) = mpsc::unbounded_channel();
         (CoreInit { state: UiState::new(discard_core::model::ChannelId(String::new()), vec![]), commands, project: String::new(), channel: String::new(), agent: String::new(), provider: String::new() }, updates)
     };
-    desktop::run(init, updates_rx, runtime.handle().clone(), settings, plugins, data_dir.to_path_buf(), desktop::DesktopConfig { startup_channel, sidebar_project, load_report, workspace: git_workspace, store, relaunch, providers, recheck, memory: memory_store, worktree_access, launcher, on_ready })?;
+    desktop::run(init, updates_rx, runtime.handle().clone(), settings, plugins, data_dir.to_path_buf(), desktop::DesktopConfig { startup_channel, sidebar_project, load_report, workspace: git_workspace, store, relaunch, providers, recheck, memory: memory_store, worktree_access, launcher, on_ready,
+        write_requests,
+        main_checkout_grants,
+    })?;
     Ok(())
 }
 

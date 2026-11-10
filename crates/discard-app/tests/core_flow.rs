@@ -107,6 +107,7 @@ async fn send_streams_then_finishes() {
     let session = SessionId::new();
     store.create_session(&session, &channel.id).unwrap();
     let engine = Engine {
+        main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
         write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
         reasoning_effort: None,

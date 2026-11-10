@@ -81,16 +81,42 @@ Before removal, Discard waits for app responses and archive operations to finish
 
 The app serializes these tool operations. External Git processes are not controlled by Discard. Git performs its own final removal checks. Removing a worktree keeps the conversation history available.
 
-## Agent workspace writes (slice A)
+## Agent workspace writes (slices A and B)
 
-An agent with **Edit files in branch channels** enabled can answer in a bound project branch or detached worktree channel using `SessionMode::Workspace`. The provider runs in that directory with a small native tool set and OS sandbox. General channels, direct chats, unbound branches, main checkouts, disabled agents, and unavailable sandbox profiles stay read-only. Discard states the reason. Root `AGENTS.md` and `CLAUDE.md` enter the prompt as bounded, untrusted repository instructions.
+An agent with **Edit files in branch channels** enabled can answer in a bound project branch or detached worktree channel using `SessionMode::Workspace`. The provider runs in that directory with a small native tool set and OS sandbox. General channels, direct chats, unbound branches, main checkouts without a one-response grant, disabled agents, and unavailable sandbox profiles stay read-only. Discard states the reason. Root `AGENTS.md` and `CLAUDE.md` enter the prompt as bounded, untrusted repository instructions.
 
-In-root file edits receive automatic approval. Shell requests use approval cards. Sandbox escapes require a separate full-access card with no Always allow action. Codex cannot reliably identify command escalation, so every Codex Workspace command approval uses the full-access card. Durable Always-allow rules and network-domain Always allow remain planned. Their controls show **Soon** where present.
+In-root file edits receive automatic approval. Shell requests use approval cards. Sandbox escapes require a separate full-access card with no Always allow action. Codex cannot reliably identify command escalation, so every Codex Workspace command approval uses the full-access card. Durable Always-allow rules support simple shell-command prefixes and exact network hosts. The user chooses the prefix cut on the approval card. The default includes the program and the first word after it that is not a flag. Compound shell syntax cannot use Always allow. Rules belong to one agent in one project. Each automatic approval records the rule ID. Project settings list rules and offer Revoke. Revocation affects the next request, including one in a running response. Codex command cards state "Always allow is unavailable for Codex write sessions."
 
 One response at a time holds a canonical worktree path. Other responses wait and show the current channel. Cancellation, setup failure, and provider failure release the lock. This lock covers Discard responses; it does not control external editors or Git processes.
 
-Workspace tokens expose `worktree_commit` with a commit message and optional relative paths. The tool rechecks the agent, channel, worktree binding, and response lock. It runs outside the provider sandbox with hooks disabled. It preserves the user’s Git identity and signing settings. It rejects main checkouts, detached HEAD, traversal, and paths outside the root. Selected-path commits exclude unrelated staged files. Commit audit records link to the saved response. Conversation and summary tokens do not expose this tool.
+Workspace tokens expose `worktree_commit` with a commit message and optional relative paths. The tool rechecks the agent, channel, worktree binding, and response lock. It runs outside the provider sandbox with hooks disabled. It preserves the user’s Git identity and signing settings. It rejects main checkouts without an active grant, detached HEAD, traversal, and paths outside the root. Selected-path commits exclude unrelated staged files. Commit audit records link to the saved response. Conversation and summary tokens do not expose this tool.
 
 Each Workspace response ends with a protected changes card, including stopped and failed responses. The card lists commits and changed files with expandable, bounded diffs. It excludes unchanged pre-existing dirty files and labels pre-existing files that changed. A collection failure saves a visible notice and releases the lock.
 
-Slices B and C remain planned: worktree creation, main-checkout write grants, durable Always-allow rules, network-domain Always allow, conversation moves, new-branch targets, and native provider resume per agent. Slice A does not change the `--builder` Coding path.
+Slice B is implemented. An opted-in agent with policy Ask can call
+`worktree_request_creation` in an unbound branch channel. The card shows the branch
+and target folder. Approval rechecks the branch and creates an owned worktree.
+A checked-out or deleted branch, or an existing target folder, prevents creation.
+Denial creates nothing. Approval starts `Command::Continue` for the requesting
+agent, with current eligibility and no new user message.
+
+A Claude agent in a branch channel bound to the main checkout can call
+`main_checkout_request_write`. Approval grants writes to one agent in one channel
+for one response. A grant expires after ten minutes and cannot cross channels.
+Commits require the same response grant. Claude's `denyWrite` blocks shell writes
+to `.git`. Native file-tool edits under `.git` require the full-access card.
+
+Codex agents cannot request or receive main-checkout writes. The spike showed
+that approved Codex commands and patches can change `.git`. The MCP server hides
+the request tool and the prompt tells the agent to explain this limit once if the
+user asks for changes. The engine rechecks provider support before using a grant.
+Codex still refuses Workspace roots with a `.git` directory.
+
+Both request types require app approval. They are single-use, expire after ten
+minutes, and are cancelled by app restart. The agent, plugins, and Always-allow
+rules cannot approve them. The user must wait for the current response to finish
+before approving.
+
+Slice C remains planned: conversation moves, new-branch targets, and creating a
+branch for a detached worktree. Native provider resume per agent is also planned.
+Slices A and B do not change the `--builder` Coding path.

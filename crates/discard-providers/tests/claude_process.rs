@@ -296,7 +296,7 @@ async fn workspace_session_runs_in_the_granted_directory() {
     let rig = Rig::new(); let mut s = conversation_spec(&rig);
     s.mode = discard_core::provider::SessionMode::Workspace;
     s.cwd = rig.dir.path().canonicalize().unwrap();
-    let out = std::process::Command::new("git").args(["init", "-q"]).current_dir(&s.cwd).output().unwrap(); assert!(out.status.success());
+    s.cwd = linked_workspace(rig.dir.path());
     let mut session = rig.provider("approval").start_session(s.clone()).await.unwrap();
     let _ = session.next_event().await;
     let log = rig.log_text(); assert!(log.contains(&format!("CWD {}", s.cwd.display())), "{log}");
@@ -309,8 +309,80 @@ async fn workspace_session_runs_in_the_granted_directory() {
 async fn workspace_missing_model_keeps_setup_error() {
     let rig = Rig::new(); let mut s = conversation_spec(&rig);
     s.mode = discard_core::provider::SessionMode::Workspace; s.cwd = rig.dir.path().canonicalize().unwrap(); s.model = None;
-    assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&s.cwd).status().unwrap().success());
+    s.cwd = linked_workspace(rig.dir.path());
     let error = rig.provider("approval").start_session(s).await.err().unwrap();
     assert!(matches!(error, ProviderError::Setup(_)), "{error:?}");
     assert!(error.to_string().contains("select an exact Claude model"));
+}
+
+#[cfg(target_os = "macos")]
+fn linked_workspace(base: &std::path::Path) -> PathBuf {
+    let repo = base.join("repo"); std::fs::create_dir(&repo).unwrap();
+    let root = base.join("worktree");
+    for args in [vec!["init", "-q"], vec!["-c", "user.name=T", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "init"], vec!["worktree", "add", "-b", "feature", root.to_str().unwrap()]] {
+        assert!(discard_core::process::spawn_std(std::process::Command::new("git").args(["-c", "core.hooksPath=/dev/null"]).args(args).current_dir(&repo)).and_then(|mut child| child.wait()).unwrap().success());
+    }
+    root.canonicalize().unwrap()
+}
+
+#[cfg(target_os = "macos")]
+fn main_checkout_spec(rig: &Rig) -> SessionSpec {
+    let mut s = conversation_spec(rig);
+    s.mode = discard_core::provider::SessionMode::Workspace;
+    let repo = rig.dir.path().join("repo"); std::fs::create_dir(&repo).unwrap();
+    assert!(discard_core::process::spawn_std(std::process::Command::new("git").args(["init", "-q"]).current_dir(&repo)).and_then(|mut child| child.wait()).unwrap().success());
+    s.cwd = repo.canonicalize().unwrap();
+    s
+}
+
+#[tokio::test]
+#[cfg(target_os = "macos")]
+async fn claude_main_checkout_args_deny_writes_to_dot_git() {
+    let rig = Rig::new(); let s = main_checkout_spec(&rig);
+    let mut session = rig.provider("approval").start_session(s.clone()).await.unwrap();
+    let _ = session.next_event().await;
+    let log = rig.log_text();
+    let settings = log.split_once("--settings ").expect("sandbox settings in CLI args").1;
+    let settings = serde_json::Deserializer::from_str(settings).into_iter::<serde_json::Value>().next().unwrap().unwrap();
+    assert!(settings["sandbox"]["filesystem"]["denyWrite"].as_array().unwrap().contains(&serde_json::json!(s.cwd.join(".git").canonicalize().unwrap())));
+    assert!(log.contains(&format!("CWD {}", s.cwd.display())));
+}
+
+#[tokio::test]
+#[cfg(target_os = "macos")]
+async fn claude_main_checkout_file_tools_require_full_access_cards() {
+    use discard_core::{approval::ApprovalKind, driver::{TurnContext, TurnInputs, run_turn}};
+    for (tool, path) in [("Write", ".git/config"), ("Edit", ".git/hooks/pre-commit")] {
+        let rig = Rig::new(); let s = main_checkout_spec(&rig);
+        let fixture = rig.dir.path().join("git-edit.jsonl");
+        let events: Vec<_> = std::fs::read_to_string(FIXTURE).unwrap().lines().map(|line| {
+            let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
+            if event["type"] == "control_request" {
+                event["request"]["tool_name"] = tool.into();
+                event["request"]["input"] = serde_json::json!({"file_path":s.cwd.join(path), "content":"synthetic", "old_string":"old", "new_string":"new"});
+                event["request"]["blocked_path"] = serde_json::json!(s.cwd.join(path));
+            }
+            event.to_string()
+        }).collect();
+        std::fs::write(&fixture, events.join("\n")).unwrap();
+        let provider = rig.provider("approval").with_env("FAKE_CLAUDE_FIXTURE", fixture);
+        let mut session = provider.start_session(s.clone()).await.unwrap();
+        let mut h = Harness::new();
+        let (updates, receive) = tokio::sync::mpsc::unbounded_channel();
+        let (decisions, decision_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (cancel, cancel_rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = TurnContext { workspace_root: Some(&s.cwd), store: &h.store, sequencer: &mut h.sequencer, session_id: &h.session_id, policy_name: "ask", updates };
+        let ui = Ui { updates: receive, decisions, cancel };
+        let (result, seen) = tokio::join!(
+            run_turn(ctx, &mut *session, "edit", TurnInputs { decisions: decision_rx, cancel: cancel_rx }),
+            collect(ui, |id, ui| decide(ui, id, Decision::Deny)),
+        );
+        assert_eq!(result.unwrap().1, TurnOutcome::Completed);
+        let id = approval_id_of(&seen);
+        assert!(seen.iter().any(|event| matches!(&event.kind, EventKind::ApprovalRequest { kind: ApprovalKind::SandboxEscape, tool: actual, .. } if actual == tool)), "{tool} {path}");
+        let approval = h.store.lock().unwrap().load_approval(&id).unwrap();
+        assert_eq!(approval.kind, ApprovalKind::SandboxEscape);
+        assert_eq!(approval.state, ApprovalState::Decided(Decision::Deny));
+        assert_eq!(approval.audit[0].decider, discard_core::approval::Decider::User);
+    }
 }

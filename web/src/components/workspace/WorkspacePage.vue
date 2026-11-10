@@ -17,6 +17,7 @@ import {
 } from '../ui/dialog'
 import ProjectAvatar from './ProjectAvatar.vue'
 import ProjectIdentitySettings from './ProjectIdentitySettings.vue'
+import ProjectAlwaysAllowRules from './ProjectAlwaysAllowRules.vue'
 import MemoryBrowser from '../memory/MemoryBrowser.vue'
 import FriendsList from '../agents/FriendsList.vue'
 import AgentAvatar from '../agents/AgentAvatar.vue'
@@ -117,6 +118,7 @@ const branchCount = computed(() => props.snapshot.branches.filter((row) => !row.
         "
         @changed="emit('projectChanged')"
       />
+      <ProjectAlwaysAllowRules v-if="project" :key="project.id" :project-id="project.id" />
       <Card>
         <CardHeader><CardTitle>Folder</CardTitle></CardHeader>
         <CardContent>

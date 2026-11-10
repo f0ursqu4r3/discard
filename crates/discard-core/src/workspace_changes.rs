@@ -91,7 +91,7 @@ mod tests {
     #[test]
     fn reports_new_commits_and_uncommitted_edits() {
         let (_dir, _repo, root) = repository(); let start = snapshot(&root).unwrap();
-        std::fs::write(root.join("a"), "committed").unwrap(); commit(&root, &CommitRequest { message: "Change".into(), paths: None }).unwrap();
+        std::fs::write(root.join("a"), "committed").unwrap(); commit(&root, &CommitRequest { message: "Change".into(), paths: None }, false).unwrap();
         std::fs::write(root.join("b"), "uncommitted").unwrap();
         let Block::Changes { commits, files, .. } = changes(&root, &start, ChangesState::Completed).unwrap() else { panic!() };
         assert_eq!(commits.len(), 1); assert_eq!(commits[0].subject, "Change"); assert_eq!(files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["a", "b"]);

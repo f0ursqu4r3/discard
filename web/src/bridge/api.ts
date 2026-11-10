@@ -38,8 +38,12 @@ export async function importAttachmentFiles(files: File[]): Promise<AttachmentDt
   return invoke<AttachmentDto[]>('import_attachments', { files: uploads })
 }
 export const attachmentPreview = (id: string) => invoke<string>('attachment_preview', { id })
-export const decideApproval = (channelId: string, approvalId: string, decision: string) =>
-  invoke<void>('decide_approval', { channelId, approvalId, decision })
+export const decideApproval = (
+  channelId: string,
+  approvalId: string,
+  decision: string,
+  ruleCut?: number,
+) => invoke<void>('decide_approval', { channelId, approvalId, decision, ruleCut })
 export const cancelTurn = (channelId: string) => invoke<void>('cancel_turn', { channelId })
 export const setPanels = (channelList: number, memberList: number) =>
   invoke<void>('set_panels', { channelList, memberList })
@@ -184,3 +188,31 @@ export const getWorktreeRequests = (channelId: string) =>
   invoke<WorktreeRemovalRequest[]>('get_worktree_requests', { channelId })
 export const decideWorktreeRemoval = (channelId: string, requestId: string, approve: boolean) =>
   invoke<WorktreeRemovalRequest>('decide_worktree_removal', { channelId, requestId, approve })
+
+export interface RuleDto {
+  id: string
+  agentId: string
+  agentName: string
+  kind: 'command' | 'host'
+  text: string
+  createdAt: number
+}
+export const getAlwaysAllowRules = (projectId: string) =>
+  invoke<RuleDto[]>('get_always_allow_rules', { projectId })
+export const revokeAlwaysAllowRule = (projectId: string, ruleId: string) =>
+  invoke<boolean>('revoke_always_allow_rule', { projectId, ruleId })
+
+export interface WriteRequest {
+  id: string
+  kind: 'worktree_create' | 'main_checkout_write'
+  channelId: string
+  agentId: string
+  branch: string
+  path: string
+  state: string
+  result: string | null
+}
+export const getWriteRequests = (channelId: string) =>
+  invoke<WriteRequest[]>('get_write_requests', { channelId })
+export const decideWriteRequest = (channelId: string, requestId: string, approve: boolean) =>
+  invoke<WriteRequest>('decide_write_request', { channelId, requestId, approve })

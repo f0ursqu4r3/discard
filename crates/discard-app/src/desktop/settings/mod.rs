@@ -149,7 +149,7 @@ pub fn settings_copy_theme(context: tauri::State<'_, SettingsContext>, name: Str
     let mut command = std::process::Command::new("xdg-open");
     #[cfg(target_os = "windows")]
     let mut command = { let mut c = std::process::Command::new("cmd"); c.args(["/c", "start", ""]); c };
-    let status = command.arg(path).status().map_err(|e| e.to_string())?;
+    let status = discard_core::process::spawn_std(command.arg(path)).and_then(|mut child| child.wait()).map_err(|e| e.to_string())?;
     if status.success() { Ok(()) } else { Err(format!("Editor command failed: {status}")) }
 }
 
@@ -186,7 +186,7 @@ fn reveal_path(path: &std::path::Path) -> Result<(), String> {
     let mut command = { let mut c = std::process::Command::new("explorer"); c.arg("/select,"); c };
     #[cfg(target_os = "linux")]
     let path = path.parent().unwrap_or(path);
-    let status = command.arg(path).status().map_err(|e| e.to_string())?;
+    let status = discard_core::process::spawn_std(command.arg(path)).and_then(|mut child| child.wait()).map_err(|e| e.to_string())?;
     if status.success() { Ok(()) } else { Err(format!("Cannot reveal path: {status}")) }
 }
 

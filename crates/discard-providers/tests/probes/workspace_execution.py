@@ -11,10 +11,13 @@ from memory_execution import MemoryExecution, text_content
 
 
 class WorkspaceExecution(MemoryExecution):
-    def __init__(self, provider, cwd):
+    def __init__(self, provider, cwd, main_checkout=False):
         super().__init__(provider)
         self.cwd = cwd
         self.instructions_seen = False
+        self.main_checkout = main_checkout
+        self.initial_config = (cwd / ".git/config").read_text()
+        self.initial_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=cwd, text=True).strip()
         self.operations = [
             ("Edit", {"file_path": str(cwd / "edit.txt"), "old_string": "before", "new_string": "after"}),
             ("Write", {"file_path": str(cwd / "../outside.txt"), "content": "outside"}),
@@ -22,6 +25,20 @@ class WorkspaceExecution(MemoryExecution):
                 "touch inside.txt", 'touch "$HOME/outside-marker"', "curl --max-time 3 -sI https://example.com", "git status", "git add -A",
             ]],
         ]
+
+        if main_checkout:
+            self.operations.extend([
+                ("Bash", {"command": "touch .git/marker"}),
+                ("Bash", {"command": "git add -A"}),
+                ("Bash", {"command": "git commit -m x"}),
+                ("Write", {"file_path": str(cwd / ".git/config"), "content": self.initial_config + "\n# synthetic edit marker\n"}),
+            ])
+            if provider == "codex":
+                for repetition in range(3):
+                    self.operations.extend([
+                        ("Bash", {"command": f"touch inside-comparison-{repetition}.txt"}),
+                        ("Bash", {"command": f'touch "$HOME/escalation-{repetition}"', "sandbox_permissions": "require_escalated", "justification": "Synthetic escalation comparison"}),
+                    ])
 
     def model_response(self, body):
         self.instructions_seen |= "DISCARD_REPOSITORY_SENTINEL" in json.dumps(body)
@@ -61,11 +78,13 @@ class WorkspaceExecution(MemoryExecution):
             return events
         events = [{"type": "response.created", "response": {"id": "response_" + str(stage), "status": "in_progress"}}]
         if stage < len(self.operations):
-            if stage < 2:
+            if self.operations[stage][0] != "Bash":
                 patch = "*** Begin Patch\n*** Update File: edit.txt\n@@\n-before\n+after\n*** End Patch" if stage == 0 else "*** Begin Patch\n*** Add File: ../outside.txt\n+outside\n*** End Patch"
+                if stage >= 2:
+                    patch = "*** Begin Patch\n*** Update File: .git/config\n@@\n" + "".join(" " + line + "\n" for line in self.initial_config.splitlines()) + "+\n+# synthetic edit marker\n*** End Patch"
                 item = {"type": "custom_tool_call", "call_id": call_id, "namespace": "functions", "name": "apply_patch", "input": patch}
             else:
-                item = {"type": "function_call", "call_id": call_id, "namespace": "functions", "name": "exec_command", "arguments": json.dumps({"cmd": self.operations[stage][1]["command"], "workdir": str(self.cwd), "yield_time_ms": 1000})}
+                item = {"type": "function_call", "call_id": call_id, "namespace": "functions", "name": "exec_command", "arguments": json.dumps({"cmd": self.operations[stage][1]["command"], "workdir": str(self.cwd), "yield_time_ms": 1000, **{k: v for k, v in self.operations[stage][1].items() if k != "command"}})}
             events.append({"type": "response.output_item.done", "item": item})
         events.append({"type": "response.completed", "response": {"id": "response_" + str(stage), "status": "completed", "output": [], "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}})
         return events
@@ -118,7 +137,7 @@ def prepare(root):
     for name in ["AGENTS.md", "CLAUDE.md"]:
         (cwd / name).write_text("DISCARD_REPOSITORY_SENTINEL: synthetic instruction marker.\n")
     env = os.environ.copy()
-    env.update(HOME=str(home), CODEX_HOME=str(home), CLAUDE_CONFIG_DIR=str(home), GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_OPTIONAL_LOCKS="0")
+    env.update(HOME=str(home), CODEX_HOME=str(home), CLAUDE_CONFIG_DIR=str(home), GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_OPTIONAL_LOCKS="0", GIT_AUTHOR_NAME="Synthetic", GIT_AUTHOR_EMAIL="synthetic@example.invalid", GIT_COMMITTER_NAME="Synthetic", GIT_COMMITTER_EMAIL="synthetic@example.invalid")
     for key in list(env):
         if key.startswith(("ANTHROPIC_", "OPENAI_", "CODEX_API", "CLAUDE_CODE_OAUTH")) or key in ["CLAUDECODE", "CLAUDE_CODE_PLUGIN_DIRS"]:
             env.pop(key, None)
@@ -134,7 +153,19 @@ def stop(process):
 
 
 def report(execution, protocol, root, home, cwd):
+    git_results = {
+        "touch_git_marker_succeeded": (cwd / ".git/marker").exists(),
+        "git_add_succeeded": bool(subprocess.check_output(["git", "diff", "--cached", "--name-only"], cwd=cwd, text=True)),
+        "git_commit_succeeded": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=cwd, text=True).strip() != execution.initial_head,
+        "edit_git_config_succeeded": (cwd / ".git/config").read_text() != execution.initial_config,
+    }
+    # A successful commit consumes the index and therefore also proves git add succeeded.
+    git_results["git_add_succeeded"] |= git_results["git_commit_succeeded"]
     return {
+        "main_checkout": execution.main_checkout,
+        "git_protection": git_results,
+        "protects_git_in_root": execution.finished.is_set() and not any(git_results.values()),
+        "operations": execution.operations,
         "completed": execution.finished.is_set(), "model_tools": sorted(set.union(set(), *execution.tool_surfaces)),
         "repository_instructions_seen": execution.instructions_seen,
         "approval_requests": protocol.requests, "tool_results": execution.results,
@@ -149,3 +180,17 @@ def scrub(value, root):
 def save_transcript(provider, transcript):
     path = pathlib.Path(__file__).resolve().parents[2] / "fixtures" / (provider + "-workspace-turn.jsonl")
     path.write_text("".join(json.dumps(value) + "\n" for value in transcript))
+
+
+def command_marker(protocol):
+    params = [r["params"] for r in protocol.requests if r.get("method") == "item/commandExecution/requestApproval"]
+    inside = [p for p in params if "inside-comparison-" in p.get("command", "")]
+    escalation = [p for p in params if "escalation-" in p.get("command", "")]
+    differing = {}
+    for key in sorted(set().union(*(p.keys() for p in inside + escalation))):
+        left = [p.get(key) for p in inside]
+        right = [p.get(key) for p in escalation]
+        if left != right:
+            differing[key] = {"in_sandbox": left, "escalation": right}
+    # IDs, command text, and suggested rules are request data, not sandbox guarantees.
+    return {"codex_in_sandbox_marker": "none", "inside_approval_count": len(inside), "escalation_approval_count": len(escalation), "differing_params": differing}

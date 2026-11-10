@@ -122,3 +122,39 @@ unsandboxed requests use SandboxEscape cards. Neither plugins nor automatic edit
 approve these cards.
 
 Supplemental synthetic review probes found that native `Write` can change a linked worktree's `.git` pointer after approval even with `--restricted` and `sandbox.filesystem.denyWrite`. Those sandbox restrictions protect shell writes. Discard therefore treats native edits to Git metadata, its aliases, outside paths, and unknown targets as user-only full-access requests before storing approvals.
+
+### Slice B spike results
+
+The synthetic main-checkout probe uses a normal temporary repository, a temporary
+provider home, and a local model endpoint. Run:
+`python3 crates/discard-providers/tests/probes/claude_workspace.py --main-checkout`.
+All approval requests are accepted to measure provider protection itself.
+
+Tested Claude Code 2.1.318 with `--restricted` and
+`sandbox.filesystem.denyWrite=[<root>/.git]`. Select this pinned binary with
+`DISCARD_CLAUDE_BIN` if the installed default has changed.
+
+`claude_protects_git_in_root = false`: `touch .git/marker`, `git add -A`,
+and `git commit -m x` failed with `Operation not permitted`. Native `Write` to
+`.git/config` succeeded after approval. Shell protection does not protect native
+file tools. This raw probe result is unchanged.
+
+Decision 20e enables Claude main-checkout grants in Discard. The sandbox's
+`denyWrite` blocks shell writes to `.git`. The driver classifies native file-tool
+edits under `.git` as `SandboxEscape`, so they need the full-access card. These
+controls also protect linked worktrees.
+
+
+Slice B adds scoped `worktree_request_creation` and `main_checkout_request_write`
+tools to Conversation-family allowlists. The MCP server checks the agent and
+channel before listing or running them. App approval starts a fresh Continue
+response. Claude advertises main-checkout write support. The engine passes that
+capability into the scoped MCP identity before the server lists the request tool
+or adds its prompt line. Approval allows one write response in the main checkout.
+Missing sandbox controls still cause a read-only fallback. Linked-worktree writes
+keep their existing protection checks. Coding behavior stays unchanged.
+
+Discard saves simple command-prefix rules and exact network-host rules per agent
+and project. The user chooses the prefix cut. Rules approve one provider request
+at a time and record their rule ID in the audit. Project settings support revocation.
+Compound shell syntax and sandbox escapes cannot use these rules.

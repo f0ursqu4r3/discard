@@ -38,6 +38,21 @@ The current main-agent setting assigns the general channel's responder. It does 
 
 ## Agent workspace writes
 
-Slice A is implemented. Agents can opt in to sandboxed writes in bound branch and detached worktree channels. Discard serializes write responses by canonical worktree path, approves in-root edits, asks for shell approvals, and separates full-access approvals. Scoped `worktree_commit` calls disable hooks and create response-linked audit records. Protected changes cards close write responses. Replay compacts tool calls and changes cards. Ineligible responses remain read-only with a reason. See [worktree writes](worktrees.md#agent-workspace-writes-slice-a).
+Slices A and B are implemented. Agents can opt in to sandboxed writes in bound branch and detached worktree channels. Discard serializes write responses by canonical worktree path, approves in-root edits, asks for shell approvals, and separates full-access approvals. Scoped `worktree_commit` calls disable hooks and create response-linked audit records. Protected changes cards close write responses. Replay compacts tool calls and changes cards. Ineligible responses remain read-only with a reason. See [worktree writes](worktrees.md#agent-workspace-writes-slices-a-and-b).
 
-Slices B and C remain planned: worktree creation, main-checkout grants, durable Always-allow rules, network-domain Always allow, conversation moves, new-branch targets, and native provider resume per agent. This does not implement multi-agent task orchestration.
+Opted-in agents can request a worktree through an app approval card. Approval
+creates an owned worktree and starts `Command::Continue` for that agent. Branch
+channels bound to the main checkout offer one-response grants to Claude agents.
+Claude's `denyWrite` blocks shell writes to `.git`; native file-tool edits under
+`.git` require the full-access card. Codex agents cannot request or receive these
+grants because approved Codex commands and patches can change `.git`. Their tool
+list omits the request, and their prompt explains the limit.
+
+Always-allow rules save a user-selected shell-command prefix or an exact network
+host for one agent in one project. Project settings list rules and allow revocation.
+Compound shell syntax and full-access requests never match rules. Codex command
+approvals retain the full-access fallback.
+
+Slice C remains planned: conversation moves, new-branch targets, and branch
+creation for detached worktrees. Native provider resume per agent is also planned.
+This does not implement multi-agent task orchestration.

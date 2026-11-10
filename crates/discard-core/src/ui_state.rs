@@ -38,8 +38,9 @@ pub fn new_divider_anchor(messages: &[Message], last_read: Option<&str>, anchor:
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Send(String),
+    Continue { agent: crate::model::AgentId, note: String },
     SendAttachments { text: String, attachments: Vec<crate::attachments::Attachment> },
-    Decide { approval_id: ApprovalId, decision: Decision },
+    Decide { approval_id: ApprovalId, decision: Decision, rule_cut: Option<usize> },
     Cancel,
 }
 
@@ -87,6 +88,12 @@ impl UiState {
 
     /// The user pressed send.
     pub fn channel_id(&self) -> &ChannelId { &self.channel_id }
+
+    pub fn response_started(&mut self) {
+        self.turn_running = true;
+        self.notice = None;
+        self.response_save_failed = false;
+    }
 
     pub fn user_sent(&mut self, text: &str) {
         self.user_sent_with_attachments(text, &[]);

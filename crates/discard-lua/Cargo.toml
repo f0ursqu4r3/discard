@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+discard-core.workspace = true
 hmac.workspace = true
 mlua.workspace = true
 pbkdf2.workspace = true

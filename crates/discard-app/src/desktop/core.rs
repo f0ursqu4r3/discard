@@ -311,6 +311,16 @@ impl AppCore {
         self.branch_generation.fetch_add(1, Ordering::SeqCst);
         self.changed.notify_one();
     }
+    pub fn begin_write_approval(&self, channel: &str) -> Result<(), String> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.active.channel_id != channel { return Err("Open this channel before approving.".into()); }
+        if s.active.ui.turn_running() { return Err("Wait for the current response to finish.".into()); }
+        if s.project_busy || s.active.archive_busy || s.active.archive.is_some() || s.confirm.is_some() || s.active.read_only || s.active.archived {
+            return Err("Finish the open operation before approving.".into());
+        }
+        s.project_busy = true; s.rev += 1; self.changed.notify_one(); Ok(())
+    }
+
     pub fn begin_project_change(&self) -> Result<(), String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if s.project_busy || s.active.archive_busy || s.active.archive.is_some() || s.confirm.is_some() || s.active.ui.turn_running() || s.parked.values().any(|c| c.ui.turn_running()) { return Err("Stop all agents and finish pending confirmations before changing projects.".into()); }
@@ -453,7 +463,19 @@ impl AppCore {
                     .iter()
                     .map(|p| PromptDto {
                         kind: p.kind.as_str().into(),
-                        always_allow: if !matches!(p.kind, discard_core::approval::ApprovalKind::ProviderTool | discard_core::approval::ApprovalKind::NetworkDomain) { "unavailable" } else if matches!(ui.session_profile, discard_core::ui_state::SessionProfile::Workspace { .. }) { "planned" } else { "available" }.into(),
+                        rule_words: matches!(ui.session_profile, discard_core::ui_state::SessionProfile::Workspace { .. }).then(|| p.rule_words.clone()).flatten(),
+                        default_cut: matches!(ui.session_profile, discard_core::ui_state::SessionProfile::Workspace { .. }).then(|| p.rule_words.as_ref().map(|words| discard_core::always_allow::default_cut(words))).flatten(),
+                        rule_host: matches!(ui.session_profile, discard_core::ui_state::SessionProfile::Workspace { .. }).then(|| p.rule_host.clone()).flatten(),
+                        always_allow_note: if matches!(ui.session_profile, discard_core::ui_state::SessionProfile::Workspace { .. }) {
+                            if p.kind == discard_core::approval::ApprovalKind::SandboxEscape && p.tool == "command" { Some("Always allow is unavailable for Codex write sessions.".into()) }
+                            else if p.kind == discard_core::approval::ApprovalKind::ProviderTool && p.rule_words.is_none() { Some("This command uses shell syntax that Always allow cannot match.".into()) }
+                            else { None }
+                        } else { None },
+                        always_allow: match ui.session_profile {
+                            discard_core::ui_state::SessionProfile::Workspace { .. } if matches!(p.kind, discard_core::approval::ApprovalKind::ProviderTool | discard_core::approval::ApprovalKind::NetworkDomain) && (p.rule_words.is_some() || p.rule_host.is_some()) => "available",
+                            discard_core::ui_state::SessionProfile::Coding if p.kind == discard_core::approval::ApprovalKind::ProviderTool => "available",
+                            _ => "unavailable",
+                        }.into(),
                         approval_id: p.approval_id.to_string(),
                         tool: p.tool.clone(),
                         summary: p.summary.clone(),
@@ -828,8 +850,22 @@ impl AppCore {
         } else { return Err("The agent session is unavailable.".into()); }
         Ok(())
     }
-    pub fn decide(&self, approval_id: String, decision: String) { self.decide_in(None, approval_id, decision); }
-    pub fn decide_in(&self, channel: Option<&str>, approval_id: String, decision: String) {
+    pub fn continue_in(&self, channel: &str, agent: AgentId, note: String) -> Result<(), String> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.active.channel_id != channel { return Err("The channel changed. Open the channel and try again.".into()); }
+        if s.active.ui.turn_running() { return Err("Wait for the current response to finish.".into()); }
+        if s.active.read_only || s.active.archived || s.active.archive_busy || s.active.archive.is_some() || s.project_busy || s.changing_channels.contains(channel) || s.changing_agents.contains(&agent.0) {
+            return Err("This channel cannot send a message right now.".into());
+        }
+        s.active.commands.send(Command::Continue { agent, note }).map_err(|_| "The agent session is unavailable.")?;
+        s.active.ui.response_started();
+        s.rev += 1;
+        self.changed.notify_one();
+        Ok(())
+    }
+
+    pub fn decide(&self, approval_id: String, decision: String) { self.decide_in(None, approval_id, decision, None); }
+    pub fn decide_in(&self, channel: Option<&str>, approval_id: String, decision: String, rule_cut: Option<usize>) {
         let decision = match decision.as_str() {
             "approve" => Decision::Approve,
             "deny" => Decision::Deny,
@@ -840,6 +876,7 @@ impl AppCore {
         if channel.is_some_and(|id| id != s.active.channel_id) { return; }
         if !s.active.ui.prompts().iter().any(|p| p.approval_id.to_string() == approval_id && p.view == ApprovalView::Pending) { return; }
         let _ = s.active.commands.send(Command::Decide {
+            rule_cut,
             approval_id: ApprovalId(approval_id),
             decision,
         });
@@ -894,6 +931,48 @@ impl AppCore {
 mod read_tests {
     use super::*;
     use discard_core::model::{ChannelId, Message, MessageId, Role};
+
+    fn approval_snapshot(profile: discard_core::ui_state::SessionProfile) -> PromptDto {
+        let channel = ChannelId::new();
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut ui = UiState::new(channel, vec![]);
+        ui.apply(Update::SessionProfile(profile));
+        ui.apply(Update::Event(Box::new(discard_core::event::Event {
+            id: discard_core::event::EventId::new(),
+            session_id: discard_core::event::SessionId::new(),
+            seq: 1,
+            raw: None,
+            kind: discard_core::event::EventKind::ApprovalRequest {
+                kind: discard_core::approval::ApprovalKind::ProviderTool,
+                approval_id: ApprovalId::new(),
+                call_id: "shell".into(),
+                tool: "Bash".into(),
+                input: serde_json::json!({"command":"cargo test -p x"}),
+                paths: vec![],
+            },
+        })));
+        AppCore::new(CoreInit { state: ui, commands, project: "P".into(), channel: "C".into(), agent: "A".into(), provider: "fake".into() }).snapshot().prompts.remove(0)
+    }
+    #[test]
+    fn read_only_approvals_have_no_always_allow_controls() {
+        let prompt = approval_snapshot(discard_core::ui_state::SessionProfile::ReadOnly { reason: None });
+        assert_eq!(prompt.always_allow, "unavailable");
+        assert!(prompt.rule_words.is_none() && prompt.rule_host.is_none() && prompt.default_cut.is_none());
+    }
+    #[test]
+    fn coding_approvals_offer_session_allow_without_prefix_controls() {
+        let prompt = approval_snapshot(discard_core::ui_state::SessionProfile::Coding);
+        assert_eq!(prompt.always_allow, "available");
+        assert!(prompt.rule_words.is_none() && prompt.rule_host.is_none() && prompt.default_cut.is_none());
+    }
+    #[test]
+    fn workspace_approvals_offer_prefix_controls() {
+        let prompt = approval_snapshot(discard_core::ui_state::SessionProfile::Workspace { root: "/worktree".into() });
+        assert_eq!(prompt.always_allow, "available");
+        assert_eq!(prompt.rule_words.unwrap(), ["cargo", "test", "-p", "x"]);
+        assert_eq!(prompt.default_cut, Some(2));
+        assert!(prompt.rule_host.is_none());
+    }
 
     #[test]
     fn direct_conversation_context_does_not_use_selected_sidebar_project() {

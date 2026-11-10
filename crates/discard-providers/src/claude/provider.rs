@@ -1,5 +1,6 @@
 //! Process management for the Claude CLI.
 
+use discard_core::process::spawn_tokio;
 use crate::claude::parse::{Item, PendingRequest, StreamParser};
 use async_trait::async_trait;
 use discard_core::approval::Decision;
@@ -128,6 +129,7 @@ impl ClaudeProvider {
 
 #[async_trait]
 impl Provider for ClaudeProvider {
+    fn supports_main_checkout_writes(&self) -> bool { true }
     fn id(&self) -> &str {
         "claude"
     }
@@ -143,9 +145,8 @@ impl Provider for ClaudeProvider {
     }
 
     async fn check_setup(&self) -> SetupStatus {
-        let version =
-            self.command().arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true).status();
-        match tokio::time::timeout(SETUP_TIMEOUT, version).await {
+        let version = spawn_tokio(self.command().arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true));
+        match tokio::time::timeout(SETUP_TIMEOUT, async { version?.wait().await }).await {
             Ok(Ok(_)) => {}
             _ => {
                 return SetupStatus::NotInstalled {
@@ -153,8 +154,8 @@ impl Provider for ClaudeProvider {
                 };
             }
         }
-        let status = self.command().args(["auth", "status"]).stdin(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true).output();
-        let logged_in = match tokio::time::timeout(SETUP_TIMEOUT, status).await {
+        let status = spawn_tokio(self.command().args(["auth", "status"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true));
+        let logged_in = match tokio::time::timeout(SETUP_TIMEOUT, async { status?.wait_with_output().await }).await {
             Ok(Ok(out)) => {
                 serde_json::from_slice::<Value>(&out.stdout).ok().and_then(|v| v.get("loggedIn").and_then(Value::as_bool)).unwrap_or(false)
             }
@@ -185,14 +186,16 @@ impl Provider for ClaudeProvider {
             if spec.resume_handle.is_some() {
                 return Err(setup("Claude conversation sessions require a fresh transcript replay".into()));
             }
-            let version = tokio::time::timeout(SETUP_TIMEOUT, self.command().arg("--version").kill_on_drop(true).output())
+            let version = spawn_tokio(self.command().arg("--version").kill_on_drop(true).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()));
+            let version = tokio::time::timeout(SETUP_TIMEOUT, async { version?.wait_with_output().await })
                 .await
                 .map_err(|_| setup("Claude version check timed out".into()))?
                 .map_err(|e| setup(e.to_string()))?;
             if !version.status.success() || !String::from_utf8_lossy(&version.stdout).starts_with("2.1.318 ") {
                 return Err(setup("Claude Code 2.1.318 is required for the verified conversation controls".into()));
             }
-            let help = tokio::time::timeout(SETUP_TIMEOUT, self.command().arg("--help").kill_on_drop(true).output())
+            let help = spawn_tokio(self.command().arg("--help").kill_on_drop(true).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()));
+            let help = tokio::time::timeout(SETUP_TIMEOUT, async { help?.wait_with_output().await })
                 .await
                 .map_err(|_| setup("Claude control check timed out".into()))?
                 .map_err(|e| setup(e.to_string()))?;
@@ -229,7 +232,7 @@ impl Provider for ClaudeProvider {
                 .env_remove("CLAUDE_CODE_PLUGIN_DIRS");
         }
         if workspace { command.env("GIT_OPTIONAL_LOCKS", "0"); }
-        let mut child = command
+        let mut child = spawn_tokio(command
             .args(build_args(&spec, &protected_git_paths)?)
             .current_dir(&spec.cwd)
             .stdin(Stdio::piped())
@@ -238,7 +241,7 @@ impl Provider for ClaudeProvider {
             .kill_on_drop(true)
             // Own process group, so cancel can kill the CLI and everything it started.
             .process_group(0)
-            .spawn()
+        )
             .map_err(|e| ProviderError::Spawn(format!("{}: {e}", self.executable.display())))?;
         let pgid = child.id().and_then(|p| i32::try_from(p).ok());
         let stdin = child.stdin.take();
@@ -538,7 +541,7 @@ mod tests {
             let allowed = args.iter().position(|arg| arg == "--allowedTools").expect("scoped memory permission list");
             assert_eq!(
                 args[allowed + 1],
-                "mcp__discard-memory__memory_search,mcp__discard-memory__memory_list,mcp__discard-memory__memory_read,mcp__discard-memory__memory_save,mcp__discard-memory__memory_edit,mcp__discard-memory__memory_forget,mcp__discard-memory__worktree_inspect,mcp__discard-memory__worktree_request_removal,mcp__discard-memory__project_list_files,mcp__discard-memory__project_read_file,mcp__discard-memory__project_search"
+                "mcp__discard-memory__memory_search,mcp__discard-memory__memory_list,mcp__discard-memory__memory_read,mcp__discard-memory__memory_save,mcp__discard-memory__memory_edit,mcp__discard-memory__memory_forget,mcp__discard-memory__worktree_inspect,mcp__discard-memory__worktree_request_removal,mcp__discard-memory__worktree_request_creation,mcp__discard-memory__main_checkout_request_write,mcp__discard-memory__project_list_files,mcp__discard-memory__project_read_file,mcp__discard-memory__project_search"
             );
             assert!(args.windows(2).any(|pair| pair == ["--tools", ""]));
         }

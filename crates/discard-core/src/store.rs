@@ -2,6 +2,7 @@
 //! The provider's native session ID is kept only as a resume handle.
 
 use crate::agent::AgentConfig;
+use crate::always_allow::{AlwaysAllowRule, RuleTarget, RuleRequest};
 use crate::approval::{Approval, ApprovalState, AuditRecord, Decider, Decision};
 use crate::event::{ApprovalId, Event, EventId, EventKind, SessionId, TurnId};
 use crate::model::{
@@ -414,6 +415,14 @@ impl Store {
                 agent_id TEXT NOT NULL REFERENCES agents(id), response TEXT REFERENCES messages(id),
                 PRIMARY KEY(repo,commit_id));")?;
             tx.pragma_update(None, "user_version", 8)?;
+            tx.commit()?;
+        }
+        if self.schema_version()? < 9 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE always_allow_rules (
+                id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES agents(id), project_id TEXT NOT NULL,
+                target_json TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(agent_id, project_id, target_json));")?;
+            tx.pragma_update(None, "user_version", 9)?;
             tx.commit()?;
         }
         self.conn.execute_batch("CREATE TABLE IF NOT EXISTS direct_message_list (agent_id TEXT PRIMARY KEY REFERENCES agents(id));")?;
@@ -1054,6 +1063,7 @@ impl Store {
     pub fn hide_project(&self, id: &ProjectId) -> Result<()> {
         self.visible_projects()?;
         self.selected_project()?;
+        self.conn.execute("DELETE FROM always_allow_rules WHERE project_id=?1", params![id.0])?;
         self.conn.execute(
             "INSERT OR IGNORE INTO hidden_projects VALUES (?1)",
             params![id.0],
@@ -1151,6 +1161,46 @@ impl Store {
         self.select_project(id)?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn insert_always_allow_rule(&self, agent: &AgentId, project: &ProjectId, target: &RuleTarget) -> Result<AlwaysAllowRule> {
+        self.require_active_agent(agent)?;
+        if !self.list_projects()?.iter().any(|p| p.id == *project) { return Err(StoreError::NotFound(project.0.clone())); }
+        let target = match target {
+            RuleTarget::Host { host } => RuleTarget::Host {
+                host: crate::always_allow::normalize_host(host).ok_or_else(|| StoreError::Invalid("Invalid network host.".into()))?,
+            },
+            RuleTarget::Command { words } if !words.is_empty() && !words[0].is_empty() => target.clone(),
+            _ => return Err(StoreError::Invalid("Choose a command prefix.".into())),
+        };
+        let json = serde_json::to_string(&target)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let created_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        self.conn.execute("INSERT OR IGNORE INTO always_allow_rules(id,agent_id,project_id,target_json,created_at) VALUES(?1,?2,?3,?4,?5)", params![id, agent.0, project.0, json, created_at])?;
+        self.always_allow_rules(project)?.into_iter().find(|rule| rule.agent == *agent && rule.target == target).ok_or_else(|| StoreError::Corrupt("Rule insert failed.".into()))
+    }
+
+    pub fn always_allow_rules(&self, project: &ProjectId) -> Result<Vec<AlwaysAllowRule>> {
+        let mut stmt = self.conn.prepare("SELECT id,agent_id,target_json,created_at FROM always_allow_rules WHERE project_id=?1 ORDER BY created_at,id")?;
+        let rows = stmt.query_map(params![project.0], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?)))?;
+        rows.map(|row| {
+            let (id, agent, target, created_at) = row?;
+            Ok(AlwaysAllowRule {
+                id,
+                agent: AgentId(agent),
+                project: project.clone(),
+                target: serde_json::from_str(&target)?,
+                created_at,
+            })
+        }).collect()
+    }
+
+    pub fn delete_always_allow_rule(&self, project: &ProjectId, id: &str) -> Result<bool> {
+        Ok(self.conn.execute("DELETE FROM always_allow_rules WHERE project_id=?1 AND id=?2", params![project.0, id])? > 0)
+    }
+
+    pub fn matching_always_allow_rule(&self, agent: &AgentId, project: &ProjectId, request: &RuleRequest<'_>) -> Result<Option<AlwaysAllowRule>> {
+        Ok(self.always_allow_rules(project)?.into_iter().find(|rule| rule.agent == *agent && crate::always_allow::matches(&rule.target, request)))
     }
 
     pub fn schema_version(&self) -> Result<i64> {
@@ -1407,6 +1457,7 @@ impl Store {
             "DELETE FROM project_main_agents WHERE agent_id=?1",
             params![id.0],
         )?;
+        tx.execute("DELETE FROM always_allow_rules WHERE agent_id=?1", params![id.0])?;
         // Keep a minimal tombstone so retained history still has a readable author.
         let tombstone = AgentConfig {
             workspace_write: false,
@@ -2292,6 +2343,60 @@ mod tests {
     use crate::model::{Block, MessageId, Role, WorkspaceMode};
     use serde_json::json;
 
+    use crate::always_allow::{RuleTarget, RuleRequest};
+
+    #[test]
+    fn rules_round_trip_and_deduplicate() {
+        let f = fixture();
+        let target = RuleTarget::Command { words: vec!["cargo".into(), "test".into()] };
+        let rule = f.store.insert_always_allow_rule(&f.agent, &f.project.id, &target).unwrap();
+        assert_eq!(rule.target, target);
+        assert_eq!(f.store.insert_always_allow_rule(&f.agent, &f.project.id, &target).unwrap(), rule);
+        assert_eq!(f.store.always_allow_rules(&f.project.id).unwrap(), vec![rule]);
+    }
+
+    #[test]
+    fn rules_are_scoped_to_agent_and_project() {
+        let f = fixture();
+        f.store.insert_always_allow_rule(&f.agent, &f.project.id, &RuleTarget::Host { host: "registry.npmjs.org".into() }).unwrap();
+        let request = RuleRequest::Host("REGISTRY.NPMJS.ORG");
+        assert!(f.store.matching_always_allow_rule(&f.agent, &f.project.id, &request).unwrap().is_some());
+        assert!(f.store.matching_always_allow_rule(&AgentId::new(), &f.project.id, &request).unwrap().is_none());
+        assert!(f.store.matching_always_allow_rule(&f.agent, &ProjectId::new(), &request).unwrap().is_none());
+    }
+
+    #[test]
+    fn deleting_a_rule_stops_matching() {
+        let f = fixture();
+        let rule = f.store.insert_always_allow_rule(&f.agent, &f.project.id, &RuleTarget::Host { host: "example.com".into() }).unwrap();
+        assert!(!f.store.delete_always_allow_rule(&ProjectId::new(), &rule.id).unwrap());
+        assert!(f.store.delete_always_allow_rule(&f.project.id, &rule.id).unwrap());
+        assert!(f.store.matching_always_allow_rule(&f.agent, &f.project.id, &RuleRequest::Host("example.com")).unwrap().is_none());
+    }
+
+    #[test]
+    fn deleting_an_agent_or_project_removes_its_rules() {
+        for delete_agent in [true, false] {
+            let f = fixture();
+            f.store.insert_always_allow_rule(&f.agent, &f.project.id, &RuleTarget::Host { host: "example.com".into() }).unwrap();
+            if delete_agent {
+                f.store.delete_agent(&f.agent, DeleteAgentOptions { delete_conversations: false, delete_private_memory: false }).unwrap();
+            } else {
+                f.store.hide_project(&f.project.id).unwrap();
+            }
+            assert!(f.store.always_allow_rules(&f.project.id).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn migration_9_adds_the_rule_table_to_a_version_8_database() {
+        let f = fixture();
+        f.store.conn.execute_batch("DROP TABLE always_allow_rules; PRAGMA user_version=8;").unwrap();
+        f.store.migrate().unwrap();
+        assert_eq!(f.store.schema_version().unwrap(), 9);
+        assert!(f.store.always_allow_rules(&f.project.id).unwrap().is_empty());
+    }
+
     #[test]
     fn project_profile_accepts_palette_slots() {
         let f = fixture();
@@ -2453,7 +2558,7 @@ mod tests {
         let v1 = Store::open(&path).unwrap().schema_version().unwrap();
         let v2 = Store::open(&path).unwrap().schema_version().unwrap();
         assert!(v1 >= 2);
-        assert_eq!(v1, 8);
+        assert_eq!(v1, 9);
         assert_eq!(v1, v2);
     }
 
@@ -2497,7 +2602,7 @@ mod tests {
             conn.execute("INSERT INTO channels (id, project_id, name, agent_id, workspace_mode) VALUES ('c', 'p', 'general', 'a', 'main_checkout')", []).unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 8);
+        assert_eq!(store.schema_version().unwrap(), 9);
         let channels = store.channels_for_project(&ProjectId("p".into())).unwrap();
         assert_eq!(channels.len(), 1);
         assert_eq!(
@@ -2662,12 +2767,12 @@ mod tests {
     fn existing_approval_rows_read_as_provider_tool_after_migration() {
         let f = fixture(); let turn = Turn::new(f.session.clone()); f.store.insert_turn(&turn).unwrap();
         let a = Approval::new(turn.id, "Bash", json!({})); f.store.save_approval(&a).unwrap();
-        f.store.conn.execute_batch("ALTER TABLE approvals DROP COLUMN kind; DROP TABLE agent_commits;").unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 8);
+        f.store.conn.execute_batch("ALTER TABLE approvals DROP COLUMN kind; DROP TABLE agent_commits; DROP TABLE always_allow_rules;").unwrap();
+        assert_eq!(f.store.schema_version().unwrap(), 9);
         f.store.migrate().unwrap();
         assert_eq!(f.store.load_approval(&a.id).unwrap().kind, crate::approval::ApprovalKind::ProviderTool);
         f.store.migrate().unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 8);
+        assert_eq!(f.store.schema_version().unwrap(), 9);
     }
 
     #[test]

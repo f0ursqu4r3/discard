@@ -44,6 +44,65 @@ impl GitWorkspace {
         Ok(if metadata.repository.is_empty() { project_dir.to_path_buf() } else { PathBuf::from(metadata.repository) })
     }
 
+    pub fn target_for_branch(&self, repo: &Path, channel: &ChannelId, branch: &str) -> Result<PathBuf, String> {
+        self.manager.target_for_branch(repo, &channel.0, branch).map_err(|e| e.to_string())
+    }
+
+    pub fn create_for_branch(&self, repo: &Path, channel: &ChannelId, branch: &str) -> Result<WorktreeRecord, String> {
+        if self.store().worktree_for(channel).map_err(|e| e.to_string())?.is_some() { return Err("This channel already has a worktree.".into()); }
+        let prepared = self.manager.prepare_owned_branch(repo, &channel.0, branch).map_err(|e| match e { WorktreeError::Git(message) => message, other => other.to_string() })?;
+        let wt = prepared.worktree;
+        let record = WorktreeRecord {
+            channel_id: channel.clone(),
+            path: wt.root.to_string_lossy().into_owned(),
+            branch: wt.branch.clone(),
+            base_commit: wt.base_commit.clone(),
+            repo: wt.repo.to_string_lossy().into_owned(),
+            owned: true,
+        };
+        let saved = { let store = self.store();
+            if store.worktree_for(channel).map_err(|e| e.to_string())?.is_some() { Err("This channel already has a worktree.".into()) }
+            else { store.save_worktree(&record).map_err(|e| e.to_string()) }
+        };
+        if let Err(error) = saved { let _ = self.manager.remove(&wt, false); return Err(error); }
+        Ok(record)
+    }
+
+    /// Resolve saved authority under the store lock, then verify Git outside it.
+    pub fn write_request_target(&self, channel: &ChannelId, agent: &crate::model::AgentId, project: Option<&crate::model::ProjectId>, kind: crate::write_requests::WriteRequestKind) -> Result<(PathBuf, String, PathBuf), String> {
+        let (repo, branch, binding) = {
+            let store = self.store();
+            let actual = store.load_channel(channel).map_err(|e| e.to_string())?;
+            if project.is_none() || actual.project_id.as_ref() != project { return Err("Write requests require this conversation's project.".into()); }
+            if store.channel_archived(channel).map_err(|e| e.to_string())? || store.agent_archived(agent).map_err(|e| e.to_string())? { return Err("This agent or channel is archived.".into()); }
+            let config = store.load_agent(agent).map_err(|e| e.to_string())?;
+            if !config.workspace_write || config.policy != crate::capability::ApprovalPolicy::Ask { return Err("This agent is not allowed to edit files.".into()); }
+            let metadata = store.project_channel_metadata(channel).map_err(|e| e.to_string())?.filter(|m| m.kind == crate::model::ProjectChannelKind::Branch).ok_or("Write requests require a branch channel.")?;
+            let branch = metadata.branch.ok_or("This channel has no branch.")?;
+            let repo = if metadata.repository.is_empty() { store.list_projects().map_err(|e| e.to_string())?.into_iter().find(|p| Some(&p.id) == project).ok_or("Project unavailable.")?.path } else { metadata.repository };
+            (PathBuf::from(repo), branch, store.worktree_for(channel).map_err(|e| e.to_string())?)
+        };
+        let entries = crate::worktree::list_branches(&repo).map_err(|e| e.to_string())?;
+        let entry = entries.iter().find(|e| e.branch == branch).ok_or("This branch no longer exists.")?;
+        match kind {
+            crate::write_requests::WriteRequestKind::WorktreeCreate => {
+                if entry.is_main_checkout { return Err("This branch is checked out in the main checkout. Use main_checkout_request_write instead.".into()); }
+                if binding.is_some() { return Err("This channel already has a worktree.".into()); }
+                if entry.worktree.is_some() { return Err("This branch is checked out in another folder. Ask again after it is free.".into()); }
+                let target = self.target_for_branch(&repo, channel, &branch)?;
+                Ok((repo, branch, target))
+            }
+            crate::write_requests::WriteRequestKind::MainCheckoutWrite => {
+                let record = binding.ok_or("This channel has no saved worktree binding.")?;
+                let root = entry.worktree.as_ref().filter(|_| entry.is_main_checkout).ok_or("This branch is not checked out in the main checkout.")?.canonicalize().map_err(|e| e.to_string())?;
+                if Path::new(&record.path).canonicalize().map_err(|e| e.to_string())? != root || record.branch != branch {
+                    return Err("The main-checkout binding changed. Ask again.".into());
+                }
+                Ok((repo, branch, root))
+            },
+        }
+    }
+
     pub fn archive(&self, channel: &ChannelId, force: bool) -> Result<ArchiveOutcome, String> {
         let record = self.store().worktree_for(channel).map_err(|e| e.to_string())?;
         let Some(record) = record else {
@@ -125,11 +184,10 @@ mod tests {
     use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
+        let out = crate::process::spawn_std(Command::new("git")
             .args(["-c", "user.name=T", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
             .args(args)
-            .current_dir(dir)
-            .output()
+            .current_dir(dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output())
             .unwrap();
         assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8_lossy(&out.stdout).trim().to_string()
@@ -163,6 +221,37 @@ mod tests {
         let store = Arc::new(Mutex::new(store));
         let ws = GitWorkspace::new(&dir.path().join("worktrees"), Arc::clone(&store));
         Rig { ws, store, repo, channel, _dir: dir }
+    }
+
+    #[test]
+    fn create_for_branch_saves_an_owned_binding() {
+        let r = rig(); git(&r.repo, &["branch", "feature"]);
+        let record = r.ws.create_for_branch(&r.repo, &r.channel.id, "feature").unwrap();
+        assert!(record.owned); assert!(Path::new(&record.path).join("a.txt").exists());
+        assert_eq!(r.store.lock().unwrap().worktree_for(&r.channel.id).unwrap(), Some(record));
+    }
+    #[test]
+    fn create_for_branch_fails_when_the_branch_is_checked_out_elsewhere() {
+        let r = rig(); git(&r.repo, &["branch", "feature"]);
+        let other = r._dir.path().join("other"); git(&r.repo, &["worktree", "add", other.to_str().unwrap(), "feature"]);
+        assert_eq!(r.ws.create_for_branch(&r.repo, &r.channel.id, "feature").unwrap_err(), "This branch is checked out in another folder. Ask again after it is free.");
+        assert!(r.store.lock().unwrap().worktree_for(&r.channel.id).unwrap().is_none());
+        assert!(!r.ws.target_for_branch(&r.repo, &r.channel.id, "feature").unwrap().exists());
+    }
+    #[test]
+    fn create_for_branch_fails_for_a_deleted_branch() {
+        let r = rig();
+        assert!(r.ws.create_for_branch(&r.repo, &r.channel.id, "deleted").is_err());
+        assert!(r.store.lock().unwrap().worktree_for(&r.channel.id).unwrap().is_none());
+    }
+    #[test]
+    fn create_for_branch_fails_when_the_target_folder_exists() {
+        let r = rig(); git(&r.repo, &["branch", "feature"]);
+        let target = r.ws.target_for_branch(&r.repo, &r.channel.id, "feature").unwrap();
+        std::fs::create_dir_all(&target).unwrap(); std::fs::write(target.join("keep"), "keep").unwrap();
+        assert!(r.ws.create_for_branch(&r.repo, &r.channel.id, "feature").is_err());
+        assert_eq!(std::fs::read_to_string(target.join("keep")).unwrap(), "keep");
+        assert!(r.store.lock().unwrap().worktree_for(&r.channel.id).unwrap().is_none());
     }
 
     #[test]

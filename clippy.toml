@@ -1,0 +1,8 @@
+disallowed-methods = [
+  { path = "std::process::Command::spawn", reason = "Spawn through discard_core::process to avoid the macOS pipe inheritance race." },
+  { path = "std::process::Command::output", reason = "Spawn through discard_core::process to avoid the macOS pipe inheritance race." },
+  { path = "std::process::Command::status", reason = "Spawn through discard_core::process to avoid the macOS pipe inheritance race." },
+  { path = "tokio::process::Command::spawn", reason = "Spawn through discard_core::process to avoid the macOS pipe inheritance race." },
+  { path = "tokio::process::Command::output", reason = "Spawn through discard_core::process to avoid the macOS pipe inheritance race." },
+  { path = "tokio::process::Command::status", reason = "Spawn through discard_core::process to avoid the macOS pipe inheritance race." },
+]

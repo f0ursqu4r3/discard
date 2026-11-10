@@ -100,6 +100,9 @@ Agents in project channels can only read today. They must be able to edit files,
 20b. **Codex.** Slice B spikes once for a reliable marker that separates Codex command approvals inside the sandbox from escalation requests. If the spike finds one, Codex command approvals inside the sandbox get the `ProviderTool` kind and can use Always allow. If it finds none, the slice A fallback stays: every Codex command approval in a write session is `SandboxEscape`, and the card says "Always allow is unavailable for Codex write sessions."
 20c. **Network rules.** A network-domain rule matches the exact host only, with no wildcards. It is kept for each agent in each project.
 20d. **Main checkout with Codex.** The main checkout contains `.git` inside the session root. If a spike shows that Codex's `workspace-write` sandbox does not keep `.git` read-only, Codex agents cannot get main-checkout grants. The request fails with that reason.
+20e. **Main checkout with Claude (owner decision, 2026-11-09, after the slice B spike).** The spike found that approved Codex commands and patches change `.git`, so 20d applies and Codex agents get no main-checkout grants. Codex agents never see `main_checkout_request_write` or its prompt line. Claude agents do get main-checkout grants:
+   - Claude's sandbox `denyWrite` on `<root>/.git` blocks shell writes even after approval.
+   - Claude file-tool edits to `.git` are classified `SandboxEscape`, so they need the full-access card. Linked worktrees have the same protection.
 
 ### Moving a conversation (slice C)
 

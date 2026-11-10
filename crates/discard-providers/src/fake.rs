@@ -50,6 +50,7 @@ pub struct Probe {
 }
 
 pub struct FakeProvider {
+    main_checkout_writes: bool,
     workspace_error: Option<String>,
     matrix: CapabilityMatrix,
     script: Vec<Step>,
@@ -65,6 +66,7 @@ impl FakeProvider {
 
     pub fn with_capabilities(script: Vec<Step>, interactive_approvals: bool) -> Self {
         Self {
+            main_checkout_writes: false,
             workspace_error: None,
             matrix: CapabilityMatrix {
                 provider: "fake".into(),
@@ -88,6 +90,8 @@ impl FakeProvider {
 
     pub fn with_workspace_error(mut self, error: &str) -> Self { self.workspace_error = Some(error.into()); self }
 
+    pub fn with_main_checkout_writes(mut self, supported: bool) -> Self { self.main_checkout_writes = supported; self }
+
     /// What `check_setup` reports.
     pub fn with_setup(mut self, setup: SetupStatus) -> Self {
         self.setup = setup;
@@ -109,6 +113,7 @@ impl FakeProvider {
 
 #[async_trait]
 impl Provider for FakeProvider {
+    fn supports_main_checkout_writes(&self) -> bool { self.main_checkout_writes }
     fn id(&self) -> &str {
         "fake"
     }

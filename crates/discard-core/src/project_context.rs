@@ -491,10 +491,9 @@ mod tests {
     fn git_ignored_files_are_unavailable_and_queries_are_literal() {
         let (dir, store, _, channel) = fixture();
         assert!(
-            std::process::Command::new("git")
+            crate::process::spawn_std(std::process::Command::new("git")
                 .args(["init", "-q"])
-                .current_dir(dir.path())
-                .status()
+                .current_dir(dir.path())).and_then(|mut child| child.wait())
                 .unwrap()
                 .success()
         );
@@ -538,10 +537,9 @@ mod tests {
             "Public\n"
         );
         assert!(
-            std::process::Command::new("git")
+            crate::process::spawn_std(std::process::Command::new("git")
                 .args(["init", "-q"])
-                .current_dir(dir.path())
-                .status()
+                .current_dir(dir.path())).and_then(|mut child| child.wait())
                 .unwrap()
                 .success()
         );
