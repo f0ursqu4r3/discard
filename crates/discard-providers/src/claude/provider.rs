@@ -31,6 +31,11 @@ const TERM_GRACE: Duration = Duration::from_secs(2);
 
 const MATRIX_JSON: &str = include_str!("../../fixtures/claude.capabilities.json");
 
+/// Git settings for autorun sessions. They stop Git from asking for credentials or reading
+/// a credential helper, such as the macOS Keychain helper.
+const AUTORUN_GIT_ENV: &[(&str, &str)] =
+    &[("GIT_TERMINAL_PROMPT", "0"), ("GIT_CONFIG_COUNT", "1"), ("GIT_CONFIG_KEY_0", "credential.helper"), ("GIT_CONFIG_VALUE_0", "")];
+
 pub struct ClaudeProvider {
     executable: PathBuf,
     matrix: CapabilityMatrix,
@@ -104,6 +109,11 @@ pub fn build_args(spec: &SessionSpec, protected_git_paths: &[PathBuf], read_deni
             ["--tools", if spec.mode == SessionMode::Workspace { "Read,Glob,Grep,Edit,Write,Bash" } else { "" }, "--strict-mcp-config", "--disable-slash-commands", "--restricted", "--system-prompt-snapshot", "off"]
                 .map(String::from),
         );
+        if spec.mode == SessionMode::Workspace {
+            // The agent can write `<root>/.claude/settings*.json`. Load no settings files, so
+            // only the `--settings` value below configures the sandbox.
+            args.extend(["--setting-sources".into(), String::new()]);
+        }
         let mut settings = json!({
             "disableAllHooks":true, "autoMemoryEnabled":false,
             "env":{"CLAUDE_CODE_DISABLE_AUTO_MEMORY":"1", "CLAUDE_CODE_DISABLE_CLAUDE_MDS":"1", "CLAUDE_CODE_PLUGIN_DIRS":""},
@@ -115,6 +125,9 @@ pub fn build_args(spec: &SessionSpec, protected_git_paths: &[PathBuf], read_deni
             settings["sandbox"]["filesystem"] = json!({"denyWrite":protected_git_paths});
             if let (true, Some(denials)) = (autorun, read_denials) {
                 settings["sandbox"]["autoAllowBashIfSandboxed"] = json!(true);
+                for (key, value) in AUTORUN_GIT_ENV {
+                    settings["env"][*key] = json!(value);
+                }
                 settings["sandbox"]["filesystem"]["denyRead"] = json!(denials.paths);
                 // The sandbox covers Bash only. These rules block native Read, Glob, and Grep.
                 settings["permissions"] = json!({"deny":denials.rules});
@@ -138,6 +151,11 @@ pub fn build_args(spec: &SessionSpec, protected_git_paths: &[PathBuf], read_deni
         args.extend(["--mcp-config".into(), mcp.to_string_lossy().into_owned()]);
     }
     Ok(args)
+}
+
+/// A directory from an environment variable. The CLI ignores a relative value, so Discard does too.
+fn absolute_dir(value: Option<OsString>) -> Option<PathBuf> {
+    value.map(PathBuf::from).filter(|p| p.is_absolute())
 }
 
 impl ClaudeProvider {
@@ -202,8 +220,9 @@ impl Provider for ClaudeProvider {
             let discard_home = self.discard_home.as_deref().ok_or_else(|| ProviderError::SandboxUnavailable("autorun needs the Discard data directory".into()))?;
             let home = std::env::home_dir().ok_or_else(|| ProviderError::SandboxUnavailable("autorun needs the home directory".into()))?;
             // Relocated credential directories are denied as well as the defaults.
-            let relocated: Vec<PathBuf> = ["CLAUDE_CONFIG_DIR", "CODEX_HOME"].iter().filter_map(std::env::var_os).filter(|v| !v.is_empty()).map(PathBuf::from).collect();
-            Some(ReadDenials::new(&home, discard_home, &spec.cwd, &relocated))
+            let claude_config = absolute_dir(std::env::var_os("CLAUDE_CONFIG_DIR")).unwrap_or_else(|| home.join(".claude"));
+            let relocated: Vec<PathBuf> = absolute_dir(std::env::var_os("CODEX_HOME")).into_iter().collect();
+            Some(ReadDenials::new(&home, discard_home, &spec.cwd, &claude_config, &relocated))
         } else { None };
         let protected_git_paths = if workspace {
             if !cfg!(target_os = "macos") || spec.enforcement != EnforcementMode::HostPrompts {
@@ -266,6 +285,7 @@ impl Provider for ClaudeProvider {
                 .env_remove("CLAUDE_CODE_PLUGIN_DIRS");
         }
         if workspace { command.env("GIT_OPTIONAL_LOCKS", "0"); }
+        if autorun { command.envs(AUTORUN_GIT_ENV.iter().copied()); }
         let mut child = spawn_tokio(command
             .args(build_args(&spec, &protected_git_paths, read_denials.as_ref())?)
             .current_dir(&spec.cwd)
@@ -517,7 +537,7 @@ mod tests {
         s.mode = SessionMode::Workspace;
         s.cwd = root.clone();
         s.sandbox_autorun = autorun;
-        let denials = ReadDenials::new(&home, &discard_home, &root, &[]);
+        let denials = ReadDenials::new(&home, &discard_home, &root, &home.join(".claude"), &[]);
         let args = build_args(&s, &[root.join(".git")], Some(&denials)).unwrap();
         serde_json::from_str(&args[args.iter().position(|a| a == "--settings").unwrap() + 1]).unwrap()
     }
@@ -539,6 +559,43 @@ mod tests {
         assert!(deny.iter().all(|r| r.as_str().unwrap().starts_with("Read(//")));
         assert!(deny.iter().any(|r| r.as_str().unwrap().starts_with("Read(") && r.as_str().unwrap().contains(".ssh")));
         assert_eq!(deny.len(), settings["sandbox"]["filesystem"]["denyRead"].as_array().unwrap().len());
+    }
+
+    #[test]
+    fn workspace_sessions_load_no_settings_files() {
+        for autorun in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut s = spec(EnforcementMode::HostPrompts);
+            s.mode = SessionMode::Workspace;
+            s.cwd = tmp.path().to_path_buf();
+            s.sandbox_autorun = autorun;
+            let denials = ReadDenials::new(tmp.path(), tmp.path(), tmp.path(), &tmp.path().join(".claude"), &[]);
+            let args = build_args(&s, &[tmp.path().join(".git")], Some(&denials)).unwrap();
+            assert!(has_pair(&args, "--setting-sources", ""), "autorun {autorun}: {args:?}");
+            assert!(args.contains(&"--settings".into()));
+        }
+    }
+
+    #[test]
+    fn relative_config_directories_are_ignored() {
+        assert_eq!(absolute_dir(Some("/abs/cfg".into())), Some(PathBuf::from("/abs/cfg")));
+        assert_eq!(absolute_dir(Some("relative/cfg".into())), None);
+        assert_eq!(absolute_dir(Some("".into())), None);
+        assert_eq!(absolute_dir(None), None);
+    }
+
+    #[test]
+    fn autorun_disables_git_credential_helpers() {
+        let settings = autorun_settings(true);
+        let env = &settings["env"];
+        assert_eq!(env["GIT_TERMINAL_PROMPT"], "0");
+        assert_eq!(env["GIT_CONFIG_COUNT"], "1");
+        assert_eq!(env["GIT_CONFIG_KEY_0"], "credential.helper");
+        assert_eq!(env["GIT_CONFIG_VALUE_0"], "");
+        assert_eq!(env["GIT_OPTIONAL_LOCKS"], "0");
+        assert!(autorun_settings(false)["env"].get("GIT_CONFIG_COUNT").is_none());
+        let vars: Vec<(&str, &str)> = AUTORUN_GIT_ENV.to_vec();
+        assert!(vars.contains(&("GIT_CONFIG_VALUE_0", "")) && vars.contains(&("GIT_TERMINAL_PROMPT", "0")));
     }
 
     #[test]
