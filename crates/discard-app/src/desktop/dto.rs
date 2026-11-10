@@ -179,6 +179,17 @@ pub struct AutorunDto {
     pub state: String,
     pub reason: Option<String>,
 }
+impl AutorunDto {
+    /// `None` when the session is not a write session or the agent did not opt in.
+    pub fn from_profile(profile: &discard_core::ui_state::SessionProfile) -> Option<Self> {
+        use discard_core::ui_state::{AutorunState, SessionProfile};
+        match profile {
+            SessionProfile::Workspace { autorun: AutorunState::On, .. } => Some(Self { state: "on".into(), reason: None }),
+            SessionProfile::Workspace { autorun: AutorunState::Unavailable(reason), .. } => Some(Self { state: "unavailable".into(), reason: Some(reason.clone()) }),
+            _ => None,
+        }
+    }
+}
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotDto {

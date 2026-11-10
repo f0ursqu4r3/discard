@@ -456,11 +456,7 @@ impl AppCore {
                 }
                 .into(),
                 turn_running: ui.turn_running(),
-                autorun: match &ui.session_profile {
-                    discard_core::ui_state::SessionProfile::Workspace { autorun: discard_core::ui_state::AutorunState::On, .. } => Some(AutorunDto { state: "on".into(), reason: None }),
-                    discard_core::ui_state::SessionProfile::Workspace { autorun: discard_core::ui_state::AutorunState::Unavailable(reason), .. } => Some(AutorunDto { state: "unavailable".into(), reason: Some(reason.clone()) }),
-                    _ => None,
-                },
+                autorun: AutorunDto::from_profile(&ui.session_profile),
                 notice: ui.notice().map(str::to_owned),
                 live_blocks: ui.live_blocks().to_vec(),
                 prompts: ui
@@ -977,6 +973,24 @@ mod read_tests {
         assert_eq!(prompt.rule_words.unwrap(), ["cargo", "test", "-p", "x"]);
         assert_eq!(prompt.default_cut, Some(2));
         assert!(prompt.rule_host.is_none());
+    }
+
+    #[test]
+    fn snapshot_reports_autorun_state() {
+        use discard_core::ui_state::{AutorunState, SessionProfile};
+        let workspace = |autorun| SessionProfile::Workspace { root: "/w".into(), autorun };
+        let json = |profile: SessionProfile| serde_json::to_value(AutorunDto::from_profile(&profile)).unwrap();
+        assert_eq!(json(workspace(AutorunState::On)), serde_json::json!({"state": "on", "reason": null}));
+        assert_eq!(json(workspace(AutorunState::Unavailable("r".into()))), serde_json::json!({"state": "unavailable", "reason": "r"}));
+        assert_eq!(AutorunDto::from_profile(&workspace(AutorunState::Off)), None);
+        assert_eq!(AutorunDto::from_profile(&SessionProfile::ReadOnly { reason: None }), None);
+        assert_eq!(AutorunDto::from_profile(&SessionProfile::Coding), None);
+        // The snapshot carries the mapping.
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut ui = UiState::new(ChannelId::new(), vec![]);
+        ui.apply(Update::SessionProfile(workspace(AutorunState::Unavailable("r".into()))));
+        let core = AppCore::new(CoreInit { state: ui, commands, project: "P".into(), channel: "C".into(), agent: "A".into(), provider: "fake".into() });
+        assert_eq!(serde_json::to_value(core.snapshot()).unwrap()["autorun"], serde_json::json!({"state": "unavailable", "reason": "r"}));
     }
 
     #[test]
