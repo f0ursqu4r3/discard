@@ -201,7 +201,9 @@ impl Provider for ClaudeProvider {
         let read_denials = if autorun {
             let discard_home = self.discard_home.as_deref().ok_or_else(|| ProviderError::SandboxUnavailable("autorun needs the Discard data directory".into()))?;
             let home = std::env::home_dir().ok_or_else(|| ProviderError::SandboxUnavailable("autorun needs the home directory".into()))?;
-            Some(ReadDenials::new(&home, discard_home, &spec.cwd))
+            // Relocated credential directories are denied as well as the defaults.
+            let relocated: Vec<PathBuf> = ["CLAUDE_CONFIG_DIR", "CODEX_HOME"].iter().filter_map(std::env::var_os).filter(|v| !v.is_empty()).map(PathBuf::from).collect();
+            Some(ReadDenials::new(&home, discard_home, &spec.cwd, &relocated))
         } else { None };
         let protected_git_paths = if workspace {
             if !cfg!(target_os = "macos") || spec.enforcement != EnforcementMode::HostPrompts {
@@ -515,7 +517,7 @@ mod tests {
         s.mode = SessionMode::Workspace;
         s.cwd = root.clone();
         s.sandbox_autorun = autorun;
-        let denials = ReadDenials::new(&home, &discard_home, &root);
+        let denials = ReadDenials::new(&home, &discard_home, &root, &[]);
         let args = build_args(&s, &[root.join(".git")], Some(&denials)).unwrap();
         serde_json::from_str(&args[args.iter().position(|a| a == "--settings").unwrap() + 1]).unwrap()
     }
@@ -534,6 +536,7 @@ mod tests {
     fn autorun_denies_native_reads_of_credentials() {
         let settings = autorun_settings(true);
         let deny = settings["permissions"]["deny"].as_array().unwrap();
+        assert!(deny.iter().all(|r| r.as_str().unwrap().starts_with("Read(//")));
         assert!(deny.iter().any(|r| r.as_str().unwrap().starts_with("Read(") && r.as_str().unwrap().contains(".ssh")));
         assert_eq!(deny.len(), settings["sandbox"]["filesystem"]["denyRead"].as_array().unwrap().len());
     }
