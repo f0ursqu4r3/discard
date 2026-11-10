@@ -111,6 +111,9 @@ Workspace uses the Conversation isolation controls and a fresh replay, with the 
 as cwd. It enables only Read, Glob, Grep, Edit, Write and Bash, plus the scoped Discard tools
 and worktree_commit. Native resume is refused. Hooks, plugin directories, automatic memory,
 and instruction discovery remain off. `GIT_OPTIONAL_LOCKS=0` allows read-only Git commands.
+Every Workspace session passes `--setting-sources ""`. The agent can write
+`<root>/.claude/settings.json` and `settings.local.json`, so Claude must not load them. Only the
+`--settings` value configures the sandbox. The adapter's help check covers this flag.
 
 The profile requires macOS, sandbox-exec, HostPrompts, the pinned version, and the required
 help controls. It rejects conflicting local managed sandbox settings. It keeps `--restricted`,
@@ -133,6 +136,20 @@ With `SessionSpec.sandbox_autorun`, a Workspace session also sets
 `crates/discard-core/src/sandbox_reads.rs`: credential stores in the home directory,
 the Claude and Codex config directories, and every Discard file outside the session
 root. The sandbox covers Bash only, so the `Read` rules protect the native tools.
+The rules escape `*`, `?`, `[`, `]`, `{` and `}` with a backslash. The sandbox paths stay literal.
+The home directory and relocated directories are canonicalized first. A relative
+`CLAUDE_CONFIG_DIR` or `CODEX_HOME` is ignored, so the default directory stays denied.
+
+Claude saves large tool outputs under `<Claude config>/projects/<encoded cwd>/` and reads them
+back with `Read`. The Claude config directory is `CLAUDE_CONFIG_DIR` or `~/.claude`. The adapter
+denies every entry of that directory except `projects/<encoded session root>`. Claude encodes
+the cwd by replacing each character that is not an ASCII letter or digit with `-`. Claude
+shortens names longer than 200 characters with a hash. Discard does not match those, so the
+whole `projects` directory stays denied for such a root.
+
+Autorun sessions also set `GIT_TERMINAL_PROMPT=0`, `GIT_CONFIG_COUNT=1`,
+`GIT_CONFIG_KEY_0=credential.helper` and `GIT_CONFIG_VALUE_0=` (empty). Git then reads no
+credential helper, such as the macOS Keychain helper, and never prompts.
 The session still needs the Discard data directory. Without it, `start_session`
 returns `SandboxUnavailable`. Local managed settings that set `autoAllowBashIfSandboxed`
 still fail the managed-settings check.
@@ -140,9 +157,13 @@ still fail the managed-settings check.
 Live probe results. Run:
 `cargo test -p discard-providers --test claude_live -- --ignored autorun --nocapture`.
 The probe uses the real subscription, model `haiku`, one turn, and a linked worktree in
-a temporary directory. The fake credential file is `<temporary home>/.ssh/probe_credential`.
-The CLI child keeps the real `HOME` so that login works. The adapter builds its denial
-list from the temporary home. Set `DISCARD_CLAUDE_BIN` to choose another executable.
+a temporary directory. The fake credential file is `<temporary home>/.ssh/probe_credential`. The temporary home
+is named `home[1]` to check glob escaping. The CLI child keeps the real `HOME` so that login
+works. The adapter builds its denial list from the temporary home. The temporary home's
+`.claude` is a link to the CLI's real config directory, so the walk runs on the real directory.
+The probe reads only entry names there. Before the turn, the probe writes
+`<root>/.claude/settings.local.json` with `sandbox.network.allowedDomains: ["example.com"]`.
+Set `DISCARD_CLAUDE_BIN` to choose another executable.
 
 Tested Claude Code 2.1.321. The adapter's tested version is 2.1.318. The newer version
 passes the version gate with a notice.
@@ -151,14 +172,19 @@ passes the version gate with a notice.
 | --- | --- |
 | Writing command | `touch inside.txt` ran and created the file. No `can_use_tool` request. |
 | Git directory write | `touch <common git dir>/probe-marker` failed with Operation not permitted. No marker. A linked worktree's `.git` is a file, so the probe uses the common directory. |
-| Shell read of a denied file | `cat <temporary home>/.ssh/probe_credential` failed with Operation not permitted. |
-| Native read of a denied file | `Read` returned "File is in a directory that is denied by your permission settings." No approval request. |
-| Network | `curl -m 3 https://example.com` sent `SandboxNetworkAccess` with `input.host=example.com`. The probe denied it. |
+| Shell read of a denied file | `cat '<temporary home>/.ssh/probe_credential'` failed with Operation not permitted. The path contains `[1]`. |
+| Native read of a denied file | `Read` returned "File is in a directory that is denied by your permission settings." No approval request. The escaped `home\[1\]` rule matched. |
+| Native Grep | `Grep` with path `<temporary home>` returned "... is outside <root>; --restricted confines the file tools to the working directory." `--restricted` refuses it before the deny rules. |
+| Native Glob | `Glob` with path `<temporary home>/.ssh` returned "Permission to read <temporary home>/.ssh has been denied." No file names. |
+| Network | `curl -m 3 https://example.com` sent `SandboxNetworkAccess` with `input.host=example.com`, although `<root>/.claude/settings.local.json` allowed the domain. The probe denied it. |
+| Keychain | `security find-generic-password -s DISCARD_PROBE_NONEXISTENT` printed "The specified item could not be found in the keychain." and `exit=44`. The sandbox does not block Keychain queries. |
+| Large output | `seq 1 200000` saved its output to `~/.claude/projects/-private-var-folders-...-discard-worktrees-probe/<session>/tool-results/<id>.txt`. `Read` with offset 199995 returned lines 199995 to 199997. |
 | Nonexistent denial paths | Accepted. The temporary home had no `.aws`, `.gnupg`, and so on. The session started. |
 | Secret leakage | The secret text appeared in no event. |
 
-Not probed live: `Glob` and `Grep` against a denied path, and reads of files outside
-the denied list. The sandbox does not limit those reads.
+Not probed live: reads of files outside the denied list. The sandbox does not limit those reads.
+The Keychain probe queried only a nonexistent item. A shell command can query the user's
+login Keychain. macOS may show its own access prompt for a protected item.
 
 ### Slice B spike results
 
