@@ -653,7 +653,7 @@ mod tests {
         let mut s = spec(EnforcementMode::HostPrompts);
         s.mode = SessionMode::Workspace;
         s.sandbox_autorun = true;
-        assert!(matches!(ClaudeProvider::new("unused").start_session(s).await, Err(ProviderError::SandboxUnavailable(_))));
+        assert!(matches!(ClaudeProvider::new("unused").with_env("ANTHROPIC_BASE_URL", "").start_session(s).await, Err(ProviderError::SandboxUnavailable(_))));
     }
 
     #[test]
@@ -669,7 +669,7 @@ mod tests {
     #[tokio::test]
     async fn workspace_mode_requires_host_prompts() {
         let mut s = spec(EnforcementMode::ProviderDenies); s.mode = SessionMode::Workspace;
-        assert!(matches!(ClaudeProvider::new("unused").start_session(s).await, Err(ProviderError::SandboxUnavailable(_))));
+        assert!(matches!(ClaudeProvider::new("unused").with_env("ANTHROPIC_BASE_URL", "").start_session(s).await, Err(ProviderError::SandboxUnavailable(_))));
     }
 
     fn has_pair(args: &[String], a: &str, b: &str) -> bool {
