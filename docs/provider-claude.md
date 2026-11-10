@@ -125,6 +125,41 @@ approve these cards.
 
 Supplemental synthetic review probes found that native `Write` can change a linked worktree's `.git` pointer after approval even with `--restricted` and `sandbox.filesystem.denyWrite`. Those sandbox restrictions protect shell writes. Discard therefore treats native edits to Git metadata, its aliases, outside paths, and unknown targets as user-only full-access requests before storing approvals.
 
+### Sandbox autorun
+
+With `SessionSpec.sandbox_autorun`, a Workspace session also sets
+`sandbox.autoAllowBashIfSandboxed: true`, `sandbox.filesystem.denyRead`, and
+`permissions.deny` `Read(//absolute/path/**)` rules. The paths come from
+`crates/discard-core/src/sandbox_reads.rs`: credential stores in the home directory,
+the Claude and Codex config directories, and every Discard file outside the session
+root. The sandbox covers Bash only, so the `Read` rules protect the native tools.
+The session still needs the Discard data directory. Without it, `start_session`
+returns `SandboxUnavailable`. Local managed settings that set `autoAllowBashIfSandboxed`
+still fail the managed-settings check.
+
+Live probe results. Run:
+`cargo test -p discard-providers --test claude_live -- --ignored autorun --nocapture`.
+The probe uses the real subscription, model `haiku`, one turn, and a linked worktree in
+a temporary directory. The fake credential file is `<temporary home>/.ssh/probe_credential`.
+The CLI child keeps the real `HOME` so that login works. The adapter builds its denial
+list from the temporary home. Set `DISCARD_CLAUDE_BIN` to choose another executable.
+
+Tested Claude Code 2.1.321. The adapter's tested version is 2.1.318. The newer version
+passes the version gate with a notice.
+
+| Question | Observed value |
+| --- | --- |
+| Writing command | `touch inside.txt` ran and created the file. No `can_use_tool` request. |
+| Git directory write | `touch <common git dir>/probe-marker` failed with Operation not permitted. No marker. A linked worktree's `.git` is a file, so the probe uses the common directory. |
+| Shell read of a denied file | `cat <temporary home>/.ssh/probe_credential` failed with Operation not permitted. |
+| Native read of a denied file | `Read` returned "File is in a directory that is denied by your permission settings." No approval request. |
+| Network | `curl -m 3 https://example.com` sent `SandboxNetworkAccess` with `input.host=example.com`. The probe denied it. |
+| Nonexistent denial paths | Accepted. The temporary home had no `.aws`, `.gnupg`, and so on. The session started. |
+| Secret leakage | The secret text appeared in no event. |
+
+Not probed live: `Glob` and `Grep` against a denied path, and reads of files outside
+the denied list. The sandbox does not limit those reads.
+
 ### Slice B spike results
 
 The synthetic main-checkout probe uses a normal temporary repository, a temporary
