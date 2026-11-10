@@ -137,6 +137,8 @@ export interface AgentEntry {
   workspaceWrite: boolean
   sandboxAutorun: boolean
   sandboxAutorunUnavailable: string | null
+  /** True when the provider does not support autorun yet. False for a missing provider. */
+  sandboxAutorunPlanned: boolean
   archived: boolean
 }
 export interface ConversationEntry {

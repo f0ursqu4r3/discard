@@ -47,6 +47,7 @@ test('short profile shows identity and personality with an explicit full-profile
       workspaceWrite: false,
       sandboxAutorun: false,
       sandboxAutorunUnavailable: null,
+      sandboxAutorunPlanned: false,
     },
   ])
   view = mount(AgentSummary, { props: { agentId: 'a', name: 'Robin', status: 'idle' } })

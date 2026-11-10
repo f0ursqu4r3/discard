@@ -18,6 +18,7 @@ const base: AgentEntry = {
   workspaceWrite: false,
   sandboxAutorun: false,
   sandboxAutorunUnavailable: null,
+  sandboxAutorunPlanned: false,
   archived: false,
 }
 let rows: AgentEntry[], changed: () => void

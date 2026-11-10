@@ -76,9 +76,12 @@ mod tests {
         let rows = agent_rows(vec![(AgentId::new(), cfg("blocked", false), false), (AgentId::new(), cfg("ready", true), false), (AgentId::new(), cfg("gone", false), false)], &providers);
         assert_eq!(rows[0]["sandboxAutorun"], false);
         assert_eq!(rows[0]["sandboxAutorunUnavailable"], "x");
+        assert_eq!(rows[0]["sandboxAutorunPlanned"], true, "a provider without autorun support is planned work");
         assert_eq!(rows[1]["sandboxAutorun"], true);
         assert_eq!(rows[1]["sandboxAutorunUnavailable"], serde_json::Value::Null);
+        assert_eq!(rows[1]["sandboxAutorunPlanned"], false);
         assert_eq!(rows[2]["sandboxAutorunUnavailable"], "This provider is not available.");
+        assert_eq!(rows[2]["sandboxAutorunPlanned"], false, "a missing provider is a state block");
     }
 
     #[test]
@@ -133,14 +136,16 @@ pub fn settings_agent_get(context: tauri::State<'_, super::SettingsContext>) -> 
     let rows = store.all_agents().map_err(|e| e.to_string())?;
     Ok(agent_rows(rows, &context.providers))
 }
-/// Settings rows. `sandboxAutorunUnavailable` carries the provider's reason when it cannot run autorun.
+/// Settings rows. `sandboxAutorunUnavailable` carries the reason autorun cannot run.
+/// `sandboxAutorunPlanned` is true when the provider does not support autorun yet (planned work),
+/// and false when the provider is missing (a state block).
 fn agent_rows(rows: Vec<(AgentId, discard_core::agent::AgentConfig, bool)>, providers: &[crate::desktop::actions::ProviderInfo]) -> Vec<serde_json::Value> {
     rows.into_iter().map(|(id, cfg, archived)| {
-        let unavailable = match providers.iter().find(|p| p.id == cfg.provider) {
-            Some(info) => match info.provider.sandbox_autorun() { discard_core::provider::SandboxAutorun::Supported => None, discard_core::provider::SandboxAutorun::Unsupported(reason) => Some(reason) },
-            None => Some("This provider is not available.".to_string()),
+        let (unavailable, planned) = match providers.iter().find(|p| p.id == cfg.provider) {
+            Some(info) => match info.provider.sandbox_autorun() { discard_core::provider::SandboxAutorun::Supported => (None, false), discard_core::provider::SandboxAutorun::Unsupported(reason) => (Some(reason), true) },
+            None => (Some("This provider is not available.".to_string()), false),
         };
-        serde_json::json!({"id": id.0, "name": cfg.name, "avatar": cfg.avatar, "archived": archived, "provider": cfg.provider, "model": cfg.model.unwrap_or_default(), "reasoningEffort": cfg.reasoning_effort, "systemPrompt": cfg.system_prompt, "policy": policy_name(cfg.policy), "workspaceWrite": cfg.workspace_write, "sandboxAutorun": cfg.sandbox_autorun, "sandboxAutorunUnavailable": unavailable, "pluginWrite": cfg.plugin_write})
+        serde_json::json!({"id": id.0, "name": cfg.name, "avatar": cfg.avatar, "archived": archived, "provider": cfg.provider, "model": cfg.model.unwrap_or_default(), "reasoningEffort": cfg.reasoning_effort, "systemPrompt": cfg.system_prompt, "policy": policy_name(cfg.policy), "workspaceWrite": cfg.workspace_write, "sandboxAutorun": cfg.sandbox_autorun, "sandboxAutorunUnavailable": unavailable, "sandboxAutorunPlanned": planned, "pluginWrite": cfg.plugin_write})
     }).collect()
 }
 #[tauri::command]

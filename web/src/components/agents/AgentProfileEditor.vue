@@ -172,6 +172,9 @@ watch(
 )
 watch(busy, (value) => emit('busy', value), { flush: 'sync' })
 const autorunUnavailable = computed(() => props.agent.sandboxAutorunUnavailable ?? null)
+const autorunPlanned = computed(
+  () => !!autorunUnavailable.value && props.agent.sandboxAutorunPlanned,
+)
 const autorunOn = computed(
   () => draft.value.workspaceWrite && !autorunUnavailable.value && !!draft.value.sandboxAutorun,
 )
@@ -462,8 +465,8 @@ async function remove() {
           <FieldContent>
             <FieldLabel for="agent-sandbox-autorun">
               Run sandboxed commands without asking
-              <!-- TODO: Enable when the provider passes the autorun sandbox check. -->
-              <Badge v-if="autorunUnavailable" variant="secondary">Soon</Badge>
+              <!-- TODO: Enable when the provider passes the autorun sandbox check. A missing provider is a state block, not planned work. -->
+              <Badge v-if="autorunPlanned" variant="secondary">Soon</Badge>
             </FieldLabel>
             <FieldDescription id="agent-sandbox-autorun-description">
               Shell commands in the worktree run without approval. The sandbox blocks writes outside
