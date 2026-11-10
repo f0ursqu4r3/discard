@@ -25,6 +25,7 @@ mod tests {
         json!({
             "project": "demo", "channel": "general", "pending_approvals": pending,
             "agent": { "id": "agent-claude", "name": "Claude", "provider": "claude", "status": status },
+            "agents": [{ "id": "agent-claude", "name": "Claude", "provider": "claude", "status": status }],
         })
     }
 
@@ -88,11 +89,12 @@ mod tests {
             let mut t = Vec::new();
             texts(&r.element, &mut t);
             assert!(t.contains(&"Claude".to_string()) && t.contains(&label.to_string()), "{t:?}");
-            assert_eq!(r.element.props.get("agent"), Some(&Prop::Text("agent-claude".into())));
+            assert_eq!(r.element.props.get("agent"), None);
             let Node::Element(heading) = &r.element.children[0] else { panic!() };
             assert_eq!(heading.children, [Node::Text("Agents".into())]);
             assert_eq!(heading.props.get("variant"), Some(&Prop::Text("label".into())));
             let Node::Element(row) = &r.element.children[1] else { panic!() };
+            assert_eq!(row.props.get("agent"), Some(&Prop::Text("agent-claude".into())));
             let Node::Element(avatar) = &row.children[0] else { panic!() };
             assert_eq!(avatar.tag, Tag::Avatar);
             assert_eq!(avatar.props.get("agent"), Some(&Prop::Text("agent-claude".into())));
@@ -113,6 +115,50 @@ mod tests {
             let Node::Element(line) = &column.children[1] else { panic!() };
             assert!(line.children.iter().all(|node| !matches!(node, Node::Element(e) if e.tag == Tag::Dot)));
         }
+    }
+
+    #[test]
+    fn the_member_list_renders_one_row_per_agent_with_its_own_status() {
+        let mut m = manager();
+        let state = json!({
+            "project": "demo", "channel": "general", "pending_approvals": 0,
+            "agent": { "id": "agent-casey", "name": "Casey", "provider": "codex", "status": "working" },
+            "agents": [
+                { "id": "agent-jordan", "name": "Jordan", "provider": "claude", "status": "idle" },
+                { "id": "agent-casey", "name": "Casey", "provider": "codex", "status": "working" },
+            ],
+        });
+        let r = m.render_slot("member_list", &state).unwrap();
+        assert_eq!(r.element.children.len(), 3, "a heading and two rows");
+        let rows: Vec<&crate::element::Element> = r.element.children[1..].iter().map(|n| match n { Node::Element(e) => e, _ => panic!() }).collect();
+        let mut jordan = Vec::new();
+        texts(rows[0], &mut jordan);
+        assert_eq!(jordan, ["Jordan", "Idle · claude"]);
+        assert_eq!(rows[0].props.get("agent"), Some(&Prop::Text("agent-jordan".into())));
+        assert_eq!(rows[0].children.len(), 2);
+        let Node::Element(avatar) = &rows[0].children[0] else { panic!() };
+        assert_eq!(avatar.props.get("status"), Some(&Prop::Text("muted_foreground".into())));
+        assert_eq!(avatar.props.get("agent"), Some(&Prop::Text("agent-jordan".into())));
+        let mut casey = Vec::new();
+        texts(rows[1], &mut casey);
+        assert_eq!(casey, ["Casey", "Working · codex"]);
+        assert_eq!(rows[1].props.get("agent"), Some(&Prop::Text("agent-casey".into())));
+        let Node::Element(avatar) = &rows[1].children[0] else { panic!() };
+        assert_eq!(avatar.props.get("agent"), Some(&Prop::Text("agent-casey".into())));
+        assert_eq!(avatar.props.get("status"), None);
+        let Node::Element(spinner) = &rows[1].children[2] else { panic!() };
+        assert_eq!(spinner.tag, Tag::Spinner);
+    }
+
+    #[test]
+    fn the_member_list_falls_back_to_the_single_agent_without_an_agents_list() {
+        let mut m = manager();
+        let state = json!({
+            "project": "demo", "channel": "general", "pending_approvals": 0,
+            "agent": { "id": "agent-claude", "name": "Claude", "provider": "claude", "status": "idle" },
+        });
+        let r = m.render_slot("member_list", &state).unwrap();
+        assert_eq!(r.element.children.len(), 2, "a heading and one row");
     }
 
     #[test]

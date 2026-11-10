@@ -210,7 +210,37 @@ impl UiState {
             "pending_approvals": self.pending_approvals(),
             "turn_running": self.turn_running,
             "agent": { "id": id, "name": name, "provider": provider, "status": status },
+            "agents": self.slot_agents(labels, id, status),
         })
+    }
+
+    /// Every agent in the conversation: the saved agent first, then the other agents in order of first reply.
+    /// Only the agent that owns the running turn has a status other than "idle".
+    fn slot_agents(&self, labels: &SlotLabels, owner_id: &str, owner_status: &str) -> Vec<serde_json::Value> {
+        // (id, name, provider), in first-appearance order. A later reply updates the name and provider.
+        let mut entries: Vec<(&str, &str, &str)> = vec![(labels.agent_id.as_str(), labels.agent_name.as_str(), labels.provider.as_str())];
+        for message in &self.history {
+            let Some(author) = self.authors.get(&message.id) else { continue };
+            let id = author.agent_id.0.as_str();
+            match entries.iter_mut().find(|entry| entry.0 == id) {
+                Some(_) if id == labels.agent_id => {}
+                Some(entry) => *entry = (id, author.name.as_str(), author.provider.as_str()),
+                None => entries.push((id, author.name.as_str(), author.provider.as_str())),
+            }
+        }
+        if let Some(author) = self.responder.as_ref().filter(|_| self.turn_running) {
+            let id = author.agent_id.0.as_str();
+            if !entries.iter().any(|entry| entry.0 == id) {
+                entries.push((id, author.name.as_str(), author.provider.as_str()));
+            }
+        }
+        entries
+            .into_iter()
+            .map(|(id, name, provider)| {
+                let status = if self.turn_running && id == owner_id { owner_status } else { "idle" };
+                serde_json::json!({ "id": id, "name": name, "provider": provider, "status": status })
+            })
+            .collect()
     }
 }
 
@@ -399,6 +429,7 @@ mod tests {
                 "project": "demo", "channel": "general", "pending_approvals": 0,
                 "turn_running": false,
                 "agent": { "id": "agent-claude", "name": "Claude", "provider": "claude", "status": "idle" },
+                "agents": [{ "id": "agent-claude", "name": "Claude", "provider": "claude", "status": "idle" }],
             })
         );
         s.user_sent("hi");
@@ -421,6 +452,81 @@ mod tests {
         s.user_sent("hi");
         s.apply(Update::Responding(crate::model::MessageAuthor { agent_id: crate::model::AgentId("agent-casey".into()), name: "Casey".into(), provider: "claude".into(), avatar: None }));
         assert_eq!(s.slot_state(&labels)["agent"], serde_json::json!({ "id": "agent-casey", "name": "Casey", "provider": "claude", "status": "working" }));
+    }
+
+    fn author(id: &str, name: &str, provider: &str) -> crate::model::MessageAuthor {
+        crate::model::MessageAuthor { agent_id: crate::model::AgentId(id.into()), name: name.into(), provider: provider.into(), avatar: None }
+    }
+
+    fn reply(s: &mut UiState, id: &str, by: crate::model::MessageAuthor) {
+        s.apply(Update::Responding(by));
+        let message = Message { id: MessageId(id.into()), channel_id: s.channel_id().clone(), role: Role::Agent, blocks: vec![] };
+        s.apply(Update::ResponseCompleted(message));
+    }
+
+    fn jordan_labels() -> SlotLabels {
+        SlotLabels { project: "demo".into(), channel: "general".into(), agent_id: "agent-jordan".into(), agent_name: "Jordan".into(), provider: "codex".into() }
+    }
+
+    #[test]
+    fn slot_state_lists_every_agent_once_with_the_saved_agent_first() {
+        let mut s = state();
+        reply(&mut s, "m1", author("agent-casey", "Casey", "claude"));
+        reply(&mut s, "m2", author("agent-jordan", "Jordan Old Name", "claude"));
+        reply(&mut s, "m3", author("agent-riley", "Riley", "codex"));
+        reply(&mut s, "m4", author("agent-casey", "Casey B", "codex"));
+        assert_eq!(
+            s.slot_state(&jordan_labels())["agents"],
+            serde_json::json!([
+                { "id": "agent-jordan", "name": "Jordan", "provider": "codex", "status": "idle" },
+                { "id": "agent-casey", "name": "Casey B", "provider": "codex", "status": "idle" },
+                { "id": "agent-riley", "name": "Riley", "provider": "codex", "status": "idle" },
+            ])
+        );
+    }
+
+    #[test]
+    fn slot_state_marks_only_the_responder_as_working_while_a_turn_runs() {
+        let mut s = state();
+        reply(&mut s, "m1", author("agent-jordan", "Jordan", "codex"));
+        reply(&mut s, "m2", author("agent-casey", "Casey", "claude"));
+        s.user_sent("again");
+        s.apply(Update::Responding(author("agent-casey", "Casey", "claude")));
+        let v = s.slot_state(&jordan_labels());
+        assert_eq!(
+            v["agents"],
+            serde_json::json!([
+                { "id": "agent-jordan", "name": "Jordan", "provider": "codex", "status": "idle" },
+                { "id": "agent-casey", "name": "Casey", "provider": "claude", "status": "working" },
+            ])
+        );
+        assert_eq!(v["agent"]["id"], "agent-casey");
+    }
+
+    #[test]
+    fn slot_state_marks_the_saved_agent_as_working_before_a_responder_is_known() {
+        let mut s = state();
+        s.user_sent("hi");
+        assert_eq!(
+            s.slot_state(&jordan_labels())["agents"],
+            serde_json::json!([{ "id": "agent-jordan", "name": "Jordan", "provider": "codex", "status": "working" }])
+        );
+    }
+
+    #[test]
+    fn slot_state_appends_a_responder_that_has_not_replied_yet() {
+        let mut s = state();
+        reply(&mut s, "m1", author("agent-riley", "Riley", "codex"));
+        s.user_sent("hi");
+        s.apply(Update::Responding(author("agent-casey", "Casey", "claude")));
+        assert_eq!(
+            s.slot_state(&jordan_labels())["agents"],
+            serde_json::json!([
+                { "id": "agent-jordan", "name": "Jordan", "provider": "codex", "status": "idle" },
+                { "id": "agent-riley", "name": "Riley", "provider": "codex", "status": "idle" },
+                { "id": "agent-casey", "name": "Casey", "provider": "claude", "status": "working" },
+            ])
+        );
     }
 
     #[test]
