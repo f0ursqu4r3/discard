@@ -1,4 +1,4 @@
-import type { MessageDto } from '../bridge/types'
+import type { BlockDto, MessageDto } from '../bridge/types'
 
 /** Display times and date boundaries in the viewer's local time zone. */
 export function messageTime(message: MessageDto): Date | null {
@@ -169,4 +169,48 @@ export function parseDiff(text: string): {
     removed,
     lines: files > 1 ? lines : lines.filter((line) => !headers.has(line)),
   }
+}
+
+export type ToolCallItem = { block: Extract<BlockDto, { type: 'tool_call' }>; index: number }
+export type BlockSegment =
+  | { kind: 'block'; block: BlockDto; index: number }
+  | { kind: 'tools'; items: ToolCallItem[] }
+
+/** Group consecutive calls without changing their stored block indexes. */
+export function groupBlocks(blocks: BlockDto[]): BlockSegment[] {
+  const segments: BlockSegment[] = []
+  let calls: ToolCallItem[] = []
+  function flush() {
+    if (calls.length === 1) segments.push({ kind: 'block', ...calls[0]! })
+    else if (calls.length > 1) segments.push({ kind: 'tools', items: calls })
+    calls = []
+  }
+  blocks.forEach((block, index) => {
+    if (block.type === 'tool_call') calls.push({ block, index })
+    else {
+      flush()
+      segments.push({ kind: 'block', block, index })
+    }
+  })
+  flush()
+  return segments
+}
+
+export function toolCallLabel(name: string): string {
+  const action = name.split('__').filter(Boolean).at(-1) ?? name
+  const words = action
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .trim()
+  return words ? words.toLowerCase() : 'tool call'
+}
+
+export function toolCallSummary(input: unknown): string {
+  if (input == null) return ''
+  if (typeof input === 'object' && !Array.isArray(input)) {
+    const fields = input as Record<string, unknown>
+    if (!Object.keys(fields).length) return ''
+    if (typeof fields.query === 'string') return summarizeInput({ pattern: fields.query })
+  }
+  return summarizeInput(input)
 }

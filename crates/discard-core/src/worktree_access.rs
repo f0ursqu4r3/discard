@@ -72,7 +72,11 @@ pub(crate) fn git_bounded(directory: &Path, args: &[&str], limit: usize, timeout
     let (error, _) = err.join().map_err(|_| "Could not read Git error.")?.map_err(|_| "Could not read Git error.")?;
     let status = status?;
     if !status.success() && !(args.contains(&"--no-index") && status.code() == Some(1)) { return Err(format!("Git refused the operation: {}", String::from_utf8_lossy(&error).trim())); }
-    Ok((String::from_utf8_lossy(&output).into_owned(), truncated))
+    // A byte limit can split the final UTF-8 character. Omit that partial character.
+    let end = if truncated {
+        std::str::from_utf8(&output).err().filter(|error| error.error_len().is_none()).map_or(output.len(), |error| error.valid_up_to())
+    } else { output.len() };
+    Ok((String::from_utf8_lossy(&output[..end]).into_owned(), truncated))
 }
 
 impl WorktreeAccess {

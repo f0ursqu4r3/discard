@@ -33,7 +33,8 @@ current checkout. It does not claim that this checkout matches a branch channel'
 a project receive no project context. Sidebar selection and the provider's empty working directory do not
 change this scope. The context counts toward the input budget and never becomes a transcript message.
 
-The scoped MCP server provides `project_list_files`, `project_read_file`, and `project_search` for follow-up
+The scoped MCP server provides `project_list_files`, `project_read_file`, `project_search`,
+`project_git_branches`, `project_git_log`, and `project_git_compare` for follow-up
 questions. These tools validate the token's project and conversation on each call. General channels can use
 them without a worktree binding. Worktree-only tools are not listed for general channels. Summary sessions
 and plugin tokens cannot use project tools. File content is reference data, not agent instructions.
@@ -41,9 +42,14 @@ and plugin tokens cannot use project tools. File content is reference data, not 
 File tools accept relative paths. They reject parent traversal, symlinks, special files, hidden paths except
 `.github`, common build directories, and key files. Git projects expose tracked and nonignored files.
 Other folders use a bounded directory walk. File reads accept UTF-8 text up to 256 KiB and return up to
-200 lines or 8 KiB per call. Listing supports offsets. Search uses literal, case-sensitive text and scans
+200 lines or 8 KiB per call. Listing supports offsets. Search defaults to literal, case-sensitive text and scans
 up to 100 files with up to 40 matches or 8 KiB of excerpts. Results report continuation, skipped files,
 and partial search results. Large directory listings ask for a narrower directory.
+
+`project_search` defaults to literal, case-sensitive matching. Set `ignore_case` for
+case-insensitive matching or `regex` for Rust regular expressions. Both options can be combined.
+Git tools inspect local branches, worktrees, commit history, and three-dot comparisons.
+They resolve refs before use, never contact remotes, and return at most 8 KiB of untrusted repository data.
 
 The prompt asks the agent to answer from supplied facts, use project tools for missing details, and retain
 conversation context for follow-ups. It should not ask users to paste accessible files or treat an empty

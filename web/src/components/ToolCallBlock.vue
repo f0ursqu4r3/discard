@@ -4,7 +4,7 @@ import { ref, computed } from 'vue'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './ui/collapsible'
 import DiffBlock from './DiffBlock.vue'
 import BrailleSpinner from './BrailleSpinner.vue'
-import { looksLikeUnifiedDiff, summarizeInput } from './messages'
+import { looksLikeUnifiedDiff, toolCallLabel, toolCallSummary } from './messages'
 
 const props = withDefaults(
   defineProps<{
@@ -17,23 +17,8 @@ const props = withDefaults(
   { isError: undefined },
 )
 const expanded = ref(false)
-const label = computed(() => {
-  const action = props.name.split('__').filter(Boolean).at(-1) ?? props.name
-  const words = action
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/[_-]+/g, ' ')
-    .trim()
-  return words ? words.toLowerCase() : 'tool call'
-})
-const summary = computed(() => {
-  if (props.input == null) return ''
-  if (typeof props.input === 'object' && !Array.isArray(props.input)) {
-    const fields = props.input as Record<string, unknown>
-    if (!Object.keys(fields).length) return ''
-    if (typeof fields.query === 'string') return summarizeInput({ pattern: fields.query })
-  }
-  return summarizeInput(props.input)
-})
+const label = computed(() => toolCallLabel(props.name))
+const summary = computed(() => toolCallSummary(props.input))
 const fullInput = computed(() =>
   typeof props.input === 'string' ? props.input : (JSON.stringify(props.input, null, 2) ?? 'null'),
 )

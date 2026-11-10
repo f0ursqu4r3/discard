@@ -8,12 +8,13 @@ import AgentAvatar from './agents/AgentAvatar.vue'
 import { useAgentIdentity } from './agents/useAgentIdentity'
 import { Button } from './ui/button'
 import BlockView from './BlockView.vue'
+import ToolCallGroup from './ToolCallGroup.vue'
 import ContextMenuHost from './ContextMenuHost.vue'
 import { runAction } from '../bridge/api'
 import { computed } from 'vue'
 import { useAppearance } from '@/bridge/appearance'
 import { serverInitials } from './layout'
-import { messageTime } from './messages'
+import { groupBlocks, messageTime } from './messages'
 const props = defineProps<{
   channelId: string
   message: MessageDto
@@ -29,6 +30,7 @@ const emit = defineEmits<{ quote: [message: MessageDto] }>()
 function quote() {
   if (target.value?.hasText && !props.quoteDisabled) emit('quote', props.message)
 }
+const segments = computed(() => groupBlocks(props.message.blocks))
 const date = computed(() => messageTime(props.message))
 const timeLabel = computed(() =>
   date.value?.toLocaleTimeString(undefined, {
@@ -146,17 +148,29 @@ async function copy() {
         >
           [agent · {{ message.author.provider }}]
         </span>
-        <BlockView
-          v-for="(block, i) in message.blocks"
-          :key="i"
-          :channel-id="channelId"
-          :block="block"
-          :inline="i === 0"
-          :running="message.id === 'live' && showCursor"
-          :prompts="prompts"
-          :message-id="target?.id"
-          :index="i"
-        />
+        <template
+          v-for="segment in segments"
+          :key="segment.kind === 'tools' ? segment.items[0]!.index : segment.index"
+        >
+          <ToolCallGroup
+            v-if="segment.kind === 'tools'"
+            :channel-id="channelId"
+            :items="segment.items"
+            :running="message.id === 'live' && showCursor"
+            :prompts="prompts"
+            :message-id="target?.id"
+          />
+          <BlockView
+            v-else
+            :channel-id="channelId"
+            :block="segment.block"
+            :inline="segment.index === 0"
+            :running="message.id === 'live' && showCursor"
+            :prompts="prompts"
+            :message-id="target?.id"
+            :index="segment.index"
+          />
+        </template>
         <span
           v-if="showCursor"
           data-testid="stream-cursor"
