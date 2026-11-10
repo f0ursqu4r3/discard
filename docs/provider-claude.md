@@ -137,7 +137,11 @@ With `SessionSpec.sandbox_autorun`, a Workspace session also sets
 the Claude and Codex config directories, and every Discard file outside the session
 root. The sandbox covers Bash only, so the `Read` rules protect the native tools.
 The rules escape `*`, `?`, `[`, `]`, `{` and `}` with a backslash. The sandbox paths stay literal.
-The home directory and relocated directories are canonicalized first. A relative
+The home directory and relocated directories are canonicalized first. Dotfiles setups often
+symlink credential paths, such as `~/.ssh -> ~/dotfiles/ssh`. Discard denies the link and its real
+target. It also walks each credential directory (4 levels, 2000 entries, no directory symlinks
+followed) and denies the real target of every symlink that points outside that directory.
+Dangling symlinks are skipped. Discard never denies a target that equals or contains the session root. A relative
 `CLAUDE_CONFIG_DIR` or `CODEX_HOME` is ignored, so the default directory stays denied.
 
 Claude saves large tool outputs under `<Claude config>/projects/<encoded cwd>/` and reads them

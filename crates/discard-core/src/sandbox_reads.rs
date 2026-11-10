@@ -14,32 +14,107 @@ const HOME_CREDENTIAL_FILES: &[&str] = &[".netrc", ".docker/config.json", ".clau
 /// Claude shortens project directory names longer than this with a hash. Discard does not match those.
 const CLAUDE_PROJECT_NAME_MAX: usize = 200;
 
+/// Walk limits for symlinks inside a credential directory.
+const WALK_MAX_DEPTH: usize = 4;
+const WALK_MAX_ENTRIES: usize = 2000;
+
 /// Paths to deny reading:
 /// - the credential entries in `home`;
+/// - the real target of each credential entry that is a symlink (dotfiles layouts such as
+///   `~/.ssh -> ~/dotfiles/ssh`), because Seatbelt matches resolved paths;
+/// - for each credential directory (except `.claude`), the real target of every symlink inside it
+///   that points outside it. The walk goes at most 4 levels deep, visits at most 2000 entries, and
+///   does not follow directory symlinks. Dangling symlinks are skipped;
 /// - every entry of `claude_config` (the Claude CLI configuration directory, `~/.claude` or
 ///   `CLAUDE_CONFIG_DIR`) except `projects/<session root>`, where Claude saves large tool outputs
 ///   that the session reads back. If `claude_config` cannot be listed, it is denied whole;
-/// - each directory in `extra_dirs` (relocated credential directories such as `CODEX_HOME`);
+/// - each directory in `extra_dirs` (relocated credential directories such as `CODEX_HOME`), with
+///   the same symlink handling as home entries;
 /// - every file under `discard_home` except the session root and its ancestors. At each level from
 ///   `discard_home` down to `root`, every entry not on the path to `root` is denied.
 ///
 /// All inputs are canonicalized first, so a symlink does not deny the root or miss a credential
 /// directory. A path that cannot be canonicalized (for example, a missing one) is kept as given.
+/// A resolved symlink target is never denied if it equals or contains the session root, or contains
+/// the kept `projects` directory of `claude_config`.
 pub fn denied_read_paths(home: &Path, discard_home: &Path, root: &Path, claude_config: &Path, extra_dirs: &[PathBuf]) -> Vec<PathBuf> {
     let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let home = canonical(home);
     let claude_config = canonical(claude_config);
     let given_root = root;
     let root = canonical(root);
-    let mut paths: Vec<PathBuf> = HOME_CREDENTIAL_PATHS.iter().map(|p| home.join(p)).filter(|p| canonical(p) != claude_config).collect();
-    deny_claude_config(&claude_config, &[given_root, &root], &mut paths);
-    for dir in extra_dirs.iter().map(|d| canonical(d)) {
-        if !paths.contains(&dir) {
-            paths.push(dir);
+    let guard = Guard { root: &root, claude_projects: claude_config.join("projects") };
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in HOME_CREDENTIAL_PATHS {
+        let link = home.join(entry);
+        if canonical(&link) == claude_config {
+            continue;
         }
+        // `.claude` is walked by `deny_claude_config`, so it is not walked here.
+        deny_entry(link, *entry != ".claude", &guard, &mut paths);
+    }
+    deny_claude_config(&claude_config, &[given_root, &root], &mut paths);
+    for dir in extra_dirs {
+        deny_entry(dir.clone(), true, &guard, &mut paths);
     }
     deny_off_path(&canonical(discard_home), &root, &mut paths);
     paths
+}
+
+/// Paths that a resolved symlink target must not deny.
+struct Guard<'a> {
+    root: &'a Path,
+    claude_projects: PathBuf,
+}
+
+impl Guard<'_> {
+    /// Add `path` unless it is a duplicate, contains the session root, or contains the kept projects directory.
+    fn deny(&self, path: PathBuf, paths: &mut Vec<PathBuf>) {
+        if self.root.starts_with(&path) || self.claude_projects.starts_with(&path) || paths.contains(&path) {
+            return;
+        }
+        paths.push(path);
+    }
+}
+
+/// Deny a credential entry. A missing entry is kept as given. For an existing entry, also deny its
+/// real path if that differs, and optionally the targets of symlinks inside it.
+fn deny_entry(entry: PathBuf, walk: bool, guard: &Guard, paths: &mut Vec<PathBuf>) {
+    let resolved = entry.canonicalize().ok();
+    if !paths.contains(&entry) {
+        paths.push(entry.clone());
+    }
+    let Some(resolved) = resolved else { return };
+    if resolved != entry {
+        guard.deny(resolved.clone(), paths);
+    }
+    if walk && resolved.is_dir() {
+        let mut visited = 0;
+        deny_symlink_targets(&resolved, &resolved, 1, &mut visited, guard, paths);
+    }
+}
+
+/// Walk `dir` and deny the real target of each symlink that points outside `base`.
+fn deny_symlink_targets(dir: &Path, base: &Path, depth: usize, visited: &mut usize, guard: &Guard, paths: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut children: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    children.sort();
+    for child in children {
+        if *visited >= WALK_MAX_ENTRIES {
+            return;
+        }
+        *visited += 1;
+        let Ok(meta) = std::fs::symlink_metadata(&child) else { continue };
+        if meta.file_type().is_symlink() {
+            if let Ok(target) = child.canonicalize()
+                && !target.starts_with(base)
+            {
+                guard.deny(target, paths);
+            }
+        } else if meta.is_dir() && depth < WALK_MAX_DEPTH {
+            deny_symlink_targets(&child, base, depth + 1, visited, guard, paths);
+        }
+    }
 }
 
 /// Claude's directory name for a project: the absolute path with every character that is not an
@@ -314,5 +389,79 @@ mod tests {
         let escaped = escape_glob(&home);
         assert!(denials.rules.contains(&format!("Read(/{escaped}/.ssh/**)")), "{:#?}", denials.rules);
         assert!(denials.paths.contains(&home.join(".ssh")), "sandbox paths stay literal");
+    }
+
+    fn symlink(target: &Path, link: &Path) {
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[test]
+    fn a_symlinked_credential_directory_denies_its_target() {
+        let (tmp, home, discard_home, root) = layout();
+        let base = tmp.path().canonicalize().unwrap();
+        let target = base.join("dotfiles").join("ssh");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("id_ed25519"), "").unwrap();
+        symlink(&target, &home.join(".ssh"));
+        let denials = ReadDenials::new(&home, &discard_home, &root, &home.join(".claude"), &[]);
+        assert!(denials.paths.contains(&home.join(".ssh")), "{:#?}", denials.paths);
+        assert!(denials.paths.contains(&target), "{:#?}", denials.paths);
+        assert!(denials.rules.contains(&format!("Read(/{}/**)", target.display())), "{:#?}", denials.rules);
+    }
+
+    #[test]
+    fn a_symlinked_file_inside_a_credential_directory_denies_its_target() {
+        let (tmp, home, discard_home, root) = layout();
+        let base = tmp.path().canonicalize().unwrap();
+        let target = base.join("keys").join("id_ed25519");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "key").unwrap();
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        symlink(&target, &home.join(".ssh").join("id_ed25519"));
+        let denials = ReadDenials::new(&home, &discard_home, &root, &home.join(".claude"), &[]);
+        assert!(denials.paths.contains(&home.join(".ssh")));
+        assert!(denials.paths.contains(&target), "{:#?}", denials.paths);
+        assert!(denials.rules.contains(&format!("Read(/{})", target.display())), "{:#?}", denials.rules);
+    }
+
+    #[test]
+    fn a_symlinked_credential_file_denies_its_target() {
+        let (tmp, home, discard_home, root) = layout();
+        let base = tmp.path().canonicalize().unwrap();
+        let target = base.join("dotfiles").join("netrc");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "machine x").unwrap();
+        symlink(&target, &home.join(".netrc"));
+        let denials = ReadDenials::new(&home, &discard_home, &root, &home.join(".claude"), &[]);
+        assert!(denials.paths.contains(&home.join(".netrc")));
+        assert!(denials.paths.contains(&target), "{:#?}", denials.paths);
+        assert!(denials.rules.contains(&format!("Read(/{})", target.display())), "{:#?}", denials.rules);
+        assert!(!denials.rules.contains(&format!("Read(/{}/**)", target.display())));
+    }
+
+    #[test]
+    fn a_credential_symlink_into_the_session_root_is_not_denied() {
+        let (_tmp, home, discard_home, root) = layout();
+        std::fs::create_dir_all(home.join(".gnupg")).unwrap();
+        std::fs::create_dir_all(root.join("keys")).unwrap();
+        symlink(&root, &home.join(".ssh"));
+        symlink(&discard_home, &home.join(".aws"));
+        symlink(&root.join("keys"), &home.join(".gnupg").join("inner"));
+        let paths = denied_read_paths(&home, &discard_home, &root, &home.join(".claude"), &[]);
+        assert!(!paths.iter().any(|p| root.starts_with(p)), "{paths:#?}");
+        assert!(paths.contains(&home.join(".ssh")), "the link itself stays denied");
+    }
+
+    #[test]
+    fn dangling_credential_symlinks_are_ignored() {
+        let (tmp, home, discard_home, root) = layout();
+        let base = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        symlink(&base.join("missing-key"), &home.join(".ssh").join("id_rsa"));
+        symlink(&base.join("missing-netrc"), &home.join(".netrc"));
+        let paths = denied_read_paths(&home, &discard_home, &root, &home.join(".claude"), &[]);
+        assert!(!paths.contains(&base.join("missing-key")), "{paths:#?}");
+        assert!(!paths.contains(&base.join("missing-netrc")), "{paths:#?}");
+        assert!(paths.contains(&home.join(".netrc")));
     }
 }
