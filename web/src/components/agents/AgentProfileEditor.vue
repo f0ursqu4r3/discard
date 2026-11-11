@@ -28,7 +28,6 @@ import ReasoningSelect from './ReasoningSelect.vue'
 import type { ProviderModel } from '@/bridge/api'
 import { Textarea } from '@/components/ui/textarea'
 import { Switch } from '@/components/ui/switch'
-import { Badge } from '@/components/ui/badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 const props = defineProps<{ agent: AgentEntry }>()
 const emit = defineEmits<{
@@ -172,9 +171,6 @@ watch(
 )
 watch(busy, (value) => emit('busy', value), { flush: 'sync' })
 const autorunUnavailable = computed(() => props.agent.sandboxAutorunUnavailable ?? null)
-const autorunPlanned = computed(
-  () => !!autorunUnavailable.value && props.agent.sandboxAutorunPlanned,
-)
 const autorunOn = computed(
   () => draft.value.workspaceWrite && !autorunUnavailable.value && !!draft.value.sandboxAutorun,
 )
@@ -466,11 +462,7 @@ async function remove() {
         </Field>
         <Field orientation="horizontal">
           <FieldContent>
-            <FieldLabel for="agent-sandbox-autorun">
-              Run sandboxed commands without asking
-              <!-- TODO: Enable when the provider passes the autorun sandbox check. A missing provider is a state block, not planned work. -->
-              <Badge v-if="autorunPlanned" variant="secondary">Soon</Badge>
-            </FieldLabel>
+            <FieldLabel for="agent-sandbox-autorun">Run sandboxed commands without asking</FieldLabel>
             <FieldDescription id="agent-sandbox-autorun-description">
               Shell commands in the worktree run without approval. The sandbox blocks writes outside
               the worktree and network access. It does not block reads. It cannot block Keychain

@@ -156,12 +156,121 @@ pub fn paths_inside(root: &Path, paths: &[String]) -> bool {
 
 pub fn is_edit_tool(tool: &str) -> bool { matches!(tool, "Edit" | "Write" | "NotebookEdit" | "file_change") }
 
+/// Entries that the nested-`.git` walk may read before it fails closed.
+pub const NESTED_GIT_WALK_CAP: usize = 5_000_000;
+
+/// Why the nested-`.git` walk gave no answer. Both cases are unsafe: treat them as "could not check".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NestedGitError {
+    /// The walk read more than the cap.
+    TooManyEntries,
+    /// A directory could not be read.
+    Unreadable,
+}
+impl std::fmt::Display for NestedGitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self { Self::TooManyEntries => "too many files", Self::Unreadable => "a directory could not be read" })
+    }
+}
+
+/// Every entry named `.git` (any case, file or directory) below `root`, relative to `root` and sorted. The root's own
+/// `.git` is skipped. A found `.git` is not entered, and symlinks are not followed. The walk fails closed: more than
+/// `cap` entries, or an unreadable directory, is an error and not a partial answer.
+pub fn find_nested_git(root: &Path, cap: usize) -> Result<Vec<PathBuf>, NestedGitError> {
+    let mut stack = vec![root.to_path_buf()];
+    let mut found = Vec::new();
+    let mut seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir).map_err(|_| NestedGitError::Unreadable)?;
+        for entry in entries {
+            let entry = entry.map_err(|_| NestedGitError::Unreadable)?;
+            seen += 1;
+            if seen > cap { return Err(NestedGitError::TooManyEntries); }
+            let path = entry.path();
+            if entry.file_name().to_string_lossy().eq_ignore_ascii_case(".git") {
+                if dir != root { found.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf()); }
+                continue;
+            }
+            if entry.file_type().is_ok_and(|t| t.is_dir()) { stack.push(path); }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// The run of paths for a message: at most five, then "and N more".
+fn path_list(paths: &[PathBuf], limit: usize) -> String {
+    let shown = paths.iter().take(limit).map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
+    match paths.len().saturating_sub(limit) { 0 => shown, more => format!("{shown} and {more} more") }
+}
+
+/// The warning for nested `.git` paths that a response created. `paths` must not be empty.
+pub fn nested_git_created_warning(paths: &[PathBuf]) -> String {
+    let list = path_list(paths, 5);
+    if paths.len() == 1 {
+        format!("Warning: this response created a nested .git path: {list}. A hook or config inside it can run commands when someone runs Git there. Review or remove it before you run Git in that directory.")
+    } else {
+        format!("Warning: this response created nested .git paths: {list}. A hook or config inside them can run commands when someone runs Git there. Review or remove them before you run Git in those directories.")
+    }
+}
+
+/// The warning for a failed walk.
+pub fn nested_git_unchecked_warning(reason: &NestedGitError) -> String {
+    format!("Warning: Discard could not check this worktree for nested .git paths ({reason}). An autorun response can create them with no approval card.")
+}
+
+/// The notice for nested `.git` paths that exist before an autorun response. `paths` must not be empty.
+pub fn nested_git_existing_notice(paths: &[PathBuf]) -> String {
+    format!("This worktree has nested .git paths ({}). An autorun command can write inside them with no approval card.", path_list(paths, 1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{agent::AgentConfig, capability::ApprovalPolicy, model::{Channel, ChannelId, WorkspaceMode}, store::{Store, WorktreeRecord}, worktree_access::git};
     use std::path::PathBuf;
 
+    fn rel(paths: &[&str]) -> Vec<PathBuf> { paths.iter().map(PathBuf::from).collect() }
+    #[test]
+    fn the_nested_git_walk_skips_the_root_pointer_and_returns_all_paths_sorted() {
+        let dir = tempfile::tempdir().unwrap(); let root = dir.path();
+        std::fs::write(root.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        std::fs::create_dir_all(root.join("src/deep")).unwrap();
+        assert_eq!(find_nested_git(root, 1000), Ok(vec![]), "the root pointer alone is clean");
+        std::fs::create_dir_all(root.join("zeta/.git/hooks")).unwrap();
+        std::fs::create_dir_all(root.join("src/deep/vendor/.git")).unwrap();
+        std::fs::create_dir_all(root.join("alpha")).unwrap();
+        std::fs::write(root.join("alpha/.git"), "gitdir: x\n").unwrap();
+        assert_eq!(find_nested_git(root, 1000), Ok(rel(&["alpha/.git", "src/deep/vendor/.git", "zeta/.git"])));
+    }
+    #[test]
+    fn the_nested_git_walk_matches_any_case_and_does_not_enter_a_found_git() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/.GIT/inner/.git")).unwrap();
+        std::fs::create_dir_all(dir.path().join("b/.Git")).unwrap();
+        assert_eq!(find_nested_git(dir.path(), 1000), Ok(rel(&["a/.GIT", "b/.Git"])));
+    }
+    #[test]
+    fn the_nested_git_walk_does_not_follow_symlinks_and_fails_closed() {
+        let dir = tempfile::tempdir().unwrap(); let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(outside.path().join(".git")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+        assert_eq!(find_nested_git(dir.path(), 1000), Ok(vec![]), "a symlink is not walked");
+        for n in 0..5 { std::fs::write(dir.path().join(format!("f{n}")), "").unwrap(); }
+        assert_eq!(find_nested_git(dir.path(), 3), Err(NestedGitError::TooManyEntries));
+        assert_eq!(find_nested_git(&dir.path().join("missing"), 1000), Err(NestedGitError::Unreadable));
+    }
+    #[test]
+    fn the_warnings_use_singular_and_plural_forms_and_cut_at_five_paths() {
+        assert_eq!(nested_git_created_warning(&rel(&["a/.git"])), "Warning: this response created a nested .git path: a/.git. A hook or config inside it can run commands when someone runs Git there. Review or remove it before you run Git in that directory.");
+        assert_eq!(nested_git_created_warning(&rel(&["a/.git", "b/.git"])), "Warning: this response created nested .git paths: a/.git, b/.git. A hook or config inside them can run commands when someone runs Git there. Review or remove them before you run Git in those directories.");
+        let seven = rel(&["1/.git", "2/.git", "3/.git", "4/.git", "5/.git", "6/.git", "7/.git"]);
+        assert!(nested_git_created_warning(&seven).contains("paths: 1/.git, 2/.git, 3/.git, 4/.git, 5/.git and 2 more. A hook"));
+        assert!(nested_git_created_warning(&seven[..5]).contains("5/.git. A hook"), "five paths need no cut");
+        assert_eq!(nested_git_unchecked_warning(&NestedGitError::TooManyEntries), "Warning: Discard could not check this worktree for nested .git paths (too many files). An autorun response can create them with no approval card.");
+        assert_eq!(nested_git_existing_notice(&rel(&["a/.git"])), "This worktree has nested .git paths (a/.git). An autorun command can write inside them with no approval card.");
+        assert_eq!(nested_git_existing_notice(&rel(&["a/.git", "b/.git", "c/.git"])), "This worktree has nested .git paths (a/.git and 2 more). An autorun command can write inside them with no approval card.");
+    }
     fn grant(main_checkout: bool) -> WorkspaceGrant { WorkspaceGrant { main_checkout, root: PathBuf::from("/work/tree"), channel: ChannelId::new(), branch: Some("feature".into()) } }
     #[test]
     fn autorun_is_on_for_an_opted_in_linked_worktree() {

@@ -209,9 +209,8 @@ export interface AgentEntry {
    * lists it as "Delegation"). A new agent cannot start with it on.
    */
   delegation?: boolean
+  /** Why autorun cannot run for this provider. A state block, not planned work. `null` when it can. */
   sandboxAutorunUnavailable: string | null
-  /** True when the provider does not support autorun yet. False for a missing provider. */
-  sandboxAutorunPlanned: boolean
   archived: boolean
 }
 export interface ConversationEntry {

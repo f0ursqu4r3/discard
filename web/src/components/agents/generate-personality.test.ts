@@ -19,7 +19,6 @@ const original = {
   workspaceWrite: false,
   sandboxAutorun: false,
   sandboxAutorunUnavailable: null,
-  sandboxAutorunPlanned: false,
   archived: false,
 }
 let generate: () => Promise<string>

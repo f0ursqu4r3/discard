@@ -95,6 +95,8 @@ class WorkspaceProtocol:
         self.process, self.provider = process, provider
         self.responses = queue.Queue()
         self.requests, self.transcript = [], []
+        self.decision = "accept"  # Codex approval answer. The on-request probe sets "decline".
+        self.observer = None  # Optional callback for every message, in arrival order.
         self.lock = threading.Lock()
         threading.Thread(target=self.read, daemon=True).start()
 
@@ -110,13 +112,15 @@ class WorkspaceProtocol:
             except ValueError:
                 continue
             self.transcript.append(value)
+            if self.observer:
+                self.observer(value)
             if self.provider == "claude" and value.get("type") == "control_request":
                 self.requests.append(value)
                 request = value.get("request", {})
                 self.send({"type": "control_response", "response": {"subtype": "success", "request_id": value["request_id"], "response": {"behavior": "allow", "updatedInput": request.get("input", {})}}})
             elif self.provider == "codex" and value.get("method") and value.get("id") is not None:
                 self.requests.append(value)
-                self.send({"id": value["id"], "result": {"decision": "accept"}})
+                self.send({"id": value["id"], "result": {"decision": self.decision}})
             elif value.get("method") is None and value.get("id") is not None:
                 self.responses.put(value)
 
@@ -177,8 +181,8 @@ def scrub(value, root):
     return json.loads(json.dumps(value).replace(str(root), "/synthetic").replace(str(root.resolve()), "/synthetic"))
 
 
-def save_transcript(provider, transcript):
-    path = pathlib.Path(__file__).resolve().parents[2] / "fixtures" / (provider + "-workspace-turn.jsonl")
+def save_transcript(provider, transcript, name="workspace-turn"):
+    path = pathlib.Path(__file__).resolve().parents[2] / "fixtures" / (provider + "-" + name + ".jsonl")
     path.write_text("".join(json.dumps(value) + "\n" for value in transcript))
 
 

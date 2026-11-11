@@ -123,7 +123,7 @@ The probe uses the observed exec_command schema and adds a three-second curl lim
 ## Workspace sessions
 
 Workspace starts a fresh ephemeral thread in the granted directory. It uses `untrusted`
-approval policy and `workspace-write` sandbox, with network access off and no extra writable
+approval policy (`on-request` with autorun, see [Autorun](#autorun)) and `workspace-write` sandbox, with network access off and no extra writable
 roots. It preserves the exact cached shell and patch capabilities and disables the other
 Conversation features. The scoped MCP allowlist adds worktree_commit. Hooks, provider memory,
 plugins, other MCP servers and project instruction discovery stay off. `GIT_OPTIONAL_LOCKS=0`
@@ -170,6 +170,119 @@ behavior stays unchanged.
 The marker result remains `none`. Every Workspace command approval therefore
 remains SandboxEscape. Its card says "Always allow is unavailable for Codex write
 sessions." Discard's durable rule system does not approve these requests.
+
+## Autorun
+
+Spec decision 11 and 12 govern Codex autorun. Decision 12 requires a spike before Codex may run
+sandboxed commands without a card. The spike passed. Codex autorun is supported.
+
+### Autorun spike results
+
+Date: 2026-11-10. Tested codex-cli 0.166.0 on macOS (arm64). The probe starts Codex with
+`approvalPolicy: "on-request"` and `sandbox: "workspace-write"` in a linked Git worktree. It uses a
+temporary provider home, a temporary repository, and a synthetic local model endpoint that scripts the
+tool calls. It uses no credentials and no model turn. It declines every approval request and records it.
+The child `TMPDIR` points inside the temporary home, so the main checkout is not writable through a
+system temporary directory.
+
+Command for every row: `python3 crates/discard-providers/tests/probes/codex_workspace.py --on-request`.
+The probe ran eight times while it grew. Every run passed. The table shows the last run.
+
+| Check | Observed value | Result |
+| --- | --- | --- |
+| a. `touch .git` (pointer file) | Exit code 1, `Operation not permitted`. Pointer file unchanged. No approval request. | Pass |
+| a. `apply_patch` to `.git` | `item/fileChange/requestApproval`, `reason: null`, `grantRoot: null`. Declined. Pointer file unchanged. The preceding `fileChange` item lists `<worktree>/.git`. | Pass |
+| a. `apply_patch` to `.GIT` (other case) | Same request as `.git`. Pointer file unchanged. | Pass |
+| b. `touch` in the common Git directory | Exit code 1, `Operation not permitted`. No file created. | Pass |
+| b. `touch` in the worktree's own Git directory (`.git/worktrees/<name>`) | Exit code 1, `Operation not permitted`. No file created. | Pass |
+| b. Append to the common `.git/config` | `operation not permitted`. Config unchanged. | Pass |
+| b. `git add -A` in the worktree | Exit code 128, `Unable to create '.../worktrees/<name>/index.lock': Operation not permitted`. Index unchanged. | Pass |
+| b. `apply_patch` to the common Git directory (`../repo/.git/...`) | `item/fileChange/requestApproval`. Declined. No file created. | Pass |
+| b. `apply_patch` through an in-root symlink to the common Git directory | `item/fileChange/requestApproval` with `reason: "command failed; retry without sandbox?"`. Declined. No file created. | Pass |
+| c. `apply_patch` inside the root (`edit.txt`) | No approval request. The `item/started` `fileChange` item lists `<worktree>/edit.txt` before the change applies: the file still had the old text when the notice arrived. The edit then applied. | Pass (second condition) |
+| d. Network from the sandbox | `curl` to a loopback listener: exit code 7, listener saw 0 connections. `curl` to `https://example.com`: exit code 6. | Pass |
+| e. In-sandbox command (`touch inside.txt`) | Ran. No approval request. | Pass |
+| f. Command with `sandbox_permissions: require_escalated` | One `item/commandExecution/requestApproval` with the model's `reason`. Declined. The command did not run. | Pass |
+| h1. Shell `touch sub/.git/hooks/probe-hook`, where `sub` is a nested repository made with `git init sub` | Exit code 0. File created. No approval request. | Gap |
+| h2. `apply_patch` adding `sub/.git/hooks/probe-hook-patch` | `Success. Updated the following files`. File created. No approval request. | Gap |
+| h3. `apply_patch` adding `newdir/.git/x` (no repository there) | `Success`. File created. No approval request. | Gap |
+| h4. Shell `mkdir -p newdir2/.git && touch newdir2/.git/x` | Exit code 0. File created. No approval request. | Gap |
+| g. `apply_patch` to `.codex/` in the root (information only) | `item/fileChange/requestApproval`, `reason: null`. Declined. No file created. | Information |
+
+Rows h1 to h4 test nested `.git` paths inside the writable root. The probe adds a second file name for
+h2 (`probe-hook-patch`), so h1 cannot make it fail. Discard's path classifier protects any path component
+named `.git`, at any depth and in any case, and under `untrusted` each of these patches gets a card.
+Under `on-request` Codex protects only the root `.git`. Every h write succeeded with no request. This is a
+gap against `untrusted`. It does not fail checks a to d, which name the root pointer and the common Git
+directory. Rows h are not part of the probe's pass or fail result. The probe prints a separate
+`nested .git gap` line.
+
+Rows a to d are the decision 12 conditions. Rows e and f confirm decision 11: under `on-request`,
+only an escalation asks. Row g shows that Codex asks before it writes `.codex/`. The engine
+classifies that request by path, and `.codex/` has no `.git` component, so it receives automatic
+approval. This is the same classification as in `untrusted` sessions. Autorun does not change it.
+
+Limits of the spike:
+
+- The probe ran on macOS (Seatbelt). Autorun is unsupported on other platforms.
+- Check c passes through its second condition. With no request, Discard cannot hold the edit. It sees the paths before the change applies. In-root edits already receive automatic approval.
+- The probe tests a linked worktree. Autorun is unsupported without a `.git` pointer file.
+- Nested `.git` paths are not protected (rows h1 to h4). See the next section.
+- The probe does not test read isolation. A Codex command can read any file that the user's account can read.
+- The recorded turn is `fixtures/codex-autorun-turn.jsonl`. Paths are scrubbed. Rust tests replay it.
+
+### Nested `.git` paths
+
+An autorun command or patch can create a nested `.git` directory inside the root, or write inside an
+existing one, with no card (rows h3, h4, h1, h2). What this permits: a planted hook or Git config in that
+nested directory. It runs only if someone later runs Git inside that directory, for example a user or
+another tool that enters it. The sandbox still blocks network access and writes outside the root. The
+changes card lists the root's tracked changes. It does not show files under a nested `.git`.
+
+The adapter closes the part that it can check at start. At autorun session start, `start_session` walks
+the root. It skips the root `.git` pointer. It refuses autorun with `SandboxUnavailable` when any other
+entry is named `.git` (any case, file or directory). Symlinks are not followed. The walk reads at most
+5,000,000 entries. If it reaches the cap or cannot read a directory, it refuses. The engine then falls back
+to a read-only response and shows the reason. Non-autorun Codex sessions are unchanged, because
+`untrusted` asks for each patch and command.
+
+The start check cannot see what the agent creates during the session. A new nested `.git` from h3 or h4
+stays possible within one autorun response. The engine now walks the root before and after each autorun
+response, for every provider. If the second walk finds nested `.git` paths that the first did not, it saves
+a warning as a system message of the channel, after the response. The warning names the paths (at most
+five). If a walk fails, it says that Discard could not check. The warning does not block, revert, or remove
+the write. The next autorun session refuses to start in that worktree until someone removes the nested
+directory. The start check and the engine use the same walk, `find_nested_git` in
+`crates/discard-core/src/workspace_session.rs`.
+
+Claude has the same limit for shell commands. The adapter's `denyWrite` list holds the root `.git`, the
+worktree Git directory, and the common Git directory only, so a sandboxed Claude shell command can write
+under a nested `.git` with no card. Claude's native `Write` and `Edit` tools go through the path
+classifier and get a card. This comparison comes from the adapter settings and the existing docs. The
+Claude probe does not cover nested `.git` paths.
+
+### Autorun sessions
+
+With `SessionSpec.sandbox_autorun` in a Workspace session, `thread/start` uses
+`approvalPolicy: "on-request"` and `sandbox: "workspace-write"`. All other Workspace controls stay
+the same: network access off, no extra writable roots, and the checks before prompt delivery.
+Non-autorun Workspace sessions keep `untrusted`. Coding and Conversation sessions ignore the flag.
+
+Codex runs sandboxed commands without a request and asks only when the model requests an
+escalation. Every command approval in an autorun session is therefore an escalation. It keeps the
+`SandboxEscape` card with no Always allow action. A command that ran without a card shows "Ran in
+sandbox".
+
+File-change approvals keep their classification: paths come from the preceding `fileChange` item.
+A path outside the root or with a `.git` component receives the full-access card. In an autorun
+session, a file-change request with a non-null `reason` also receives that card. Codex sends such a
+request when a patch fails in the sandbox ("command failed; retry without sandbox?"). The retry
+leaves the sandbox, so the path does not decide its class.
+
+`start_session` refuses an autorun Workspace session on a platform other than macOS, in a root
+without a `.git` pointer file, and in a root with a nested `.git` path. The engine then falls back to a read-only response. `sandbox_autorun()`
+reports `Unsupported` with the reason on other platforms. The settings page shows the toggle disabled
+with that reason. It is a state block, not planned work.
 
 ## Text generation
 

@@ -18,7 +18,6 @@ const original = {
   workspaceWrite: false,
   sandboxAutorun: false,
   sandboxAutorunUnavailable: null as string | null,
-  sandboxAutorunPlanned: false,
   archived: false,
 }
 const rows = { agents: [structuredClone(original)] }
@@ -295,31 +294,16 @@ test('sends the autorun choice once file edits are on', async () => {
   )
   view.unmount()
 })
-test('labels autorun Soon for providers without support', async () => {
+test('disables autorun with the provider reason and no Soon label', async () => {
   const agent = {
     ...original,
     workspaceWrite: true,
-    sandboxAutorunUnavailable: 'No sandbox.',
-    sandboxAutorunPlanned: true,
+    sandboxAutorunUnavailable: 'Codex autorun was checked on macOS only.',
   }
   const view = mount(AgentProfileEditor, { props: { agent } })
   await flushPromises()
   expect(view.get('#agent-sandbox-autorun').attributes('disabled')).toBeDefined()
-  expect(view.text()).toContain('Soon')
-  expect(view.text()).toContain('No sandbox.')
-  view.unmount()
-})
-test('does not label autorun Soon when the provider is missing', async () => {
-  const agent = {
-    ...original,
-    workspaceWrite: true,
-    sandboxAutorunUnavailable: 'This provider is not available.',
-    sandboxAutorunPlanned: false,
-  }
-  const view = mount(AgentProfileEditor, { props: { agent } })
-  await flushPromises()
-  expect(view.get('#agent-sandbox-autorun').attributes('disabled')).toBeDefined()
-  expect(view.text()).toContain('This provider is not available.')
+  expect(view.text()).toContain('Codex autorun was checked on macOS only.')
   expect(view.text()).not.toContain('Soon')
   view.unmount()
 })

@@ -22,6 +22,9 @@ pub enum Step {
     Crash,
     /// Never produce another event.
     Hang,
+    /// Create this directory (and its parents), emit nothing, and play the next step. Simulates a command
+    /// that writes to the worktree during the turn.
+    CreateDir(std::path::PathBuf),
 }
 
 impl Step {
@@ -215,11 +218,17 @@ impl ProviderSession for FakeSession {
             self.decisions_rx.recv().await?;
             self.waiting_for = None;
         }
+        // A step that only changes the disk produces no event: play it, then look at the next one.
+        while let Some(Step::CreateDir(path)) = self.script.front() {
+            let _ = std::fs::create_dir_all(path);
+            self.script.pop_front();
+        }
         // Cancel-safety: a hang is never consumed, so a dropped future leaves it in place.
         if matches!(self.script.front(), Some(Step::Hang)) {
             return std::future::pending().await;
         }
         match self.script.pop_front()? {
+            Step::CreateDir(_) => None, // unreachable: handled above
             Step::Emit(kind) => Some(RawEvent { kind, raw: None }),
             Step::Approval { tool, input } => {
                 let id = ApprovalId::new();
