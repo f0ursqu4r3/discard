@@ -32,7 +32,7 @@ async fn turn(commands: &mpsc::UnboundedSender<Command>, updates: &mut mpsc::Unb
             }
             Update::TurnFinished(outcome) => return (outcome, reply, kinds),
             Update::Error(m) | Update::ResponseSaveFailed(m) | Update::SetupNeeded(m) => panic!("engine problem: {m}"),
-            Update::SessionProfile(_) | Update::Responding(_) | Update::ApprovalState { .. } | Update::Notice(_) | Update::ResponseCompleted(_) | Update::ConversationMarker(_) | Update::MemoryChanges { .. } | Update::MessagePosted { .. } | Update::UserMessageSaved(_) | Update::ThreadFollowed | Update::ThreadsAnchored(_) | Update::SubAgentFinished { .. } => {}
+            Update::SessionProfile(_) | Update::Responding(_) | Update::ApprovalState { .. } | Update::Notice(_) | Update::ResponseCompleted(_) | Update::ConversationMarker(_) | Update::MemoryChanges { .. } | Update::MessagePosted { .. } | Update::UserMessageSaved(_) | Update::UserMessageAdded(_) | Update::ThreadFollowed | Update::ThreadsAnchored(_) | Update::SubAgentFinished { .. } => {}
         }
     }
 }

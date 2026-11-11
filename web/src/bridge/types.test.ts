@@ -50,7 +50,8 @@ test('the sub-agent golden payloads follow the contract', () => {
   const open = payload.openThread
   expect(open?.kind).toBe('sub_agent')
   expect(open?.anchorMessageId).toBeNull()
-  expect(open?.composerDisabledReason).toBe('steering_soon')
+  expect(open?.composerDisabled).toBe(false)
+  expect(open?.composerDisabledReason).toBeNull()
   expect(threadHistory.anchor).toBeNull()
   // After the turn the same chips hang under the saved response.
   expect(history.messages[1]?.subAgentThreads?.map((chip) => chip.state)).toEqual([

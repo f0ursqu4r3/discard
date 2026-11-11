@@ -281,32 +281,68 @@ test('the brief shows the parent agent as its author', () => {
   expect(brief.text()).not.toContain('You')
 })
 
-test('the sub-agent composer is disabled, labelled Soon and has no Also post box', () => {
+test('the sub-agent composer is on and offers Also post like a question thread', () => {
   const view = subPanel()
-  expect(view.get('textarea').attributes('disabled')).toBeDefined()
-  expect(view.get('[data-ui-id="composer-soon"]').text()).toContain('Soon')
-  expect(view.find('[data-ui-id="composer-also-post"]').exists()).toBe(false)
-  expect(view.getComponent(Composer).props('alsoPostLabel')).toBeUndefined()
+  expect(view.get('textarea').attributes('disabled')).toBeUndefined()
+  expect(view.find('[data-ui-id="composer-soon"]').exists()).toBe(false)
+  expect(view.text()).not.toContain('Soon')
+  expect(view.find('[data-ui-id="composer-also-post"]').exists()).toBe(true)
+  expect(view.getComponent(Composer).props('alsoPostLabel')).toBe('#general')
   expect(view.text()).not.toContain('Channel archived')
   expect(view.text()).not.toContain('Read only.')
   // The read-only note about file edits still shows.
   expect(view.get('[data-ui-id="thread-read-only-note"]').text()).toBe(subThread.readOnlyNote)
 })
 
-test('a read-only reason is not a planned label', () => {
-  const view = subPanel({ composerDisabledReason: 'read_only' })
+test('the sub-agent placeholder says steer while the task runs and reply after', () => {
+  const running = subPanel({ state: 'running', turnRunning: true })
+  expect(running.get('textarea').attributes('placeholder')).toBe('Steer this sub-agent')
+  for (const state of ['done', 'failed', 'cancelled', 'timed_out'] as const) {
+    const view = subPanel({ state, turnRunning: false })
+    expect(view.get('textarea').attributes('placeholder')).toBe('Reply in thread')
+  }
+  // A question thread keeps its own placeholder.
+  expect(panel().get('textarea').attributes('placeholder')).toBe('Reply in thread')
+})
+
+test('a read-only reason turns the sub-agent composer off with the read-only line', () => {
+  const view = subPanel({ composerDisabled: true, composerDisabledReason: 'read_only' })
+  expect(view.get('textarea').attributes('disabled')).toBeDefined()
   expect(view.find('[data-ui-id="composer-soon"]').exists()).toBe(false)
   expect(view.text()).toContain('Read only.')
 })
 
-test('Stop in a running sub-agent thread asks the app to stop, and Send stays off', async () => {
+test('a running sub-agent thread shows Stop and Send, and Send sends a steer', async () => {
   const view = subPanel()
-  expect(view.find('[data-ui-id="composer-send"]').exists()).toBe(false)
+  expect(view.find('[data-ui-id="composer-stop"]').exists()).toBe(true)
+  const send = view.get('[data-ui-id="composer-send"]')
+  expect(send.attributes('disabled')).toBeDefined()
+  await view.get('textarea').setValue('Only look in tests.')
+  expect(send.attributes('disabled')).toBeUndefined()
+  await send.trigger('click')
+  expect(view.emitted('send')?.[0]).toEqual(['Only look in tests.', [], false])
   await view.get('[data-ui-id="composer-stop"]').trigger('click')
   expect(view.emitted('stop')).toHaveLength(1)
+})
+
+test('Enter sends a steer while the sub-agent works', async () => {
+  const view = subPanel()
+  await view.get('textarea').setValue('Stop checking docs.')
+  await view.get('textarea').trigger('keydown', { key: 'Enter' })
+  expect(view.emitted('send')?.[0]).toEqual(['Stop checking docs.', [], false])
+})
+
+test('after the task ended the thread shows Send only, and a question thread cannot send while it runs', async () => {
   const done = subPanel({ turnRunning: false, state: 'done' })
   expect(done.find('[data-ui-id="composer-stop"]').exists()).toBe(false)
   expect(done.get('[data-ui-id="composer-send"]').attributes('disabled')).toBeDefined()
+  // A follow-up turn runs in a finished thread: Stop shows, Send does not.
+  const followUp = subPanel({ turnRunning: true, state: 'done' })
+  expect(followUp.find('[data-ui-id="composer-stop"]').exists()).toBe(true)
+  expect(followUp.find('[data-ui-id="composer-send"]').exists()).toBe(false)
+  const question = panel({ thread: { ...thread, turnRunning: true } })
+  expect(question.find('[data-ui-id="composer-stop"]').exists()).toBe(true)
+  expect(question.find('[data-ui-id="composer-send"]').exists()).toBe(false)
 })
 
 test('Post to channel, Follow and Leave keep working in a sub-agent thread', async () => {

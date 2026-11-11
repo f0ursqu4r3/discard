@@ -138,6 +138,17 @@ pub struct Engine {
 struct RunState {
     sequencer: Sequencer,
     notices: HashSet<String>,
+    /// A user message that arrived while a sub-agent task ran. The turn stops, and `run_steers` runs this message next.
+    steer: Option<Steer>,
+    /// The turn that runs is a steer turn: it goes on with the task of the interrupted turn.
+    steering: bool,
+}
+
+/// What a user message of a steer carries.
+struct Steer {
+    text: String,
+    attachments: Vec<crate::attachments::Attachment>,
+    also_post: bool,
 }
 
 struct RevokeOnDrop {
@@ -168,6 +179,11 @@ fn send(updates: &mpsc::UnboundedSender<Update>, update: Update) {
     let _ = updates.send(update);
 }
 
+/// A turn that failed does not run the steer that stopped it: the task ends as failed. Say so, because the message is lost.
+fn drop_steer(steer: &mut Option<Steer>, updates: &mpsc::UnboundedSender<Update>) {
+    if steer.take().is_some() { send(updates, Update::Error("The turn failed, so Discard did not send your message. Send it again.".into())); }
+}
+
 fn policy_name(policy: ApprovalPolicy) -> &'static str {
     match policy {
         ApprovalPolicy::Ask => "ask",
@@ -177,7 +193,7 @@ fn policy_name(policy: ApprovalPolicy) -> &'static str {
 
 /// What a thread session knows about its thread, in one sentence each. `@you` calls the user into the thread.
 pub const AT_YOU_NOTE: &str = "To call the user into this thread, write @you in plain text outside code and quotes.";
-const SUB_AGENT_NOTE: &str = "This is a sub-agent thread. The first message is a brief from another agent, not from the user. Research it with your read-only tools. End with one final message that stands alone: it goes back to that agent as your result.";
+const SUB_AGENT_NOTE: &str = "This is a sub-agent thread. The first message is a brief from another agent, not from the user. Research it with your read-only tools. End with one final message that stands alone: it goes back to that agent as your result. Later messages in this thread come from the user. If one arrives while you work on the brief, follow it, and still end with one final message that stands alone, which goes back to that agent. After you return the result, your replies stay in this thread.";
 
 /// The system prompt of a thread session: the agent prompt, then the notes for the kind of thread.
 fn thread_system_prompt(base: &str, kind: crate::model::ThreadKind) -> String {
@@ -334,7 +350,7 @@ impl Engine {
         mut commands: mpsc::UnboundedReceiver<Command>,
         updates: mpsc::UnboundedSender<Update>,
     ) {
-        let mut state = RunState { sequencer: Sequencer::new(), notices: HashSet::new() };
+        let mut state = RunState { sequencer: Sequencer::new(), notices: HashSet::new(), steer: None, steering: false };
         match crate::driver::lock(&self.store).last_seq(&self.session_id) {
             Ok(last) => state.sequencer.resume(&self.session_id, last),
             Err(e) => warn!(error = %e, "could not read the last event sequence"),
@@ -358,6 +374,48 @@ impl Engine {
                 Command::SendInThread { text, attachments, also_post } => self.turn(&mut state, text, attachments, None, also_post, None, &mut commands, &updates).await,
                 _ => {}
             }
+            self.run_steers(&mut state, &mut commands, &updates).await;
+        }
+    }
+
+    /// Run the steers that interrupted a turn, one after the other, until none is left. A steer turn goes on with the
+    /// task of the interrupted turn, so the sub-agent does not settle between them.
+    async fn run_steers(&self, state: &mut RunState, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) {
+        while let Some(steer) = state.steer.take() {
+            // A stop that arrives between the two turns drops the steer, and ends the task like any stop.
+            if self.stopped_between_turns(commands, updates) {
+                self.finish(updates, crate::driver::TurnOutcome::Cancelled);
+                return;
+            }
+            state.steering = true;
+            self.turn(state, steer.text, steer.attachments, None, steer.also_post, None, commands, updates).await;
+            state.steering = false;
+        }
+    }
+
+    /// Read the commands that wait between two turns of a task. Returns whether one of them is a stop. A message is
+    /// refused, as it is while a turn runs: the task already has the steer that it runs next.
+    fn stopped_between_turns(&self, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) -> bool {
+        let mut stopped = false;
+        while let Ok(command) = commands.try_recv() {
+            match command {
+                Command::Cancel => stopped = true,
+                Command::Decide { .. } => {}
+                _ => send(updates, Update::Error("A turn is already running. Wait for it to finish or cancel it.".into())),
+            }
+        }
+        stopped
+    }
+
+    /// Why a user message cannot steer this sub-agent, if it cannot. A steer goes to the sub-agent, so a mention of
+    /// another agent has no turn to start.
+    fn steer_refusal(&self, text: &str) -> Option<String> {
+        let resolved = crate::mentions::resolve(&crate::driver::lock(&self.store), &self.channel_id, text);
+        match resolved {
+            Ok(None) => None,
+            Ok(Some(agent)) if agent == self.agent_id => None,
+            Ok(Some(_)) => Some("Wait for the sub-agent to finish before you mention another agent.".into()),
+            Err(error) => Some(error),
         }
     }
 
@@ -469,12 +527,14 @@ impl Engine {
             }
         };
         let thread = info.is_some();
-        // A sub-agent thread has one request, its brief. The brief's text is the author's, so it never selects a recipient.
+        // A sub-agent thread starts with one request, its brief. The brief's text is the author's, so it never selects a recipient.
         let sub_agent = info.as_ref().filter(|t| t.kind == crate::model::ThreadKind::SubAgent);
         let refusal = match (&brief, sub_agent) {
             (Some(_), None) => Some("A brief can start only a sub-agent thread."),
             (Some(_), Some(_)) if crate::driver::lock(&self.store).messages_for_channel(&self.channel_id).map_or(true, |m| !m.is_empty()) => Some("This sub-agent thread already ran. A call to delegate makes new threads."),
-            (None, Some(_)) => Some("A sub-agent thread takes no messages yet."),
+            (None, Some(_)) if recipient.is_some() => Some("A sub-agent thread takes messages from the user only."),
+            // A turn that runs takes a steer in its own loop. A message that reaches here finds no turn: the brief is not sent yet.
+            (None, Some(thread)) if thread.state == Some(crate::model::ThreadState::Running) && !state.steering => Some("This sub-agent has not started its brief yet. Send the message again in a moment."),
             _ => None,
         };
         if let Some(refusal) = refusal {
@@ -510,8 +570,9 @@ impl Engine {
         send(updates, Update::Responding(author.clone()));
         send(updates, Update::SessionProfile(snapshot.session_profile()));
         snapshot.turn_snapshot(&author, state, text, attachments, store_user_message, also_post, brief, commands, updates).await;
-        // A setup problem ends the turn without `finish`. The run of a sub-agent still ends, as failed.
-        if sub_agent.is_some() {
+        // A setup problem ends the turn without `finish`. The run of a sub-agent still ends, as failed. A turn that a
+        // steer interrupted does not end the run: the steer turn goes on with it.
+        if sub_agent.is_some() && state.steer.is_none() {
             let current = crate::driver::lock(&self.store).thread_info(&self.channel_id);
             match current {
                 Ok(info) if info.as_ref().and_then(|t| t.state) == Some(crate::model::ThreadState::Running) => self.settle_sub_agent(updates, crate::driver::TurnOutcome::Failed),
@@ -557,7 +618,9 @@ impl Engine {
 
     #[expect(clippy::too_many_arguments, reason = "Keep replay and message storage separate.")]
     async fn turn_snapshot(&self, author: &crate::model::MessageAuthor, state: &mut RunState, text: String, attachments: Vec<crate::attachments::Attachment>, store_user_message: bool, also_post: bool, brief: Option<crate::model::MessageAuthor>, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) {
-        let RunState { sequencer, notices } = state;
+        let RunState { sequencer, notices, steer, steering } = state;
+        // The brief turn and the steer turns of a task take a steer. A follow-up turn after the result does not.
+        let task_turn = brief.is_some() || *steering;
         let mut session_mode = if self.mode == SessionMode::Conversation && self.write_access.is_ok() { SessionMode::Workspace } else { self.mode };
         let history = crate::driver::lock(&self.store).channel_history(&self.channel_id);
         let thread_turn = self.write_access == Err(ReadOnlyReason::Thread);
@@ -572,9 +635,18 @@ impl Engine {
             }
         };
         if brief.is_none() { self.observe(observer::message_sent(&self.channel_id.0, &text)); }
-        send(updates, Update::UserMessageSaved(saved.id.clone()));
+        // A steer turn has no local message in the UI: it comes after the partial response of the interrupted turn.
+        if !*steering { send(updates, Update::UserMessageSaved(saved.id.clone())); }
+        // The app shows no local message when it took the message for a steer, and the task can end before the message
+        // arrives: it is then a follow-up turn. So every user message of a thread is also reported in full. A message
+        // that the UI already shows is not added twice.
+        if thread_turn && brief.is_none() { send(updates, Update::UserMessageAdded(saved.clone())); }
         // A brief is an agent's request, not a user reply: it does not follow the thread.
-        if thread_turn && brief.is_none() { self.follow_and_post(&saved, also_post, updates); }
+        if thread_turn && brief.is_none() {
+            self.follow_and_post(&saved, also_post, updates);
+            // The app showed no local message for a steer, so it learns of the follow from the engine.
+            if *steering { send(updates, Update::ThreadFollowed); }
+        }
         }
 
         let enforcement = match self.provider.capabilities().enforcement_for(self.policy) {
@@ -899,7 +971,20 @@ impl Engine {
                             }
                         }
                         Some(Command::Cancel) => {
+                            // A stop after a steer was accepted drops the steer.
+                            *steer = None;
                             let _ = cancel_tx.send(());
+                        }
+                        Some(Command::SendInThread { text, attachments, also_post }) if task_turn => {
+                            if steer.is_some() {
+                                send(updates, Update::Error("A turn is already running. Wait for it to finish or cancel it.".into()));
+                            } else if let Some(refusal) = self.steer_refusal(&text) {
+                                send(updates, Update::Error(refusal));
+                            } else {
+                                // Stop the provider turn the way a stop does. The partial response is saved, and the steer runs next.
+                                *steer = Some(Steer { text, attachments, also_post });
+                                let _ = cancel_tx.send(());
+                            }
                         }
                         Some(Command::Send(_) | Command::SendAttachments { .. } | Command::SendInThread { .. } | Command::Continue { .. } | Command::ContinueDeclined { .. } | Command::SendBrief { .. }) => send(
                             updates,
@@ -937,6 +1022,7 @@ impl Engine {
                 Err(error) => {
                     send(updates, Update::ResponseSaveFailed(format!("{error}. Copy the reply before sending another message, then resolve the storage error.")));
                     if !thread_turn { self.anchor_sub_agents(None, updates); }
+                    drop_steer(steer, updates);
                     self.finish(updates, crate::driver::TurnOutcome::Failed);
                     return;
                 }
@@ -983,10 +1069,14 @@ impl Engine {
                 {
                     warn!(error = %e, "could not save the resume handle");
                 }
+                // A steer stopped this turn. The task goes on: no end of turn, and no final state. `run_steers` runs the steer.
+                if steer.is_some() && outcome != crate::driver::TurnOutcome::Failed { return; }
+                drop_steer(steer, updates);
                 self.finish(updates, outcome);
             }
             Err(e) => {
                 send(updates, Update::Error(redact(&e.to_string())));
+                drop_steer(steer, updates);
                 self.finish(updates, crate::driver::TurnOutcome::Failed);
             }
         }

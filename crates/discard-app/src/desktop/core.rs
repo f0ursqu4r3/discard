@@ -137,7 +137,6 @@ fn open_thread_dto(s: &State) -> Option<OpenThreadDto> {
     let channel = s.parked.get(id)?;
     let record = s.threads.get(id)?;
     let ui = &channel.ui;
-    let steering_soon = record.kind == ThreadKind::SubAgent;
     let blocked = thread_blocked(s, channel);
     Some(OpenThreadDto {
         channel_id: id.clone(), parent_channel_id: record.parent.clone(), name: record.name.clone(), followed: record.followed,
@@ -147,9 +146,8 @@ fn open_thread_dto(s: &State) -> Option<OpenThreadDto> {
         responder: ui.responder().cloned(), agent_status: agent_status_name(ui.agent_status()).into(), turn_running: ui.turn_running(),
         notice: ui.notice().map(str::to_owned), live_blocks: ui.live_blocks().to_vec(), prompts: prompt_dtos(ui),
         pending_approvals: ui.pending_approvals(), unread: record.unread(s.window.last_read(id)),
-        composer_disabled: blocked || steering_soon,
-        // TODO: steering a sub-agent and follow-up turns in a sub-agent thread. Until then its composer stays off.
-        composer_disabled_reason: if steering_soon { Some("steering_soon".into()) } else if blocked { Some("read_only".into()) } else { None },
+        composer_disabled: blocked,
+        composer_disabled_reason: blocked.then(|| "read_only".into()),
         read_only_note: discard_core::workspace_session::ReadOnlyReason::Thread.note(),
     })
 }
@@ -1258,16 +1256,27 @@ impl AppCore {
         if text.trim().is_empty() && attachments.is_empty() { return Ok(()); }
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(target) = s.parked.get(thread).filter(|c| c.thread_parent.is_some()) else { return Err("This thread is unavailable.".into()) };
-        // TODO: steering a sub-agent and follow-up turns. Until then a sub-agent thread takes only its brief.
-        if s.threads.get(thread).is_some_and(|record| record.kind == ThreadKind::SubAgent) { return Err("A sub-agent thread takes no messages yet.".into()); }
-        if thread_blocked(&s, target) || s.changing_agents.contains(&target.agent_id) || s.changing_channels.contains(thread) || s.project_busy || target.ui.turn_running() {
+        // A message in a sub-agent thread whose task runs steers the task. Any other running turn refuses it.
+        let steering = s.threads.get(thread).is_some_and(|record| record.kind == ThreadKind::SubAgent && record.state == Some(ThreadState::Running)) && target.ui.turn_running();
+        if thread_blocked(&s, target) || s.changing_agents.contains(&target.agent_id) || s.changing_channels.contains(thread) || s.project_busy || (target.ui.turn_running() && !steering) {
             return Err("This thread cannot send a message right now.".into());
         }
         if recipient.as_ref().is_some_and(|agent| s.changing_agents.contains(&agent.agent_id.0)) {
             return Err("The mentioned agent is being updated. Try again.".into());
         }
+        // The engine refuses such a steer too. The refusal here keeps the draft in the composer.
+        if steering && recipient.as_ref().is_some_and(|agent| agent.agent_id.0 != target.agent_id) {
+            return Err("Wait for the sub-agent to finish before you mention another agent.".into());
+        }
         let target = s.parked.get_mut(thread).expect("thread checked under lock");
         target.commands.send(Command::SendInThread { text: text.clone(), attachments: attachments.clone(), also_post }).map_err(|_| "The agent session is unavailable.")?;
+        if steering {
+            // The engine shows a steer after the partial response of the turn that it stops (`Update::UserMessageAdded`),
+            // and follows the thread then. The running turn stays as it is until then.
+            s.rev += 1;
+            self.changed.notify_one();
+            return Ok(());
+        }
         target.ui.user_sent_with_attachments(&text, &attachments);
         if let Some(author) = recipient { target.ui.apply(Update::Responding(author)); }
         // The engine follows a thread when the user sends in it. The record follows too.

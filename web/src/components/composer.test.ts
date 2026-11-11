@@ -34,6 +34,31 @@ test('stop replaces send while running', () => {
   expect(composer.text()).not.toContain('Send')
 })
 
+test('send stays next to stop while running when the composer allows it', async () => {
+  const composer = mount(Composer, {
+    props: {
+      archived: false,
+      busy: false,
+      running: true,
+      sendWhileRunning: true,
+      channel: 'general',
+    },
+  })
+  expect(composer.find('[data-ui-id="composer-stop"]').exists()).toBe(true)
+  const send = composer.get('[data-ui-id="composer-send"]')
+  expect(send.attributes('disabled')).toBeDefined()
+  await composer.get('textarea').setValue('steer')
+  await send.trigger('click')
+  expect(composer.emitted('send')?.[0]).toEqual(['steer'])
+  // Without the prop a running turn blocks Enter as before.
+  const plain = mount(Composer, {
+    props: { archived: false, busy: false, running: true, channel: 'general' },
+  })
+  await plain.get('textarea').setValue('steer')
+  await plain.get('textarea').trigger('keydown', { key: 'Enter' })
+  expect(plain.emitted('send')).toBeUndefined()
+})
+
 test('a parent-owned draft survives a composer remount', async () => {
   const { defineComponent, ref } = await import('vue')
   const Host = defineComponent({
