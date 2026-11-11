@@ -1610,9 +1610,11 @@ struct SubAgent { t: Threaded, engine: Engine, probe: Probe, thread: ChannelId, 
 /// A sub-agent thread of a worktree parent. The sub-agent is "Other". `script` is what its provider does.
 fn sub_agent(script: Vec<Step>) -> SubAgent { sub_agent_in(script, false) }
 
-fn sub_agent_in(script: Vec<Step>, file_db: bool) -> SubAgent {
+fn sub_agent_in(script: Vec<Step>, file_db: bool) -> SubAgent { sub_agent_with(FakeProvider::new(script), file_db) }
+
+/// Like `sub_agent`, with a provider that has a script for each session.
+fn sub_agent_with(provider: FakeProvider, file_db: bool) -> SubAgent {
     let t = threaded_in(discard_core::provider::SessionMode::Conversation, false, file_db);
-    let provider = FakeProvider::new(script);
     let probe = provider.probe.clone();
     let spy = Arc::new(DelegationSpy::default());
     let (thread, session, parent_author) = {
@@ -1669,16 +1671,22 @@ async fn a_brief_runs_one_turn_in_a_sub_agent_thread_and_reports_the_result() {
 }
 
 #[tokio::test]
-async fn a_sub_agent_thread_takes_one_brief_and_no_other_message() {
+async fn a_sub_agent_thread_takes_one_brief_and_refuses_messages_until_it_has_one() {
     let s = sub_agent(vec![Step::working(), Step::text("first"), Step::idle()]);
     let (thread, author) = (s.thread.clone(), s.parent_author.clone());
     let mut rig = launch_workspace(s.engine, s.probe);
-    for refused in [Command::Send("hello".into()), Command::SendInThread { text: "x".into(), attachments: vec![], also_post: false }, Command::Continue { agent: author.agent_id.clone(), note: "ok".into() }] {
+    // Before the brief the task still waits for its turn, so a message has no turn to steer and no result to follow up.
+    for refused in [Command::Send("hello".into()), Command::SendInThread { text: "x".into(), attachments: vec![], also_post: false }] {
         rig.commands.send(refused).unwrap();
         let updates = rig.until_finished().await;
-        assert!(updates.iter().any(|u| matches!(u, Update::Error(e) if e.contains("takes no messages"))), "{updates:?}");
+        assert!(updates.iter().any(|u| matches!(u, Update::Error(e) if e.contains("has not started its brief"))), "{updates:?}");
         assert!(rig.messages().is_empty() && rig.probe.specs.lock().unwrap().is_empty(), "nothing is saved or started");
     }
+    // A Continue is an approval of the app, which a sub-agent thread never asks for.
+    rig.commands.send(Command::Continue { agent: author.agent_id.clone(), note: "ok".into() }).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(updates.iter().any(|u| matches!(u, Update::Error(e) if e.contains("messages from the user only"))), "{updates:?}");
+    assert!(rig.messages().is_empty() && rig.probe.specs.lock().unwrap().is_empty());
     rig.commands.send(brief("go", &author)).unwrap(); rig.until_finished().await;
     rig.commands.send(brief("again", &author)).unwrap();
     let updates = rig.until_finished().await;
@@ -1691,6 +1699,255 @@ async fn a_sub_agent_thread_takes_one_brief_and_no_other_message() {
     let updates = question.until_finished().await;
     assert!(updates.iter().any(|u| matches!(u, Update::Error(e) if e.contains("only a sub-agent thread"))), "{updates:?}");
     rig.task.abort(); question.task.abort();
+}
+
+#[tokio::test]
+async fn a_message_after_the_result_is_a_follow_up_turn_that_leaves_the_state_alone() {
+    use discard_core::model::ThreadState;
+    let provider = FakeProvider::new(vec![Step::working(), Step::text("Callers: a, b."), Step::idle()])
+        .then_session(vec![Step::working(), Step::text("It is in foo.rs."), Step::idle()]);
+    let s = sub_agent_with(provider, false);
+    let (thread, author, other) = (s.thread.clone(), s.parent_author.clone(), s.sub_agent.clone());
+    let mut rig = launch_workspace(s.engine, s.probe);
+    rig.commands.send(brief("find the callers", &author)).unwrap(); rig.until_finished().await;
+    assert!(!rig.store.lock().unwrap().thread_info(&thread).unwrap().unwrap().followed);
+    rig.commands.send(Command::SendInThread { text: "Where is a defined?".into(), attachments: vec![], also_post: false }).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(!updates.iter().any(|u| matches!(u, Update::Error(_))), "{updates:?}");
+    assert!(updates.iter().any(|u| matches!(u, Update::Responding(a) if a.agent_id == other)));
+    assert!(matches!(updates.last(), Some(Update::TurnFinished(TurnOutcome::Completed))));
+    // The state and the result of the task stay. The app sees the same final state again.
+    assert!(updates.contains(&Update::SubAgentFinished { state: ThreadState::Done, text: "It is in foo.rs.".into() }), "{updates:?}");
+    let messages = rig.messages();
+    assert_eq!(messages.iter().map(|m| m.role).collect::<Vec<_>>(), [Role::User, Role::Agent, Role::User, Role::Agent]);
+    let info = rig.store.lock().unwrap().thread_info(&thread).unwrap().unwrap();
+    assert_eq!((info.state, info.followed), (Some(ThreadState::Done), true), "the message follows the thread");
+    assert!(updates.iter().any(|u| matches!(u, Update::UserMessageSaved(id) if *id == messages[2].id)));
+    let sent = rig.probe.sent.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    for part in ["find the callers", "Callers: a, b.", "Where is a defined?"] { assert!(sent[1].contains(part), "{part}: {}", sent[1]); }
+    assert!(!sent[1].contains("anchor reply"), "no parent transcript: {}", sent[1]);
+    let specs = rig.probe.specs.lock().unwrap();
+    assert_eq!(specs[1].mode, discard_core::provider::SessionMode::Conversation);
+    assert!(specs[1].system_prompt.as_deref().unwrap().contains("File edits are unavailable in this response: threads are read-only."));
+    drop(specs); drop(sent);
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn a_follow_up_turn_that_fails_does_not_change_a_final_state() {
+    use discard_core::model::ThreadState;
+    let provider = FakeProvider::new(vec![Step::working(), Step::text("Callers: a, b."), Step::idle()])
+        .then_session(vec![Step::working(), Step::Crash]);
+    let s = sub_agent_with(provider, false);
+    let (thread, author) = (s.thread.clone(), s.parent_author.clone());
+    let mut rig = launch_workspace(s.engine, s.probe);
+    rig.commands.send(brief("find the callers", &author)).unwrap(); rig.until_finished().await;
+    rig.commands.send(Command::SendInThread { text: "again".into(), attachments: vec![], also_post: false }).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(matches!(updates.last(), Some(Update::TurnFinished(TurnOutcome::Failed))), "{updates:?}");
+    assert_eq!(rig.store.lock().unwrap().thread_info(&thread).unwrap().unwrap().state, Some(ThreadState::Done), "the first final state wins");
+    rig.task.abort();
+}
+
+/// Read updates until the sub-agent's provider streamed some text.
+async fn until_text(rig: &mut Rig) -> Vec<Update> {
+    let mut seen = Vec::new();
+    loop { let u = rig.next().await; let done = matches!(&u, Update::Event(e) if matches!(e.kind, EventKind::TextDelta { .. })); seen.push(u); if done { return seen; } }
+}
+
+fn steer(text: &str) -> Command { Command::SendInThread { text: text.into(), attachments: vec![], also_post: false } }
+
+#[tokio::test]
+async fn a_steer_stops_the_turn_and_runs_a_new_one_inside_the_same_task() {
+    use discard_core::model::ThreadState;
+    let provider = FakeProvider::new(vec![Step::working(), Step::text("partial work"), Step::Hang])
+        .then_session(vec![Step::working(), Step::text("Final: only the tests."), Step::idle()]);
+    let s = sub_agent_with(provider, false);
+    let (thread, author) = (s.thread.clone(), s.parent_author.clone());
+    let mut rig = launch_workspace(s.engine, s.probe);
+    rig.commands.send(brief("find the callers", &author)).unwrap();
+    let mut updates = until_text(&mut rig).await;
+    rig.commands.send(steer("Only look in tests.")).unwrap();
+    updates.extend(rig.until_finished().await);
+    assert!(!updates.iter().any(|u| matches!(u, Update::Error(_))), "{updates:?}");
+    assert_eq!(updates.iter().filter(|u| matches!(u, Update::TurnFinished(_))).count(), 1, "the interrupted turn does not end the task's turn: {updates:?}");
+    assert_eq!(updates.iter().filter(|u| matches!(u, Update::SubAgentFinished { .. })).count(), 1, "{updates:?}");
+    assert!(matches!(updates.last(), Some(Update::TurnFinished(TurnOutcome::Completed))));
+    assert_eq!(updates[updates.len() - 2], Update::SubAgentFinished { state: ThreadState::Done, text: "Final: only the tests.".into() }, "the result is the last turn's message");
+    let messages = rig.messages();
+    assert_eq!(messages.iter().map(|m| m.role).collect::<Vec<_>>(), [Role::User, Role::Agent, Role::User, Role::Agent]);
+    // The partial response shows before the steer, which shows by `UserMessageAdded`.
+    let partial = updates.iter().position(|u| matches!(u, Update::ResponseCompleted(m) if m.id == messages[1].id)).expect("the partial response is saved");
+    let added = updates.iter().position(|u| matches!(u, Update::UserMessageAdded(m) if m.id == messages[2].id)).expect("the steer shows");
+    assert!(partial < added);
+    assert!(updates[added..].contains(&Update::ThreadFollowed), "the app has no local message to follow from");
+    assert!(rig.probe.cancelled.load(std::sync::atomic::Ordering::SeqCst), "the provider turn was stopped");
+    let info = rig.store.lock().unwrap().thread_info(&thread).unwrap().unwrap();
+    assert_eq!((info.state, info.followed), (Some(ThreadState::Done), true), "the steer follows the thread");
+    let sent = rig.probe.sent.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    for part in ["find the callers", "partial work", "Only look in tests."] { assert!(sent[1].contains(part), "{part}: {}", sent[1]); }
+    drop(sent);
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn a_steer_during_a_steer_turn_is_a_steer_again() {
+    use discard_core::model::ThreadState;
+    let provider = FakeProvider::new(vec![Step::working(), Step::text("partial one"), Step::Hang])
+        .then_session(vec![Step::working(), Step::text("partial two"), Step::Hang])
+        .then_session(vec![Step::working(), Step::text("Final."), Step::idle()]);
+    let s = sub_agent_with(provider, false);
+    let author = s.parent_author.clone();
+    let mut rig = launch_workspace(s.engine, s.probe);
+    rig.commands.send(brief("go", &author)).unwrap();
+    let mut updates = until_text(&mut rig).await;
+    rig.commands.send(steer("first steer")).unwrap();
+    // Wait for the second turn's text before the second steer.
+    loop { let u = rig.next().await; let text = matches!(&u, Update::Event(e) if matches!(&e.kind, EventKind::TextDelta { text } if text == "partial two")); updates.push(u); if text { break; } }
+    rig.commands.send(steer("second steer")).unwrap();
+    updates.extend(rig.until_finished().await);
+    assert_eq!(updates.iter().filter(|u| matches!(u, Update::SubAgentFinished { .. })).count(), 1, "{updates:?}");
+    assert!(updates.contains(&Update::SubAgentFinished { state: ThreadState::Done, text: "Final.".into() }));
+    assert_eq!(rig.messages().iter().map(|m| m.role).collect::<Vec<_>>(), [Role::User, Role::Agent, Role::User, Role::Agent, Role::User, Role::Agent]);
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn a_second_steer_while_one_is_pending_is_refused() {
+    use discard_core::model::ThreadState;
+    let provider = FakeProvider::new(vec![Step::working(), Step::text("partial"), Step::Hang])
+        .then_session(vec![Step::working(), Step::text("Final."), Step::idle()]);
+    let s = sub_agent_with(provider, false);
+    let author = s.parent_author.clone();
+    let mut rig = launch_workspace(s.engine, s.probe);
+    rig.commands.send(brief("go", &author)).unwrap();
+    let mut updates = until_text(&mut rig).await;
+    rig.commands.send(steer("first")).unwrap();
+    rig.commands.send(steer("second")).unwrap();
+    updates.extend(rig.until_finished().await);
+    assert!(updates.iter().any(|u| matches!(u, Update::Error(e) if e.contains("A turn is already running"))), "{updates:?}");
+    let messages = rig.messages();
+    let texts: Vec<_> = messages.iter().filter(|m| m.role == Role::User).map(|m| format!("{:?}", m.blocks)).collect();
+    assert_eq!(texts.len(), 2, "the brief and the first steer: {texts:?}");
+    assert!(texts[1].contains("first") && !texts.iter().any(|t| t.contains("second")));
+    assert_eq!(rig.store.lock().unwrap().thread_info(&rig.channel).unwrap().unwrap().state, Some(ThreadState::Done));
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn a_steer_cannot_mention_another_agent() {
+    let provider = FakeProvider::new(vec![Step::working(), Step::text("partial"), Step::Hang]);
+    let s = sub_agent_with(provider, false);
+    let author = s.parent_author.clone();
+    let mut rig = launch_workspace(s.engine, s.probe);
+    rig.commands.send(brief("go", &author)).unwrap();
+    until_text(&mut rig).await;
+    // "A" is the parent agent, not the sub-agent.
+    rig.commands.send(steer("@A what do you think?")).unwrap();
+    loop { if matches!(rig.next().await, Update::Error(e) if e.contains("mention another agent")) { break; } }
+    assert_eq!(rig.probe.specs.lock().unwrap().len(), 1, "the turn goes on");
+    rig.commands.send(Command::Cancel).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(matches!(updates.last(), Some(Update::TurnFinished(TurnOutcome::Cancelled))));
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn a_stop_after_a_steer_drops_the_steer_and_ends_the_task_as_cancelled() {
+    use discard_core::model::ThreadState;
+    let provider = FakeProvider::new(vec![Step::working(), Step::text("partial"), Step::Hang])
+        .then_session(vec![Step::working(), Step::text("must not run"), Step::idle()]);
+    let s = sub_agent_with(provider, false);
+    let (thread, author) = (s.thread.clone(), s.parent_author.clone());
+    let mut rig = launch_workspace(s.engine, s.probe);
+    rig.commands.send(brief("go", &author)).unwrap();
+    until_text(&mut rig).await;
+    rig.commands.send(steer("change course")).unwrap();
+    rig.commands.send(Command::Cancel).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(matches!(updates.last(), Some(Update::TurnFinished(TurnOutcome::Cancelled))), "{updates:?}");
+    assert!(updates.contains(&Update::SubAgentFinished { state: ThreadState::Cancelled, text: "partial".into() }), "{updates:?}");
+    assert_eq!(rig.store.lock().unwrap().thread_info(&thread).unwrap().unwrap().state, Some(ThreadState::Cancelled));
+    assert_eq!(rig.messages().iter().map(|m| m.role).collect::<Vec<_>>(), [Role::User, Role::Agent], "the steer is not saved");
+    assert_eq!(rig.probe.specs.lock().unwrap().len(), 1, "no steer turn starts");
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn a_stop_during_the_steer_turn_cancels_that_turn() {
+    use discard_core::model::ThreadState;
+    let provider = FakeProvider::new(vec![Step::working(), Step::text("partial"), Step::Hang])
+        .then_session(vec![Step::working(), Step::text("steer partial"), Step::Hang]);
+    let s = sub_agent_with(provider, false);
+    let (thread, author) = (s.thread.clone(), s.parent_author.clone());
+    let mut rig = launch_workspace(s.engine, s.probe);
+    rig.commands.send(brief("go", &author)).unwrap();
+    until_text(&mut rig).await;
+    rig.commands.send(steer("change course")).unwrap();
+    loop { if matches!(rig.next().await, Update::Event(e) if matches!(&e.kind, EventKind::TextDelta { text } if text == "steer partial")) { break; } }
+    rig.commands.send(Command::Cancel).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(updates.contains(&Update::SubAgentFinished { state: ThreadState::Cancelled, text: "steer partial".into() }), "{updates:?}");
+    assert_eq!(rig.store.lock().unwrap().thread_info(&thread).unwrap().unwrap().state, Some(ThreadState::Cancelled));
+    assert_eq!(rig.messages().len(), 4, "brief, partial, steer, steer partial");
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn a_timeout_that_was_set_before_a_steer_stays() {
+    use discard_core::model::ThreadState;
+    let provider = FakeProvider::new(vec![Step::working(), Step::text("partial"), Step::Hang])
+        .then_session(vec![Step::working(), Step::text("Final."), Step::idle()]);
+    let s = sub_agent_with(provider, false);
+    let (thread, author) = (s.thread.clone(), s.parent_author.clone());
+    let mut rig = launch_workspace(s.engine, s.probe);
+    rig.commands.send(brief("go", &author)).unwrap();
+    until_text(&mut rig).await;
+    rig.store.lock().unwrap().finish_sub_agent_thread(&thread, ThreadState::TimedOut).unwrap();
+    rig.commands.send(steer("hurry")).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(updates.contains(&Update::SubAgentFinished { state: ThreadState::TimedOut, text: "Final.".into() }), "{updates:?}");
+    assert_eq!(rig.store.lock().unwrap().thread_info(&thread).unwrap().unwrap().state, Some(ThreadState::TimedOut));
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn a_question_thread_still_refuses_a_message_while_its_turn_runs() {
+    let mut t = threaded(discard_core::provider::SessionMode::Conversation, false);
+    let hold = FakeProvider::new(vec![Step::working(), Step::text("thinking"), Step::Hang]);
+    let probe = hold.probe.clone();
+    t.thread.provider = Arc::new(hold);
+    let mut rig = launch_workspace(t.thread, probe);
+    rig.commands.send(Command::SendInThread { text: "first".into(), attachments: vec![], also_post: false }).unwrap();
+    until_text(&mut rig).await;
+    rig.commands.send(steer("second")).unwrap();
+    loop { if matches!(rig.next().await, Update::Error(e) if e.contains("A turn is already running")) { break; } }
+    assert_eq!(rig.probe.specs.lock().unwrap().len(), 1, "the turn goes on");
+    rig.commands.send(Command::Cancel).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(matches!(updates.last(), Some(Update::TurnFinished(TurnOutcome::Cancelled))));
+    assert_eq!(rig.messages().iter().filter(|m| m.role == Role::User).count(), 1, "the second message is not saved");
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn a_message_during_a_follow_up_turn_is_not_a_steer() {
+    let provider = FakeProvider::new(vec![Step::working(), Step::text("done"), Step::idle()])
+        .then_session(vec![Step::working(), Step::text("answering"), Step::Hang]);
+    let s = sub_agent_with(provider, false);
+    let author = s.parent_author.clone();
+    let mut rig = launch_workspace(s.engine, s.probe);
+    rig.commands.send(brief("go", &author)).unwrap(); rig.until_finished().await;
+    rig.commands.send(steer("follow up")).unwrap();
+    until_text(&mut rig).await;
+    rig.commands.send(steer("again")).unwrap();
+    loop { if matches!(rig.next().await, Update::Error(e) if e.contains("A turn is already running")) { break; } }
+    rig.commands.send(Command::Cancel).unwrap();
+    rig.until_finished().await;
+    assert_eq!(rig.messages().iter().filter(|m| m.role == Role::User).count(), 2, "the brief and the follow-up");
+    rig.task.abort();
 }
 
 #[tokio::test]

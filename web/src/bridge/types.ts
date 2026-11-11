@@ -160,11 +160,10 @@ export interface OpenThreadDto {
   unread: boolean
   composerDisabled: boolean
   /**
-   * Why the composer is off: `steering_soon` in a sub-agent thread (planned work: steering and follow-up turns,
-   * shown with the `Soon` label), `read_only` when the thread, its agent or its channel is archived or
-   * unavailable. Null when the composer is on.
+   * Why the composer is off: `read_only` when the thread, its agent or its channel is archived or unavailable.
+   * Null when the composer is on. A sub-agent thread has its composer on.
    */
-  composerDisabledReason: 'steering_soon' | 'read_only' | null
+  composerDisabledReason: 'read_only' | null
   /** Says that threads are read-only. Always present. */
   readOnlyNote: string
 }

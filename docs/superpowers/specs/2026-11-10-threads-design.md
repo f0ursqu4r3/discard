@@ -170,7 +170,7 @@ Approved by the owner through the design interview on 2026-11-10.
 
 67. The chip shows the title, the sub-agent's name, and the state. During the run the chips show on the live message. After the turn they show under the saved response, in task order.
 68. Opening the chip shows the thread panel with the live transcript.
-69. In a sub-agent thread, Post to channel, Copy, Quote, Follow, and Leave work. The composer is disabled, labelled `Soon`, with a `TODO`: steering a sub-agent and follow-up turns.
+69. In a sub-agent thread, Post to channel, Copy, Quote, Follow, and Leave work. The composer is disabled, labelled `Soon`, with a `TODO`: steering a sub-agent and follow-up turns. Slice 3 enables the composer (decisions 81-93).
 70. The read-only note covers both kinds: "threads are read-only".
 
 ### Follow triggers, all thread kinds
@@ -196,7 +196,7 @@ Approved by the owner through the design interview on 2026-11-10.
 
 - Sub-agents that write.
 - Nesting.
-- Follow-up turns and steering.
+- Follow-up turns and steering. Slice 3 covers them (decisions 81-93).
 - A user command to delegate.
 - An agent description field.
 - Settings for the limits.
@@ -207,3 +207,48 @@ Approved by the owner through the design interview on 2026-11-10.
 - Auto-archive.
 - Native provider session fork.
 - Write access in a question thread.
+
+## Decisions — slice 3, steering and follow-up turns
+
+The owner skipped the design interview for this slice. The owner approved decisions 83 and 85 on 2026-11-10. The other decisions are the designer's calls.
+
+### Follow-up turns
+
+81. A user message in a sub-agent thread with a final state (done, failed, cancelled, timed out) starts a normal thread turn, as in a question thread. The turn is read-only and uses the Conversation profile. The replay holds this thread only: the brief, the answers, and later messages. The parent transcript is still not replayed. An `@mention` of another agent selects that agent for one response. "Also post to channel" and attachments work. The message follows the thread.
+82. A follow-up turn does not change the thread state and returns nothing to the parent agent. The `delegate` call already returned. The chip keeps its final state.
+
+### Steering
+
+83. A user message in a sub-agent thread whose turn runs is a steer. The turn that runs is the brief turn or a steer turn. The engine stops the provider turn, keeps the partial response that a cancelled turn normally saves, saves the user message, and starts a new turn with it at once. The replay gives the sub-agent the brief, its partial work, and the steer message.
+84. A steer does not end the task. The thread state stays `running`. The engine sends no `Update::SubAgentFinished` for the interrupted turn, and the `delegate` call keeps waiting. The task result is the final message of the last turn.
+85. The 10-minute limit counts from the `delegate` call. A steer does not extend it.
+86. A stop (`Command::Cancel`: the user Stop, a parent stop, or the timeout) that arrives after the engine accepted a steer and before the steer turn starts drops the steer. The task ends as a normal cancel. A stop during the steer turn cancels that turn and settles the task as before. A state that is already final in the store, for example `timed_out`, stays.
+87. A second steer while a steer is pending replaces nothing. The first accepted steer runs. The engine answers the second with the existing "A turn is already running" error. A steer during a later steer turn is allowed, by the rule in decision 83.
+88. Steering applies only to sub-agent threads, and only while the task runs. A question thread keeps the "turn is already running" refusal. A message during a follow-up turn gets the same refusal.
+89. A second brief is still refused. `SendBrief` in a thread that has messages is still refused.
+90. A steer or follow-up message is a user message. It follows the thread (`follow_and_post`), and `also_post` works.
+
+### Prompt
+
+91. The sub-agent system prompt note says that later messages in the thread come from the user. If one arrives while the sub-agent works on the brief, it follows that message and still ends with one final message that stands alone, which goes back to the agent. After the result returns, replies stay in this thread.
+
+### UI
+
+92. The composer in a sub-agent thread is on, unless the thread is blocked for the existing read-only reasons. The placeholder is `Steer this sub-agent` while the task state is running, and `Reply in thread` after. While the task runs, the composer shows Send and Stop. Send is on when the composer has text. The `steering_soon` reason is gone from the Rust DTO, the TS type, and all users. The `Soon` label is gone from the thread composer. The `soon` prop is gone from `Composer.vue`, because no other caller used it.
+93. The four `TODO` comments about steering are gone, and so are the three refusals they guarded.
+
+### Implementation notes
+
+- A steer stops the turn like Stop does. The engine keeps the steer in its run state, and `run_steers` runs it after the stopped turn ends. The interrupted turn sends no `TurnFinished`, so the UI keeps its running turn. The engine shows the steer with `Update::UserMessageAdded`, after the partial response.
+- A steer cannot `@mention` another agent. The engine refuses it with a message, and the turn goes on.
+- A message that reaches the engine before the brief turn starts is refused: there is no turn to steer.
+
+### Out of scope for slice 3
+
+- Sub-agents that write.
+- Nesting.
+- A user command to delegate.
+- Provider-native mid-turn injection.
+- Telling the parent agent that the user steered.
+- A change to the timeout.
+- Thread menu actions.

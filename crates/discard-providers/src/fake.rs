@@ -57,6 +57,9 @@ pub struct FakeProvider {
     sandbox_autorun: Option<SandboxAutorun>,
     matrix: CapabilityMatrix,
     script: Vec<Step>,
+    /// The scripts of the sessions after the first, in order. A session with no script of its own plays `script`.
+    later_scripts: Vec<Vec<Step>>,
+    sessions_started: std::sync::atomic::AtomicUsize,
     setup: SetupStatus,
     resume_handle: Option<String>,
     notice: Option<String>,
@@ -88,12 +91,18 @@ impl FakeProvider {
                 },
             },
             script,
+            later_scripts: Vec::new(),
+            sessions_started: std::sync::atomic::AtomicUsize::new(0),
             setup: SetupStatus::Ready,
             resume_handle: None,
             notice: None,
             probe: Probe::default(),
         }
     }
+
+    /// The script of the next session after the ones that are already scripted: the first session plays the script
+    /// of `new`, the second plays the first script given here, and so on.
+    pub fn then_session(mut self, script: Vec<Step>) -> Self { self.later_scripts.push(script); self }
 
     pub fn with_notice(mut self, notice: impl Into<String>) -> Self { self.notice = Some(notice.into()); self }
 
@@ -156,8 +165,10 @@ impl Provider for FakeProvider {
         self.probe.specs.lock().expect("probe lock").push(spec.clone());
         if spec.mode == discard_core::provider::SessionMode::Workspace && let Some(error) = &self.workspace_error { return Err(ProviderError::SandboxUnavailable(error.clone())); }
         let (decisions_tx, decisions_rx) = mpsc::unbounded_channel();
+        let number = self.sessions_started.fetch_add(1, Ordering::SeqCst);
+        let script = if number == 0 { &self.script } else { self.later_scripts.get(number - 1).unwrap_or(&self.script) };
         Ok(Box::new(FakeSession {
-            script: self.script.iter().cloned().collect(),
+            script: script.iter().cloned().collect(),
             probe: self.probe.clone(),
             started: false,
             decisions_tx,

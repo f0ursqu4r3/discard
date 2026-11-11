@@ -63,8 +63,15 @@ const disabled = computed(() =>
   props.thread ? props.thread.composerDisabled : !!props.composerDisabled,
 )
 const subAgent = computed(() => props.thread?.kind === 'sub_agent')
-// A sub-agent thread has a planned composer. A read-only composer is a state, not planned work.
-const steeringSoon = computed(() => props.thread?.composerDisabledReason === 'steering_soon')
+// While the task of a sub-agent runs, a message steers it: Send stays next to Stop.
+const steering = computed(() => subAgent.value && props.thread?.state === 'running')
+const placeholder = computed(() =>
+  steering.value
+    ? 'Steer this sub-agent'
+    : props.thread
+      ? 'Reply in thread'
+      : 'Ask about this message',
+)
 const typing = computed(() =>
   thinkingLine(!!props.thread?.turnRunning, [
     props.thread?.responder?.name ?? props.thread?.agent ?? '',
@@ -197,7 +204,7 @@ defineExpose({ focusComposer: () => composer.value?.focusEnd?.() })
       :agent-avatar="agentAvatar"
       :prompts="thread?.prompts"
       :quote-disabled="quoteDisabled"
-      :thread-disabled="disabled && !steeringSoon"
+      :thread-disabled="disabled"
       :jump-to="jumpTo"
       @quote="emit('quote', $event)"
     />
@@ -217,10 +224,7 @@ defineExpose({ focusComposer: () => composer.value?.focusEnd?.() })
     >
       {{ thread.readOnlyNote }}
     </p>
-    <p v-if="disabled && !steeringSoon" class="px-5 py-2 text-xs text-muted-foreground">
-      Read only.
-    </p>
-    <!-- TODO: Steer a running sub-agent and send follow-up turns to a finished one. The composer stays off until then. -->
+    <p v-if="disabled" class="px-5 py-2 text-xs text-muted-foreground">Read only.</p>
     <Composer
       ref="composer"
       :key="key"
@@ -234,17 +238,9 @@ defineExpose({ focusComposer: () => composer.value?.focusEnd?.() })
       :archived="disabled"
       :busy="!!busy"
       :running="!!thread?.turnRunning"
-      :placeholder="
-        steeringSoon
-          ? 'Steer this sub-agent'
-          : thread
-            ? 'Reply in thread'
-            : 'Ask about this message'
-      "
-      :also-post-label="
-        steeringSoon ? undefined : directMessage ? 'the conversation' : `#${parentName}`
-      "
-      :soon="steeringSoon ? 'Steering a sub-agent and follow-up turns.' : undefined"
+      :send-while-running="steering"
+      :placeholder="placeholder"
+      :also-post-label="directMessage ? 'the conversation' : `#${parentName}`"
       @update:draft="emit('update:draft', $event)"
       @update:attachments="emit('update:attachments', $event)"
       @send="(text, files, alsoPost) => emit('send', text, files ?? [], !!alsoPost)"

@@ -119,8 +119,9 @@ pub struct OpenThreadDto {
     pub pending_approvals: usize,
     pub unread: bool,
     pub composer_disabled: bool,
-    /// Why the composer is off: `steering_soon` in a sub-agent thread (planned: steering and follow-up turns),
-    /// `read_only` when the thread, its agent or its channel is archived or unavailable. Null when it is on.
+    /// Why the composer is off: `read_only` when the thread, its agent or its channel is archived or unavailable.
+    /// Null when it is on. A sub-agent thread has its composer on: a message steers a task that runs, and starts a
+    /// follow-up turn after the task ended.
     pub composer_disabled_reason: Option<String>,
     /// Says that threads are read-only. Always present.
     pub read_only_note: String,
@@ -608,7 +609,7 @@ mod tests {
         snapshot.open_thread = Some(OpenThreadDto {
             channel_id: "find-callers".into(), parent_channel_id: "channel".into(), name: "Find callers".into(), followed: true, kind: "sub_agent".into(), state: Some("running".into()), agent_name: "Reviewer".into(),
             anchor_message_id: None, history_rev: 3, agent_id: "reviewer".into(), agent: "Reviewer".into(), provider: "example".into(), responder: None, agent_status: "awaiting_approval".into(), turn_running: true, notice: None,
-            live_blocks: vec![], prompts: vec![], pending_approvals: 1, unread: false, composer_disabled: true, composer_disabled_reason: Some("steering_soon".into()),
+            live_blocks: vec![], prompts: vec![], pending_approvals: 1, unread: false, composer_disabled: false, composer_disabled_reason: None,
             read_only_note: discard_core::workspace_session::ReadOnlyReason::Thread.note(),
         });
         // After the turn the chips hang under the saved response, in task order.

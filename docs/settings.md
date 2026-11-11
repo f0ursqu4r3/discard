@@ -259,9 +259,12 @@ is the saved response. The first message is the brief. It shows the parent agent
 **You**. The transcript is live while the sub-agent runs. **Stop** in the thread stops that
 sub-agent only. The parent agent gets "cancelled" for that task and continues. **Post to channel**,
 Copy, Quote, **Follow**, and **Leave** work. A quote from a sub-agent thread goes to the channel
-composer. The composer is disabled and labelled **Soon**, because steering a sub-agent and
-follow-up turns are planned. There is no **Also post** box. A sub-agent thread cannot start
-another thread.
+composer. The composer is on. While the sub-agent works, it reads **Steer this sub-agent**: a message stops the
+current turn, keeps the partial work, and starts a new turn with your message. The task does not end,
+and the parent agent gets the final message of the last turn. After the task ended, the composer reads
+**Reply in thread**, and a message starts a normal turn in the thread. The state does not change, and
+the parent agent gets nothing. **Stop** works in both cases. **Also post** works as in a question
+thread. A sub-agent thread cannot start another thread.
 
 The **Delegation** switch is in the agent's tool permissions. It is off by default. When it is on,
 the agent can start read-only sub-agents in threads in Conversation and Workspace responses. Turning

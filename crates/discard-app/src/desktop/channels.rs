@@ -677,8 +677,6 @@ impl Channels {
     pub fn send_with_options(&self, channel: &str, text: String, attachments: Vec<discard_core::attachments::Attachment>, also_post: bool) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let thread_info = self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(&ChannelId(channel.into())).map_err(|e| e.to_string())?;
-        // TODO: steering a sub-agent and follow-up turns. Until then a sub-agent thread takes only its brief.
-        if thread_info.as_ref().is_some_and(|thread| thread.kind == discard_core::model::ThreadKind::SubAgent) { return Err("A sub-agent thread takes no messages yet.".into()); }
         let thread = thread_info.is_some();
         if also_post && !thread { return Err("Only a message in a thread can be posted to a channel.".into()); }
         let recipient = {

@@ -27,6 +27,8 @@ struct Rigs {
     parents: Mutex<HashMap<String, Parent>>,
     /// The script of a sub-agent thread, by thread name. A thread with none answers "done: <name>".
     scripts: Mutex<HashMap<String, Vec<Step>>>,
+    /// The scripts of the sessions after the first of a sub-agent thread, by thread name: one for each later turn.
+    later_scripts: Mutex<HashMap<String, Vec<Vec<Step>>>>,
     /// Thread names whose engine cannot start.
     broken: Mutex<Vec<String>>,
     /// The launcher of the thread "gate" says it arrived on `entered`, then waits for `release`: the call stands
@@ -66,7 +68,7 @@ fn launcher(store: Arc<Mutex<Store>>, rigs: Arc<Rigs>, handle: tokio::runtime::H
                     workspace_mode: channel.workspace_mode, workspace: None, observer: None, channel_name: channel.name.clone(),
                     provider: Arc::new(match channel.name.as_str() {
                         "nosetup" => FakeProvider::new(script).with_setup(discard_core::provider::SetupStatus::NotInstalled { install_hint: "Install the fake CLI.".into() }),
-                        _ => FakeProvider::new(script),
+                        name => rigs.later_scripts.lock().unwrap().get(name).cloned().unwrap_or_default().into_iter().fold(FakeProvider::new(script), |provider, later| provider.then_session(later)),
                     }),
                     channel_id: channel.id.clone(), session_id: session, cwd: ".".into(), model: Some("test".into()), system_prompt: None,
                     policy: discard_core::capability::ApprovalPolicy::Ask,
@@ -190,11 +192,11 @@ async fn two_tasks_run_together_and_the_results_come_back_in_task_order() {
         [(threads[0].as_str(), "slow", "sub_agent", Some("running")), (threads[1].as_str(), "quick", "sub_agent", Some("done"))]);
     assert_eq!(snapshot.live_sub_agent_threads[0].agent_name, "Quinn");
     assert!(w.core.history().iter().all(|m| m.sub_agent_threads.is_empty()), "nothing hangs under a message before the turn ends");
-    // The thread of an unanchored run opens, and the panel says why its composer is off.
+    // The thread of an unanchored run opens. Its composer is on: a message steers the task.
     w.channels.open_thread(&ChannelId(threads[0].clone())).unwrap();
     let open = w.core.snapshot().open_thread.unwrap();
     assert_eq!((open.kind.as_str(), open.state.as_deref(), open.anchor_message_id.clone(), open.agent_name.as_str()), ("sub_agent", Some("running"), None, "Quinn"));
-    assert!(open.composer_disabled && open.composer_disabled_reason.as_deref() == Some("steering_soon"));
+    assert!(!open.composer_disabled && open.composer_disabled_reason.is_none());
     assert!(open.read_only_note.contains("threads are read-only"), "{}", open.read_only_note);
     let history = w.core.thread_history_snapshot().unwrap();
     assert!(history.anchor.is_none(), "an unanchored thread has no anchor message");
@@ -397,15 +399,12 @@ async fn a_failed_run_keeps_the_error_text_as_the_detail() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_finished_sub_agent_thread_takes_no_message_and_supports_post_follow_leave_and_read() {
+async fn a_finished_sub_agent_thread_supports_post_follow_leave_and_read() {
     let w = world();
     w.parent_turn_running();
     let results = finish(call(&w, &w.parent.id, vec![task("one", &w.agent)])).await;
     let thread = results[0].thread_channel_id.clone();
-    // Nothing is sent into it, and it cannot start a thread.
-    assert!(w.channels.send_with_options(&thread.0, "hello".into(), vec![], false).unwrap_err().contains("takes no messages"));
-    assert!(w.channels.send_with_options(&thread.0, "hello".into(), vec![], true).unwrap_err().contains("takes no messages"));
-    assert!(w.core.send_in_thread(&thread.0, "hello".into(), vec![], false, None).unwrap_err().contains("takes no messages"));
+    // It cannot start a thread.
     let brief = w.store.lock().unwrap().messages_for_channel(&thread).unwrap()[0].id.clone();
     assert!(w.channels.start_thread(&thread.0, &brief.0, "nested".into(), vec![], false).unwrap_err().contains("sub-agent thread cannot start"));
     assert_eq!(w.store.lock().unwrap().messages_for_channel(&thread).unwrap().len(), 2, "nothing was added");
@@ -431,6 +430,57 @@ async fn a_finished_sub_agent_thread_takes_no_message_and_supports_post_follow_l
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_in_a_finished_sub_agent_thread_starts_a_follow_up_turn_and_keeps_the_state() {
+    let w = world();
+    w.rigs.scripts.lock().unwrap().insert("one".into(), vec![Step::working(), Step::text("first answer"), Step::idle()]);
+    w.rigs.later_scripts.lock().unwrap().insert("one".into(), vec![vec![Step::working(), Step::text("held"), Step::Hang]]);
+    w.parent_turn_running();
+    let results = finish(call(&w, &w.parent.id, vec![task("one", &w.agent)])).await;
+    let thread = results[0].thread_channel_id.clone();
+    assert_eq!((results[0].state, results[0].text.as_str()), (ThreadState::Done, "first answer"));
+    until("the thread turn to end", || !w.thread_running(&thread)).await;
+    w.channels.open_thread(&thread).unwrap();
+    w.channels.send_with_options(&thread.0, "Where is it defined?".into(), vec![], false).unwrap();
+    // The message shows at once, and the follow-up turn runs.
+    let open = w.core.snapshot().open_thread.unwrap();
+    assert!(open.turn_running && open.followed);
+    until("the follow-up reply to stream", || w.core.snapshot().open_thread.is_some_and(|t| !t.live_blocks.is_empty())).await;
+    // While that turn runs, a second message is not a steer: the task ended.
+    assert!(w.channels.send_with_options(&thread.0, "and here?".into(), vec![], false).unwrap_err().contains("cannot send a message right now"));
+    w.core.cancel_in(Some(&thread.0));
+    until("the follow-up turn to end", || !w.thread_running(&thread)).await;
+    assert_eq!(w.state(&thread), Some(ThreadState::Done), "a follow-up turn leaves the state alone");
+    let roles = w.core.thread_history_snapshot().unwrap().messages.iter().map(|m| m.role.clone()).collect::<Vec<_>>();
+    assert_eq!(roles, ["user", "agent", "user", "agent"]);
+    assert_eq!(w.store.lock().unwrap().messages_for_channel(&thread).unwrap().len(), 4);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_steer_keeps_the_task_open_and_the_call_returns_the_text_of_the_last_turn() {
+    let w = world();
+    w.rigs.scripts.lock().unwrap().insert("steered".into(), vec![Step::working(), Step::text("partial notes"), Step::Hang]);
+    w.rigs.later_scripts.lock().unwrap().insert("steered".into(), vec![vec![Step::working(), Step::text("Only the tests call it."), Step::idle()]]);
+    w.parent_turn_running();
+    let call = call(&w, &w.parent.id, vec![task("steered", &w.agent)]);
+    let thread = w.started(&w.parent.id, 1).await.remove(0);
+    w.channels.open_thread(&thread).unwrap();
+    until("the partial text", || w.core.snapshot().open_thread.is_some_and(|t| !t.live_blocks.is_empty())).await;
+    let open = w.core.snapshot().open_thread.unwrap();
+    assert!(!open.composer_disabled && open.turn_running && open.state.as_deref() == Some("running"), "the composer takes a steer");
+    w.channels.send_with_options(&thread.0, "Only look in tests.".into(), vec![], false).unwrap();
+    let results = finish(call).await;
+    assert_eq!((results[0].state, results[0].text.as_str()), (ThreadState::Done, "Only the tests call it."), "the result is the last turn's message");
+    until("the steer turn to end", || !w.thread_running(&thread)).await;
+    assert_eq!(w.state(&thread), Some(ThreadState::Done));
+    // The panel shows the partial response, then the steer, then the final reply.
+    let messages = w.core.thread_history_snapshot().unwrap().messages;
+    assert_eq!(messages.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(), ["user", "agent", "user", "agent"]);
+    assert_eq!(w.store.lock().unwrap().messages_for_channel(&thread).unwrap().len(), 4);
+    let open = w.core.snapshot().open_thread.unwrap();
+    assert!(open.followed && !open.turn_running);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_new_process_opens_a_finished_sub_agent_thread_from_storage() {
     let w = world();
     w.parent_turn_running();
@@ -451,7 +501,8 @@ async fn a_new_process_opens_a_finished_sub_agent_thread_from_storage() {
     assert!(core.snapshot().live_sub_agent_threads.is_empty(), "an anchored thread is not live");
     channels.open_thread(&results[1].thread_channel_id).unwrap();
     let open = core.snapshot().open_thread.unwrap();
-    assert_eq!((open.kind.as_str(), open.state.as_deref(), open.anchor_message_id.as_deref(), open.composer_disabled_reason.as_deref()), ("sub_agent", Some("done"), Some(response.0.as_str()), Some("steering_soon")));
+    assert_eq!((open.kind.as_str(), open.state.as_deref(), open.anchor_message_id.as_deref(), open.composer_disabled_reason.as_deref()), ("sub_agent", Some("done"), Some(response.0.as_str()), None));
+    assert!(!open.composer_disabled, "a finished sub-agent thread takes a reply");
     assert_eq!(core.thread_history_snapshot().unwrap().messages.len(), 2, "the transcript comes from storage");
 }
 

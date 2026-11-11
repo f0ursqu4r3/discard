@@ -43,12 +43,14 @@ pub enum Command {
     ContinueDeclined { agent: crate::model::AgentId, note: String },
     /// The brief of a sub-agent: the first and only request in a new sub-agent thread. The engine saves it as a user
     /// message that `author` (the delegating agent) wrote, and the thread's agent answers it. The text is never
-    /// searched for `@mentions`, and the thread is not followed. Any other command that carries text is refused in a
-    /// sub-agent thread, and so is a second brief.
+    /// searched for `@mentions`, and the thread is not followed. A second brief is refused. A user message later in the
+    /// thread is a follow-up turn when the task ended, and a steer while the task runs: see `SendInThread`.
     SendBrief { text: String, author: crate::model::MessageAuthor },
     SendAttachments { text: String, attachments: Vec<crate::attachments::Attachment> },
     /// A user message in a thread channel. With `also_post`, the saved message also shows in the parent channel.
-    /// `Send` and `SendAttachments` never post.
+    /// `Send` and `SendAttachments` never post. In a sub-agent thread whose task runs, the message is a steer: the
+    /// engine stops the turn, saves its partial response and this message, and runs a new turn with it. The task does
+    /// not end between the two turns.
     SendInThread { text: String, attachments: Vec<crate::attachments::Attachment>, also_post: bool },
     Decide { approval_id: ApprovalId, decision: Decision, rule_cut: Option<usize> },
     Cancel,
@@ -78,6 +80,9 @@ pub enum Update {
     /// The engine saved the user message that `UiState::user_sent` showed. The saved ID replaces the local one,
     /// so the message can anchor a thread or be posted from one.
     UserMessageSaved(MessageId),
+    /// The engine saved a user message that the UI has not shown: a steer of a sub-agent task. It arrives after the
+    /// partial response of the turn that the steer stopped, and the turn of the steer goes on with the task.
+    UserMessageAdded(Message),
     /// The engine followed the thread of this channel: it got a pending approval, or an agent message in it wrote
     /// `@you`. The thread's `followed` flag is now true in storage. Read the thread again to update lists.
     ThreadFollowed,
@@ -164,6 +169,13 @@ impl UiState {
                     if let Some(author) = self.authors.remove(&local) { self.authors.insert(saved.clone(), author); }
                     if let Some(message) = self.history.iter_mut().rev().find(|m| m.id == local) { message.id = saved; }
                 }
+            }
+            Update::UserMessageAdded(message) => {
+                if !self.history.iter().any(|m| m.id == message.id) { self.history.push(message); }
+                self.live = Timeline::new();
+                self.turn_running = true;
+                self.response_save_failed = false;
+                self.notice = None;
             }
             Update::Event(event) => self.live.apply(&event.kind),
             Update::ApprovalState { approval_id, state } => self.live.mark_approval(&approval_id, state),
@@ -399,6 +411,25 @@ mod tests {
         s.apply(Update::UserMessageSaved(saved.clone()));
         assert_eq!(s.authors().get(&saved), Some(&author));
         assert!(!s.authors().contains_key(&local));
+    }
+
+    #[test]
+    fn a_steer_shows_after_the_partial_response_and_the_turn_goes_on() {
+        let mut s = state();
+        s.user_sent("brief");
+        s.apply(Update::Event(Box::new(crate::event::Event { id: crate::event::EventId::new(), session_id: crate::event::SessionId::new(), seq: 1, raw: None, kind: crate::event::EventKind::TextDelta { text: "partial".into() } })));
+        // The engine saves the partial response of the stopped turn, then the steer. No `TurnFinished` comes between.
+        let partial = Message { id: MessageId::new(), channel_id: s.channel_id().clone(), role: Role::Agent, blocks: vec![Block::Markdown { text: "partial".into() }] };
+        s.apply(Update::ResponseCompleted(partial.clone()));
+        assert!(s.turn_running() && s.live_blocks().is_empty());
+        let steer = Message { id: MessageId::new(), channel_id: s.channel_id().clone(), role: Role::User, blocks: vec![Block::Markdown { text: "Only tests.".into() }] };
+        s.apply(Update::UserMessageAdded(steer.clone()));
+        assert!(s.turn_running());
+        assert_eq!(s.history().iter().map(|m| m.role).collect::<Vec<_>>(), [Role::User, Role::Agent, Role::User]);
+        assert_eq!(s.history()[2], steer);
+        // The same report twice shows the message once.
+        s.apply(Update::UserMessageAdded(steer));
+        assert_eq!(s.history().len(), 3);
     }
 
     fn discard_core_author() -> crate::model::MessageAuthor {
