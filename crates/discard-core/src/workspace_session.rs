@@ -9,6 +9,8 @@ pub struct WorkspaceGrant { pub main_checkout: bool, pub root: PathBuf, pub chan
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadOnlyReason {
     NotProjectChannel, NoWorktree, WorktreeMissing, MainCheckout, AgentNotOptedIn, PolicyDenyAll, WorktreeUnverified(String), SandboxUnavailable(String),
+    /// Question threads never write, whatever the parent channel allows.
+    Thread,
 }
 impl ReadOnlyReason {
     pub fn note(&self) -> String {
@@ -21,6 +23,7 @@ impl ReadOnlyReason {
             Self::PolicyDenyAll => "this agent's policy denies tool use".into(),
             Self::WorktreeUnverified(detail) => format!("Discard could not verify the worktree ({detail})"),
             Self::SandboxUnavailable(detail) => format!("the provider sandbox is unavailable ({detail})"),
+            Self::Thread => "question threads are read-only".into(),
         };
         format!("File edits are unavailable in this response: {reason}.")
     }

@@ -9,6 +9,7 @@ import {
   ContextMenuTrigger,
 } from './ui/context-menu'
 import { planned } from './project-menu'
+import { openContextMenuFromKeyboard } from './context-menu-keyboard'
 
 const props = defineProps<{
   kind: 'branch' | 'worktree' | 'channel'
@@ -35,25 +36,12 @@ async function copy(text: string) {
     toast.error('Could not copy to clipboard', { description: String(error) })
   }
 }
-function openFromKeyboard(event: KeyboardEvent) {
-  if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
-  event.preventDefault()
-  const element = event.currentTarget as HTMLElement
-  const bounds = element.getBoundingClientRect()
-  element.dispatchEvent(
-    new MouseEvent('contextmenu', {
-      bubbles: true,
-      cancelable: true,
-      button: 2,
-      clientX: bounds.right,
-      clientY: bounds.top,
-    }),
-  )
-}
 </script>
 <template>
   <ContextMenu>
-    <ContextMenuTrigger as-child @keydown="openFromKeyboard"><slot /></ContextMenuTrigger>
+    <ContextMenuTrigger as-child @keydown="openContextMenuFromKeyboard">
+      <slot />
+    </ContextMenuTrigger>
     <ContextMenuContent
       :data-ui-id="`${kind}-context-menu`"
       class="min-w-56"

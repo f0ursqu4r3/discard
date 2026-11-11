@@ -57,11 +57,23 @@ pub fn replay(messages: &[Message]) -> Vec<(MessageId, String)> {
 }
 
 pub fn replay_with_authors(messages: &[Message], authors: &std::collections::HashMap<MessageId, crate::model::MessageAuthor>) -> Vec<(MessageId, String)> {
+    replay_with_posted(messages, authors, &std::collections::HashMap::new())
+}
+
+/// Label that marks a thread message posted to the channel. Quotes in the thread name become apostrophes.
+pub fn posted_label(thread_name: &str) -> String {
+    format!("[From thread \"{}\"]", thread_name.replace('"', "'"))
+}
+
+/// Replay with authors, and with the `posted_label` on each reference row of `posted`. The reference keeps
+/// the role of its source message.
+pub fn replay_with_posted(messages: &[Message], authors: &std::collections::HashMap<MessageId, crate::model::MessageAuthor>, posted: &std::collections::HashMap<MessageId, crate::model::PostedSource>) -> Vec<(MessageId, String)> {
     messages
         .iter()
         .filter(|m| m.role != Role::System)
         .flat_map(|m| {
             let author = authors.get(&m.id).map(|a| format!("Author: {}\n", serde_json::to_string(a).expect("author serializes"))).unwrap_or_default();
+            let label = posted.get(&m.id).map(|p| format!("{}\n", posted_label(&p.thread_name))).unwrap_or_default();
             let body = serde_json::to_string(&compact_blocks(&m.blocks)).expect("message blocks serialize");
             let mut parts = Vec::new();
             let mut start = 0;
@@ -74,7 +86,7 @@ pub fn replay_with_authors(messages: &[Message], authors: &std::collections::Has
                 parts.push((
                     id,
                     format!(
-                        "<message role=\"{}\" part=\"{}\">\n{author}{}\n</message>\n",
+                        "<message role=\"{}\" part=\"{}\">\n{author}{label}{}\n</message>\n",
                         m.role.as_str(),
                         parts.len(),
                         &body[start..end]
@@ -189,7 +201,7 @@ pub async fn summarize(
                 },
                 command = commands.recv() => match command {
                     Some(Command::Cancel) | None => return Err(ContextError::Cancelled),
-                    Some(Command::Send(_) | Command::SendAttachments { .. }) => return Err("A response is already running. Send your request again after it finishes.".into()),
+                    Some(Command::Send(_) | Command::SendAttachments { .. } | Command::SendInThread { .. }) => return Err("A response is already running. Send your request again after it finishes.".into()),
                     _ => {},
                 },
             }
@@ -250,5 +262,50 @@ mod tests {
         let messages = vec![(a.clone(), "a".into()), (b.clone(), "b".into())];
         assert_eq!(after_boundary(&messages, Some(&a)), &messages[1..]);
         assert_eq!(after_boundary(&messages, None), &messages);
+    }
+    fn markdown(role: Role, text: &str) -> Message {
+        Message { id: MessageId::new(), channel_id: crate::model::ChannelId::new(), role, blocks: vec![Block::Markdown { text: text.into() }] }
+    }
+    #[test]
+    fn posted_messages_replay_with_the_thread_label_and_their_original_role() {
+        let (plain, posted_agent, posted_user) = (markdown(Role::User, "q"), markdown(Role::Agent, "a"), markdown(Role::User, "u"));
+        let source = |name: &str| crate::model::PostedSource { source_message_id: MessageId::new(), thread_channel_id: crate::model::ChannelId::new(), thread_name: name.into() };
+        let posted = std::collections::HashMap::from([(posted_agent.id.clone(), source("Why \"x\"?")), (posted_user.id.clone(), source("Other"))]);
+        let replay = replay_with_posted(&[plain.clone(), posted_agent.clone(), posted_user.clone()], &std::collections::HashMap::new(), &posted);
+        assert!(!replay[0].1.contains("[From thread"));
+        assert!(replay[1].1.starts_with("<message role=\"agent\" part=\"0\">\n[From thread \"Why 'x'?\"]\n"), "{}", replay[1].1);
+        assert!(replay[2].1.starts_with("<message role=\"user\" part=\"0\">\n[From thread \"Other\"]\n"), "{}", replay[2].1);
+        assert!(!replay_with_authors(&[posted_agent], &std::collections::HashMap::new())[0].1.contains("[From thread"), "no posted map, no label");
+    }
+    #[test]
+    fn a_summary_boundary_in_a_threads_parent_prefix_stays_valid_as_the_conversation_grows() {
+        use crate::{agent::AgentConfig, capability::ApprovalPolicy, store::Store};
+        let store = Store::open_in_memory().unwrap();
+        let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "fake".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        let parent = store.create_conversation(&agent, None, "chat").unwrap();
+        let add = |channel: &crate::model::ChannelId, role: Role, text: &str| {
+            let message = Message { id: MessageId::new(), channel_id: channel.clone(), role, blocks: vec![Block::Markdown { text: text.into() }] };
+            store.insert_message(&message).unwrap();
+            message.id
+        };
+        let first = add(&parent.id, Role::User, &"a".repeat(5000));
+        let anchor = add(&parent.id, Role::Agent, "anchor");
+        add(&parent.id, Role::User, "after the anchor");
+        let thread = store.create_thread(&parent.id, &anchor, "t", &agent).unwrap();
+        add(&thread.id, Role::User, "side one");
+        let remaining = |store: &Store| {
+            let history = store.channel_history(&thread.id).unwrap();
+            let replayed = replay_with_posted(&history.messages, &history.authors, &history.posted);
+            // The saved boundary is the last fragment of the first parent message.
+            let through = MessageId(format!("{}:part:1", first.0));
+            after_boundary(&replayed, Some(&through)).iter().map(|(_, text)| text.clone()).collect::<Vec<_>>()
+        };
+        let before = remaining(&store);
+        assert_eq!(before.len(), 2, "the anchor and the first thread message remain: {before:?}");
+        assert!(before[0].contains("anchor") && before[1].contains("side one"));
+        add(&parent.id, Role::User, "much later in the parent");
+        store.post_thread_message(&add(&thread.id, Role::Agent, "side two")).unwrap();
+        assert_eq!(remaining(&store).len(), 3, "only the new thread message joins the replay");
+        assert!(!remaining(&store).iter().any(|text| text.contains("after the anchor") || text.contains("much later")));
     }
 }

@@ -8,7 +8,17 @@
     "kind": "general",
     "branch": null,
     "archived": false,
-    "archivedInto": null
+    "archivedInto": null,
+    "threads": [
+      {
+        "id": "thread-id",
+        "parentChannelId": "general-id",
+        "name": "Why a thread?",
+        "unread": true,
+        "running": false,
+        "pendingApprovals": 0
+      }
+    ]
   },
   {
     "id": "branch-id",
@@ -19,7 +29,8 @@
     "kind": "branch",
     "branch": "feature/x",
     "archived": false,
-    "archivedInto": null
+    "archivedInto": null,
+    "threads": []
   },
   {
     "id": "legacy-id",
@@ -30,6 +41,7 @@
     "kind": "archived_legacy",
     "branch": "feature/x",
     "archived": true,
-    "archivedInto": "branch-id"
+    "archivedInto": "branch-id",
+    "threads": []
   }
 ]

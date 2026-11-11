@@ -40,6 +40,9 @@ pub enum Command {
     Send(String),
     Continue { agent: crate::model::AgentId, note: String },
     SendAttachments { text: String, attachments: Vec<crate::attachments::Attachment> },
+    /// A user message in a thread channel. With `also_post`, the saved message also shows in the parent channel.
+    /// `Send` and `SendAttachments` never post.
+    SendInThread { text: String, attachments: Vec<crate::attachments::Attachment>, also_post: bool },
     Decide { approval_id: ApprovalId, decision: Decision, rule_cut: Option<usize> },
     Cancel,
 }
@@ -62,6 +65,12 @@ pub enum Update {
     /// The live reply remains available for copying; no saved response ID exists.
     ResponseSaveFailed(String),
     MemoryChanges { response: MessageId, changes: Vec<crate::memory_items::MemoryChange> },
+    /// A thread message now also shows in the parent channel. `reference` is the parent's row, with the
+    /// source message's role and blocks. The thread's own UI state has nothing to change.
+    MessagePosted { reference: Message, source: crate::model::PostedSource },
+    /// The engine saved the user message that `UiState::user_sent` showed. The saved ID replaces the local one,
+    /// so the message can anchor a thread or be posted from one.
+    UserMessageSaved(MessageId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,16 +84,22 @@ pub struct UiState {
     turn_running: bool,
     response_save_failed: bool,
     notice: Option<String>,
+    /// The local ID of the latest user message the engine has not reported as saved.
+    unsaved_user: Option<MessageId>,
 }
 
 impl UiState {
     pub fn new(channel_id: ChannelId, history: Vec<Message>) -> Self {
-        Self { session_profile: SessionProfile::default(), channel_id, history, authors: Default::default(), responder: None, live: Timeline::new(), turn_running: false, response_save_failed: false, notice: None }
+        Self { session_profile: SessionProfile::default(), channel_id, history, authors: Default::default(), responder: None, live: Timeline::new(), turn_running: false, response_save_failed: false, notice: None, unsaved_user: None }
     }
 
     pub fn with_authors(mut self, authors: std::collections::HashMap<MessageId, crate::model::MessageAuthor>) -> Self { self.authors = authors; self }
     pub fn authors(&self) -> &std::collections::HashMap<MessageId, crate::model::MessageAuthor> { &self.authors }
+    /// Record the author of a message that was added through `Update::ConversationMarker`.
+    pub fn set_author(&mut self, message: MessageId, author: crate::model::MessageAuthor) { self.authors.insert(message, author); }
     pub fn responder(&self) -> Option<&crate::model::MessageAuthor> { self.responder.as_ref() }
+    /// The local ID of the latest user message that `Update::UserMessageSaved` has not replaced yet.
+    pub fn unsaved_user(&self) -> Option<&MessageId> { self.unsaved_user.as_ref() }
 
     /// The user pressed send.
     pub fn channel_id(&self) -> &ChannelId { &self.channel_id }
@@ -99,8 +114,10 @@ impl UiState {
         self.user_sent_with_attachments(text, &[]);
     }
     pub fn user_sent_with_attachments(&mut self, text: &str, attachments: &[crate::attachments::Attachment]) {
+        let id = MessageId::new();
+        self.unsaved_user = Some(id.clone());
         self.history.push(Message {
-            id: MessageId::new(),
+            id,
             channel_id: self.channel_id.clone(),
             role: Role::User,
             blocks: crate::attachments::blocks(text, attachments),
@@ -122,7 +139,11 @@ impl UiState {
                 self.live = Timeline::new(); self.history.push(message);
             },
             Update::ConversationMarker(message) => self.history.push(message),
-            Update::MemoryChanges { .. } => {},
+            Update::MemoryChanges { .. } | Update::MessagePosted { .. } => {},
+            Update::UserMessageSaved(saved) => {
+                if let Some(local) = self.unsaved_user.take()
+                    && let Some(message) = self.history.iter_mut().rev().find(|m| m.id == local) { message.id = saved; }
+            }
             Update::Event(event) => self.live.apply(&event.kind),
             Update::ApprovalState { approval_id, state } => self.live.mark_approval(&approval_id, state),
             Update::TurnFinished(_) => self.finish_turn(),
@@ -329,6 +350,21 @@ mod tests {
         assert_eq!(s.history().len(), 1);
         assert_eq!(s.history()[0].role, Role::User);
         assert_eq!(s.history()[0].blocks, vec![Block::Markdown { text: "hi".into() }]);
+    }
+
+    #[test]
+    fn the_saved_id_replaces_the_local_id_of_the_user_message() {
+        let mut s = state();
+        s.user_sent("hi");
+        let local = s.history()[0].id.clone();
+        assert_eq!(s.unsaved_user(), Some(&local));
+        let saved = MessageId::new();
+        s.apply(Update::UserMessageSaved(saved.clone()));
+        assert_eq!(s.history()[0].id, saved);
+        assert_eq!(s.unsaved_user(), None);
+        // A second report has nothing left to replace.
+        s.apply(Update::UserMessageSaved(MessageId::new()));
+        assert_eq!(s.history()[0].id, saved);
     }
 
     #[test]

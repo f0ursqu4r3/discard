@@ -19,10 +19,16 @@ defineProps<{
   jumpTo?: { messageId: string; request: number }
   position?: TranscriptPosition
   quoteDisabled?: boolean
+  surface?: 'channel' | 'thread'
+  anchor?: MessageDto | null
+  anchorChannelId?: string
+  threadDisabled?: boolean
 }>()
 const emit = defineEmits<{
   savePosition: [id: string, position: TranscriptPosition]
   quote: [message: MessageDto]
+  startThread: [message: MessageDto]
+  openThread: [threadId: string]
 }>()
 </script>
 <template>
@@ -34,6 +40,8 @@ const emit = defineEmits<{
     <TranscriptContent
       v-bind="$props"
       @quote="emit('quote', $event)"
+      @start-thread="emit('startThread', $event)"
+      @open-thread="emit('openThread', $event)"
       @save-position="(id, position) => emit('savePosition', id, position)"
     />
   </MessageScrollerProvider>

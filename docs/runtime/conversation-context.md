@@ -71,6 +71,22 @@ Prompt guidance asks the agent to state the observed worktree state, suggest a u
 missing evidence. It identifies repository strings as untrusted data. The snapshot does not grant shell or Git
 mutation tools. The snapshot counts toward the input budget and is not inserted into saved transcript messages.
 
+## Threads
+
+A question thread is a channel row with `parent_channel_id`, `anchor_message_id`, `thread_kind` and `followed`. It inherits its parent's project and has its own session, transcript, summary state and read marker. A parent that is itself a thread cannot start a thread. A message that was posted from a thread cannot start one. Each message anchors at most one thread. Threads never appear in `channels_for_project`, `all_channels_for_project`, `all_conversations`, `conversations_for_agent`, the saved project channel, or direct-history search.
+
+A thread always runs as Conversation mode with the read-only profile and transcript replay. The process `SessionMode` (including Coding) and the parent's write access do not change this. A thread turn gets no workspace prompt, no autorun, no main-checkout request tool and no resume handle. The read-only note says that question threads are read-only.
+
+The thread answers as the author of its anchor message when that author is an active agent. Otherwise it uses the parent's default agent. A user `@mention` still selects another agent for one response.
+
+Thread replay is the parent channel's messages up to and including the anchor, then the thread's messages. Later parent messages never enter it. The thread saves its own `ConversationContext`. `through` can point into the parent part of the replay. That part never changes after the thread exists, so the boundary stays valid. The parent's own summary is not reused.
+
+Posting a thread message stores no copy. The parent gets a reference row (`messages.source_message_id`) at the time of posting. Loading the parent returns the reference with the source's role, blocks and author. `Store::posted_sources` maps each reference to its source message and thread. Posting the same message again returns the existing reference. A parent replay shows each reference at its position with the label `[From thread "<name>"]` and the source's role. Quotes in the name become apostrophes. Thread messages that were not posted never enter the parent replay. Posting starts no parent turn. The posted message is part of the parent context from the next parent turn on.
+
+`Command::SendInThread { text, attachments, also_post }` sends a user message in a thread. With `also_post`, the engine posts the saved message right after saving it and sends `Update::MessagePosted`. Any user message sent in a thread sets `followed`. `Send` and `SendAttachments` never post. `also_post` is an error outside a thread.
+
+A thread has its own engine, session and event sequence. A thread turn and a parent turn can run at the same time. They share no lock.
+
 ## Context budget
 
 The app counts one UTF-8 byte as one input token. This deliberately overestimates ordinary text token use. With provider metadata, the app uses the exact selected model's limit, capped at 131,072 tokens. Without metadata, the app uses 32,768 tokens. It reserves 8,192 tokens for output and protocol overhead. The unknown-model input budget is therefore 24,576 bytes. This app budget is an estimate; the provider can still return a context-limit error.

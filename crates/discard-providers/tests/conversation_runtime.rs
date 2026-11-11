@@ -572,6 +572,55 @@ async fn summary_is_semantic_reusable_and_does_not_delete_original_messages() {
 }
 
 #[tokio::test]
+async fn a_thread_saves_its_own_summary_over_the_parent_prefix_and_excludes_later_parent_messages() {
+    let mut rig = Rig::new(vec![Step::text("A semantic summary."), Step::idle()]).await;
+    let say = |channel: &ChannelId, role: Role, text: String| {
+        let message = Message { id: MessageId::new(), channel_id: channel.clone(), role, blocks: vec![Block::Markdown { text }] };
+        rig.store.lock().unwrap().insert_message(&message).unwrap();
+        message.id
+    };
+    let mut older = Vec::new();
+    for i in 0..messages_over_budget(1) { older.push(say(&rig.channel, Role::User, format!("older {i} {}", "x".repeat(4000)))); }
+    let anchor = say(&rig.channel, Role::Agent, "the anchor".into());
+    say(&rig.channel, Role::User, "LATER PARENT MESSAGE".into());
+    let thread = rig.store.lock().unwrap().create_thread(&rig.channel, &anchor, "t", &rig.agent).unwrap();
+    rig.task.abort();
+    let _ = (&mut rig.task).await;
+    let provider = Arc::new(FakeProvider::new(vec![Step::text("A semantic summary."), Step::idle()]));
+    let probe = provider.probe.clone();
+    let session = rig.store.lock().unwrap().latest_session(&thread.id).unwrap().unwrap();
+    let engine = Engine {
+        main_checkout_grants: Arc::default(), workspace_locks: Arc::default(),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel), autorun: discard_core::workspace_session::AutorunState::Off,
+        reasoning_effort: None, mode: SessionMode::Coding, providers: vec![provider.clone()], store: rig.store.clone(), agent_id: rig.agent.clone(), project_id: None,
+        memory: Some(rig.runtime.clone()), plugin_write: false, workspace_mode: WorkspaceMode::MainCheckout, workspace: None, observer: None,
+        channel_name: thread.name.clone(), provider, channel_id: thread.id.clone(), session_id: session, cwd: rig._dir.path().into(), model: None, system_prompt: None, policy: ApprovalPolicy::Ask,
+    };
+    let (commands, rx) = mpsc::unbounded_channel();
+    let (tx, updates) = mpsc::unbounded_channel();
+    rig.commands = commands;
+    rig.updates = updates;
+    rig.task = tokio::spawn(engine.run(rx, tx));
+    rig.commands.send(Command::Send("side question".into())).unwrap();
+    let updates = rig.done().await;
+    assert!(updates.iter().any(|u| matches!(u, Update::Notice(s) if s.contains("summary"))));
+    let (thread_state, parent_state) = {
+        let store = rig.store.lock().unwrap();
+        (store.conversation_context(&thread.id).unwrap(), store.conversation_context(&rig.channel).unwrap())
+    };
+    assert_eq!(thread_state.summary.as_deref(), Some("A semantic summary."));
+    let through = thread_state.through.expect("a saved boundary").0;
+    let source = through.split(":part:").next().unwrap().to_owned();
+    assert!(older.iter().any(|id| id.0 == source), "the boundary sits inside the parent prefix, not after the anchor");
+    assert_eq!(parent_state, Default::default(), "the parent's own summary state is untouched");
+    let sent = probe.sent.lock().unwrap().last().unwrap().clone();
+    assert!(sent.contains("side question") && sent.contains("A semantic summary."));
+    assert!(!sent.contains("LATER PARENT MESSAGE"));
+    assert_eq!(rig.store.lock().unwrap().messages_for_channel(&rig.channel).unwrap().len(), older.len() + 2, "no original message is removed");
+    rig.close().await;
+}
+
+#[tokio::test]
 async fn summary_cancellation_revokes_tokens_and_keeps_boundary_unmodified() {
     let mut rig = Rig::new(vec![Step::Hang]).await;
     for _ in 0..messages_over_budget(1) {

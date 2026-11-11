@@ -129,6 +129,51 @@ pub struct Channel {
     pub workspace_mode: WorkspaceMode,
 }
 
+/// Why a thread exists. Slice 1 writes only `Question`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadKind {
+    Question,
+    /// Reserved for sub-agent threads. Nothing writes this kind yet.
+    SubAgent,
+}
+
+impl ThreadKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Question => "question",
+            Self::SubAgent => "sub_agent",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "question" => Some(Self::Question),
+            "sub_agent" => Some(Self::SubAgent),
+            _ => None,
+        }
+    }
+}
+
+/// The thread columns of a channel row. A normal channel has none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadInfo {
+    pub channel_id: ChannelId,
+    pub parent_channel_id: ChannelId,
+    pub anchor_message_id: MessageId,
+    pub kind: ThreadKind,
+    /// Whether the thread shows in the channel bar.
+    pub followed: bool,
+    pub name: String,
+}
+
+/// Where a reference row in a parent channel points: the thread message it shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostedSource {
+    pub source_message_id: MessageId,
+    pub thread_channel_id: ChannelId,
+    pub thread_name: String,
+}
+
 /// A message is a list of typed blocks. Plugins may add block types later.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

@@ -93,7 +93,9 @@ test('the quote icon emits the selected message through the transcript', async (
   expect(list.get('button[aria-label="Quote message"]').attributes('disabled')).toBeDefined()
   await list.get('button[aria-label="Quote message"]').trigger('click')
   expect(list.emitted('quote')).toHaveLength(1)
-  expect(list.get('button[aria-label="Start thread — Soon"]').attributes('disabled')).toBeDefined()
+  expect(list.get('button[aria-label="Start thread"]').attributes('disabled')).toBeUndefined()
+  await list.setProps({ threadDisabled: true })
+  expect(list.get('button[aria-label="Start thread"]').attributes('disabled')).toBeDefined()
   list.unmount()
 })
 

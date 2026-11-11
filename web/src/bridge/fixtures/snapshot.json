@@ -39,6 +39,7 @@
   "repositories": [],
   "repositoriesLoading": false,
   "channels": [],
+  "openThread": null,
   "slots": {},
   "banners": {
     "reviewCount": 0,

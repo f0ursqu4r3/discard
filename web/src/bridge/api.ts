@@ -7,15 +7,55 @@ import type {
   HistoryDto,
   ProjectChannelDto,
   SnapshotDto,
+  ThreadHistoryDto,
+  ThreadLinkDto,
 } from './types'
 export const getSnapshot = () => invoke<SnapshotDto>('get_snapshot')
 export const getHistory = () => invoke<HistoryDto>('get_history')
-export const sendMessage = (channelId: string, text: string, attachmentIds: string[] = []) =>
+/** Send a message. In a thread, `alsoPost` also posts it to the parent channel. Outside a thread it is an error. */
+export const sendMessage = (
+  channelId: string,
+  text: string,
+  attachmentIds: string[] = [],
+  alsoPost = false,
+) =>
   invoke<void>('send_message', {
     channelId,
     text,
     ...(attachmentIds.length ? { attachmentIds } : {}),
+    ...(alsoPost ? { alsoPost } : {}),
   })
+/** The open thread's transcript, or null when no thread is open. */
+export const getThreadHistory = () => invoke<ThreadHistoryDto | null>('get_thread_history')
+/**
+ * Start a thread on a saved message of the selected channel, send its first message and open it.
+ * No thread exists before this call. Returns the thread channel ID. Rejects when the anchor
+ * already has a thread, is not a user or agent message, or is a thread or posted message.
+ */
+export const startThread = (
+  parentChannelId: string,
+  anchorMessageId: string,
+  text: string,
+  attachmentIds: string[] = [],
+  alsoPost = false,
+) =>
+  invoke<string>('start_thread', {
+    parentChannelId,
+    anchorMessageId,
+    text,
+    ...(attachmentIds.length ? { attachmentIds } : {}),
+    ...(alsoPost ? { alsoPost } : {}),
+  })
+/** Show a thread of the selected channel beside it. */
+export const openThread = (threadId: string) => invoke<void>('open_thread', { threadId })
+export const closeThread = () => invoke<void>('close_thread')
+/** Select the parent channel of a followed thread and open the thread. Returns the parent channel ID. */
+export const selectThread = (threadId: string) => invoke<string>('select_thread', { threadId })
+/** Post a thread message (any role) to the parent channel. Idempotent. Returns the reference row ID. */
+export const postThreadMessage = (messageId: string) =>
+  invoke<string>('post_thread_message', { messageId })
+export const followThread = (threadId: string) => invoke<void>('follow_thread', { threadId })
+export const leaveThread = (threadId: string) => invoke<void>('leave_thread', { threadId })
 export const chooseAttachments = () => invoke<AttachmentDto[]>('choose_attachments')
 export async function importAttachmentFiles(files: File[]): Promise<AttachmentDto[]> {
   if (files.length > 8) throw new Error('Attach up to 8 files per message.')
@@ -156,6 +196,8 @@ export interface ConversationEntry {
   archived: boolean
   agentArchived: boolean
   deleted: boolean
+  /** Followed threads of this conversation, from storage. */
+  threads?: ThreadLinkDto[]
 }
 export const getAgents = () => invoke<AgentEntry[]>('settings_agent_get')
 export const getConversations = () => invoke<ConversationEntry[]>('get_conversations')

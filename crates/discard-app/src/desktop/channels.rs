@@ -1,6 +1,7 @@
 //! Real project channels. Git and storage work run off the webview thread.
-use discard_core::model::AgentId;
+use discard_core::model::{AgentId, MessageId};
 use super::core::{AppCore, CoreInit};
+use super::threads::ThreadRecord;
 use discard_core::{model::{Channel, ChannelId, ProjectId, WorkspaceMode}, store::{Store, WorktreeRecord}, ui_state::Update, worktree::{list_branch_tree, WorktreeManager}};
 use std::{path::PathBuf, sync::{Arc, Mutex}};
 use tokio::{runtime::Handle, sync::mpsc::UnboundedReceiver};
@@ -56,16 +57,21 @@ impl Channels {
     fn refresh_channel_access(&self, channel: &Channel) -> Result<(), String> {
         let (archived, unavailable) = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-            (store.channel_archived(&channel.id).map_err(|e| e.to_string())?, store.agent_archived(&channel.agent_id).unwrap_or(true))
+            // A thread is archived with its parent channel.
+            let owner = store.thread_info(&channel.id).map_err(|e| e.to_string())?.map_or_else(|| channel.id.clone(), |thread| thread.parent_channel_id);
+            (store.channel_archived(&owner).map_err(|e| e.to_string())?, store.agent_archived(&channel.agent_id).unwrap_or(true))
         };
         self.core.channel_read_only(&channel.id.0, archived || unavailable, archived);
         Ok(())
     }
     fn start_mode(&self, channel: &Channel, restart: bool) -> Result<(), String> {
         let (init, mut updates) = (self.launch)(channel)?;
+        let thread = self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(&channel.id).map_err(|e| e.to_string())?;
         if restart { if !self.core.restart_closed_channel(init, channel)? { return Ok(()); } }
+        else if let Some(thread) = &thread { self.core.add_thread(init, channel, thread); }
         else { self.core.add_channel(init, channel); }
         self.refresh_channel_access(channel)?;
+        if thread.is_none() && !restart { self.refresh_threads(&channel.id)?; }
         let core = self.core.clone();
         let id = channel.id.0.clone();
         let generation = core.channel_runtime_generation(&id).ok_or("Conversation unavailable")?;
@@ -80,9 +86,114 @@ impl Channels {
         });
         Ok(())
     }
+    /// Select a channel. A thread opens beside its parent channel, which becomes the selected channel.
     pub fn select(&self, id: &str) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let thread = self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(&ChannelId(id.to_owned())).map_err(|e| e.to_string())?;
+        if let Some(thread) = thread { return self.select_thread_inner(&thread); }
         self.select_inner(id)
+    }
+    fn select_thread_inner(&self, thread: &discard_core::model::ThreadInfo) -> Result<(), String> {
+        if self.core.active_channel_id() != thread.parent_channel_id.0 { self.select_inner(&thread.parent_channel_id.0)?; }
+        self.open_thread_inner(&thread.channel_id)
+    }
+    /// Select the parent channel of a thread and open the thread beside it. Returns the parent channel ID.
+    pub fn select_thread(&self, thread: &ChannelId) -> Result<String, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let info = self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(thread).map_err(|e| e.to_string())?.ok_or("This thread is unavailable.")?;
+        self.select_thread_inner(&info)?;
+        Ok(info.parent_channel_id.0)
+    }
+    /// Show a thread of the selected channel beside it, loading its session first.
+    pub fn open_thread(&self, thread: &ChannelId) -> Result<(), String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        self.open_thread_inner(thread)
+    }
+    fn open_thread_inner(&self, thread: &ChannelId) -> Result<(), String> {
+        self.load_thread(thread)?;
+        self.core.open_thread(&thread.0)
+    }
+    /// Start or restart the session of a thread when it has none that works.
+    fn load_thread(&self, thread: &ChannelId) -> Result<(), String> {
+        let channel = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            if store.thread_info(thread).map_err(|e| e.to_string())?.is_none() { return Err("This thread is unavailable.".into()); }
+            store.load_channel(thread).map_err(|e| e.to_string())?
+        };
+        if !self.core.has_channel(&thread.0) { self.start_mode(&channel, false) }
+        else if self.core.channel_session_closed(&thread.0) { self.start_mode(&channel, true) }
+        else { Ok(()) }
+    }
+    /// Read the threads and reference rows of a channel from storage into the app state.
+    pub fn refresh_threads(&self, channel: &ChannelId) -> Result<(), String> {
+        let (records, posted) = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            if store.thread_info(channel).map_err(|e| e.to_string())?.is_some() { return Ok(()); }
+            let mut records = Vec::new();
+            for info in store.threads_for_channel(channel).map_err(|e| e.to_string())? {
+                let messages = store.messages_for_channel(&info.channel_id).map_err(|e| e.to_string())?;
+                let authors = store.message_authors(&info.channel_id).map_err(|e| e.to_string())?;
+                records.push(ThreadRecord::build(&info, &messages, &authors));
+            }
+            (records, store.posted_sources(channel).map_err(|e| e.to_string())?)
+        };
+        self.core.set_channel_threads(&channel.0, records);
+        if self.core.has_channel(&channel.0) { self.core.set_posted(&channel.0, posted); }
+        Ok(())
+    }
+    /// The followed threads of one channel, for the channel bar.
+    pub fn thread_links(&self, channel: &ChannelId) -> Result<Vec<super::dto::ThreadLinkDto>, String> {
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        super::threads::stored_links(&store, channel, |id| self.core.last_read(id))
+    }
+    /// Start a thread on a saved message of the selected channel. The thread row, its session and its first
+    /// message come together: a failure before the message is queued leaves no thread behind. The new thread opens
+    /// beside the channel. Returns the thread channel ID.
+    pub fn start_thread(&self, parent: &str, anchor: &str, text: String, attachments: Vec<discard_core::attachments::Attachment>, also_post: bool) -> Result<String, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        if text.trim().is_empty() && attachments.is_empty() { return Err("Enter a message to start the thread.".into()); }
+        self.core.can_start_thread(parent)?;
+        let (parent_id, anchor_id) = (ChannelId(parent.to_owned()), MessageId(anchor.to_owned()));
+        let (thread, recipient) = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            let parent_channel = store.load_channel(&parent_id).map_err(|e| e.to_string())?;
+            let default = discard_core::mentions::anchor_agent(&store, &parent_channel, &anchor_id)?;
+            let recipient = discard_core::mentions::resolve(&store, &parent_id, &text)?.unwrap_or_else(|| default.clone());
+            if store.agent_archived(&recipient).map_err(|e| e.to_string())? { return Err("This agent is archived. Restore it before sending a message.".into()); }
+            let config = store.load_agent(&recipient).map_err(|e| e.to_string())?;
+            let recipient = discard_core::model::MessageAuthor { agent_id: recipient, name: config.name, provider: config.provider, avatar: config.avatar };
+            (store.create_thread(&parent_id, &anchor_id, &discard_core::store::thread_name(&text), &default).map_err(|e| e.to_string())?, recipient)
+        };
+        let sent = self.start_mode(&thread, false).and_then(|()| self.core.send_in_thread(&thread.id.0, text, attachments, also_post, Some(recipient)));
+        if let Err(error) = sent {
+            self.core.remove_thread(&thread.id.0);
+            let _ = self.store.lock().unwrap_or_else(|e| e.into_inner()).discard_empty_thread(&thread.id);
+            return Err(error);
+        }
+        self.core.open_thread(&thread.id.0)?;
+        Ok(thread.id.0)
+    }
+    /// Show a thread message in the thread's parent channel. Posting again changes nothing. Returns the ID of the
+    /// parent's reference row.
+    pub fn post_thread_message(&self, message: &str) -> Result<String, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let (reference, source) = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            let (reference, _) = store.post_thread_message(&MessageId(message.to_owned())).map_err(|e| e.to_string())?;
+            let source = store.posted_sources(&reference.channel_id).map_err(|e| e.to_string())?.remove(&reference.id).ok_or("The posted message is unavailable.")?;
+            (reference, source)
+        };
+        self.load_thread(&source.thread_channel_id)?;
+        let id = reference.id.0.clone();
+        self.core.message_posted(&source.thread_channel_id.0.clone(), reference, source);
+        Ok(id)
+    }
+    /// Follow or leave a thread. A followed thread shows in the channel bar.
+    pub fn set_thread_followed(&self, thread: &ChannelId, followed: bool) -> Result<(), String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        self.store.lock().unwrap_or_else(|e| e.into_inner()).set_thread_followed(thread, followed).map_err(|e| e.to_string())?;
+        self.core.set_thread_followed(&thread.0, followed);
+        Ok(())
     }
     fn project_channel(&self, project: &ProjectId, channel: &ChannelId, allow_archived: bool) -> Result<(Channel, discard_core::model::ProjectChannelMetadata, bool), String> {
         let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -110,12 +221,14 @@ impl Channels {
                 .ok_or("Project channel metadata is unavailable")?;
             let worktree = store.worktree_for(&channel.id).map_err(|e| e.to_string())?
                 .map(|record| super::dto::ChannelWorktreeDto { path: record.path, branch: record.branch });
+            let threads = super::threads::stored_links(&store, &channel.id, |id| self.core.last_read(id))?;
             Ok(super::dto::ProjectChannelDto {
                 worktree,
                 id: channel.id.0, project_id: project.0.clone(), name: channel.name,
                 agent_id: channel.agent_id.0, workspace_mode: channel.workspace_mode.as_str().into(),
                 kind: match metadata.kind { discard_core::model::ProjectChannelKind::General => "general", discard_core::model::ProjectChannelKind::Branch => "branch", discard_core::model::ProjectChannelKind::ArchivedLegacy => "archived_legacy", discard_core::model::ProjectChannelKind::Legacy => "legacy" }.into(),
                 repository: metadata.repository, branch: metadata.branch, archived, archived_into: metadata.archived_into.map(|id| id.0),
+                threads,
             })
         }).collect()
     }
@@ -222,6 +335,7 @@ impl Channels {
             Some(super::dto::ChannelMemberDto { id: agent.0.clone(), name: config.name, provider: config.provider, archived: store.agent_archived(&agent).unwrap_or(true) })
         }).collect();
         let main_agent_id = store.project_main_agent(project).map_err(|e| e.to_string())?.map(|id| id.0);
+        let threads = super::threads::stored_links(&store, &channel.id, |id| self.core.last_read(id))?;
         Ok(super::dto::ChannelDetailsDto {
             channel: super::dto::ProjectChannelDto {
                 worktree: store.worktree_for(&channel.id).map_err(|e| e.to_string())?
@@ -230,6 +344,7 @@ impl Channels {
                 agent_id: channel.agent_id.0, workspace_mode: channel.workspace_mode.as_str().into(),
                 kind: match metadata.kind { discard_core::model::ProjectChannelKind::General => "general", discard_core::model::ProjectChannelKind::Branch => "branch", discard_core::model::ProjectChannelKind::ArchivedLegacy => "archived_legacy", discard_core::model::ProjectChannelKind::Legacy => "legacy" }.into(),
                 repository: metadata.repository, branch: metadata.branch, archived, archived_into: metadata.archived_into.map(|id| id.0),
+                threads,
             },
             topic: super::dto::ChannelTopicDto { channel_id: topic.channel_id.0, text: topic.text, version: topic.version },
             topic_history, members, main_agent_id,
@@ -284,6 +399,7 @@ impl Channels {
         if project_change { self.core.switch_channel_for_project(id)?; } else { self.core.switch_channel(id)?; }
         if let Some(project) = project { self.core.configure_branch_source(self.store.clone(), channel.id.clone(), channel.workspace_mode, project.path.into()); }
         else { self.core.clear_branch_source(); }
+        self.refresh_threads(&channel.id)?;
         self.core.clear_slots();
         self.core.refresh_branches(self.core.request_branch_refresh());
         if channel.project_id.is_none() {
@@ -304,7 +420,16 @@ impl Channels {
     }
     pub fn reload_project(&self, id: &ProjectId) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        let channels: Vec<_> = self.store.lock().unwrap_or_else(|e| e.into_inner()).all_conversations().map_err(|e| e.to_string())?.into_iter().filter(|c| c.project_id.as_ref() == Some(id) && self.core.has_channel(&c.id.0)).collect();
+        let channels: Vec<_> = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            let conversations: Vec<_> = store.all_conversations().map_err(|e| e.to_string())?.into_iter().filter(|c| c.project_id.as_ref() == Some(id)).collect();
+            // Threads are not conversations, but their sessions end with the project's transports too.
+            let mut threads = Vec::new();
+            for conversation in &conversations {
+                for thread in store.threads_for_channel(&conversation.id).map_err(|e| e.to_string())? { threads.push(store.load_channel(&thread.channel_id).map_err(|e| e.to_string())?); }
+            }
+            conversations.into_iter().chain(threads).filter(|c| self.core.has_channel(&c.id.0)).collect()
+        };
         self.core.invalidate_project_channels(id)?;
         for channel in channels { self.start_mode(&channel, true)?; }
         if self.core.active_context().1.as_ref() == Some(id) {
@@ -491,7 +616,13 @@ impl Channels {
         self.send_with_attachments(channel, text, Vec::new())
     }
     pub fn send_with_attachments(&self, channel: &str, text: String, attachments: Vec<discard_core::attachments::Attachment>) -> Result<(), String> {
+        self.send_with_options(channel, text, attachments, false)
+    }
+    /// Send a user message. In a thread, `also_post` also posts it to the parent channel. Anywhere else it is an error.
+    pub fn send_with_options(&self, channel: &str, text: String, attachments: Vec<discard_core::attachments::Attachment>, also_post: bool) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let thread = self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(&ChannelId(channel.into())).map_err(|e| e.to_string())?.is_some();
+        if also_post && !thread { return Err("Only a message in a thread can be posted to a channel.".into()); }
         let recipient = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
             let id = discard_core::mentions::recipient(&store, &ChannelId(channel.into()), &text)?;
@@ -499,6 +630,10 @@ impl Channels {
             let config = store.load_agent(&id).map_err(|e| e.to_string())?;
             Some(discard_core::model::MessageAuthor { agent_id: id, name: config.name, provider: config.provider, avatar: config.avatar })
         };
+        if thread {
+            self.load_thread(&ChannelId(channel.into()))?;
+            return self.core.send_in_thread(channel, text, attachments, also_post, recipient);
+        }
         self.core.send_to_agent_with_attachments(Some(channel), text, recipient, attachments)
     }
 

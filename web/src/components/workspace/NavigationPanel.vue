@@ -24,6 +24,8 @@ const emit = defineEmits<{
   inspectChannel: [id: string]
   openBranch: [key: string]
   approvals: []
+  selectThread: [threadId: string]
+  leaveThread: [threadId: string]
   projectAction: [action: ProjectMenuAction, project: ProjectEntry]
 }>()
 </script>
@@ -61,8 +63,11 @@ const emit = defineEmits<{
         class="min-w-0 flex-1"
         :channel-id="snapshot.channelId"
         :busy="busy"
+        :open-thread-id="snapshot.openThread?.channelId"
         @select-channel="emit('selectChannel', $event)"
         @action="emit('action', $event)"
+        @select-thread="emit('selectThread', $event)"
+        @leave-thread="emit('leaveThread', $event)"
       />
       <ChannelList
         v-else-if="!compact"
@@ -86,6 +91,7 @@ const emit = defineEmits<{
         :repositories="snapshot.repositories"
         :repositories-loading="snapshot.repositoriesLoading"
         :target="{ type: 'channel', id: snapshot.channelId }"
+        :open-thread-id="snapshot.openThread?.channelId"
         @navigate="emit('navigate', $event)"
         @action="emit('action', $event)"
         @toggle-branch="emit('toggleBranch', $event)"
@@ -93,6 +99,8 @@ const emit = defineEmits<{
         @inspect-channel="emit('inspectChannel', $event)"
         @open-branch="emit('openBranch', $event)"
         @approvals="emit('approvals')"
+        @select-thread="emit('selectThread', $event)"
+        @leave-thread="emit('leaveThread', $event)"
       />
     </div>
     <UserBar

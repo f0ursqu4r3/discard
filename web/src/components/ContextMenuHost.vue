@@ -2,6 +2,8 @@
 import { ref } from 'vue'
 import type { ContextTargetDto, MenuEntryDto } from '../bridge/types'
 import { contextMenu, pluginMenuAction, runAction } from '../bridge/api'
+import type { PlannedMenuEntry } from './project-menu'
+import ProjectMenuItems from './ProjectMenuItems.vue'
 import {
   ContextMenu,
   ContextMenuContent,
@@ -9,8 +11,16 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from './ui/context-menu'
-const props = defineProps<{ target: ContextTargetDto | null; quoteEnabled?: boolean }>()
-const emit = defineEmits<{ quote: [] }>()
+const props = defineProps<{
+  target: ContextTargetDto | null
+  quoteEnabled?: boolean
+  /** The thread item of a message menu. Left out where a message has no thread action. */
+  threadAction?: { label: string; disabled: boolean }
+  /** The "Post to channel" item of a thread message. `posted` shows the done state. */
+  postAction?: { posted: boolean; disabled: boolean }
+  plannedEntries?: PlannedMenuEntry[]
+}>()
+const emit = defineEmits<{ quote: []; thread: []; post: [] }>()
 const quoted = ref(false)
 function quote() {
   if (!props.quoteEnabled) return
@@ -62,11 +72,24 @@ async function select(entry: MenuEntryDto) {
       >
         Quote
       </ContextMenuItem>
-      <!-- TODO: Open a clarification thread with channel history through this source message. -->
-      <ContextMenuItem v-if="target.type === 'message'" disabled>
-        Start thread
-        <span class="ml-auto text-xs text-muted-foreground">Soon</span>
+      <ContextMenuItem
+        v-if="target.type === 'message' && threadAction"
+        :disabled="threadAction.disabled"
+        @select="emit('thread')"
+      >
+        {{ threadAction.label }}
       </ContextMenuItem>
+      <ContextMenuItem
+        v-if="target.type === 'message' && postAction"
+        :disabled="postAction.disabled || postAction.posted"
+        @select="emit('post')"
+      >
+        {{ postAction.posted ? 'Posted to channel' : 'Post to channel' }}
+      </ContextMenuItem>
+      <ProjectMenuItems
+        v-if="target.type === 'message' && plannedEntries?.length"
+        :entries="plannedEntries"
+      />
     </ContextMenuContent>
   </ContextMenu>
   <slot v-else />

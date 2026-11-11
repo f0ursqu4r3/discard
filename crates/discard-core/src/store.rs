@@ -6,9 +6,9 @@ use crate::always_allow::{AlwaysAllowRule, RuleTarget, RuleRequest};
 use crate::approval::{Approval, ApprovalState, AuditRecord, Decider, Decision};
 use crate::event::{ApprovalId, Event, EventId, EventKind, SessionId, TurnId};
 use crate::model::{
-    AgentId, Block, Channel, ChannelId, ChannelTopic, ChannelTopicRevision, Message, MessageId,
-    Project, ProjectChannelKind, ProjectChannelMetadata, ProjectId, Role, TopicAuthorKind,
-    WorkspaceMode,
+    AgentId, Block, Channel, ChannelId, ChannelTopic, ChannelTopicRevision, Message, MessageAuthor,
+    MessageId, PostedSource, Project, ProjectChannelKind, ProjectChannelMetadata, ProjectId, Role,
+    ThreadInfo, ThreadKind, TopicAuthorKind, WorkspaceMode,
 };
 use crate::turn::{Turn, TurnState};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -181,6 +181,43 @@ pub struct HistoryMatch {
 pub struct HistorySearch {
     pub results: Vec<HistoryMatch>,
     pub has_more: bool,
+}
+
+/// What a response replays: messages oldest first, with the side maps replay needs.
+#[derive(Debug, Default)]
+pub struct ChannelHistory {
+    pub messages: Vec<Message>,
+    pub authors: std::collections::HashMap<MessageId, MessageAuthor>,
+    /// Posted reference rows among `messages`, by reference ID.
+    pub posted: std::collections::HashMap<MessageId, PostedSource>,
+}
+
+/// Characters kept from the first thread message when it names the thread.
+pub const THREAD_NAME_CHARS: usize = 40;
+
+/// Name a thread from its first message: whitespace collapsed, cut at `THREAD_NAME_CHARS` characters
+/// on a character boundary. Text with no visible characters gives `Thread`.
+pub fn thread_name(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(THREAD_NAME_CHARS) {
+        Some((end, _)) => flat[..end].trim_end().to_owned(),
+        None if flat.is_empty() => "Thread".into(),
+        None => flat,
+    }
+}
+
+const THREAD_COLUMNS: &str = "id,parent_channel_id,anchor_message_id,thread_kind,followed,name";
+
+type RawThread = (String, String, String, Option<String>, bool, String);
+
+fn raw_thread(r: &rusqlite::Row<'_>) -> rusqlite::Result<RawThread> {
+    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+}
+
+fn thread_from(raw: RawThread) -> Result<ThreadInfo> {
+    let (id, parent, anchor, kind, followed, name) = raw;
+    let kind = kind.as_deref().and_then(ThreadKind::parse).ok_or_else(|| StoreError::Corrupt(format!("thread_kind {kind:?}")))?;
+    Ok(ThreadInfo { channel_id: ChannelId(id), parent_channel_id: ChannelId(parent), anchor_message_id: MessageId(anchor), kind, followed, name })
 }
 
 fn decision_str(d: Decision) -> &'static str {
@@ -433,6 +470,23 @@ impl Store {
             tx.pragma_update(None, "user_version", 10)?;
             tx.commit()?;
         }
+        if self.schema_version()? < 11 {
+            let tx = self.conn.unchecked_transaction()?;
+            for (column, definition) in [
+                ("parent_channel_id", "TEXT"),
+                ("anchor_message_id", "TEXT"),
+                ("thread_kind", "TEXT CHECK(thread_kind IN ('question','sub_agent'))"),
+                ("followed", "INTEGER NOT NULL DEFAULT 0"),
+            ] {
+                if !has_column("channels", column)? { tx.execute_batch(&format!("ALTER TABLE channels ADD COLUMN {column} {definition};"))?; }
+            }
+            if !has_column("messages", "source_message_id")? { tx.execute_batch("ALTER TABLE messages ADD COLUMN source_message_id TEXT;")?; }
+            tx.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS one_thread_per_anchor ON channels(anchor_message_id) WHERE anchor_message_id IS NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS one_reference_per_source ON messages(source_message_id) WHERE source_message_id IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS threads_by_parent ON channels(parent_channel_id) WHERE parent_channel_id IS NOT NULL;")?;
+            tx.pragma_update(None, "user_version", 11)?;
+            tx.commit()?;
+        }
         self.conn.execute_batch("CREATE TABLE IF NOT EXISTS direct_message_list (agent_id TEXT PRIMARY KEY REFERENCES agents(id));")?;
         Ok(())
     }
@@ -580,7 +634,7 @@ impl Store {
         } else {
             let candidate: Option<String> = tx.query_row(
                 "SELECT c.id FROM channels c LEFT JOIN project_channels pc ON pc.channel_id=c.id
-                 WHERE c.project_id=?1 AND c.archived=0 AND lower(trim(c.name))='general' AND pc.channel_id IS NULL
+                 WHERE c.project_id=?1 AND c.archived=0 AND c.parent_channel_id IS NULL AND lower(trim(c.name))='general' AND pc.channel_id IS NULL
                  ORDER BY (SELECT COALESCE(MAX(s.ord),0) FROM sessions s WHERE s.channel_id=c.id) DESC,c.id DESC LIMIT 1",
                 params![project.0], |r| r.get(0)).optional()?;
             if let Some(id) = candidate {
@@ -710,7 +764,7 @@ impl Store {
     pub fn select_project_channel(&self, project: &ProjectId, channel: &ChannelId) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         let valid: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM channels WHERE id=?1 AND project_id=?2 AND archived=0)",
+            "SELECT EXISTS(SELECT 1 FROM channels WHERE id=?1 AND project_id=?2 AND archived=0 AND parent_channel_id IS NULL)",
             params![channel.0, project.0],
             |r| r.get(0),
         )?;
@@ -738,7 +792,7 @@ impl Store {
             return Ok(None);
         };
         let valid: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM channels WHERE id=?1 AND project_id=?2 AND archived=0)",
+            "SELECT EXISTS(SELECT 1 FROM channels WHERE id=?1 AND project_id=?2 AND archived=0 AND parent_channel_id IS NULL)",
             params![id, project.0],
             |r| r.get(0),
         )?;
@@ -773,7 +827,7 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let selected_agent: Option<String> = tx.query_row(
             "SELECT c.agent_id FROM channels c LEFT JOIN project_channels pc ON pc.channel_id=c.id
-             WHERE c.id=?1 AND c.project_id=?2 AND lower(trim(c.name))='general'
+             WHERE c.id=?1 AND c.project_id=?2 AND c.parent_channel_id IS NULL AND lower(trim(c.name))='general'
              AND (c.archived=0 OR pc.kind='archived_legacy') AND (pc.channel_id IS NULL OR pc.kind!='branch')",
             params![channel.0, project.0],
             |r| r.get(0),
@@ -816,7 +870,7 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let repository = self.project_channel_metadata(channel)?.map(|metadata| metadata.repository).unwrap_or_default();
         let valid: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM channels c LEFT JOIN project_channels pc ON pc.channel_id=c.id
-            WHERE c.id=?1 AND c.project_id=?2 AND (pc.channel_id IS NULL OR (pc.kind='archived_legacy' AND pc.branch_name=?3) OR (pc.kind='branch' AND pc.branch_name=?3)))",params![channel.0,project.0,branch],|r|r.get(0))?;
+            WHERE c.id=?1 AND c.project_id=?2 AND c.parent_channel_id IS NULL AND (pc.channel_id IS NULL OR (pc.kind='archived_legacy' AND pc.branch_name=?3) OR (pc.kind='branch' AND pc.branch_name=?3)))",params![channel.0,project.0,branch],|r|r.get(0))?;
         if !valid {
             return Err(StoreError::Invalid(
                 "Select a channel from this project that belongs to this branch.".into(),
@@ -1425,7 +1479,7 @@ impl Store {
                  WHERE archived_into IN (SELECT id FROM channels WHERE agent_id=?1)",
                 params![id.0],
             )?;
-            for channel in channels {
+            for channel in self.channels_to_delete(id, &channels)? {
                 for sql in [
                     "DELETE FROM project_last_channels WHERE channel_id=?1",
                     "DELETE FROM project_channel_views WHERE channel_id=?1",
@@ -1433,7 +1487,7 @@ impl Store {
                     "DELETE FROM channel_topic_revisions WHERE channel_id=?1",
                     "DELETE FROM channel_agents WHERE channel_id=?1",
                 ] {
-                    tx.execute(sql, params![channel.id.0])?;
+                    tx.execute(sql, params![channel.0])?;
                 }
                 for sql in [
                     "DELETE FROM agent_commits WHERE channel_id=?1",
@@ -1445,12 +1499,13 @@ impl Store {
                     "DELETE FROM conversation_context WHERE channel_id=?1",
                     "DELETE FROM response_memory WHERE channel_id=?1",
                     "DELETE FROM sessions WHERE channel_id=?1",
+                    "DELETE FROM messages WHERE source_message_id IN (SELECT id FROM messages WHERE channel_id=?1)",
                     "DELETE FROM messages WHERE channel_id=?1",
                     "DELETE FROM worktrees WHERE channel_id=?1",
                     "DELETE FROM channel_branches WHERE channel_id=?1",
                     "DELETE FROM channels WHERE id=?1",
                 ] {
-                    self.conn.execute(sql, params![channel.id.0])?;
+                    self.conn.execute(sql, params![channel.0])?;
                 }
             }
         }
@@ -1503,6 +1558,18 @@ impl Store {
         Ok(result)
     }
 
+    /// Channels removed with an agent's conversations: those conversations plus the agent's threads and the
+    /// threads of those conversations. Threads come first, so no thread outlives its parent.
+    fn channels_to_delete(&self, agent: &AgentId, conversations: &[Channel]) -> Result<Vec<ChannelId>> {
+        let mut stmt = self.conn.prepare("SELECT id,parent_channel_id,agent_id FROM channels WHERE parent_channel_id IS NOT NULL ORDER BY ord")?;
+        let threads = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut doomed: Vec<ChannelId> = threads.into_iter()
+            .filter(|(_, parent, owner)| owner == &agent.0 || conversations.iter().any(|c| c.id.0 == *parent))
+            .map(|(id, ..)| ChannelId(id)).collect();
+        doomed.extend(conversations.iter().map(|c| c.id.clone()));
+        Ok(doomed)
+    }
+
     pub fn create_conversation(
         &self,
         agent: &AgentId,
@@ -1539,9 +1606,9 @@ impl Store {
         Ok(channel)
     }
 
-    /// All saved conversations, including retained histories of deleted agents.
+    /// All saved conversations, including retained histories of deleted agents. Threads are not conversations.
     pub fn all_conversations(&self) -> Result<Vec<Channel>> {
-        let mut stmt = self.conn.prepare("SELECT id FROM channels ORDER BY ord")?;
+        let mut stmt = self.conn.prepare("SELECT id FROM channels WHERE parent_channel_id IS NULL ORDER BY ord")?;
         let ids = stmt
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1552,7 +1619,7 @@ impl Store {
 
     pub fn conversations_for_agent(&self, agent: &AgentId) -> Result<Vec<Channel>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id,project_id,name,workspace_mode FROM channels WHERE agent_id=?1 ORDER BY ord",
+            "SELECT id,project_id,name,workspace_mode FROM channels WHERE agent_id=?1 AND parent_channel_id IS NULL ORDER BY ord",
         )?;
         let rows = stmt.query_map(params![agent.0], |r| {
             Ok((
@@ -1623,7 +1690,7 @@ impl Store {
         plugin_write: bool,
     ) -> Result<Option<(AgentId, AgentConfig)>> {
         let mut statement = self.conn.prepare(
-            "SELECT a.id, a.config_toml FROM channels c JOIN agents a ON a.id = c.agent_id WHERE c.project_id = ?1 AND a.archived=0 AND a.deleted=0 ORDER BY c.ord",
+            "SELECT a.id, a.config_toml FROM channels c JOIN agents a ON a.id = c.agent_id WHERE c.project_id = ?1 AND c.parent_channel_id IS NULL AND a.archived=0 AND a.deleted=0 ORDER BY c.ord",
         )?;
         let rows = statement.query_map(params![project.0], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1723,7 +1790,7 @@ impl Store {
 
     pub fn channels_for_project(&self, p: &ProjectId) -> Result<Vec<Channel>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, project_id, name, agent_id, workspace_mode FROM channels WHERE project_id = ?1 AND archived = 0 ORDER BY ord",
+            "SELECT id, project_id, name, agent_id, workspace_mode FROM channels WHERE project_id = ?1 AND archived = 0 AND parent_channel_id IS NULL ORDER BY ord",
         )?;
         let rows = stmt.query_map(params![p.0], |r| {
             Ok((
@@ -1751,7 +1818,7 @@ impl Store {
     }
 
     pub fn all_channels_for_project(&self, p: &ProjectId) -> Result<Vec<(Channel, bool)>> {
-        let mut stmt = self.conn.prepare("SELECT id, project_id, name, agent_id, workspace_mode, archived FROM channels WHERE project_id = ?1 ORDER BY ord")?;
+        let mut stmt = self.conn.prepare("SELECT id, project_id, name, agent_id, workspace_mode, archived FROM channels WHERE project_id = ?1 AND parent_channel_id IS NULL ORDER BY ord")?;
         let rows = stmt.query_map(params![p.0], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -2209,17 +2276,27 @@ impl Store {
         Ok(())
     }
 
-    pub fn message_authors(&self, channel: &ChannelId) -> Result<std::collections::HashMap<MessageId, crate::model::MessageAuthor>> {
-        let mut statement = self.conn.prepare("SELECT id,author_json FROM messages WHERE channel_id=?1 AND author_json IS NOT NULL")?;
+    /// Authors by message ID. A posted reference row takes its source message's author.
+    pub fn message_authors(&self, channel: &ChannelId) -> Result<std::collections::HashMap<MessageId, MessageAuthor>> {
+        let mut statement = self.conn.prepare("SELECT m.id,COALESCE(s.author_json,m.author_json) FROM messages m LEFT JOIN messages s ON s.id=m.source_message_id
+            WHERE m.channel_id=?1 AND COALESCE(s.author_json,m.author_json) IS NOT NULL")?;
         let rows = statement.query_map(params![channel.0], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
         let mut authors = std::collections::HashMap::new();
         for row in rows { let (id, json) = row?; authors.insert(MessageId(id), serde_json::from_str(&json)?); }
         Ok(authors)
     }
 
+    /// The saved author of one message, if it has one. User messages have none.
+    pub fn message_author(&self, message: &MessageId) -> Result<Option<MessageAuthor>> {
+        let json: Option<String> = self.conn.query_row("SELECT author_json FROM messages WHERE id=?1", params![message.0], |r| r.get(0)).optional()?.flatten();
+        Ok(json.map(|json| serde_json::from_str(&json)).transpose()?)
+    }
+
+    /// Saved messages, oldest first. A posted reference row loads with its source message's role and blocks.
     pub fn messages_for_channel(&self, c: &ChannelId) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, role, blocks_json FROM messages WHERE channel_id = ?1 ORDER BY ord",
+            "SELECT m.id, COALESCE(s.role, m.role), COALESCE(s.blocks_json, m.blocks_json) FROM messages m
+             LEFT JOIN messages s ON s.id = m.source_message_id WHERE m.channel_id = ?1 ORDER BY m.ord",
         )?;
         let rows = stmt.query_map(params![c.0], |r| {
             Ok((
@@ -2242,8 +2319,154 @@ impl Store {
         Ok(out)
     }
 
+    /// Thread columns of a channel, or `None` for a normal channel.
+    pub fn thread_info(&self, channel: &ChannelId) -> Result<Option<ThreadInfo>> {
+        self.conn.query_row(&format!("SELECT {THREAD_COLUMNS} FROM channels WHERE id=?1 AND parent_channel_id IS NOT NULL"), params![channel.0], raw_thread)
+            .optional()?.map(thread_from).transpose()
+    }
+
+    /// The thread that starts from this message, if any.
+    pub fn thread_for_anchor(&self, anchor: &MessageId) -> Result<Option<ThreadInfo>> {
+        self.conn.query_row(&format!("SELECT {THREAD_COLUMNS} FROM channels WHERE anchor_message_id=?1"), params![anchor.0], raw_thread)
+            .optional()?.map(thread_from).transpose()
+    }
+
+    /// Every thread of a parent channel, oldest first, followed or not.
+    pub fn threads_for_channel(&self, parent: &ChannelId) -> Result<Vec<ThreadInfo>> {
+        let mut stmt = self.conn.prepare(&format!("SELECT {THREAD_COLUMNS} FROM channels WHERE parent_channel_id=?1 ORDER BY ord"))?;
+        let rows = stmt.query_map(params![parent.0], raw_thread)?.collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.into_iter().map(thread_from).collect()
+    }
+
+    /// Start a question thread from a saved message of a normal channel. The thread inherits the project,
+    /// starts followed, and gets its own session. `agent` is the default responder; `name` comes from `thread_name`.
+    pub fn create_thread(&self, parent: &ChannelId, anchor: &MessageId, name: &str, agent: &AgentId) -> Result<Channel> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(StoreError::Invalid("Enter a thread name.".into()));
+        }
+        self.require_active_agent(agent)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let parent_channel = self.load_channel(parent)?;
+        if self.thread_info(parent)?.is_some() {
+            return Err(StoreError::Invalid("A thread cannot start another thread.".into()));
+        }
+        let row: Option<(String, String, Option<String>)> = self.conn
+            .query_row("SELECT channel_id,role,source_message_id FROM messages WHERE id=?1", params![anchor.0], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .optional()?;
+        let Some((channel, role, source)) = row.filter(|(channel, ..)| channel == &parent.0) else {
+            return Err(StoreError::Invalid("Start a thread from a saved message in this channel.".into()));
+        };
+        if source.is_some() {
+            return Err(StoreError::Invalid("A message posted from a thread cannot start another thread.".into()));
+        }
+        if Role::parse(&role) == Some(Role::System) {
+            return Err(StoreError::Invalid("Start a thread from a user or agent message.".into()));
+        }
+        if self.thread_for_anchor(anchor)?.is_some() {
+            return Err(StoreError::Invalid("This message already has a thread.".into()));
+        }
+        let thread = Channel { id: ChannelId::new(), project_id: parent_channel.project_id, name: name.into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::MainCheckout };
+        self.insert_channel(&thread)?;
+        self.conn.execute(
+            "UPDATE channels SET parent_channel_id=?2,anchor_message_id=?3,thread_kind=?4,followed=1 WHERE id=?1",
+            params![thread.id.0, channel, anchor.0, ThreadKind::Question.as_str()],
+        )?;
+        self.create_session(&SessionId::new(), &thread.id)?;
+        tx.commit()?;
+        Ok(thread)
+    }
+
+    pub fn set_thread_followed(&self, thread: &ChannelId, followed: bool) -> Result<()> {
+        if self.conn.execute("UPDATE channels SET followed=?2 WHERE id=?1 AND parent_channel_id IS NOT NULL", params![thread.0, followed])? == 0 {
+            return Err(StoreError::NotFound(format!("thread {}", thread.0)));
+        }
+        Ok(())
+    }
+
+    /// Remove a thread that never received a message, with its session. A thread with messages stays, and this
+    /// returns false. The app uses it when the first send of a new thread fails, so no empty thread remains.
+    pub fn discard_empty_thread(&self, thread: &ChannelId) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        if self.thread_info(thread)?.is_none() { return Ok(false); }
+        let messages: i64 = self.conn.query_row("SELECT COUNT(*) FROM messages WHERE channel_id=?1", params![thread.0], |r| r.get(0))?;
+        let turns: i64 = self.conn.query_row("SELECT COUNT(*) FROM turns WHERE session_id IN (SELECT id FROM sessions WHERE channel_id=?1)", params![thread.0], |r| r.get(0))?;
+        if messages > 0 || turns > 0 { return Ok(false); }
+        for sql in [
+            "DELETE FROM events WHERE session_id IN (SELECT id FROM sessions WHERE channel_id=?1)",
+            "DELETE FROM conversation_context WHERE channel_id=?1",
+            "DELETE FROM channel_agents WHERE channel_id=?1",
+            "DELETE FROM sessions WHERE channel_id=?1",
+            "DELETE FROM channels WHERE id=?1",
+        ] {
+            self.conn.execute(sql, params![thread.0])?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Show a user or agent thread message in the thread's parent channel. The message stays stored once, in the
+    /// thread. The parent gets a reference row at the current position. Posting again returns the existing
+    /// reference. The flag is true when this call created it.
+    pub fn post_thread_message(&self, message: &MessageId) -> Result<(Message, bool)> {
+        let tx = self.conn.unchecked_transaction()?;
+        let row: Option<(String, String, Option<String>)> = self.conn
+            .query_row("SELECT channel_id,role,source_message_id FROM messages WHERE id=?1", params![message.0], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .optional()?;
+        let (channel, role, source) = row.ok_or_else(|| StoreError::NotFound(format!("message {}", message.0)))?;
+        let thread = self.thread_info(&ChannelId(channel))?
+            .filter(|_| source.is_none())
+            .ok_or_else(|| StoreError::Invalid("Only a message in a thread can be posted to its channel.".into()))?;
+        let role = Role::parse(&role).ok_or_else(|| StoreError::Corrupt(format!("role {role}")))?;
+        if role == Role::System {
+            return Err(StoreError::Invalid("Only user and agent messages can be posted to the channel.".into()));
+        }
+        let existing: Option<String> = self.conn.query_row("SELECT id FROM messages WHERE source_message_id=?1", params![message.0], |r| r.get(0)).optional()?;
+        let created = existing.is_none();
+        let reference = existing.map(MessageId).unwrap_or_default();
+        if created {
+            self.conn.execute(
+                "INSERT INTO messages (id, channel_id, role, blocks_json, source_message_id) VALUES (?1, ?2, ?3, '[]', ?4)",
+                params![reference.0, thread.parent_channel_id.0, role.as_str(), message.0],
+            )?;
+        }
+        tx.commit()?;
+        let posted = self.messages_for_channel(&thread.parent_channel_id)?.into_iter().find(|m| m.id == reference)
+            .ok_or_else(|| StoreError::Corrupt(format!("reference {}", reference.0)))?;
+        Ok((posted, created))
+    }
+
+    /// Reference rows of a channel: reference ID to the thread message it shows.
+    pub fn posted_sources(&self, channel: &ChannelId) -> Result<std::collections::HashMap<MessageId, PostedSource>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, m.source_message_id, t.id, t.name FROM messages m
+             JOIN messages s ON s.id=m.source_message_id JOIN channels t ON t.id=s.channel_id WHERE m.channel_id=?1",
+        )?;
+        let rows = stmt.query_map(params![channel.0], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))?;
+        rows.map(|row| {
+            let (id, source, thread, name) = row?;
+            Ok((MessageId(id), PostedSource { source_message_id: MessageId(source), thread_channel_id: ChannelId(thread), thread_name: name }))
+        }).collect()
+    }
+
+    /// The messages a response in this channel replays, with their authors and posted-source labels.
+    /// A thread replays its parent channel up to and including the anchor message, then its own messages.
+    pub fn channel_history(&self, channel: &ChannelId) -> Result<ChannelHistory> {
+        let mut history = ChannelHistory { messages: self.messages_for_channel(channel)?, authors: self.message_authors(channel)?, posted: self.posted_sources(channel)? };
+        let Some(thread) = self.thread_info(channel)? else { return Ok(history) };
+        let parent = self.messages_for_channel(&thread.parent_channel_id)?;
+        let end = parent.iter().position(|m| m.id == thread.anchor_message_id)
+            .ok_or_else(|| StoreError::Corrupt(format!("thread anchor {}", thread.anchor_message_id.0)))?;
+        let mut messages = parent[..=end].to_vec();
+        messages.append(&mut history.messages);
+        history.messages = messages;
+        history.authors.extend(self.message_authors(&thread.parent_channel_id)?);
+        history.posted.extend(self.posted_sources(&thread.parent_channel_id)?);
+        Ok(history)
+    }
+
     /// Literal, case-insensitive search of saved direct message text, newest first.
-    /// Includes archived and retained chats; never reads project conversations.
+    /// Includes archived and retained chats; never reads project conversations or threads.
     pub fn search_direct_history(&self, agent: &AgentId, query: &str) -> Result<HistorySearch> {
         let needle = query.trim().to_lowercase();
         let mut results = Vec::new();
@@ -2254,9 +2477,9 @@ impl Store {
             });
         }
         let mut stmt = self.conn.prepare(
-            "SELECT m.id, m.channel_id, c.name, m.role, m.blocks_json
-             FROM messages m JOIN channels c ON c.id = m.channel_id
-             WHERE c.agent_id = ?1 AND c.project_id IS NULL ORDER BY m.ord DESC",
+            "SELECT m.id, m.channel_id, c.name, COALESCE(s.role, m.role), COALESCE(s.blocks_json, m.blocks_json)
+             FROM messages m JOIN channels c ON c.id = m.channel_id LEFT JOIN messages s ON s.id = m.source_message_id
+             WHERE c.agent_id = ?1 AND c.project_id IS NULL AND c.parent_channel_id IS NULL ORDER BY m.ord DESC",
         )?;
         let rows = stmt.query_map(params![agent.0], |r| {
             Ok((
@@ -2415,7 +2638,7 @@ mod tests {
         let f = fixture();
         f.store.conn.execute_batch("DROP TABLE always_allow_rules; PRAGMA user_version=8;").unwrap();
         f.store.migrate().unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 10);
+        assert_eq!(f.store.schema_version().unwrap(), 11);
         assert!(f.store.always_allow_rules(&f.project.id).unwrap().is_empty());
     }
 
@@ -2428,7 +2651,7 @@ mod tests {
             store.conn.execute_batch("DROP TABLE autorun_responses; PRAGMA user_version=9;").unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 10);
+        assert_eq!(store.schema_version().unwrap(), 11);
         let columns: Vec<String> = store.conn.prepare("PRAGMA table_info(autorun_responses)").unwrap()
             .query_map([], |r| r.get::<_, String>(1)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
         assert_eq!(columns, ["response_id", "channel_id", "agent_id", "provider", "root", "created_at"]);
@@ -2610,7 +2833,7 @@ mod tests {
         let v1 = Store::open(&path).unwrap().schema_version().unwrap();
         let v2 = Store::open(&path).unwrap().schema_version().unwrap();
         assert!(v1 >= 2);
-        assert_eq!(v1, 10);
+        assert_eq!(v1, 11);
         assert_eq!(v1, v2);
     }
 
@@ -2654,7 +2877,7 @@ mod tests {
             conn.execute("INSERT INTO channels (id, project_id, name, agent_id, workspace_mode) VALUES ('c', 'p', 'general', 'a', 'main_checkout')", []).unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 10);
+        assert_eq!(store.schema_version().unwrap(), 11);
         let channels = store.channels_for_project(&ProjectId("p".into())).unwrap();
         assert_eq!(channels.len(), 1);
         assert_eq!(
@@ -2820,11 +3043,11 @@ mod tests {
         let f = fixture(); let turn = Turn::new(f.session.clone()); f.store.insert_turn(&turn).unwrap();
         let a = Approval::new(turn.id, "Bash", json!({})); f.store.save_approval(&a).unwrap();
         f.store.conn.execute_batch("ALTER TABLE approvals DROP COLUMN kind; DROP TABLE agent_commits; DROP TABLE always_allow_rules;").unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 10);
+        assert_eq!(f.store.schema_version().unwrap(), 11);
         f.store.migrate().unwrap();
         assert_eq!(f.store.load_approval(&a.id).unwrap().kind, crate::approval::ApprovalKind::ProviderTool);
         f.store.migrate().unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 10);
+        assert_eq!(f.store.schema_version().unwrap(), 11);
     }
 
     #[test]
@@ -3125,6 +3348,270 @@ mod tests {
         }
         let store = Store::open(&path).unwrap();
         assert_eq!(store.last_seq(&session).unwrap(), 1);
+    }
+
+    fn say(store: &Store, channel: &ChannelId, role: Role, text: &str, author: Option<&AgentId>) -> MessageId {
+        let message = Message { id: MessageId::new(), channel_id: channel.clone(), role, blocks: vec![Block::Markdown { text: text.into() }] };
+        match author {
+            Some(agent) => store.insert_authored_message(&message, &MessageAuthor { agent_id: agent.clone(), name: "Scout".into(), provider: "claude".into(), avatar: None }).unwrap(),
+            None => store.insert_message(&message).unwrap(),
+        }
+        message.id
+    }
+
+    fn texts(messages: &[Message]) -> Vec<String> {
+        messages.iter().map(|m| match &m.blocks[..] { [Block::Markdown { text }] => text.clone(), other => format!("{other:?}") }).collect()
+    }
+
+    fn invalid(result: Result<Channel>) -> String {
+        match result { Err(StoreError::Invalid(message)) => message, other => panic!("expected an Invalid error, got {other:?}") }
+    }
+
+    fn columns(store: &Store, table: &str) -> Vec<(String, String, bool, Option<String>)> {
+        store.conn.prepare(&format!("PRAGMA table_info({table})")).unwrap()
+            .query_map([], |r| Ok((r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    }
+
+    #[test]
+    fn migration_11_adds_thread_columns_to_a_version_10_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v10.db");
+        let (fresh_channels, fresh_messages) = {
+            let f = fixture();
+            (columns(&f.store, "channels"), columns(&f.store, "messages"))
+        };
+        let (channel, message) = {
+            let f = fixture();
+            let store = Store::open(&path).unwrap();
+            store.insert_project(&f.project).unwrap();
+            store.insert_agent(&f.agent, &store_agent_config()).unwrap();
+            store.insert_channel(&f.channel).unwrap();
+            let message = say(&store, &f.channel.id, Role::User, "old", None);
+            store.conn.execute_batch("DROP INDEX one_thread_per_anchor; DROP INDEX one_reference_per_source; DROP INDEX threads_by_parent;
+                ALTER TABLE channels DROP COLUMN parent_channel_id; ALTER TABLE channels DROP COLUMN anchor_message_id;
+                ALTER TABLE channels DROP COLUMN thread_kind; ALTER TABLE channels DROP COLUMN followed;
+                ALTER TABLE messages DROP COLUMN source_message_id; PRAGMA user_version=10;").unwrap();
+            assert!(!columns(&store, "channels").iter().any(|c| c.0 == "followed"));
+            (f.channel, message)
+        };
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 11);
+        assert_eq!(columns(&store, "channels"), fresh_channels, "an upgraded database matches a fresh one");
+        assert_eq!(columns(&store, "messages"), fresh_messages);
+        assert_eq!(texts(&store.messages_for_channel(&channel.id).unwrap()), ["old"]);
+        assert_eq!(store.thread_info(&channel.id).unwrap(), None);
+        let thread = store.create_thread(&channel.id, &message, "old", &channel.agent_id).unwrap();
+        assert!(store.thread_info(&thread.id).unwrap().unwrap().followed);
+        store.migrate().unwrap();
+        assert_eq!(store.schema_version().unwrap(), 11);
+    }
+
+    fn store_agent_config() -> AgentConfig {
+        AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "Scout".into(), avatar: None, provider: "claude".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }
+    }
+
+    #[test]
+    fn a_thread_inherits_the_project_starts_followed_and_has_a_session() {
+        let f = fixture();
+        let anchor = say(&f.store, &f.channel.id, Role::Agent, "answer", Some(&f.agent));
+        let thread = f.store.create_thread(&f.channel.id, &anchor, "Why?", &f.agent).unwrap();
+        assert_eq!(thread.project_id, f.channel.project_id);
+        assert_eq!(thread.agent_id, f.agent);
+        assert_eq!(thread.name, "Why?");
+        let info = f.store.thread_info(&thread.id).unwrap().unwrap();
+        assert_eq!(info, ThreadInfo { channel_id: thread.id.clone(), parent_channel_id: f.channel.id.clone(), anchor_message_id: anchor.clone(), kind: ThreadKind::Question, followed: true, name: "Why?".into() });
+        assert_eq!(f.store.thread_for_anchor(&anchor).unwrap(), Some(info.clone()));
+        assert_eq!(f.store.threads_for_channel(&f.channel.id).unwrap(), vec![info]);
+        assert!(f.store.latest_session(&thread.id).unwrap().is_some());
+        assert_eq!(f.store.thread_info(&f.channel.id).unwrap(), None, "a normal channel has no thread info");
+        f.store.set_thread_followed(&thread.id, false).unwrap();
+        assert!(!f.store.thread_info(&thread.id).unwrap().unwrap().followed);
+        assert!(matches!(f.store.set_thread_followed(&f.channel.id, true), Err(StoreError::NotFound(_))), "only a thread can be followed");
+    }
+
+    #[test]
+    fn thread_creation_rules_reject_bad_anchors_and_nested_threads() {
+        let f = fixture();
+        let anchor = say(&f.store, &f.channel.id, Role::User, "question", None);
+        let other = f.store.create_conversation(&f.agent, f.channel.project_id.as_ref(), "other").unwrap();
+        let elsewhere = say(&f.store, &other.id, Role::User, "elsewhere", None);
+        let marker = say(&f.store, &f.channel.id, Role::System, "marker", None);
+        assert!(invalid(f.store.create_thread(&f.channel.id, &MessageId::new(), "x", &f.agent)).contains("saved message"), "unknown anchor");
+        assert!(invalid(f.store.create_thread(&f.channel.id, &elsewhere, "x", &f.agent)).contains("saved message"), "anchor in another channel");
+        assert!(invalid(f.store.create_thread(&f.channel.id, &marker, "x", &f.agent)).contains("user or agent"));
+        assert!(invalid(f.store.create_thread(&f.channel.id, &anchor, "  ", &f.agent)).contains("name"));
+        let thread = f.store.create_thread(&f.channel.id, &anchor, "first", &f.agent).unwrap();
+        assert!(invalid(f.store.create_thread(&f.channel.id, &anchor, "second", &f.agent)).contains("already has a thread"));
+        let inside = say(&f.store, &thread.id, Role::User, "inside", None);
+        assert!(invalid(f.store.create_thread(&thread.id, &inside, "nested", &f.agent)).contains("cannot start another thread"));
+        let (reference, _) = f.store.post_thread_message(&inside).unwrap();
+        assert!(invalid(f.store.create_thread(&f.channel.id, &reference.id, "from a post", &f.agent)).contains("posted from a thread"));
+        f.store.set_agent_archived(&f.agent, true).unwrap();
+        let later = say(&f.store, &f.channel.id, Role::User, "later", None);
+        assert!(invalid(f.store.create_thread(&f.channel.id, &later, "archived agent", &f.agent)).contains("Restore the agent"));
+        assert_eq!(f.store.threads_for_channel(&f.channel.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn only_a_thread_without_messages_can_be_discarded() {
+        let f = fixture();
+        let anchor = say(&f.store, &f.channel.id, Role::User, "question", None);
+        let thread = f.store.create_thread(&f.channel.id, &anchor, "first", &f.agent).unwrap();
+        assert!(!f.store.discard_empty_thread(&f.channel.id).unwrap(), "a normal channel is never discarded");
+        assert!(f.store.load_channel(&f.channel.id).is_ok());
+        say(&f.store, &thread.id, Role::User, "inside", None);
+        assert!(!f.store.discard_empty_thread(&thread.id).unwrap(), "a thread with a message stays");
+        assert!(f.store.thread_info(&thread.id).unwrap().is_some());
+        let empty = say(&f.store, &f.channel.id, Role::Agent, "second", Some(&f.agent));
+        let second = f.store.create_thread(&f.channel.id, &empty, "second", &f.agent).unwrap();
+        assert!(f.store.discard_empty_thread(&second.id).unwrap());
+        assert!(f.store.thread_info(&second.id).unwrap().is_none());
+        assert!(f.store.load_channel(&second.id).is_err());
+        assert!(f.store.thread_for_anchor(&empty).unwrap().is_none(), "the anchor can start a new thread");
+        f.store.create_thread(&f.channel.id, &empty, "again", &f.agent).unwrap();
+    }
+
+    #[test]
+    fn one_thread_per_anchor_is_enforced_by_the_database() {
+        let f = fixture();
+        let anchor = say(&f.store, &f.channel.id, Role::User, "question", None);
+        f.store.create_thread(&f.channel.id, &anchor, "first", &f.agent).unwrap();
+        let second = Channel { id: ChannelId::new(), project_id: None, name: "dup".into(), agent_id: f.agent.clone(), workspace_mode: WorkspaceMode::MainCheckout };
+        f.store.insert_channel(&second).unwrap();
+        assert!(f.store.conn.execute("UPDATE channels SET parent_channel_id=?2,anchor_message_id=?3,thread_kind='question' WHERE id=?1", params![second.id.0, f.channel.id.0, anchor.0]).is_err());
+    }
+
+    #[test]
+    fn thread_names_cut_on_a_character_boundary() {
+        assert_eq!(thread_name("  Why does\n the build\tfail? "), "Why does the build fail?");
+        assert_eq!(thread_name(&"é".repeat(60)), "é".repeat(THREAD_NAME_CHARS));
+        assert_eq!(thread_name(&format!("{} tail", "a".repeat(39))), "a".repeat(39), "no trailing space is kept");
+        assert_eq!(thread_name(&"日本語".repeat(20)).chars().count(), THREAD_NAME_CHARS);
+        assert_eq!(thread_name("short"), "short");
+        assert_eq!(thread_name(" \n "), "Thread");
+    }
+
+    #[test]
+    fn threads_are_not_listed_as_channels_or_conversations() {
+        let f = fixture();
+        let project = f.channel.project_id.clone().unwrap();
+        let anchor = say(&f.store, &f.channel.id, Role::User, "question", None);
+        let thread = f.store.create_thread(&f.channel.id, &anchor, "general", &f.agent).unwrap();
+        let direct = f.store.create_conversation(&f.agent, None, "chat").unwrap();
+        let direct_anchor = say(&f.store, &direct.id, Role::User, "dm question", None);
+        let direct_thread = f.store.create_thread(&direct.id, &direct_anchor, "dm thread", &f.agent).unwrap();
+        let ids = |channels: Vec<Channel>| channels.into_iter().map(|c| c.id).collect::<Vec<_>>();
+        assert_eq!(ids(f.store.channels_for_project(&project).unwrap()), vec![f.channel.id.clone()]);
+        assert_eq!(f.store.all_channels_for_project(&project).unwrap().into_iter().map(|(c, _)| c.id).collect::<Vec<_>>(), vec![f.channel.id.clone()]);
+        assert_eq!(f.store.first_channel(&project).unwrap().unwrap().id, f.channel.id);
+        assert_eq!(ids(f.store.all_conversations().unwrap()), vec![f.channel.id.clone(), direct.id.clone()]);
+        assert_eq!(ids(f.store.conversations_for_agent(&f.agent).unwrap()), vec![f.channel.id.clone(), direct.id.clone()]);
+        assert!(f.store.select_project_channel(&project, &thread.id).is_err(), "a thread cannot be the project's selected channel");
+        f.store.conn.execute("INSERT INTO project_last_channels(project_id,channel_id) VALUES(?1,?2)", params![project.0, thread.id.0]).unwrap();
+        assert_eq!(f.store.last_project_channel(&project).unwrap().map(|c| c.id), None);
+        assert!(f.store.set_canonical_project_channel(&project, &thread.id).is_err(), "a thread named general is not a general channel");
+        f.store.select_project_channel(&project, &f.channel.id).unwrap();
+        assert_eq!(f.store.last_project_channel(&project).unwrap().unwrap().id, f.channel.id);
+        // A direct thread stays out of the default conversation and the history search.
+        say(&f.store, &direct_thread.id, Role::User, "needle in a thread", None);
+        say(&f.store, &direct.id, Role::User, "needle in the chat", None);
+        let found = f.store.search_direct_history(&f.agent, "needle").unwrap().results;
+        assert_eq!(found.iter().map(|m| m.channel_id.clone()).collect::<Vec<_>>(), vec![direct.id.0.clone()]);
+        let default = f.store.ensure_default_conversation(&f.agent).unwrap();
+        assert!(f.store.thread_info(&default.id).unwrap().is_none() && f.store.default_conversation(&f.agent).unwrap().id == default.id);
+    }
+
+    #[test]
+    fn a_thread_named_general_is_never_adopted_as_the_general_channel() {
+        let f = fixture();
+        let project = Project { id: ProjectId::new(), name: "second".into(), path: "/second".into() };
+        f.store.insert_project(&project).unwrap();
+        let parent = f.store.create_conversation(&f.agent, Some(&project.id), "branch-work").unwrap();
+        let anchor = say(&f.store, &parent.id, Role::User, "question", None);
+        let thread = f.store.create_thread(&parent.id, &anchor, "general", &f.agent).unwrap();
+        let general = f.store.ensure_project_general_channel(&project.id, &f.agent).unwrap();
+        assert_ne!(general.id, thread.id);
+        assert_ne!(general.id, parent.id);
+    }
+
+    #[test]
+    fn posting_stores_the_message_once_and_references_it_in_the_parent() {
+        let f = fixture();
+        let anchor = say(&f.store, &f.channel.id, Role::User, "question", None);
+        let thread = f.store.create_thread(&f.channel.id, &anchor, "Why?", &f.agent).unwrap();
+        let reply = say(&f.store, &thread.id, Role::Agent, "because", Some(&f.agent));
+        say(&f.store, &thread.id, Role::User, "not posted", None);
+        let later = say(&f.store, &f.channel.id, Role::User, "later parent message", None);
+        let (reference, created) = f.store.post_thread_message(&reply).unwrap();
+        assert!(created);
+        assert_eq!((reference.channel_id.clone(), reference.role), (f.channel.id.clone(), Role::Agent));
+        assert_ne!(reference.id, reply);
+        let (again, created) = f.store.post_thread_message(&reply).unwrap();
+        assert!(!created);
+        assert_eq!(again, reference, "posting twice returns the existing reference");
+        let count = |channel: &ChannelId| -> i64 { f.store.conn.query_row("SELECT COUNT(*) FROM messages WHERE channel_id=?1", params![channel.0], |r| r.get(0)).unwrap() };
+        assert_eq!((count(&f.channel.id), count(&thread.id)), (3, 2), "the thread keeps its own rows and the parent gets one reference");
+        let parent = f.store.messages_for_channel(&f.channel.id).unwrap();
+        assert_eq!(parent.iter().map(|m| m.id.clone()).collect::<Vec<_>>(), vec![anchor.clone(), later, reference.id.clone()], "the reference sits at the time of posting");
+        assert_eq!(parent[2].role, Role::Agent);
+        assert_eq!(texts(&parent[2..]), ["because"]);
+        assert_eq!(f.store.message_authors(&f.channel.id).unwrap().get(&reference.id).map(|a| a.agent_id.clone()), Some(f.agent.clone()), "the reference shows the source's author");
+        let sources = f.store.posted_sources(&f.channel.id).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[&reference.id], PostedSource { source_message_id: reply.clone(), thread_channel_id: thread.id.clone(), thread_name: "Why?".into() });
+        assert!(f.store.posted_sources(&thread.id).unwrap().is_empty());
+        assert_eq!(f.store.messages_for_channel(&thread.id).unwrap().len(), 2);
+        assert!(matches!(f.store.post_thread_message(&anchor), Err(StoreError::Invalid(_))), "a parent message is not a thread message");
+        assert!(matches!(f.store.post_thread_message(&reference.id), Err(StoreError::Invalid(_))), "a reference cannot be posted again");
+        assert!(matches!(f.store.post_thread_message(&MessageId::new()), Err(StoreError::NotFound(_))));
+        let marker = say(&f.store, &thread.id, Role::System, "model changed", None);
+        assert!(matches!(f.store.post_thread_message(&marker), Err(StoreError::Invalid(_))));
+    }
+
+    #[test]
+    fn a_thread_replays_its_parent_up_to_the_anchor_then_its_own_messages() {
+        let f = fixture();
+        let first = say(&f.store, &f.channel.id, Role::User, "one", None);
+        let anchor = say(&f.store, &f.channel.id, Role::Agent, "two", Some(&f.agent));
+        say(&f.store, &f.channel.id, Role::User, "three", None);
+        let thread = f.store.create_thread(&f.channel.id, &anchor, "t", &f.agent).unwrap();
+        say(&f.store, &thread.id, Role::User, "side question", None);
+        let side = say(&f.store, &thread.id, Role::Agent, "side answer", Some(&f.agent));
+        say(&f.store, &f.channel.id, Role::User, "four", None);
+        let history = f.store.channel_history(&thread.id).unwrap();
+        assert_eq!(texts(&history.messages), ["one", "two", "side question", "side answer"]);
+        assert!(history.authors.contains_key(&anchor) && history.authors.contains_key(&side) && !history.authors.contains_key(&first));
+        assert!(history.posted.is_empty());
+        let parent = f.store.channel_history(&f.channel.id).unwrap();
+        assert_eq!(texts(&parent.messages), ["one", "two", "three", "four"], "thread messages that were not posted never reach the parent");
+        let (reference, _) = f.store.post_thread_message(&side).unwrap();
+        let parent = f.store.channel_history(&f.channel.id).unwrap();
+        assert_eq!(texts(&parent.messages), ["one", "two", "three", "four", "side answer"]);
+        assert_eq!(parent.posted[&reference.id].thread_name, "t");
+        let thread_history = f.store.channel_history(&thread.id).unwrap();
+        assert_eq!(texts(&thread_history.messages), ["one", "two", "side question", "side answer"], "later parent messages and posts stay out of the thread");
+    }
+
+    #[test]
+    fn deleting_an_agents_conversations_removes_its_threads_and_their_references() {
+        let f = fixture();
+        let other = AgentId::new();
+        f.store.insert_agent(&other, &store_agent_config()).unwrap();
+        let anchor = say(&f.store, &f.channel.id, Role::User, "question", None);
+        let thread = f.store.create_thread(&f.channel.id, &anchor, "t", &other).unwrap();
+        let reply = say(&f.store, &thread.id, Role::Agent, "answer", Some(&other));
+        let (reference, _) = f.store.post_thread_message(&reply).unwrap();
+        f.store.delete_agent(&other, DeleteAgentOptions { delete_conversations: true, delete_private_memory: false }).unwrap();
+        assert!(f.store.thread_info(&thread.id).unwrap().is_none());
+        assert!(f.store.load_channel(&thread.id).is_err());
+        assert!(f.store.messages_for_channel(&f.channel.id).unwrap().iter().all(|m| m.id != reference.id), "the reference goes with its source");
+        assert_eq!(texts(&f.store.messages_for_channel(&f.channel.id).unwrap()), ["question"]);
+        let thread = f.store.create_thread(&f.channel.id, &anchor, "again", &f.agent).unwrap();
+        say(&f.store, &thread.id, Role::User, "hi", None);
+        f.store.delete_agent(&f.agent, DeleteAgentOptions { delete_conversations: true, delete_private_memory: false }).unwrap();
+        assert!(f.store.all_conversations().unwrap().is_empty());
+        let rows: i64 = f.store.conn.query_row("SELECT COUNT(*) FROM channels", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 0, "a thread never outlives its parent");
     }
 }
 

@@ -88,7 +88,7 @@ async fn build_plugin(provider: Arc<dyn Provider>, model: Option<&str>) {
             }
             Update::TurnFinished(outcome) => break outcome,
             Update::Error(m) | Update::ResponseSaveFailed(m) | Update::SetupNeeded(m) => panic!("engine problem: {m}"),
-            Update::SessionProfile(_) | Update::Responding(_) | Update::ApprovalState { .. } | Update::Notice(_) | Update::ResponseCompleted(_) | Update::ConversationMarker(_) | Update::MemoryChanges { .. } => {}
+            Update::SessionProfile(_) | Update::Responding(_) | Update::ApprovalState { .. } | Update::Notice(_) | Update::ResponseCompleted(_) | Update::ConversationMarker(_) | Update::MemoryChanges { .. } | Update::MessagePosted { .. } | Update::UserMessageSaved(_) => {}
         }
     };
     assert_eq!(outcome, TurnOutcome::Completed, "tools used: {tools:?}");

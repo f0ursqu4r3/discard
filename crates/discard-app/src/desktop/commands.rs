@@ -13,9 +13,78 @@ pub fn get_history(core: State<'_, Arc<AppCore>>) -> HistoryDto {
     core.history_snapshot()
 }
 #[tauri::command]
-pub fn send_message(channels: State<'_, Arc<super::channels::Channels>>, context: State<'_, super::settings::SettingsContext>, channel_id: String, text: String, attachment_ids: Option<Vec<String>>) -> Result<(), String> {
+pub fn send_message(channels: State<'_, Arc<super::channels::Channels>>, context: State<'_, super::settings::SettingsContext>, channel_id: String, text: String, attachment_ids: Option<Vec<String>>, also_post: Option<bool>) -> Result<(), String> {
     let attachments = discard_core::attachments::load_all(&context.home, &attachment_ids.unwrap_or_default())?;
-    channels.send_with_attachments(&channel_id, text, attachments)
+    channels.send_with_options(&channel_id, text, attachments, also_post.unwrap_or(false))
+}
+
+/// The open thread's transcript, or null when no thread is open. The `discard://thread-history` event sends the same value.
+#[tauri::command]
+pub fn get_thread_history(core: State<'_, Arc<AppCore>>) -> Option<super::dto::ThreadHistoryDto> {
+    core.thread_history_snapshot()
+}
+
+/// Start a thread on a saved message of the selected channel, send its first message, and open it. Returns the thread channel ID.
+#[tauri::command]
+#[expect(clippy::too_many_arguments, reason = "Tauri passes one argument per command field.")]
+pub async fn start_thread(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, context: State<'_, super::settings::SettingsContext>, parent_channel_id: String, anchor_message_id: String, text: String, attachment_ids: Option<Vec<String>>, also_post: Option<bool>) -> Result<String, String> {
+    let channels = channels.inner().clone();
+    let home = context.home.clone();
+    let id = tauri::async_runtime::spawn_blocking(move || {
+        let attachments = discard_core::attachments::load_all(&home, &attachment_ids.unwrap_or_default())?;
+        channels.start_thread(&parent_channel_id, &anchor_message_id, text, attachments, also_post.unwrap_or(false))
+    }).await.map_err(|e| e.to_string())??;
+    use tauri::Emitter;
+    let _ = app.emit("discard://conversations", ());
+    Ok(id)
+}
+
+/// Show a thread of the selected channel beside it.
+#[tauri::command]
+pub async fn open_thread(channels: State<'_, Arc<super::channels::Channels>>, thread_id: String) -> Result<(), String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.open_thread(&discard_core::model::ChannelId(thread_id))).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn close_thread(core: State<'_, Arc<AppCore>>) {
+    core.close_thread();
+}
+
+/// Select the parent channel of a followed thread and open the thread beside it. Returns the parent channel ID.
+#[tauri::command]
+pub async fn select_thread(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, thread_id: String) -> Result<String, String> {
+    let channels = channels.inner().clone();
+    let parent = tauri::async_runtime::spawn_blocking(move || channels.select_thread(&discard_core::model::ChannelId(thread_id))).await.map_err(|e| e.to_string())??;
+    use tauri::Emitter;
+    let _ = app.emit("discard://conversations", ());
+    super::windows::show_conversation(&app);
+    Ok(parent)
+}
+
+/// Show a thread message in the thread's parent channel. Any user or agent message. Posting again changes nothing.
+/// Returns the ID of the reference row in the parent channel.
+#[tauri::command]
+pub async fn post_thread_message(channels: State<'_, Arc<super::channels::Channels>>, message_id: String) -> Result<String, String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.post_thread_message(&message_id)).await.map_err(|e| e.to_string())?
+}
+
+async fn follow(app: tauri::AppHandle, channels: Arc<super::channels::Channels>, thread_id: String, followed: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || channels.set_thread_followed(&discard_core::model::ChannelId(thread_id), followed)).await.map_err(|e| e.to_string())??;
+    use tauri::Emitter;
+    let _ = app.emit("discard://conversations", ());
+    Ok(())
+}
+/// Follow a thread: it shows in the channel bar under its parent.
+#[tauri::command]
+pub async fn follow_thread(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, thread_id: String) -> Result<(), String> {
+    follow(app, channels.inner().clone(), thread_id, true).await
+}
+/// Leave a thread: it leaves the channel bar. Its chip stays.
+#[tauri::command]
+pub async fn leave_thread(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, thread_id: String) -> Result<(), String> {
+    follow(app, channels.inner().clone(), thread_id, false).await
 }
 
 #[tauri::command]
@@ -275,7 +344,8 @@ pub fn get_conversations(context: State<'_, super::settings::SettingsContext>) -
         let agent_archived = store.agent_archived(&channel.agent_id).ok();
         let is_default = store.default_conversation(&channel.agent_id).map(|c| c.id == channel.id).unwrap_or(false);
         let in_dm_list = channel.project_id.is_none() && direct_messages.contains(&channel.agent_id);
-        Ok(serde_json::json!({"inDmList":in_dm_list,"isDefault":is_default,"id":channel.id.0,"name":channel.name,"agentId":channel.agent_id.0,"agent":agent.name,"avatar":agent.avatar,"provider":agent.provider,"model":agent.model,"projectId":channel.project_id.map(|p|p.0),"workspaceMode":channel.workspace_mode.as_str(),"archived":archived,"agentArchived":agent_archived == Some(true),"deleted":agent_archived.is_none()}))
+        let threads = super::threads::stored_links(&store, &channel.id, |id| context.core.last_read(id))?;
+        Ok(serde_json::json!({"threads":threads,"inDmList":in_dm_list,"isDefault":is_default,"id":channel.id.0,"name":channel.name,"agentId":channel.agent_id.0,"agent":agent.name,"avatar":agent.avatar,"provider":agent.provider,"model":agent.model,"projectId":channel.project_id.map(|p|p.0),"workspaceMode":channel.workspace_mode.as_str(),"archived":archived,"agentArchived":agent_archived == Some(true),"deleted":agent_archived.is_none()}))
     }).collect()
 }
 

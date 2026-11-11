@@ -203,15 +203,44 @@ times; the bridge exposes them as Unix milliseconds. The UI uses the device's ti
 for timestamps and date dividers, including daylight saving time. Messages without a valid saved time
 leave the timestamp blank.
 
-Saved messages show Copy, Quote, and a disabled **Start thread — Soon** action on hover or keyboard focus.
+Saved messages show Copy, Quote, and a thread action on hover or keyboard focus.
 The icon toolbar aligns with the message's top-right corner. Tooltips appear after 500 ms.
 Quote appends editable Markdown and a link to the source message to the current draft. It preserves
 existing draft text and attachments, focuses the composer, and does not send. Source links open the
 original conversation and highlight the message. Quote is also available in the message context menu.
 It is disabled when the composer is unavailable or the message has no text.
-The message context menu also shows the disabled thread action. Planned threads are for clarifying
-questions. They will inherit channel history through the source message, including that message.
-Thread questions and replies will stay separate from the main channel. Thread creation is not implemented.
+
+A thread is a side conversation about one message. The thread action is **Start thread** on a message
+with no thread. It opens the thread panel with the message and an empty composer. No thread exists
+until the first send, and closing the panel discards the draft. A message that has a thread shows
+**Open thread** instead, and a chip under it. The chip shows the thread name, the message count, the
+last message, and an unread mark. Select the chip to open the thread. A **Follow** button on the
+chip follows a thread that is not followed. Both actions are also in the message context menu. A
+message that still streams has no thread action. The action is disabled when the channel is read only.
+
+The thread panel takes the place of the context panel and closes back to it. It is 360 to 640 px wide.
+On narrow screens it shows in the right sheet. Only one thread is open at a time. The header shows
+the thread name and its channel, **Follow** or **Leave**, and a close button. The anchor message shows
+at the top, then the thread messages. They use the same rows as the channel, so live replies, approvals,
+and tool calls work the same way. Approvals and Stop act on the thread. A note says that question
+threads are read-only. The composer has the same attachments and mentions as the channel composer. A
+quote of a thread message goes to the thread composer. The thread is marked read when its panel
+shows the newest message.
+
+The thread composer has an **Also post to #channel** box. It is off by default and applies to one
+message. Every thread message, including an agent reply, has **Post to channel** in its hover
+toolbar and context menu. A posted message shows in the channel as a row with a **from thread** link
+that opens the thread. A posted message shows **Posted to channel** in the thread.
+
+**Leave** removes a followed thread from the channel bar. The chip stays. Replying in a thread or
+choosing **Follow** follows it again. A followed thread shows indented under its channel in the
+channel bar and under its conversation in the direct message list. It shows unread, running, and
+pending approval marks. Select it to open its channel with the thread panel. The thread row menu has
+**Leave thread**. Thread activity does not mark the parent channel unread.
+
+The **Threads** list in the channel header, **Rename thread**, **Delete thread**, and **Remove from
+channel** on a posted row are planned. They show disabled with **Soon**. The design is in
+[Threads — design](superpowers/specs/2026-11-10-threads-design.md).
 
 - **Theme source.** Default, Ghostty, or Custom. A line under the buttons says what each one does.
 - **Themes.** Shown only for Custom. Pick a light theme and a dark theme from searchable lists. Discard switches

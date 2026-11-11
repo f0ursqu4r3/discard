@@ -140,6 +140,16 @@ async fn a_turn_streams_updates_and_persists_both_messages() {
 }
 
 #[tokio::test]
+async fn the_engine_reports_the_saved_id_of_the_user_message() {
+    let mut rig = start(FakeProvider::new(vec![Step::working(), Step::idle()]), ApprovalPolicy::Ask);
+    rig.commands.send(Command::Send("hello".into())).unwrap();
+    let updates = rig.until_finished().await;
+    let saved: Vec<_> = updates.iter().filter_map(|u| match u { Update::UserMessageSaved(id) => Some(id.clone()), _ => None }).collect();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0], rig.messages()[0].id, "the update names the stored user message");
+}
+
+#[tokio::test]
 async fn attachments_are_persisted_and_sent_without_requiring_message_text() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("notes.txt");
@@ -255,6 +265,7 @@ async fn missing_login_tells_the_user_the_command_to_run() {
     rig.commands.send(Command::Send("hello".into())).unwrap();
     assert!(matches!(rig.next().await, Update::Responding(_)));
     assert_eq!(rig.next().await, Update::SessionProfile(discard_core::ui_state::SessionProfile::Coding));
+    assert!(matches!(rig.next().await, Update::UserMessageSaved(_)), "the user message is saved before the setup check");
     let Update::SetupNeeded(text) = rig.next().await else { panic!("expected SetupNeeded") };
     assert!(text.contains("claude auth login"), "{text}");
     assert!(rig.probe.started_with.lock().unwrap().is_empty(), "no session may start");
@@ -1359,4 +1370,218 @@ async fn provider_notice_is_saved_once_without_blocking_two_turns() {
     assert_eq!(rig.messages().iter().filter(|m| m.role == Role::System && m.blocks == markers[0].blocks).count(), 1);
     drop(rig.commands);
     rig.task.await.unwrap();
+}
+
+struct Threaded {
+    _dir: tempfile::TempDir,
+    parent: Engine,
+    parent_probe: Probe,
+    thread: Engine,
+    thread_probe: Probe,
+    other: AgentId,
+    anchor: discard_core::model::MessageId,
+}
+
+fn put(store: &Store, channel: &ChannelId, role: Role, text: &str, author: Option<&AgentId>) -> discard_core::model::MessageId {
+    let message = discard_core::model::Message { id: discard_core::model::MessageId::new(), channel_id: channel.clone(), role, blocks: vec![Block::Markdown { text: text.into() }] };
+    match author {
+        Some(agent) => { let config = store.load_agent(agent).unwrap(); store.insert_authored_message(&message, &discard_core::model::MessageAuthor { agent_id: agent.clone(), name: config.name, provider: config.provider, avatar: None }).unwrap() }
+        None => store.insert_message(&message).unwrap(),
+    }
+    message.id
+}
+
+/// A worktree parent channel that can write, with a thread on its second message. `mode` is the thread engine's process mode.
+fn threaded(mode: discard_core::provider::SessionMode, anchor_by_other: bool) -> Threaded {
+    let (dir, parent, parent_probe) = workspace_engine(FakeProvider::new(vec![Step::working(), Step::text("parent reply"), Step::idle()]), true);
+    let provider = FakeProvider::new(vec![Step::working(), Step::text("thread reply"), Step::idle()]).with_resume_handle("must-not-resume");
+    let thread_probe = provider.probe.clone();
+    let (other, anchor, thread_channel, session) = {
+        let store = parent.store.lock().unwrap();
+        let other = store.create_agent(&AgentConfig::from_toml("name='Other'\nprovider='fake'\nmodel='test'\npolicy='ask'\n").unwrap()).unwrap();
+        put(&store, &parent.channel_id, Role::User, "one", None);
+        let anchor = put(&store, &parent.channel_id, Role::Agent, "anchor reply", Some(if anchor_by_other { &other } else { &parent.agent_id }));
+        put(&store, &parent.channel_id, Role::User, "after the anchor", None);
+        let channel = store.create_thread(&parent.channel_id, &anchor, &discard_core::store::thread_name("Side question"), &parent.agent_id).unwrap();
+        let session = store.latest_session(&channel.id).unwrap().unwrap();
+        (other, anchor, channel, session)
+    };
+    let mut thread = parent.clone();
+    thread.channel_id = thread_channel.id; thread.channel_name = thread_channel.name; thread.session_id = session; thread.mode = mode; thread.provider = Arc::new(provider);
+    Threaded { _dir: dir, parent, parent_probe, thread, thread_probe, other, anchor }
+}
+
+#[tokio::test]
+async fn a_thread_runs_as_read_only_conversation_whatever_the_process_mode_and_parent_write_access() {
+    use discard_core::provider::SessionMode;
+    use discard_core::workspace_session::{ReadOnlyReason, SessionProfile};
+    for mode in [SessionMode::Coding, SessionMode::Conversation] {
+        let t = threaded(mode, false);
+        // The parent has a verified worktree and an opted-in agent: its own turn is a Workspace session.
+        let mut parent = launch_workspace(t.parent.clone(), t.parent_probe.clone());
+        parent.commands.send(Command::Send("edit".into())).unwrap(); parent.until_finished().await;
+        assert_eq!(parent.probe.specs.lock().unwrap()[0].mode, SessionMode::Workspace);
+        let mut rig = launch_workspace(t.thread, t.thread_probe);
+        rig.commands.send(Command::Send("what does that mean?".into())).unwrap();
+        let updates = rig.until_finished().await;
+        assert!(updates.iter().any(|u| matches!(u, Update::SessionProfile(SessionProfile::ReadOnly { reason: Some(ReadOnlyReason::Thread) }))), "{mode:?}");
+        let specs = rig.probe.specs.lock().unwrap();
+        let spec = &specs[0];
+        assert_eq!(spec.mode, SessionMode::Conversation, "{mode:?}");
+        assert_eq!(spec.resume_handle, None, "{mode:?}");
+        assert!(!spec.sandbox_autorun);
+        let system = spec.system_prompt.as_deref().unwrap();
+        assert!(system.contains("File edits are unavailable in this response: question threads are read-only."), "{system}");
+        assert!(!system.contains("Workspace writes"), "{system}");
+        assert_ne!(spec.cwd, t._dir.path().join("worktree").canonicalize().unwrap());
+        assert_eq!(rig.probe.started_with.lock().unwrap().as_slice(), [None]);
+        drop(specs);
+        assert!(rig.messages().iter().any(|m| m.role == Role::Agent), "the reply is saved in the thread");
+        assert!(rig.store.lock().unwrap().resume_handle(&rig.session).unwrap().is_none(), "no resume handle is saved");
+        rig.task.abort(); parent.task.abort();
+    }
+}
+
+#[tokio::test]
+async fn a_thread_never_asks_for_main_checkout_writes() {
+    #[derive(Default)]
+    struct Spy(Mutex<Vec<bool>>);
+    impl MemoryService for Spy {
+        fn prepare_response(&self, _agent: &AgentId, _project: Option<&ProjectId>, _source: &ChannelId, _base: Option<&str>, _plugin_write: bool, options: discard_core::engine::MemoryOptions<'_>) -> Result<PreparedMemory, String> {
+            self.0.lock().unwrap().push(options.main_checkout_requests);
+            Ok(PreparedMemory { system_prompt: "P".into(), mcp_config: PathBuf::from("/run/c.json"), token: "t".into() })
+        }
+        fn prepare(&self, _: &AgentId, _: Option<&ProjectId>, _: &ChannelId, _: Option<&str>, _: bool) -> Result<PreparedMemory, String> { unreachable!() }
+        fn finish(&self, _: &str) {}
+    }
+    let t = threaded(discard_core::provider::SessionMode::Conversation, false);
+    let spy = Arc::new(Spy::default());
+    let (mut parent, mut thread) = (t.parent.clone(), t.thread.clone());
+    parent.memory = Some(spy.clone()); parent.provider = Arc::new(FakeProvider::new(vec![Step::idle()]).with_main_checkout_writes(true));
+    thread.memory = Some(spy.clone()); thread.provider = Arc::new(FakeProvider::new(vec![Step::idle()]).with_main_checkout_writes(true));
+    let mut parent = launch_workspace(parent, t.parent_probe.clone()); parent.commands.send(Command::Send("hi".into())).unwrap(); parent.until_finished().await;
+    let mut rig = launch_workspace(thread, t.thread_probe.clone()); rig.commands.send(Command::Send("hi".into())).unwrap(); rig.until_finished().await;
+    assert_eq!(spy.0.lock().unwrap().as_slice(), [true, false], "the parent may request main-checkout writes, its thread may not");
+    rig.task.abort(); parent.task.abort();
+}
+
+#[tokio::test]
+async fn a_thread_replays_the_parent_up_to_the_anchor_then_its_own_messages() {
+    let t = threaded(discard_core::provider::SessionMode::Conversation, false);
+    let parent_id = t.parent.channel_id.clone();
+    let mut rig = launch_workspace(t.thread, t.thread_probe);
+    rig.commands.send(Command::Send("first side question".into())).unwrap(); rig.until_finished().await;
+    rig.commands.send(Command::Send("second side question".into())).unwrap(); rig.until_finished().await;
+    let sent = rig.probe.sent.lock().unwrap().clone();
+    assert!(sent[0].contains("\"one\"") && sent[0].contains("anchor reply"), "{}", sent[0]);
+    assert!(!sent[0].contains("after the anchor"), "later parent messages stay out");
+    assert!(sent[0].trim_end().ends_with("first side question\n</current_user_request>"), "{}", sent[0]);
+    assert!(sent[1].contains("first side question") && sent[1].contains("thread reply") && sent[1].contains("anchor reply"), "{}", sent[1]);
+    assert!(!sent[1].contains("after the anchor"));
+    let state = rig.store.lock().unwrap().conversation_context(&rig.channel).unwrap();
+    assert_eq!(state.summary, None);
+    assert_eq!(rig.store.lock().unwrap().thread_info(&rig.channel).unwrap().unwrap().anchor_message_id, t.anchor);
+    assert_eq!(rig.store.lock().unwrap().messages_for_channel(&parent_id).unwrap().len(), 3, "the parent transcript is unchanged");
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn the_anchor_author_answers_in_a_thread_and_a_mention_overrides_one_response() {
+    for (by_other, expected) in [(true, "other"), (false, "main")] {
+        let t = threaded(discard_core::provider::SessionMode::Conversation, by_other);
+        let (main, other) = (t.parent.agent_id.clone(), t.other.clone());
+        let mut rig = launch_workspace(t.thread, t.thread_probe);
+        rig.commands.send(Command::Send("who answers?".into())).unwrap();
+        let updates = rig.until_finished().await;
+        let responder = updates.iter().find_map(|u| match u { Update::Responding(author) => Some(author.agent_id.clone()), _ => None }).unwrap();
+        assert_eq!(responder, if expected == "other" { other.clone() } else { main.clone() });
+        rig.commands.send(Command::Send("@Other you then".into())).unwrap();
+        let updates = rig.until_finished().await;
+        assert!(updates.iter().any(|u| matches!(u, Update::Responding(a) if a.agent_id == other)));
+        rig.commands.send(Command::Send("and again".into())).unwrap();
+        let updates = rig.until_finished().await;
+        let responder = updates.iter().find_map(|u| match u { Update::Responding(author) => Some(author.agent_id.clone()), _ => None }).unwrap();
+        assert_eq!(responder, if expected == "other" { other } else { main }, "the mention applied to one response only");
+        rig.task.abort();
+    }
+}
+
+#[tokio::test]
+async fn a_user_message_in_a_thread_follows_it_and_continue_does_not() {
+    let t = threaded(discard_core::provider::SessionMode::Conversation, false);
+    let agent = t.parent.agent_id.clone();
+    let thread = t.thread.channel_id.clone();
+    t.thread.store.lock().unwrap().set_thread_followed(&thread, false).unwrap();
+    let mut rig = launch_workspace(t.thread, t.thread_probe);
+    rig.commands.send(Command::Continue { agent, note: "Approved.".into() }).unwrap(); rig.until_finished().await;
+    assert!(!rig.store.lock().unwrap().thread_info(&thread).unwrap().unwrap().followed);
+    rig.commands.send(Command::Send("a reply".into())).unwrap(); rig.until_finished().await;
+    assert!(rig.store.lock().unwrap().thread_info(&thread).unwrap().unwrap().followed);
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn also_post_shows_the_user_message_in_the_parent_and_the_parent_replay_labels_it() {
+    let t = threaded(discard_core::provider::SessionMode::Conversation, false);
+    let (parent_id, thread_id) = (t.parent.channel_id.clone(), t.thread.channel_id.clone());
+    let mut rig = launch_workspace(t.thread, t.thread_probe);
+    rig.commands.send(Command::SendInThread { text: "private note".into(), attachments: vec![], also_post: false }).unwrap(); rig.until_finished().await;
+    assert!(rig.store.lock().unwrap().posted_sources(&parent_id).unwrap().is_empty(), "off by default");
+    rig.commands.send(Command::SendInThread { text: "share this".into(), attachments: vec![], also_post: true }).unwrap();
+    let updates = rig.until_finished().await;
+    let posted = updates.iter().find_map(|u| match u { Update::MessagePosted { reference, source } => Some((reference.clone(), source.clone())), _ => None }).expect("a MessagePosted update");
+    assert_eq!((posted.0.channel_id.clone(), posted.0.role), (parent_id.clone(), Role::User));
+    assert_eq!(posted.1.thread_channel_id, thread_id);
+    assert_eq!(posted.1.thread_name, "Side question");
+    let thread_messages = rig.messages();
+    assert_eq!(posted.1.source_message_id, thread_messages.iter().find(|m| matches!(&m.blocks[..], [Block::Markdown { text }] if text == "share this")).unwrap().id, "the source is the thread's saved message");
+    {
+        let store = rig.store.lock().unwrap();
+        let parent_messages = store.messages_for_channel(&parent_id).unwrap();
+        assert_eq!(parent_messages.len(), 4, "only the user message was posted, not the agent reply or the first note");
+        assert!(matches!(&parent_messages[3].blocks[..], [Block::Markdown { text }] if text == "share this"));
+        assert_eq!(store.posted_sources(&parent_id).unwrap().len(), 1);
+    }
+    // The next parent turn sees the post, labelled, and nothing else from the thread. The post itself started no parent turn.
+    assert!(t.parent_probe.specs.lock().unwrap().is_empty());
+    let mut parent = launch_workspace(t.parent, t.parent_probe);
+    parent.commands.send(Command::Send("back in the channel".into())).unwrap(); parent.until_finished().await;
+    let sent = parent.probe.sent.lock().unwrap()[0].clone();
+    assert!(sent.contains("[From thread \"Side question\"]"), "{sent}");
+    assert!(sent.contains("share this"));
+    assert!(!sent.contains("private note") && !sent.contains("thread reply"), "unposted thread messages never enter the parent replay: {sent}");
+    rig.task.abort(); parent.task.abort();
+}
+
+#[tokio::test]
+async fn also_post_is_refused_outside_a_thread() {
+    let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::idle()]), true);
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::SendInThread { text: "x".into(), attachments: vec![], also_post: true }).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(updates.iter().any(|u| matches!(u, Update::Error(e) if e.contains("Only a message in a thread"))));
+    assert!(matches!(updates.last(), Some(Update::TurnFinished(TurnOutcome::Failed))));
+    assert!(rig.messages().is_empty() && rig.probe.specs.lock().unwrap().is_empty());
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn a_thread_turn_runs_while_the_parent_turn_is_still_running() {
+    let t = threaded(discard_core::provider::SessionMode::Conversation, false);
+    let mut parent_engine = t.parent.clone();
+    let hold = FakeProvider::new(vec![Step::working(), Step::Hang]);
+    let hold_probe = hold.probe.clone();
+    parent_engine.provider = Arc::new(hold);
+    let mut parent = launch_workspace(parent_engine, hold_probe);
+    parent.commands.send(Command::Send("hold".into())).unwrap();
+    loop { if matches!(parent.next().await, Update::Event(_)) { break; } }
+    let mut rig = launch_workspace(t.thread, t.thread_probe);
+    rig.commands.send(Command::Send("quick question".into())).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(matches!(updates.last(), Some(Update::TurnFinished(TurnOutcome::Completed))));
+    assert!(!updates.iter().any(|u| matches!(u, Update::Notice(n) if n.starts_with("Waiting for"))), "the thread never waits on the parent's worktree");
+    assert!(rig.messages().iter().any(|m| m.role == Role::Agent));
+    parent.commands.send(Command::Cancel).unwrap();
+    parent.until_finished().await;
+    rig.task.abort(); parent.task.abort();
 }

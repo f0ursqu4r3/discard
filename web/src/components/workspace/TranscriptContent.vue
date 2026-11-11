@@ -24,6 +24,7 @@ import MemoryCaptureStatus from '../memory/MemoryCaptureStatus.vue'
 import { useMemory } from '../memory/useMemory'
 import { Button } from '../ui/button'
 import { hasLiveRow, rowCount, messagePresentation, messageDateLabel } from '../messages'
+import { messageCountLabel } from '../threads'
 const props = defineProps<{
   messages: MessageDto[]
   live: BlockDto[]
@@ -40,11 +41,18 @@ const props = defineProps<{
   jumpTo?: { messageId: string; request: number }
   position?: TranscriptPosition
   quoteDisabled?: boolean
+  /** A thread transcript has no memory notices and no worktree requests, and its rows can post to the channel. */
+  surface?: 'channel' | 'thread'
+  /** The message a thread starts from. It shows above the thread messages. */
+  anchor?: MessageDto | null
+  /** The channel that holds the anchor message. */
+  anchorChannelId?: string
+  threadDisabled?: boolean
 }>()
 const appearance = useAppearance()
 const memory = useMemory(
-  () => props.conversationId || null,
-  () => !!props.conversationId,
+  () => (props.surface === 'thread' ? null : props.conversationId || null),
+  () => props.surface !== 'thread' && !!props.conversationId,
 )
 watch([() => props.messages.at(-1)?.id, () => props.running, () => props.memoryRevision], () => {
   void memory.reload()
@@ -52,6 +60,8 @@ watch([() => props.messages.at(-1)?.id, () => props.running, () => props.memoryR
 const emit = defineEmits<{
   savePosition: [id: string, position: TranscriptPosition]
   quote: [message: MessageDto]
+  startThread: [message: MessageDto]
+  openThread: [threadId: string]
 }>()
 const host = ref<HTMLElement | null>(null)
 const scroller = useMessageScrollerContext()
@@ -77,10 +87,18 @@ const scrollable = useMessageScrollerScrollable()
 const visibility = useMessageScrollerVisibility()
 const historyRows = computed(() =>
   props.messages.map((message, index) => {
-    const presentation = messagePresentation(message, props.messages[index - 1])
+    const presentation = messagePresentation(
+      message,
+      index === 0 ? (props.anchor ?? undefined) : props.messages[index - 1],
+    )
     return { message: { ...message, continuesGroup: presentation.continuesGroup }, ...presentation }
   }),
 )
+const anchorRow = computed(() => {
+  if (!props.anchor) return null
+  const message = { ...props.anchor, continuesGroup: false }
+  return { message, ...messagePresentation(message) }
+})
 const liveStartedAt = ref<number | null>(null)
 watch(
   [() => props.conversationId, () => hasLiveRow(props.running, props.live.length)],
@@ -202,6 +220,45 @@ onUnmounted(() => window.removeEventListener('focus', read))
           :class="appearance.messageDensity === 'compact' ? 'gap-0' : 'gap-1'"
         >
           <MessageScrollerItem
+            v-if="anchorRow"
+            class="[content-visibility:visible]"
+            :message-id="anchorRow.message.id"
+          >
+            <div
+              v-if="anchorRow.startsDate && anchorRow.date"
+              data-testid="date-divider"
+              role="separator"
+              :aria-label="messageDateLabel(anchorRow.date)"
+              class="my-4 flex items-center gap-3 px-3 text-xs font-semibold text-muted-foreground sm:px-6"
+            >
+              <span class="flex-1 border-t border-border" />
+              <time :datetime="anchorRow.date.toLocaleDateString('en-CA')">
+                {{ messageDateLabel(anchorRow.date) }}
+              </time>
+              <span class="flex-1 border-t border-border" />
+            </div>
+            <MessageRow
+              surface="anchor"
+              :channel-id="anchorChannelId ?? conversationId"
+              :message="anchorRow.message"
+              :quote-disabled="quoteDisabled"
+              @quote="emit('quote', $event)"
+              :agent="agent"
+              :agent-id="agentId"
+              :agent-avatar="agentAvatar"
+            />
+            <div
+              v-if="messages.length"
+              data-testid="thread-divider"
+              role="separator"
+              class="my-3 flex items-center gap-3 px-3 text-xs font-semibold text-muted-foreground sm:px-6"
+            >
+              <span class="flex-1 border-t border-border" />
+              {{ messageCountLabel(messages.length) }}
+              <span class="flex-1 border-t border-border" />
+            </div>
+          </MessageScrollerItem>
+          <MessageScrollerItem
             class="[content-visibility:visible]"
             v-for="{ message, date, startsDate } in historyRows"
             :key="message.id"
@@ -233,16 +290,21 @@ onUnmounted(() => window.removeEventListener('focus', read))
               <span class="w-4 border-t border-primary" />
             </div>
             <MessageRow
+              :surface="surface"
+              :thread-disabled="threadDisabled"
               :channel-id="conversationId"
               :message="message"
               :quote-disabled="quoteDisabled"
               @quote="emit('quote', $event)"
+              @start-thread="emit('startThread', $event)"
+              @open-thread="emit('openThread', $event)"
               :agent="agent"
               :agent-id="agentId"
               :agent-avatar="agentAvatar"
               :prompts="prompts"
             />
             <MemoryResponse
+              v-if="surface !== 'thread'"
               :records="memory.data.value.responses.filter((r) => r.responseId === message.id)"
               :proposals="memory.data.value.proposals"
               :channel-id="conversationId"
@@ -268,6 +330,7 @@ onUnmounted(() => window.removeEventListener('focus', read))
               <span class="flex-1 border-t border-border" />
             </div>
             <MessageRow
+              :surface="surface"
               :channel-id="conversationId"
               :message="{ ...liveMessage, continuesGroup: livePresentation.continuesGroup }"
               :agent="agent"
@@ -282,7 +345,11 @@ onUnmounted(() => window.removeEventListener('focus', read))
           <Empty v-if="!messages.length && !hasLiveRow(running, live.length)" class="m-auto">
             <EmptyHeader>
               <EmptyMedia variant="icon"><MessageSquare /></EmptyMedia>
-              <EmptyTitle>No messages yet</EmptyTitle>
+              <EmptyTitle>
+                {{
+                  surface === 'thread' ? 'Send a message to start the thread' : 'No messages yet'
+                }}
+              </EmptyTitle>
             </EmptyHeader>
           </Empty>
         </MessageScrollerContent>

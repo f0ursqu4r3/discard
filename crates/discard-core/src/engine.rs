@@ -9,7 +9,7 @@ use crate::model::{AgentId, Block, ChannelId, Message, MessageId, ProjectId, Rol
 use crate::provider::{Provider, ProviderError, SessionMode, SessionSpec, SetupStatus};
 use crate::workspace_session::{self, AutorunState, ReadOnlyReason, WorkspaceGrant, SessionProfile};
 use crate::redact::redact;
-use crate::store::Store;
+use crate::store::{ChannelHistory, Store};
 use crate::timeline::{ApprovalView, Timeline};
 use crate::ui_state::{Command, Update};
 use std::collections::HashSet;
@@ -178,6 +178,7 @@ impl Engine {
             let store = crate::driver::lock(&self.store);
             let channel = store.load_channel(&self.channel_id).map_err(|e| e.to_string())?;
             if store.channel_archived(&self.channel_id).map_err(|e| e.to_string())? { return Err("This conversation is archived.".into()); }
+            let thread = store.thread_info(&self.channel_id).map_err(|e| e.to_string())?.is_some();
             let mentioned = if recipient.is_some() { None } else { crate::mentions::resolve(&store, &self.channel_id, text)? };
             let recipient = match recipient.or_else(|| mentioned.clone()) { Some(agent) => agent, None => crate::mentions::default_agent(&store, &channel)? };
             if store.agent_archived(&recipient).map_err(|e| e.to_string())? { return Err("This agent is archived. Restore it before sending a message.".into()); }
@@ -191,7 +192,9 @@ impl Engine {
             }
             let author = crate::model::MessageAuthor { agent_id: recipient.clone(), name: config.name.clone(), provider: config.provider.clone(), avatar: config.avatar.clone() };
             let mut snapshot = self.clone();
-            let binding = workspace_session::eligibility(&store, &self.channel_id, &config);
+            // A question thread is read-only Conversation mode, whatever the process mode and the parent's write access.
+            let binding = if thread { Err(ReadOnlyReason::Thread) } else { workspace_session::eligibility(&store, &self.channel_id, &config) };
+            if thread { snapshot.mode = SessionMode::Conversation; }
             snapshot.agent_id = recipient;
             snapshot.project_id = channel.project_id;
             snapshot.provider = provider;
@@ -231,7 +234,7 @@ impl Engine {
         Ok(())
     }
 
-    async fn conversation_input(&self, current: &str, history: &[Message], system: &str, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) -> Result<(String, Vec<crate::attachments::Attachment>), crate::conversation_context::ContextError> {
+    async fn conversation_input(&self, current: &str, history: &ChannelHistory, system: &str, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) -> Result<(String, Vec<crate::attachments::Attachment>), crate::conversation_context::ContextError> {
         use crate::conversation_context as context;
         let topic = crate::driver::lock(&self.store).channel_topic(&self.channel_id).map_err(|e| e.to_string())?;
         let current = if topic.text.is_empty() { current.to_owned() } else {
@@ -250,8 +253,7 @@ impl Engine {
         let summary_limit = context::summary_limit(budget);
         context::required_fits(system, &current, budget)?;
         let mut state = crate::driver::lock(&self.store).conversation_context(&self.channel_id).map_err(|e| e.to_string())?;
-        let authors = crate::driver::lock(&self.store).message_authors(&self.channel_id).map_err(|e| e.to_string())?;
-        let messages = context::replay_with_authors(history, &authors);
+        let messages = context::replay_with_posted(&history.messages, &history.authors, &history.posted);
         let mut remaining = context::after_boundary(&messages, state.through.as_ref());
         let available = budget.saturating_sub(system.len());
         let mut input = context::compose(state.summary.as_deref(), remaining, &current);
@@ -287,7 +289,7 @@ impl Engine {
         // Replay IDs identify chunks as <message-id>:part:<index>. Keep images while any chunk remains.
         let retained: std::collections::HashSet<_> = remaining.iter()
             .filter_map(|(id, _)| id.0.rsplit_once(":part:").map(|(message_id, _)| message_id)).collect();
-        let images = history.iter().filter(|message| retained.contains(message.id.0.as_str()))
+        let images = history.messages.iter().filter(|message| retained.contains(message.id.0.as_str()))
             .flat_map(|message| &message.blocks)
             .filter_map(|block| match block { Block::Attachment { attachment } if attachment.is_image() => Some(attachment.clone()), _ => None }).collect();
         Ok((input, images))
@@ -325,10 +327,11 @@ impl Engine {
                     // A failed or cancelled follow-up must not leave authority for a later Send.
                     let _revoke = RevokeMainCheckoutOnDrop { grants: &self.main_checkout_grants, channel: &self.channel_id, agent: agent.clone() };
                     let text = format!("The user approved your request in the app: {note} Continue the user's latest request in this channel. Do not repeat work that is already done.");
-                    self.turn(&mut state, text, Vec::new(), Some(agent), &mut commands, &updates).await;
+                    self.turn(&mut state, text, Vec::new(), Some(agent), false, &mut commands, &updates).await;
                 }
-                Command::Send(text) => self.turn(&mut state, text, Vec::new(), None, &mut commands, &updates).await,
-                Command::SendAttachments { text, attachments } => self.turn(&mut state, text, attachments, None, &mut commands, &updates).await,
+                Command::Send(text) => self.turn(&mut state, text, Vec::new(), None, false, &mut commands, &updates).await,
+                Command::SendAttachments { text, attachments } => self.turn(&mut state, text, attachments, None, false, &mut commands, &updates).await,
+                Command::SendInThread { text, attachments, also_post } => self.turn(&mut state, text, attachments, None, also_post, &mut commands, &updates).await,
                 _ => {}
             }
         }
@@ -354,17 +357,28 @@ impl Engine {
         Ok(message)
     }
 
+    #[expect(clippy::too_many_arguments, reason = "One argument per send option.")]
     async fn turn(
         &self,
         state: &mut RunState,
         text: String,
         attachments: Vec<crate::attachments::Attachment>,
         recipient: Option<AgentId>,
+        also_post: bool,
         commands: &mut mpsc::UnboundedReceiver<Command>,
         updates: &mpsc::UnboundedSender<Update>,
     ) {
         let store_user_message = recipient.is_none();
-        let (snapshot, author) = if self.mode == crate::provider::SessionMode::Conversation {
+        let thread = match crate::driver::lock(&self.store).thread_info(&self.channel_id) {
+            Ok(thread) => thread.is_some(),
+            Err(error) => { send(updates, Update::Error(error.to_string())); self.finish(updates, crate::driver::TurnOutcome::Failed); return; }
+        };
+        if also_post && !thread {
+            send(updates, Update::Error("Only a message in a thread can be posted to a channel.".into()));
+            self.finish(updates, crate::driver::TurnOutcome::Failed);
+            return;
+        }
+        let (snapshot, author) = if self.mode == crate::provider::SessionMode::Conversation || thread {
             match self.snapshot(&text, recipient).await {
                 Ok(snapshot) => snapshot,
                 Err(error) => { send(updates, Update::Error(error)); self.finish(updates, crate::driver::TurnOutcome::Failed); return; }
@@ -383,7 +397,21 @@ impl Engine {
         };
         send(updates, Update::Responding(author.clone()));
         send(updates, Update::SessionProfile(snapshot.session_profile()));
-        snapshot.turn_snapshot(&author, state, text, attachments, store_user_message, commands, updates).await;
+        snapshot.turn_snapshot(&author, state, text, attachments, store_user_message, also_post, commands, updates).await;
+    }
+
+    /// A user message in a thread follows the thread, and with `also_post` shows in the parent channel.
+    /// The message is already saved, so a failure here is reported and the turn continues.
+    fn follow_and_post(&self, saved: &Message, also_post: bool, updates: &mpsc::UnboundedSender<Update>) {
+        let store = crate::driver::lock(&self.store);
+        if let Err(error) = store.set_thread_followed(&self.channel_id, true) { send(updates, Update::Error(format!("Discard could not follow this thread: {error}"))); }
+        if !also_post { return; }
+        let posted = store.post_thread_message(&saved.id).and_then(|(reference, _)| Ok((reference, store.thread_info(&self.channel_id)?)));
+        match posted {
+            Ok((reference, Some(thread))) => send(updates, Update::MessagePosted { reference, source: crate::model::PostedSource { source_message_id: saved.id.clone(), thread_channel_id: thread.channel_id, thread_name: thread.name } }),
+            Ok((_, None)) => send(updates, Update::Error("Discard could not post this message: the thread is gone.".into())),
+            Err(error) => send(updates, Update::Error(format!("Discard could not post this message to the channel: {error}"))),
+        }
     }
 
     fn changes_block(&self, start: &Result<crate::workspace_changes::StartSnapshot, String>, state: crate::workspace_changes::ChangesState) -> Block {
@@ -398,24 +426,30 @@ impl Engine {
             Err(reason) => {
                 let store = crate::driver::lock(&self.store);
                 let direct_without_opt_in = self.project_id.is_none() && store.load_agent(&self.agent_id).is_ok_and(|a| !a.workspace_write);
-                SessionProfile::ReadOnly { reason: (!direct_without_opt_in).then(|| reason.clone()) }
+                SessionProfile::ReadOnly { reason: (!direct_without_opt_in || *reason == ReadOnlyReason::Thread).then(|| reason.clone()) }
             }
         }
     }
 
     #[expect(clippy::too_many_arguments, reason = "Keep replay and message storage separate.")]
-    async fn turn_snapshot(&self, author: &crate::model::MessageAuthor, state: &mut RunState, text: String, attachments: Vec<crate::attachments::Attachment>, store_user_message: bool, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) {
+    async fn turn_snapshot(&self, author: &crate::model::MessageAuthor, state: &mut RunState, text: String, attachments: Vec<crate::attachments::Attachment>, store_user_message: bool, also_post: bool, commands: &mut mpsc::UnboundedReceiver<Command>, updates: &mpsc::UnboundedSender<Update>) {
         let RunState { sequencer, notices } = state;
         let mut session_mode = if self.mode == SessionMode::Conversation && self.write_access.is_ok() { SessionMode::Workspace } else { self.mode };
-        let history = crate::driver::lock(&self.store).messages_for_channel(&self.channel_id);
+        let history = crate::driver::lock(&self.store).channel_history(&self.channel_id);
+        let thread_turn = self.write_access == Err(ReadOnlyReason::Thread);
         let previous_changes = self.memory.as_ref().map(|m| m.changes(&self.channel_id)).transpose();
         if store_user_message {
-        if let Err(error) = self.store_message(Role::User, crate::attachments::blocks(&text, &attachments), None) {
-            send(updates, Update::Error(format!("{error}. Retry after resolving the storage error.")));
-            self.finish(updates, crate::driver::TurnOutcome::Failed);
-            return;
-        }
+        let saved = match self.store_message(Role::User, crate::attachments::blocks(&text, &attachments), None) {
+            Ok(saved) => saved,
+            Err(error) => {
+                send(updates, Update::Error(format!("{error}. Retry after resolving the storage error.")));
+                self.finish(updates, crate::driver::TurnOutcome::Failed);
+                return;
+            }
+        };
         self.observe(observer::message_sent(&self.channel_id.0, &text));
+        send(updates, Update::UserMessageSaved(saved.id.clone()));
+        if thread_turn { self.follow_and_post(&saved, also_post, updates); }
         }
 
         let enforcement = match self.provider.capabilities().enforcement_for(self.policy) {
@@ -470,7 +504,7 @@ impl Engine {
         let mut memory_query = text.clone();
         if let Ok(history) = &history {
             // Only this conversation contributes retrieval terms. The replay still keeps all history.
-            for message in history.iter().rev().filter(|m| m.role != Role::System).take(2) {
+            for message in history.messages.iter().rev().filter(|m| m.role != Role::System).take(2) {
                 memory_query.push_str(&serde_json::to_string(&message.blocks).unwrap_or_default());
             }
         }
@@ -506,7 +540,7 @@ impl Engine {
             Some(service) => match service.prepare_response(&self.agent_id, self.project_id.as_ref(), &self.channel_id, self.system_prompt.as_deref(), self.plugin_write && self.mode == SessionMode::Coding, MemoryOptions {
                 query: &memory_query,
                 workspace: (session_mode == SessionMode::Workspace).then(|| self.write_access.as_ref().unwrap()),
-                main_checkout_requests: self.mode == SessionMode::Conversation && self.provider.supports_main_checkout_writes(),
+                main_checkout_requests: self.mode == SessionMode::Conversation && !thread_turn && self.provider.supports_main_checkout_writes(),
             }) {
                 Ok(p) => Some(p),
                 Err(e) => {
@@ -735,7 +769,7 @@ impl Engine {
                         Some(Command::Cancel) => {
                             let _ = cancel_tx.send(());
                         }
-                        Some(Command::Send(_) | Command::SendAttachments { .. } | Command::Continue { .. }) => send(
+                        Some(Command::Send(_) | Command::SendAttachments { .. } | Command::SendInThread { .. } | Command::Continue { .. }) => send(
                             updates,
                             Update::Error("A turn is already running. Wait for it to finish or cancel it.".into()),
                         ),

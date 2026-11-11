@@ -4,13 +4,14 @@ pub mod channels;
 pub mod core;
 pub mod dto;
 pub mod pump;
+pub mod threads;
 
 use core::{AppCore, CoreInit};
 use discard_core::ghostty::{live::LiveTheme, spec::Appearance};
 use discard_core::settings::SettingsStore;
 use discard_core::ui_state::Update;
 use discard_lua::PluginService;
-use dto::{HistoryDto, SnapshotDto};
+use dto::{HistoryDto, SnapshotDto, ThreadHistoryDto};
 use pump::Emit;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,6 +47,9 @@ impl Emit for WebEmit {
     }
     fn history(&self, value: &HistoryDto) {
         let _ = self.app.emit("discard://history", value);
+    }
+    fn thread_history(&self, value: &ThreadHistoryDto) {
+        let _ = self.app.emit("discard://thread-history", value);
     }
 }
 /// Startup data for the main desktop window.
@@ -87,6 +91,7 @@ pub fn run(
     }
     (config.on_ready)(&core);
     let channels = Arc::new(channels::Channels::new(core.clone(), config.store.clone(), runtime.clone(), config.launcher));
+    if let Some(channel) = &config.startup_channel && let Err(error) = channels.refresh_threads(&channel.id) { core.notice(format!("Could not load threads: {error}")); }
     if config.startup_channel.is_none()
         && let Err(error) = channels.restore() { core.notice(format!("Could not restore conversation: {error}")); }
     core.refresh_branches(core.request_branch_refresh());
@@ -241,6 +246,8 @@ pub fn run(
             commands::create_channel, commands::switch_channel, commands::open_branch_channel,
             commands::get_history,
             commands::send_message,
+            commands::get_thread_history, commands::start_thread, commands::open_thread, commands::close_thread, commands::select_thread,
+            commands::post_thread_message, commands::follow_thread, commands::leave_thread,
             attachments::choose_attachments,
             attachments::import_attachments,
             attachments::attachment_preview,
