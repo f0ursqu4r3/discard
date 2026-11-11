@@ -134,6 +134,24 @@ pub struct Engine {
     pub policy: ApprovalPolicy,
 }
 
+/// Walk a worktree root for nested `.git` paths off the async runtime.
+async fn nested_git_walk(root: PathBuf) -> Result<Vec<PathBuf>, workspace_session::NestedGitError> {
+    tokio::task::spawn_blocking(move || workspace_session::find_nested_git(&root, workspace_session::NESTED_GIT_WALK_CAP))
+        .await
+        .unwrap_or(Err(workspace_session::NestedGitError::Unreadable))
+}
+
+/// The warning to save after an autorun response, or none. A failed walk gives one message, whichever walk failed.
+fn nested_git_warning(before: &Result<Vec<PathBuf>, workspace_session::NestedGitError>, after: &Result<Vec<PathBuf>, workspace_session::NestedGitError>) -> Option<String> {
+    match (before, after) {
+        (Err(reason), _) | (_, Err(reason)) => Some(workspace_session::nested_git_unchecked_warning(reason)),
+        (Ok(before), Ok(after)) => {
+            let created: Vec<PathBuf> = after.iter().filter(|path| !before.contains(path)).cloned().collect();
+            (!created.is_empty()).then(|| workspace_session::nested_git_created_warning(&created))
+        }
+    }
+}
+
 /// State shared by turns in one engine run, including per-turn configuration snapshots.
 struct RunState {
     sequencer: Sequencer,
@@ -261,6 +279,12 @@ impl Engine {
             Err(_) => AutorunState::Off,
         };
         Ok((snapshot, author))
+    }
+
+    /// Save a warning as a system message of the channel, like a provider notice. Replay leaves system messages out,
+    /// and saving one starts no turn.
+    fn save_warning(&self, text: Option<String>, updates: &mpsc::UnboundedSender<Update>) {
+        if let Some(text) = text && let Err(error) = self.marker(text, updates) { warn!(%error, "could not save the nested .git warning"); }
     }
 
     fn marker(&self, text: String, updates: &mpsc::UnboundedSender<Update>) -> Result<(), String> {
@@ -861,6 +885,13 @@ impl Engine {
             });
         }
 
+        // Nested `.git` check: an autorun response walks the worktree before and after the turn. Other sessions never walk.
+        let nested_root = if autorun_started { self.write_access.as_ref().ok().map(|grant| grant.root.clone()) } else { None };
+        let nested_before = match &nested_root { Some(root) => Some(nested_git_walk(root.clone()).await), None => None };
+        if let Some(Ok(paths)) = &nested_before && !paths.is_empty() && notices.insert(format!("nested-git:{paths:?}")) {
+            send(updates, Update::Notice(workspace_session::nested_git_existing_notice(paths)));
+        }
+
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
         let (decisions_tx, decisions_rx) = mpsc::unbounded_channel();
         let (cancel_tx, cancel_rx) = mpsc::unbounded_channel();
@@ -999,6 +1030,11 @@ impl Engine {
             drop(revoke.take());
             guard.stop_writes().await;
         }
+        // Whatever the outcome, look again. The warning is saved after the response, so it follows the response.
+        let nested_warning = match (&nested_root, &nested_before) {
+            (Some(root), Some(before)) => nested_git_warning(before, &nested_git_walk(root.clone()).await),
+            _ => None,
+        };
 
         let changes = match (&self.memory, previous_changes) {
             (Some(memory), Ok(Some(before))) => match memory.changes(&self.channel_id) {
@@ -1021,6 +1057,7 @@ impl Engine {
                 Ok(response) => response,
                 Err(error) => {
                     send(updates, Update::ResponseSaveFailed(format!("{error}. Copy the reply before sending another message, then resolve the storage error.")));
+                    self.save_warning(nested_warning, updates);
                     if !thread_turn { self.anchor_sub_agents(None, updates); }
                     drop_steer(steer, updates);
                     self.finish(updates, crate::driver::TurnOutcome::Failed);
@@ -1059,6 +1096,7 @@ impl Engine {
             }
             for (response, changes) in groups { send(updates, Update::MemoryChanges { response, changes }); }
         } else if !thread_turn { self.anchor_sub_agents(None, updates); }
+        self.save_warning(nested_warning, updates);
         drop(revoke);
         drop(workspace_guard);
         match result {

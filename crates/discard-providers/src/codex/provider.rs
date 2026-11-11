@@ -139,41 +139,6 @@ impl CodexProvider {
     }
 }
 
-/// Entries the nested-`.git` walk may read before it fails closed.
-const NESTED_GIT_WALK_CAP: usize = 200_000;
-
-#[derive(Debug, PartialEq, Eq)]
-enum NestedGit {
-    Clean,
-    /// The first path found, relative to the root.
-    Found(PathBuf),
-    /// The walk hit the cap or could not read a directory. Treat as unsafe.
-    Unchecked,
-}
-
-/// Walk `root` for any entry named `.git` (any case, file or directory) below the root. The root's own `.git`
-/// pointer is skipped. Symlinks are not followed. Unreadable directories fail closed.
-fn find_nested_git(root: &Path, cap: usize) -> NestedGit {
-    let mut stack = vec![root.to_path_buf()];
-    let mut seen = 0usize;
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { return NestedGit::Unchecked };
-        for entry in entries {
-            let Ok(entry) = entry else { return NestedGit::Unchecked };
-            seen += 1;
-            if seen > cap { return NestedGit::Unchecked; }
-            let name = entry.file_name();
-            let path = entry.path();
-            if name.to_string_lossy().eq_ignore_ascii_case(".git") {
-                if dir == root { continue; }
-                return NestedGit::Found(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
-            }
-            if entry.file_type().is_ok_and(|t| t.is_dir()) { stack.push(path); }
-        }
-    }
-    NestedGit::Clean
-}
-
 /// The parameters for `thread/start` (or `thread/resume` when `spec.resume_handle` is set).
 /// Returns the method name and its params.
 pub fn thread_params(spec: &SessionSpec) -> (&'static str, Value) {
@@ -305,13 +270,16 @@ impl Provider for CodexProvider {
             // Under on-request, Codex applies in-root patches and shell writes under a nested `.git` with no request.
             // Discard treats any `.git` component as protected, so refuse a root that already holds one.
             let root = spec.cwd.clone();
-            let found = tokio::task::spawn_blocking(move || find_nested_git(&root, NESTED_GIT_WALK_CAP))
+            let found = tokio::task::spawn_blocking(move || discard_core::workspace_session::find_nested_git(&root, discard_core::workspace_session::NESTED_GIT_WALK_CAP))
                 .await
                 .map_err(|e| ProviderError::SandboxUnavailable(format!("Codex autorun could not check for nested .git paths: {e}")))?;
             match found {
-                NestedGit::Clean => {}
-                NestedGit::Found(path) => return Err(ProviderError::SandboxUnavailable(format!("Codex autorun needs a worktree without nested .git paths (found {})", path.display()))),
-                NestedGit::Unchecked => return Err(ProviderError::SandboxUnavailable("Codex autorun could not finish checking the worktree for nested .git paths (too many files or an unreadable directory)".into())),
+                Ok(paths) if paths.is_empty() => {}
+                Ok(paths) => {
+                    let more = if paths.len() > 1 { format!(" and {} more", paths.len() - 1) } else { String::new() };
+                    return Err(ProviderError::SandboxUnavailable(format!("Codex autorun needs a worktree without nested .git paths (found {}{more})", paths[0].display())));
+                }
+                Err(reason) => return Err(ProviderError::SandboxUnavailable(format!("Codex autorun could not finish checking the worktree for nested .git paths ({reason})"))),
             }
         }
         if workspace && spec.cwd.join(".git").is_dir() {
@@ -708,40 +676,6 @@ mod tests {
         assert!(matches!(&error, ProviderError::SandboxUnavailable(m) if m == "Codex autorun needs a linked worktree"), "{error:?}");
     }
 
-    #[test]
-    fn the_nested_git_walk_skips_the_root_pointer_and_finds_any_other_git_component() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::write(root.join(".git"), "gitdir: /elsewhere\n").unwrap();
-        std::fs::create_dir_all(root.join("src/deep")).unwrap();
-        std::fs::write(root.join("src/deep/a.rs"), "").unwrap();
-        assert_eq!(find_nested_git(root, 1000), NestedGit::Clean, "the root pointer alone is the supported setup");
-        std::fs::create_dir_all(root.join("src/deep/vendor/.git/hooks")).unwrap();
-        assert_eq!(find_nested_git(root, 1000), NestedGit::Found(PathBuf::from("src/deep/vendor/.git")));
-    }
-
-    #[test]
-    fn the_nested_git_walk_matches_any_case_and_files() {
-        for name in [".GIT", ".Git"] {
-            let dir = tempfile::tempdir().unwrap();
-            std::fs::create_dir(dir.path().join("sub")).unwrap();
-            std::fs::write(dir.path().join("sub").join(name), "gitdir: x\n").unwrap();
-            assert_eq!(find_nested_git(dir.path(), 1000), NestedGit::Found(PathBuf::from("sub").join(name)), "{name}");
-        }
-    }
-
-    #[test]
-    fn the_nested_git_walk_does_not_follow_symlinks_and_fails_closed_at_the_cap() {
-        let dir = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        std::fs::create_dir(outside.path().join(".git")).unwrap();
-        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
-        assert_eq!(find_nested_git(dir.path(), 1000), NestedGit::Clean, "a symlink is not walked");
-        for n in 0..5 { std::fs::write(dir.path().join(format!("f{n}")), "").unwrap(); }
-        assert_eq!(find_nested_git(dir.path(), 3), NestedGit::Unchecked, "more entries than the cap");
-        assert_eq!(find_nested_git(&dir.path().join("missing"), 1000), NestedGit::Unchecked, "an unreadable root");
-    }
-
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn codex_autorun_refuses_a_worktree_with_a_nested_git_path() {
@@ -754,6 +688,9 @@ mod tests {
         s.sandbox_autorun = true;
         let error = CodexProvider::new("unused").start_session(s.clone()).await.err().unwrap();
         assert!(matches!(&error, ProviderError::SandboxUnavailable(m) if m == "Codex autorun needs a worktree without nested .git paths (found sub/.git)"), "{error:?}");
+        std::fs::create_dir_all(dir.path().join("zed/.git")).unwrap();
+        let error = CodexProvider::new("unused").start_session(s.clone()).await.err().unwrap();
+        assert!(matches!(&error, ProviderError::SandboxUnavailable(m) if m == "Codex autorun needs a worktree without nested .git paths (found sub/.git and 1 more)"), "{error:?}");
         // Without autorun, the same root starts as before: untrusted approval covers nested `.git` writes.
         s.sandbox_autorun = false;
         let error = CodexProvider::new("unused").start_session(s).await.err();

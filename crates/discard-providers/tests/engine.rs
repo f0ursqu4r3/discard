@@ -864,6 +864,137 @@ async fn autorun_marks_shell_calls_in_the_saved_response() {
     rig.task.abort();
 }
 
+fn system_texts(rig: &Rig) -> Vec<String> {
+    rig.messages().into_iter().filter(|m| m.role == Role::System).map(|m| match &m.blocks[0] { Block::Markdown { text } => text.clone(), other => panic!("{other:?}") }).collect()
+}
+
+fn nested_notices(updates: &[Update]) -> Vec<String> {
+    updates.iter().filter_map(|u| match u { Update::Notice(text) if text.contains("nested .git") => Some(text.clone()), _ => None }).collect()
+}
+
+const SINGULAR: &str = "Warning: this response created a nested .git path: newdir/.git. A hook or config inside it can run commands when someone runs Git there. Review or remove it before you run Git in that directory.";
+
+/// An opted-in autorun engine on a provider that reports support and does not refuse nested paths.
+/// The script is built from the worktree root. `setup` runs on the root before the engine starts.
+fn autorun_rig_with(script: impl FnOnce(&std::path::Path) -> Vec<Step>, setup: impl FnOnce(&std::path::Path)) -> (tempfile::TempDir, Rig) {
+    let (dir, engine, _) = workspace_engine(FakeProvider::new(vec![]), true);
+    let root = dir.path().join("worktree");
+    setup(&root);
+    let provider = FakeProvider::new(script(&root)).with_sandbox_autorun(discard_core::provider::SandboxAutorun::Supported);
+    let probe = provider.probe.clone();
+    let engine = Engine { provider: Arc::new(provider), ..engine };
+    opt_in_to_autorun(&engine);
+    (dir, launch_workspace(engine, probe))
+}
+
+#[tokio::test]
+async fn an_autorun_response_that_creates_a_nested_git_path_saves_a_warning_after_the_response() {
+    let (_dir, mut rig) = autorun_rig_with(|root| vec![Step::working(), Step::CreateDir(root.join("newdir/.git")), Step::text("done"), Step::idle()], |_| {});
+    rig.commands.send(Command::Send("Edit".into())).unwrap();
+    let updates = rig.until_finished().await;
+    assert_eq!(system_texts(&rig), vec![SINGULAR.to_string()]);
+    let messages = rig.messages();
+    assert_eq!(messages.last().unwrap().role, Role::System, "the warning follows the response");
+    assert!(messages.iter().rev().nth(1).is_some_and(|m| m.role == Role::Agent));
+    assert!(updates.iter().any(|u| matches!(u, Update::ConversationMarker(m) if m.role == Role::System)), "the UI shows it as a conversation marker");
+    assert!(nested_notices(&updates).is_empty(), "nothing existed before");
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn the_warning_uses_the_plural_form_and_cuts_the_list_at_five_paths() {
+    let (_dir, mut rig) = autorun_rig_with(|root| vec![Step::working(), Step::CreateDir(root.join("a/.git")), Step::CreateDir(root.join("b/.git")), Step::text("done"), Step::idle()], |_| {});
+    rig.commands.send(Command::Send("Edit".into())).unwrap(); rig.until_finished().await;
+    assert_eq!(system_texts(&rig), vec!["Warning: this response created nested .git paths: a/.git, b/.git. A hook or config inside them can run commands when someone runs Git there. Review or remove them before you run Git in those directories.".to_string()]);
+    rig.task.abort();
+    let (_dir, mut rig) = autorun_rig_with(|root| [vec![Step::working()], (1..=7).map(|n| Step::CreateDir(root.join(format!("d{n}/.git")))).collect(), vec![Step::idle()]].concat(), |_| {});
+    rig.commands.send(Command::Send("Edit".into())).unwrap(); rig.until_finished().await;
+    let texts = system_texts(&rig);
+    assert_eq!(texts.len(), 1);
+    assert!(texts[0].contains("created nested .git paths: d1/.git, d2/.git, d3/.git, d4/.git, d5/.git and 2 more. A hook"), "{}", texts[0]);
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn a_response_that_creates_none_saves_nothing_and_old_paths_are_not_new() {
+    let (_dir, mut rig) = autorun_rig_with(|_| vec![Step::working(), Step::text("done"), Step::idle()], |_| {});
+    rig.commands.send(Command::Send("Edit".into())).unwrap(); rig.until_finished().await;
+    assert!(system_texts(&rig).is_empty());
+    rig.task.abort();
+    // A path that exists before the turn is not reported. Only the new one is.
+    let (_dir, mut rig) = autorun_rig_with(|root| vec![Step::working(), Step::CreateDir(root.join("newdir/.git")), Step::idle()], |root| std::fs::create_dir_all(root.join("old/.git")).unwrap());
+    rig.commands.send(Command::Send("Edit".into())).unwrap(); rig.until_finished().await;
+    assert_eq!(system_texts(&rig), vec![SINGULAR.to_string()]);
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn failed_and_cancelled_turns_still_walk() {
+    let (_dir, mut rig) = autorun_rig_with(|root| vec![Step::working(), Step::CreateDir(root.join("newdir/.git")), Step::Crash], |_| {});
+    rig.commands.send(Command::Send("Edit".into())).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(matches!(updates.last(), Some(Update::TurnFinished(TurnOutcome::Failed))), "{:?}", updates.last());
+    assert_eq!(system_texts(&rig), vec![SINGULAR.to_string()]);
+    rig.task.abort();
+    let (_dir, mut rig) = autorun_rig_with(|root| vec![Step::working(), Step::CreateDir(root.join("newdir/.git")), Step::Hang], |_| {});
+    rig.commands.send(Command::Send("Edit".into())).unwrap();
+    loop { if let Update::Event(e) = rig.next().await && matches!(e.kind, EventKind::StatusChange { .. }) { break; } }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    rig.commands.send(Command::Cancel).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(matches!(updates.last(), Some(Update::TurnFinished(TurnOutcome::Cancelled))), "{:?}", updates.last());
+    assert_eq!(system_texts(&rig), vec![SINGULAR.to_string()]);
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn a_session_without_autorun_never_walks() {
+    // The script creates a nested path and the root has a pre-existing one. An autorun response would warn and notify.
+    let (dir, engine, _) = workspace_engine(FakeProvider::new(vec![]), true);
+    let root = dir.path().join("worktree");
+    std::fs::create_dir_all(root.join("old/.git")).unwrap();
+    let provider = FakeProvider::new(vec![Step::working(), Step::CreateDir(root.join("newdir/.git")), Step::idle()]).with_sandbox_autorun(discard_core::provider::SandboxAutorun::Supported);
+    let probe = provider.probe.clone();
+    // The agent did not opt in.
+    let mut rig = launch_workspace(Engine { provider: Arc::new(provider), ..engine }, probe);
+    rig.commands.send(Command::Send("Edit".into())).unwrap();
+    let updates = rig.until_finished().await;
+    assert!(!rig.probe.specs.lock().unwrap()[0].sandbox_autorun);
+    assert!(system_texts(&rig).is_empty());
+    assert!(nested_notices(&updates).is_empty());
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn a_walk_that_cannot_finish_saves_one_warning() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, mut rig) = autorun_rig_with(|_| vec![Step::working(), Step::text("done"), Step::idle()], |root| {
+        std::fs::create_dir(root.join("locked")).unwrap();
+        std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    });
+    rig.commands.send(Command::Send("Edit".into())).unwrap(); rig.until_finished().await;
+    // Both walks fail. The response gets one warning, not two.
+    assert_eq!(system_texts(&rig), vec!["Warning: Discard could not check this worktree for nested .git paths (a directory could not be read). An autorun response can create them with no approval card.".to_string()]);
+    std::fs::set_permissions(dir.path().join("worktree/locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    rig.task.abort();
+}
+
+#[tokio::test]
+async fn an_existing_nested_git_path_gives_one_notice_for_each_set_of_paths() {
+    let (dir, mut rig) = autorun_rig_with(|_| vec![Step::working(), Step::idle()], |root| std::fs::create_dir_all(root.join("vendor/.git")).unwrap());
+    rig.commands.send(Command::Send("one".into())).unwrap();
+    assert_eq!(nested_notices(&rig.until_finished().await), vec!["This worktree has nested .git paths (vendor/.git). An autorun command can write inside them with no approval card.".to_string()]);
+    // The same set shows no second notice.
+    rig.commands.send(Command::Send("two".into())).unwrap();
+    assert!(nested_notices(&rig.until_finished().await).is_empty());
+    // A different set shows a new notice.
+    std::fs::create_dir_all(dir.path().join("worktree/other/.git")).unwrap();
+    rig.commands.send(Command::Send("three".into())).unwrap();
+    assert_eq!(nested_notices(&rig.until_finished().await), vec!["This worktree has nested .git paths (other/.git and 1 more). An autorun command can write inside them with no approval card.".to_string()]);
+    assert!(system_texts(&rig).is_empty(), "a notice is not saved as a message");
+    rig.task.abort();
+}
+
 #[tokio::test]
 async fn ineligible_channel_states_the_reason() {
     let (_dir, engine, probe) = workspace_engine(FakeProvider::new(vec![Step::working(), Step::idle()]), false);

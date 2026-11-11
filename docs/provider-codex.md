@@ -246,9 +246,14 @@ entry is named `.git` (any case, file or directory). Symlinks are not followed. 
 to a read-only response and shows the reason. Non-autorun Codex sessions are unchanged, because
 `untrusted` asks for each patch and command.
 
-The walk cannot see what the agent creates during the session. A new nested `.git` from h3 or h4 stays
-possible within one autorun response. The next autorun session refuses to start in that worktree until
-someone removes the nested directory.
+The start check cannot see what the agent creates during the session. A new nested `.git` from h3 or h4
+stays possible within one autorun response. The engine now walks the root before and after each autorun
+response, for every provider. If the second walk finds nested `.git` paths that the first did not, it saves
+a warning as a system message of the channel, after the response. The warning names the paths (at most
+five). If a walk fails, it says that Discard could not check. The warning does not block, revert, or remove
+the write. The next autorun session refuses to start in that worktree until someone removes the nested
+directory. The start check and the engine use the same walk, `find_nested_git` in
+`crates/discard-core/src/workspace_session.rs`.
 
 Claude has the same limit for shell commands. The adapter's `denyWrite` list holds the root `.git`, the
 worktree Git directory, and the common Git directory only, so a sandboxed Claude shell command can write

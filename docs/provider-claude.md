@@ -161,6 +161,15 @@ The session still needs the Discard data directory. Without it, `start_session`
 returns `SandboxUnavailable`. Local managed settings that set `autoAllowBashIfSandboxed`
 still fail the managed-settings check.
 
+Nested `.git` paths. The adapter's `sandbox.filesystem.denyWrite` list holds the root `.git` pointer,
+the worktree's Git directory, and the common Git directory. It does not cover a `.git` below the root.
+A sandboxed Claude shell command can therefore write under a nested `.git` with no card. Native `Write`
+and `Edit` still get a card, because the path classifier protects any `.git` component. This is inferred
+from the adapter settings. The live probe does not cover it. Claude autorun does not refuse a worktree
+that already has nested `.git` paths. Instead, the engine walks the root before and after each autorun
+response. It shows a notice for existing paths, once for each set per session. It saves a warning as a
+system message when the response created new ones. See the Codex page for the shared check.
+
 Live probe results. Run:
 `cargo test -p discard-providers --test claude_live -- --ignored autorun --nocapture`.
 The probe uses the real subscription, model `haiku`, one turn, and a linked worktree in
