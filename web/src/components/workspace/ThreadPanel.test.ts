@@ -12,18 +12,27 @@ import type {
 } from '@/bridge/types'
 import ThreadPanel from './ThreadPanel.vue'
 import Composer from '../Composer.vue'
+import { clearAction, pendingAction } from '../thread-actions'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(), isTauri: () => false }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
 vi.mock('vue-sonner', () => ({ toast: { error: vi.fn() } }))
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
 const views: ReturnType<typeof mount>[] = []
 beforeEach(() => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub)
   vi.mocked(invoke).mockReset()
   vi.mocked(invoke).mockResolvedValue(null)
 })
 afterEach(() => {
+  vi.unstubAllGlobals()
   views.splice(0).forEach((view) => view.unmount())
   document.body.innerHTML = ''
+  clearAction()
 })
 const thread = (fixture.snapshot as SnapshotDto).openThread as OpenThreadDto
 const history = fixture.threadHistory as ThreadHistoryDto
@@ -77,16 +86,54 @@ test('a followed thread offers Leave and a thread that is not followed offers Fo
   expect(invoke).toHaveBeenCalledWith('follow_thread', { threadId: 'thread' })
 })
 
-test('the thread menu shows Rename and Delete as planned items', async () => {
+const menuItems = () => [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+const menuLabels = () => menuItems().map((item) => item.textContent?.replace(/\s+/g, ' ').trim())
+
+test('the thread menu offers Rename and Delete with no Soon label, and each opens its dialog', async () => {
   const view = panel()
   await view.get('[aria-label="Thread menu"]').trigger('keydown', { key: 'Enter' })
   await flushPromises()
-  const items = [...document.querySelectorAll('[role="menuitem"]')]
-  expect(items.map((item) => item.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
-    'Rename thread Soon',
-    'Delete thread Soon',
-  ])
-  for (const item of items) expect(item.getAttribute('aria-disabled')).toBe('true')
+  expect(menuLabels()).toEqual(['Rename thread', 'Delete thread'])
+  for (const item of menuItems()) expect(item.getAttribute('aria-disabled')).toBeNull()
+  menuItems()[0]!.click()
+  await flushPromises()
+  expect(pendingAction.value).toEqual({
+    kind: 'rename-thread',
+    threadId: 'thread',
+    name: 'Why a thread?',
+  })
+  await view.get('[aria-label="Thread menu"]').trigger('keydown', { key: 'Enter' })
+  await flushPromises()
+  menuItems()[1]!.click()
+  await flushPromises()
+  expect(pendingAction.value).toEqual({
+    kind: 'delete-thread',
+    threadId: 'thread',
+    name: 'Why a thread?',
+  })
+})
+
+test('Delete thread is disabled while a turn runs, a task runs or an approval waits, with no Soon label', async () => {
+  for (const [state, reason] of [
+    [{ turnRunning: true }, 'A turn runs in this thread.'],
+    [{ state: 'running', kind: 'sub_agent' }, 'A sub-agent task runs in this thread.'],
+    [{ pendingApprovals: 2 }, 'An approval waits in this thread.'],
+  ] as const) {
+    const view = panel({ thread: { ...thread, ...state } })
+    await view.get('[aria-label="Thread menu"]').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    const remove = menuItems()[1]!
+    expect(remove.textContent).toContain('Delete thread')
+    expect(remove.textContent).not.toContain('Soon')
+    expect(remove.getAttribute('aria-disabled')).toBe('true')
+    expect(remove.getAttribute('title')).toBe(reason)
+    remove.click()
+    await flushPromises()
+    expect(pendingAction.value).toBeNull()
+    view.unmount()
+    views.pop()
+    document.body.innerHTML = ''
+  }
 })
 
 test('thread messages can post to the channel and show posted ones as done', () => {
@@ -361,14 +408,14 @@ test('Post to channel, Follow and Leave keep working in a sub-agent thread', asy
   expect(invoke).toHaveBeenCalledWith('follow_thread', { threadId: 'find-callers' })
 })
 
-test('a sub-agent thread offers no way to start another thread and keeps Rename and Delete planned', async () => {
+test('a sub-agent thread offers no way to start another thread and its running task blocks Delete', async () => {
   const view = subPanel()
   expect(view.find('[aria-label="Start thread"]').exists()).toBe(false)
   await view.get('[aria-label="Thread menu"]').trigger('keydown', { key: 'Enter' })
   await flushPromises()
-  const items = [...document.querySelectorAll('[role="menuitem"]')]
-  expect(items.map((item) => item.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
-    'Rename thread Soon',
-    'Delete thread Soon',
-  ])
+  expect(menuLabels()).toEqual(['Rename thread', 'Delete thread'])
+  expect(menuItems()[0]!.getAttribute('aria-disabled')).toBeNull()
+  expect(menuItems()[1]!.getAttribute('aria-disabled')).toBe(
+    subAgentFixture.snapshot.openThread?.state === 'running' ? 'true' : null,
+  )
 })

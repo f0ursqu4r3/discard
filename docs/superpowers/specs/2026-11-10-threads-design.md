@@ -110,12 +110,7 @@ The work has two slices. Slice 1 is question threads. Slice 2 is sub-agent threa
 
 ### Planned actions
 
-These controls are visible and disabled, with the label `Soon` and a `TODO` comment, per `AGENTS.md`:
-
-- **Threads list** in the channel header. Missing: a list of all threads in the channel, including threads that are not followed.
-- **Rename thread.** Missing: edit of the thread name.
-- **Delete thread.** Missing: deletion, with rules for posted messages.
-- **Remove from channel** on a posted message. Missing: removal of the reference row, with rules for a parent agent that already read it.
+None. Slice 4 implements the four actions that were planned here: the Threads list, Rename thread, Delete thread, and Remove from channel.
 
 ## Decisions — slice 2, sub-agent threads
 
@@ -236,6 +231,7 @@ The owner skipped the design interview for this slice. The owner approved decisi
 
 92. The composer in a sub-agent thread is on, unless the thread is blocked for the existing read-only reasons. The placeholder is `Steer this sub-agent` while the task state is running, and `Reply in thread` after. While the task runs, the composer shows Send and Stop. Send is on when the composer has text. The `steering_soon` reason is gone from the Rust DTO, the TS type, and all users. The `Soon` label is gone from the thread composer. The `soon` prop is gone from `Composer.vue`, because no other caller used it.
 93. The four `TODO` comments about steering are gone, and so are the three refusals they guarded.
+94. When the user sent one or more messages to a sub-agent during its task, the `delegate` result for that task starts with a note, then a blank line, then the normal result text. The note has this form: `Note: the user sent this sub-agent <N> message(s) during the task. The result follows the user's instructions, which can differ from your brief. Latest user message: "<text>"`. `<N>` is the count of user messages saved in the thread during the task. The brief is written by the parent agent and does not count. `<N> message(s)` reads `1 message` or `2 messages`. `<text>` is the plain text of the latest such message, cut to 500 characters with `…` when cut, with `"` replaced by `'`. The note applies to every final state: done, failed, cancelled, and timed out. For a state other than done, the normal text is the existing error text. A steer that the engine accepted but dropped before it was saved (a stop between turns, or a failed turn) does not count. With no steer, the result is unchanged. A follow-up turn after the task ended never changes a result: the call already returned. The note is part of the tool result only. It is never a saved message, so the thread transcript does not change. The replay limit of decision 54 stays at 8 KB, and the note counts toward it.
 
 ### Implementation notes
 
@@ -249,6 +245,45 @@ The owner skipped the design interview for this slice. The owner approved decisi
 - Nesting.
 - A user command to delegate.
 - Provider-native mid-turn injection.
-- Telling the parent agent that the user steered.
 - A change to the timeout.
 - Thread menu actions.
+
+## Decisions — slice 4, thread actions
+
+The owner chose the posted-message rule of decision 97 and the warning rule of decision 98. The other decisions are the designer's calls. Decision 99 (rename of a text channel) is in [Channel bar sections, text channels, and Reply](2026-11-10-channel-bar-and-reply-design.md).
+
+### Threads list
+
+95. The Threads button in the channel header opens a popover. It lists every thread of the channel: question threads and sub-agent threads, followed or not. The order is latest activity first. The latest activity is the newest user or agent message of the thread, or the creation of the thread while it has none. A question thread that has no message is not listed. Each row shows the name, the kind (Question or Sub-agent), the run state of a sub-agent thread, the message count, an unread mark, and a Follow or Leave control. A click on a row opens the thread panel and closes the popover. A channel with no thread shows "No threads yet." The button is enabled wherever it shows. The snapshot carries the list (`channelThreads`).
+
+### Rename
+
+96. Rename thread is in the thread panel menu and the thread row menu. The dialog has one name field with the current name. The app trims the name, changes line breaks to spaces, and accepts 1 to 80 characters. Duplicate names are allowed. The rule applies to question threads and sub-agent threads. The new name shows on the chip, the channel bar row, the panel header, the Threads list, the reference rows, and in the replay label `[From thread "<name>"]`. The label always uses the current name. An unchanged name closes the dialog with no write.
+
+### Delete
+
+97. Delete thread is in the same two menus. A confirm dialog opens with Cancel in focus. The item is disabled, with no `Soon` label and no `TODO`, while a turn runs in the thread, while its sub-agent task state is `running`, and while it has a pending approval. The store and the app check the same rules again when the user confirms. The delete is one transaction:
+    - Each message of the thread that was posted to the parent channel becomes a normal message of the parent. It keeps its role, author, content, attachments, and its row, so it stays at the place of its reference row. It has no thread link and no `[From thread …]` label after that. The parent agent's context does not change for a posted message.
+    - Then the app removes the thread with its sessions, turns, events, approvals, messages, and read marker (`state.toml`).
+    - The dialog states how many posted messages stay in the channel when the count is above zero.
+    - If the panel shows the thread, it closes. The chip under the anchor message goes. A loaded provider session of the thread closes before the rows go. The anchor message can start a new thread.
+
+### Remove from channel
+
+98. Remove from channel is in the hover toolbar and the context menu of a posted row. It removes the reference row from the parent channel only. The message stays in the thread, and Post to channel works on it again. A confirm dialog always shows. When an agent message follows the row in the parent channel, the dialog adds a warning: the agent already read the message, earlier replies can still refer to it, and later turns will not see it. Another reference row does not count as an agent message. The row goes in both cases. If the replay summary of the channel ended at the row, it ends at the row before.
+
+### Unchanged
+
+100. Mute Channel and Archive Channel… stay planned: disabled, `Soon`, with their `TODO`. The Git branch and worktree items stay planned.
+
+### Shared rules
+
+101. The `TODO` comments and planned entries of the five implemented actions are gone. The shared planned-item model stays for the planned items that remain. An action that a state blocks is disabled without `Soon`.
+102. A backend error shows as a toast. The dialog stays open and the input stays as the user typed it.
+
+### Implementation notes
+
+- All writes are Tauri commands with checks in Rust: `rename_thread`, `delete_thread`, `remove_posted_message`, and `rename_text_channel`. `thread_posted_count` is a read command for the delete dialog. The web checks are for feedback only.
+- One host (`ThreadActionDialogs.vue`) shows the four dialogs. A control sets `pendingAction` (`thread-actions.ts`), so no menu needs an event chain.
+- In a confirm dialog, Enter activates the button that has the focus. Cancel has the focus when the dialog opens, so Enter confirms only when the focus is not on a button. Escape and Cancel close the dialog.
+- The delete keeps the reference row and copies the content of its source into it. The row ID does not change, so read markers and replay summaries stay valid.

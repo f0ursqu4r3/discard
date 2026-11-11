@@ -87,6 +87,51 @@ pub async fn leave_thread(app: tauri::AppHandle, channels: State<'_, Arc<super::
     follow(app, channels.inner().clone(), thread_id, false).await
 }
 
+/// Give a thread a new name. Returns the stored name. The name is trimmed, line breaks become spaces, and the length
+/// is 1 to 80 characters.
+#[tauri::command]
+pub async fn rename_thread(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, thread_id: String, name: String) -> Result<String, String> {
+    let channels = channels.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || channels.rename_thread(&discard_core::model::ChannelId(thread_id), &name)).await.map_err(|e| e.to_string())?;
+    use tauri::Emitter;
+    let _ = app.emit("discard://conversations", ());
+    result
+}
+
+/// How many messages of a thread were posted to its channel. A delete keeps these in the channel.
+#[tauri::command]
+pub async fn thread_posted_count(channels: State<'_, Arc<super::channels::Channels>>, thread_id: String) -> Result<usize, String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.thread_posted_count(&discard_core::model::ChannelId(thread_id))).await.map_err(|e| e.to_string())?
+}
+
+/// Delete a thread with its messages. A message that was posted to the channel stays there. Returns how many stayed.
+#[tauri::command]
+pub async fn delete_thread(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, thread_id: String) -> Result<usize, String> {
+    let channels = channels.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || channels.delete_thread(&discard_core::model::ChannelId(thread_id))).await.map_err(|e| e.to_string())?;
+    use tauri::Emitter;
+    let _ = app.emit("discard://conversations", ());
+    result
+}
+
+/// Remove a posted reference row from its channel. The message stays in its thread.
+#[tauri::command]
+pub async fn remove_posted_message(channels: State<'_, Arc<super::channels::Channels>>, message_id: String) -> Result<(), String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.remove_posted_message(&message_id)).await.map_err(|e| e.to_string())?
+}
+
+/// Rename a text channel. Returns the stored name.
+#[tauri::command]
+pub async fn rename_text_channel(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, channel_id: String, name: String) -> Result<String, String> {
+    let channels = channels.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || channels.rename_text_channel(&discard_core::model::ProjectId(project_id), &discard_core::model::ChannelId(channel_id), &name)).await.map_err(|e| e.to_string())?;
+    use tauri::Emitter;
+    let _ = app.emit("discard://conversations", ());
+    result
+}
+
 #[tauri::command]
 pub fn get_worktree_requests(access: State<'_, Arc<discard_core::worktree_access::WorktreeAccess>>, channel_id: String) -> Vec<discard_core::worktree_access::RemovalRequest> {
     access.requests(&discard_core::model::ChannelId(channel_id))

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import ChannelList from './ChannelList.vue'
 import NavigationContextMenu from './NavigationContextMenu.vue'
 import { ContextMenuItem } from './ui/context-menu'
+import { clearAction, pendingAction } from './thread-actions'
 import type { BranchRowDto, ChannelDto, ProjectChannelDto, ThreadLinkDto } from '../bridge/types'
 
 vi.mock('@/bridge/api', () => ({ createTextChannel: vi.fn() }))
@@ -67,6 +68,7 @@ beforeEach(() => localStorage.clear())
 afterEach(() => {
   views.splice(0).forEach((view) => view.unmount())
   document.body.innerHTML = ''
+  clearAction()
 })
 
 test('the Text channels section lists general first, then text channels in creation order', () => {
@@ -165,7 +167,7 @@ test('the plus button is disabled while the app is busy', () => {
   expect(view.get('[data-ui-id="text-channels-create"]').attributes('disabled')).toBeDefined()
 })
 
-test('a text channel menu has Mute, Rename, and Archive as disabled Soon items; general has no Rename', async () => {
+test('a text channel menu has Rename as a working item; Mute and Archive stay disabled Soon items', async () => {
   const view = track(mount(ChannelList, { attachTo: document.body, props }))
   const menus = view.findAllComponents(NavigationContextMenu)
   const channelMenus = menus.filter((menu) => menu.props('kind') === 'channel')
@@ -180,27 +182,30 @@ test('a text channel menu has Mute, Rename, and Archive as disabled Soon items; 
     ['plans', 'plans', true],
     ['notes', 'notes', true],
   ])
-  const entries = async (id: string) => {
-    const target = view.get(
-      id === 'general'
-        ? '[data-ui-id="project-general-channel"]'
-        : `[data-ui-id="text-channel-${id}"]`,
-    )
-    await target.trigger('contextmenu', { button: 2, clientX: 10, clientY: 10 })
-    await flushPromises()
-    const planned = view
-      .findAllComponents(ContextMenuItem)
-      .filter((item) => item.text().includes('Soon'))
-    return planned.map((item) => [
-      item.text().replace(/\s+/g, ' '),
-      item.attributes('aria-disabled'),
-    ])
-  }
-  expect(await entries('plans')).toEqual([
-    ['Mute Channel Soon', 'true'],
-    ['Rename Channel… Soon', 'true'],
-    ['Archive Channel… Soon', 'true'],
+  await view
+    .get('[data-ui-id="text-channel-plans"]')
+    .trigger('contextmenu', { button: 2, clientX: 10, clientY: 10 })
+  await flushPromises()
+  const items = view.findAllComponents(ContextMenuItem)
+  const labels = items.map((item) => item.text().replace(/\s+/g, ' '))
+  expect(labels.filter((label) => /Mute|Rename Channel|Archive/.test(label))).toEqual([
+    'Mute Channel Soon',
+    'Rename Channel…',
+    'Archive Channel… Soon',
   ])
+  const rename = items.find((item) => item.text() === 'Rename Channel…')!
+  expect(rename.attributes('aria-disabled')).toBeUndefined()
+  for (const label of ['Mute Channel Soon', 'Archive Channel… Soon'])
+    expect(
+      items.find((item) => item.text().replace(/\s+/g, ' ') === label)!.attributes('aria-disabled'),
+    ).toBe('true')
+  rename.vm.$emit('select')
+  expect(pendingAction.value).toEqual({
+    kind: 'rename-channel',
+    projectId: 'project',
+    channelId: 'plans',
+    name: 'plans',
+  })
 })
 
 test('the general row menu has no Rename item', async () => {

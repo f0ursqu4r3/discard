@@ -1,14 +1,17 @@
 import { expect, test } from 'vite-plus/test'
 import type { ChannelDto, MessageDto, ThreadChipDto, ThreadLinkDto } from '../bridge/types'
 import {
+  THREAD_NAME_MAX,
+  agentFollows,
   channelApprovals,
   messageCountLabel,
+  normalizeThreadName,
   selectedChannelApprovals,
   threadAction,
   threadLinks,
   threadStates,
 } from './threads'
-import { referenceMenuPlanned, threadActions, threadMenuPlanned } from './thread-menu'
+import { threadActionLabels, threadDeleteBlock } from './thread-menu'
 
 const link = (id: string, name = id): ThreadLinkDto => ({
   id,
@@ -65,15 +68,42 @@ test('message counts use the singular for one', () => {
   expect(messageCountLabel(3)).toBe('3 messages')
 })
 
-test('every planned thread control uses the shared planned model', () => {
-  for (const entry of [
-    ...Object.values(threadActions),
-    ...threadMenuPlanned,
-    ...referenceMenuPlanned,
-  ])
-    expect(entry.kind).toBe('planned')
-  expect(threadMenuPlanned.map((entry) => entry.label)).toEqual(['Rename thread', 'Delete thread'])
-  expect(referenceMenuPlanned.map((entry) => entry.label)).toEqual(['Remove from channel'])
+test('the thread actions are implemented: no planned entry is left in the thread menu model', () => {
+  expect(threadActionLabels).toEqual({
+    list: 'Threads',
+    rename: 'Rename thread',
+    remove: 'Delete thread',
+    removeFromChannel: 'Remove from channel',
+  })
+})
+
+test('a running turn, a running task or a pending approval blocks Delete', () => {
+  expect(threadDeleteBlock({})).toBeNull()
+  expect(threadDeleteBlock({ running: false, state: 'done', pendingApprovals: 0 })).toBeNull()
+  expect(threadDeleteBlock({ running: true })).toBe('A turn runs in this thread.')
+  expect(threadDeleteBlock({ state: 'running' })).toBe('A sub-agent task runs in this thread.')
+  expect(threadDeleteBlock({ pendingApprovals: 3 })).toBe('An approval waits in this thread.')
+})
+
+test('a thread name loses line breaks and edge spaces and has 1 to 80 characters', () => {
+  expect(normalizeThreadName('  Latency\nplan\r\nnow  ')).toBe('Latency plan now')
+  expect(normalizeThreadName('')).toBeNull()
+  expect(normalizeThreadName(' \n ')).toBeNull()
+  expect(normalizeThreadName('é'.repeat(THREAD_NAME_MAX))).toBe('é'.repeat(THREAD_NAME_MAX))
+  expect(normalizeThreadName('a'.repeat(THREAD_NAME_MAX + 1))).toBeNull()
+})
+
+test('an agent message that follows a reference row says the agent read it', () => {
+  const at = (id: string, role: MessageDto['role'], postedFrom?: MessageDto['postedFrom']) =>
+    ({ id, role, continuesGroup: false, blocks: [], postedFrom }) as MessageDto
+  const from = { sourceMessageId: 's', threadChannelId: 't', threadName: 'T' }
+  const reference = at('ref', 'agent', from)
+  expect(agentFollows([at('q', 'user'), reference], 'ref')).toBe(false)
+  expect(agentFollows([reference, at('u', 'user')], 'ref')).toBe(false)
+  expect(agentFollows([reference, at('a', 'agent')], 'ref')).toBe(true)
+  expect(agentFollows([at('a', 'agent'), reference], 'ref')).toBe(false)
+  expect(agentFollows([reference, at('other', 'agent', from)], 'ref')).toBe(false)
+  expect(agentFollows([at('a', 'agent')], 'missing')).toBe(false)
 })
 
 test('approval counts add the threads of a channel to the channel itself', () => {

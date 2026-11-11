@@ -71,6 +71,7 @@ import NavigationPanel from './components/workspace/NavigationPanel.vue'
 import DirectMessageSidebar from './components/workspace/DirectMessageSidebar.vue'
 import ContextPanel from './components/workspace/ContextPanel.vue'
 import ThreadPanel from './components/workspace/ThreadPanel.vue'
+import ThreadActionDialogs from './components/workspace/ThreadActionDialogs.vue'
 import WorkspacePageView from './components/workspace/WorkspacePage.vue'
 import BrandMark from './components/workspace/BrandMark.vue'
 import UiInspector from './components/workspace/UiInspector.vue'
@@ -1108,6 +1109,8 @@ watch(
                 page === 'conversation' && store.snapshot.agentId ? store.snapshot.agent : undefined
               "
               @search="searchHistory"
+              :threads="store.snapshot.channelThreads ?? []"
+              @open-thread="openThreadById"
               :member-list-visible="
                 (showContextPanel || contextOpen) && sidebarMode === 'profile' && !threadActive
               "
@@ -1591,6 +1594,7 @@ watch(
       @close="profileId = null"
       @message="action(`message_agent:${$event}`)"
     />
+    <ThreadActionDialogs :messages="store.history" />
     <UiInspector v-if="inspector" @close="inspector = false" />
     <Toaster
       :theme="store.snapshot?.theme.mode === 'light' ? 'light' : 'dark'"

@@ -121,6 +121,13 @@ impl UiState {
     /// Record the author of a message that was added through `Update::ConversationMarker`.
     pub fn set_author(&mut self, message: MessageId, author: crate::model::MessageAuthor) { self.authors.insert(message, author); }
     pub fn responder(&self) -> Option<&crate::model::MessageAuthor> { self.responder.as_ref() }
+    /// Drop a saved message from the transcript, with its author. Returns whether it was there.
+    pub fn remove_message(&mut self, message: &MessageId) -> bool {
+        self.authors.remove(message);
+        let before = self.history.len();
+        self.history.retain(|m| &m.id != message);
+        self.history.len() != before
+    }
     /// The local ID of the latest user message that `Update::UserMessageSaved` has not replaced yet.
     pub fn unsaved_user(&self) -> Option<&MessageId> { self.unsaved_user.as_ref() }
 
@@ -383,6 +390,19 @@ mod tests {
         assert_eq!(s.history().len(), 1);
         assert_eq!(s.history()[0].role, Role::User);
         assert_eq!(s.history()[0].blocks, vec![Block::Markdown { text: "hi".into() }]);
+    }
+
+    #[test]
+    fn a_removed_message_leaves_the_transcript_with_its_author() {
+        let mut s = state();
+        s.user_sent("one");
+        s.user_sent("two");
+        let (first, second) = (s.history()[0].id.clone(), s.history()[1].id.clone());
+        s.set_author(second.clone(), crate::model::MessageAuthor { agent_id: crate::model::AgentId("a".into()), name: "Q".into(), provider: "x".into(), avatar: None });
+        assert!(s.remove_message(&second));
+        assert!(!s.remove_message(&second), "a second removal finds nothing");
+        assert_eq!(s.history().iter().map(|m| m.id.clone()).collect::<Vec<_>>(), vec![first]);
+        assert!(s.authors().is_empty());
     }
 
     #[test]

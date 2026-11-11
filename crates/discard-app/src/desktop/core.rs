@@ -119,6 +119,13 @@ fn live_sub_agent_chips(s: &State, channel: &str) -> Vec<ThreadChipDto> {
         .map(|r| r.chip(s.window.last_read(&r.id), thread_approvals(s, &r.id))).collect()
 }
 
+/// Every thread of `channel` that shows anywhere, followed or not, latest activity first.
+fn channel_thread_list(s: &State, channel: &str) -> Vec<ThreadChipDto> {
+    let mut records: Vec<&ThreadRecord> = s.threads.values().filter(|r| r.parent == channel && r.visible()).collect();
+    records.sort_by(|a, b| b.activity().cmp(a.activity()).then_with(|| b.id.cmp(&a.id)));
+    records.into_iter().map(|r| r.chip(s.window.last_read(&r.id), thread_approvals(s, &r.id))).collect()
+}
+
 /// Every loaded thread with an approval that waits, followed or not.
 fn pending_thread_approvals(s: &State) -> Vec<ThreadApprovalDto> {
     s.threads.values().filter_map(|r| {
@@ -710,6 +717,7 @@ impl AppCore {
                 },
                 channels,
                 live_sub_agent_threads: live_sub_agent_chips(&state, &state.active.channel_id),
+                channel_threads: channel_thread_list(&state, &state.active.channel_id),
                 thread_approvals: pending_thread_approvals(&state),
                 open_thread: open_thread_dto(&state),
                 branches,
@@ -1235,6 +1243,84 @@ impl AppCore {
         let parent = record.parent.clone();
         if s.active.channel_id == parent { s.history_rev += 1; }
         if s.open_thread.as_deref() == Some(id) { s.thread_rev += 1; }
+        s.rev += 1;
+        self.changed.notify_one();
+    }
+    /// Why a loaded thread cannot be deleted now: a turn runs, its sub-agent task runs, or an approval waits.
+    pub fn thread_delete_blocker(&self, id: &str) -> Option<&'static str> {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        Self::delete_blocker(&s, id)
+    }
+    fn delete_blocker(s: &State, id: &str) -> Option<&'static str> {
+        let loaded = s.parked.get(id);
+        if loaded.is_some_and(|c| c.ui.turn_running()) { return Some("A turn runs in this thread. Stop it before you delete the thread."); }
+        if s.threads.get(id).is_some_and(|r| r.state == Some(ThreadState::Running)) { return Some("A sub-agent task still runs in this thread. Stop it or wait for it before you delete the thread."); }
+        if loaded.is_some_and(|c| c.ui.pending_approvals() > 0) { return Some("An approval waits in this thread. Decide it before you delete the thread."); }
+        None
+    }
+    /// Take a thread out of use before its rows go: nothing can send in it until `end_channel_change`. Refused when
+    /// `thread_delete_blocker` names a reason.
+    pub fn begin_thread_delete(&self, id: &str) -> Result<(), String> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(reason) = Self::delete_blocker(&s, id) { return Err(reason.into()); }
+        if !s.changing_channels.insert(id.to_owned()) { return Err("This thread is changing. Try again.".into()); }
+        Ok(())
+    }
+    /// Forget a thread that the store deleted: its runtime, record, read marker and panel. Its posted messages are
+    /// normal messages of the parent now, so the parent keeps them and loses only the thread link.
+    pub fn thread_deleted(&self, id: &str) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.parked.get(id).is_some_and(|c| c.thread_parent.is_some()) && let Some(runtime) = s.parked.remove(id) {
+            let _ = runtime.commands.send(Command::Cancel);
+        }
+        let parent = s.threads.remove(id).map(|record| record.parent);
+        let _ = s.window.clear_last_read(id);
+        if s.open_thread.as_deref() == Some(id) { s.open_thread = None; s.thread_rev += 1; }
+        let st = &mut *s;
+        for channel in std::iter::once(&mut st.active).chain(st.parked.values_mut()) { channel.posted.retain(|_, source| source.thread_channel_id.0 != id); }
+        if parent.is_none_or(|parent| parent == s.active.channel_id) { s.history_rev += 1; }
+        s.rev += 1;
+        self.changed.notify_one();
+    }
+    /// Show the new name of a thread everywhere the app holds it: its record, its runtime and the reference rows.
+    pub fn thread_renamed(&self, id: &str, name: &str) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(record) = s.threads.get_mut(id) else { return };
+        record.name = name.to_owned();
+        let parent = record.parent.clone();
+        if let Some(runtime) = s.parked.get_mut(id) { runtime.channel = name.to_owned(); }
+        let st = &mut *s;
+        for channel in std::iter::once(&mut st.active).chain(st.parked.values_mut()) {
+            for source in channel.posted.values_mut().filter(|source| source.thread_channel_id.0 == id) { source.thread_name = name.to_owned(); }
+        }
+        touch_thread(&mut s, &parent, id);
+        s.rev += 1;
+        self.changed.notify_one();
+    }
+    /// Show the new name of a channel.
+    pub fn channel_renamed(&self, id: &str, name: &str) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let target = if s.active.channel_id == id { Some(&mut s.active) } else { s.parked.get_mut(id) };
+        let Some(target) = target else { return };
+        target.channel = name.to_owned();
+        s.rev += 1;
+        self.changed.notify_one();
+    }
+    /// A reference row left its channel: the row, its link and its position in the read marker go. The thread keeps
+    /// the message, and the thread panel shows it as not posted.
+    pub fn reference_removed(&self, reference: &discard_core::model::MessageId, source: &PostedSource) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let st = &mut *s;
+        let Some(parent) = std::iter::once(&mut st.active).chain(st.parked.values_mut()).find(|c| c.posted.contains_key(reference)) else { return };
+        let parent_id = parent.channel_id.clone();
+        let before = parent.ui.history().iter().position(|m| m.id == *reference).and_then(|index| index.checked_sub(1)).map(|index| parent.ui.history()[index].id.0.clone());
+        parent.posted.remove(reference);
+        parent.ui.remove_message(reference);
+        if parent.new_anchor.as_deref() == Some(reference.0.as_str()) { parent.new_anchor = None; }
+        // A marker on the removed row moves to the row before it, so the messages after it keep their read state.
+        if st.window.last_read(&parent_id) == Some(reference.0.as_str()) && let Some(before) = before { let _ = st.window.set_last_read(&parent_id, &before); }
+        if s.active.channel_id == parent_id { s.history_rev += 1; }
+        if s.open_thread.as_deref() == Some(source.thread_channel_id.0.as_str()) { s.thread_rev += 1; }
         s.rev += 1;
         self.changed.notify_one();
     }

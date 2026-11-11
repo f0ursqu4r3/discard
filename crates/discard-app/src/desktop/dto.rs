@@ -364,6 +364,9 @@ pub struct SnapshotDto {
     /// The sub-agent threads of the running turn of the selected channel, in task order. They have no anchor yet.
     /// When the turn ends they move to `MessageDto.subAgentThreads` of the saved response.
     pub live_sub_agent_threads: Vec<ThreadChipDto>,
+    /// Every thread of the selected channel, followed or not, latest activity first. A question thread that has no
+    /// message yet is not listed. The Threads list reads this.
+    pub channel_threads: Vec<ThreadChipDto>,
     /// Threads with an approval waiting, followed or not, in the loaded channels.
     pub thread_approvals: Vec<ThreadApprovalDto>,
     pub open_thread: Option<OpenThreadDto>,
@@ -450,6 +453,7 @@ fn sample_snapshot() -> SnapshotDto {
         repositories_loading: false,
         channels: vec![],
         live_sub_agent_threads: vec![],
+        channel_threads: vec![],
         thread_approvals: vec![],
         open_thread: None,
         slots: BTreeMap::new(),
@@ -566,6 +570,7 @@ mod tests {
         let mut posted = message("reply", "agent", "It keeps the channel clean.");
         posted.posted_to_channel = true;
         let mut snapshot = sample_snapshot();
+        snapshot.channel_threads = anchor.thread.iter().cloned().collect();
         snapshot.channels = vec![ChannelDto {
             agent_id: "agent".into(), project_id: Some("project".into()), id: "channel".into(), name: "general".into(), agent: "Agent".into(), provider: "example".into(),
             workspace_mode: "main_checkout".into(), running: false, unread: false, pending_approvals: 0, thread_pending_approvals: 0,
@@ -602,6 +607,7 @@ mod tests {
         // Two sub-agent threads run now. They have no anchor: the snapshot carries their chips.
         let mut snapshot = sample_snapshot();
         snapshot.live_sub_agent_threads = vec![chip("find-callers", "Find callers", "running", "", 1), chip("read-docs", "Read the docs", "done", "The docs say two things.", 2)];
+        snapshot.channel_threads = snapshot.live_sub_agent_threads.iter().rev().cloned().collect();
         snapshot.channels = vec![ChannelDto {
             agent_id: "agent".into(), project_id: Some("project".into()), id: "channel".into(), name: "general".into(), agent: "Agent".into(), provider: "example".into(),
             workspace_mode: "main_checkout".into(), running: true, unread: false, pending_approvals: 0, thread_pending_approvals: 1,

@@ -7,7 +7,7 @@ use discard_app::desktop::delegation::{AppDelegator, Limits};
 use discard_app::desktop::pump::{Emit, pump_live};
 use discard_core::agent::AgentConfig;
 use discard_core::agent_requests::AgentRequests;
-use discard_core::delegation::{DelegateResult, DelegateTask, Delegator};
+use discard_core::delegation::{DelegateResult, DelegateTask, Delegator, format_results, steer_note};
 use discard_core::driver::TurnOutcome;
 use discard_core::engine::Engine;
 use discard_core::model::{AgentId, Block, Channel, ChannelId, Message, MessageAuthor, MessageId, Role, ThreadState};
@@ -438,6 +438,7 @@ async fn a_message_in_a_finished_sub_agent_thread_starts_a_follow_up_turn_and_ke
     let results = finish(call(&w, &w.parent.id, vec![task("one", &w.agent)])).await;
     let thread = results[0].thread_channel_id.clone();
     assert_eq!((results[0].state, results[0].text.as_str()), (ThreadState::Done, "first answer"));
+    assert_eq!(results[0].steer_note, None, "a task without a steer has no note");
     until("the thread turn to end", || !w.thread_running(&thread)).await;
     w.channels.open_thread(&thread).unwrap();
     w.channels.send_with_options(&thread.0, "Where is it defined?".into(), vec![], false).unwrap();
@@ -470,6 +471,10 @@ async fn a_steer_keeps_the_task_open_and_the_call_returns_the_text_of_the_last_t
     w.channels.send_with_options(&thread.0, "Only look in tests.".into(), vec![], false).unwrap();
     let results = finish(call).await;
     assert_eq!((results[0].state, results[0].text.as_str()), (ThreadState::Done, "Only the tests call it."), "the result is the last turn's message");
+    let note = steer_note(1, "Only look in tests.");
+    assert_eq!(results[0].steer_note, note, "the note counts the steer and quotes it");
+    let rendered: serde_json::Value = serde_json::from_str(&format_results(&results)).unwrap();
+    assert_eq!(rendered["results"][0]["result"], format!("{}\n\nOnly the tests call it.", note.unwrap()).as_str(), "the note leads the text of the last turn");
     until("the steer turn to end", || !w.thread_running(&thread)).await;
     assert_eq!(w.state(&thread), Some(ThreadState::Done));
     // The panel shows the partial response, then the steer, then the final reply.
@@ -478,6 +483,28 @@ async fn a_steer_keeps_the_task_open_and_the_call_returns_the_text_of_the_last_t
     assert_eq!(w.store.lock().unwrap().messages_for_channel(&thread).unwrap().len(), 4);
     let open = w.core.snapshot().open_thread.unwrap();
     assert!(open.followed && !open.turn_running);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_steered_task_that_ends_cancelled_still_carries_the_note() {
+    let w = world();
+    w.rigs.scripts.lock().unwrap().insert("steered".into(), vec![Step::working(), Step::text("partial notes"), Step::Hang]);
+    w.rigs.later_scripts.lock().unwrap().insert("steered".into(), vec![vec![Step::working(), Step::text("steer partial"), Step::Hang]]);
+    w.parent_turn_running();
+    let call = call(&w, &w.parent.id, vec![task("steered", &w.agent)]);
+    let thread = w.started(&w.parent.id, 1).await.remove(0);
+    w.channels.open_thread(&thread).unwrap();
+    until("the partial text", || w.core.snapshot().open_thread.is_some_and(|t| !t.live_blocks.is_empty())).await;
+    w.channels.send_with_options(&thread.0, "Only look in \"tests\".".into(), vec![], false).unwrap();
+    until("the steer turn to run", || w.store.lock().unwrap().messages_for_channel(&thread).unwrap().len() >= 3).await;
+    w.core.cancel_in(Some(&thread.0));
+    let results = finish(call).await;
+    assert_eq!(results[0].state, ThreadState::Cancelled);
+    assert_eq!(results[0].steer_note, steer_note(1, "Only look in 'tests'."), "the quotes of the message are swapped");
+    let rendered: serde_json::Value = serde_json::from_str(&format_results(&results)).unwrap();
+    let error = rendered["results"][0]["error"].as_str().unwrap();
+    assert!(error.starts_with("Note: the user sent this sub-agent 1 message during the task."), "{error}");
+    assert!(error.ends_with("The sub-agent task was cancelled."), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

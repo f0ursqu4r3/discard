@@ -247,11 +247,33 @@ that opens the thread. A posted message shows **Posted to channel** in the threa
 choosing **Follow** follows it again. A followed thread shows indented under its channel in the
 channel bar and under its conversation in the direct message list. It shows unread, running, and
 pending approval marks. Select it to open its channel with the thread panel. The thread row menu has
-**Leave thread**. Thread activity does not mark the parent channel unread.
+**Open thread**, **Leave thread**, **Rename thread**, and **Delete thread**. Thread activity does not mark
+the parent channel unread.
 
-The **Threads** list in the channel header, **Rename thread**, **Delete thread**, and **Remove from
-channel** on a posted row are planned. They show disabled with **Soon**. The design is in
-[Threads — design](superpowers/specs/2026-11-10-threads-design.md).
+The **Threads** button in the channel header opens a list of every thread of the channel, followed
+or not. The newest activity comes first. A row shows the thread name, its kind (**Question** or
+**Sub-agent**), the run state of a sub-agent, the message count, an unread mark, and **Follow** or
+**Leave**. Select a row to open the thread. An empty channel says "No threads yet."
+
+**Rename thread** is in the thread panel menu and the thread row menu. The dialog has one name field.
+The name is trimmed, line breaks become spaces, and the length is 1 to 80 characters. Names can repeat.
+The new name shows on the chip, the channel bar, the panel header, the Threads list, and in the label
+`[From thread "<name>"]` that the channel agent reads.
+
+**Delete thread** is in the same menus. A confirm dialog opens, with Cancel in focus. The item is
+disabled while a turn runs in the thread, while its sub-agent task runs, and while an approval waits.
+No Soon label shows, because the state is temporary. A message that you posted to the channel stays
+there as a normal message, at the same place, with the same role, author, content, and attachments.
+It loses its **from thread** link and its replay label, so the channel agent's context does not
+change. The dialog says how many posted messages stay. The delete removes the thread, its messages,
+approvals, and read marker. The panel closes, and the chip under the anchor message goes.
+
+**Remove from channel** is in the hover toolbar and the context menu of a posted row. It removes the
+row from the channel only. The message stays in the thread, and **Post to channel** works on it
+again. A confirm dialog always shows. When an agent message follows the row in the channel, the dialog
+warns that the agent already read the message, that earlier replies can still refer to it, and that
+later turns will not see it. The row goes in both cases. The owner chose these rules for the delete and
+the removal. The design is in [Threads — design](superpowers/specs/2026-11-10-threads-design.md).
 
 A **sub-agent thread** is a read-only research run. An agent starts it with the `delegate` tool.
 You cannot start one. Each task of one `delegate` call makes one thread. During the run, the chips
@@ -272,7 +294,7 @@ sub-agent only. The parent agent gets "cancelled" for that task and continues. *
 Copy, Reply, **Follow**, and **Leave** work. A reply from a sub-agent thread goes to the channel
 composer. The composer is on. While the sub-agent works, it reads **Steer this sub-agent**: a message stops the
 current turn, keeps the partial work, and starts a new turn with your message. The task does not end,
-and the parent agent gets the final message of the last turn. After the task ended, the composer reads
+and the parent agent gets the final message of the last turn. That result starts with a note that says you sent messages, and quotes the latest one. After the task ended, the composer reads
 **Reply in thread**, and a message starts a normal turn in the thread. The state does not change, and
 the parent agent gets nothing. **Stop** works in both cases. **Also post** works as in a question
 thread. A sub-agent thread cannot start another thread.
@@ -377,8 +399,11 @@ channel. Enter a name. The dialog shows the saved name as `#name`. Discard saves
 case. It joins words with hyphens. A name holds 1 to 50 letters, numbers, hyphens, and underscores.
 A name cannot match another active text channel or `general`. The new channel opens at once.
 
-**Mute Channel**, **Rename Channel…**, and **Archive Channel…** show in the row menu of a text
-channel. They are disabled and marked Soon. `#general` has no rename item. **Archive Channel** in the
+**Rename Channel…** works in the row menu of a text channel. The dialog has one name field with the
+current name. It uses the checks of channel creation: the same name rules, and a name that no other
+active text channel or `general` has. An unchanged name closes the dialog with no change. `#general`
+and branch channels cannot be renamed here, and `#general` has no rename item. **Mute Channel** and
+**Archive Channel…** show in the same menu, disabled and marked Soon. **Archive Channel** in the
 menu bar archives the open text channel. An archived text channel shows in Archived.
 
 Archived holds a channel when one of these is true:

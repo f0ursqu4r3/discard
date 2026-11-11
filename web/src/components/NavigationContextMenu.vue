@@ -20,7 +20,7 @@ const props = defineProps<{
   /** The channel can be renamed. `#general` cannot. */
   renamable?: boolean
 }>()
-const emit = defineEmits<{ open: [] }>()
+const emit = defineEmits<{ open: []; rename: [] }>()
 const label = computed(() => props.kind[0]!.toUpperCase() + props.kind.slice(1))
 const plannedEntries = computed(() => {
   // TODO: Create worktrees and rename or delete Git branches with validation and confirmation.
@@ -29,9 +29,6 @@ const plannedEntries = computed(() => {
   // TODO: Create a branch in a worktree and remove worktrees after checking for local changes.
   if (props.kind === 'worktree') return [planned('Create Branch…'), planned('Remove Worktree…')]
   // TODO: Persist channel mute settings and archive channels from the sidebar.
-  // TODO: Rename text channels with the same name checks as channel creation.
-  if (props.renamable)
-    return [planned('Mute Channel'), planned('Rename Channel…'), planned('Archive Channel…')]
   return [planned('Mute Channel'), planned('Archive Channel…')]
 })
 async function copy(text: string) {
@@ -64,10 +61,21 @@ async function copy(text: string) {
         Copy {{ label }} ID
       </ContextMenuItem>
       <ContextMenuSeparator />
-      <ContextMenuItem v-for="(entry, index) in plannedEntries" :key="index" disabled>
-        {{ entry.label }}
-        <span class="ml-auto text-xs text-muted-foreground">Soon</span>
-      </ContextMenuItem>
+      <template v-for="(entry, index) in plannedEntries" :key="index">
+        <ContextMenuItem disabled>
+          {{ entry.label }}
+          <span class="ml-auto text-xs text-muted-foreground">Soon</span>
+        </ContextMenuItem>
+        <!-- Rename sits between Mute and Archive. -->
+        <ContextMenuItem
+          v-if="index === 0 && renamable"
+          data-ui-id="rename-channel-item"
+          :disabled="busy || !id"
+          @select="!busy && id && emit('rename')"
+        >
+          Rename Channel…
+        </ContextMenuItem>
+      </template>
     </ContextMenuContent>
   </ContextMenu>
 </template>

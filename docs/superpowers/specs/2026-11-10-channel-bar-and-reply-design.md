@@ -21,7 +21,8 @@ The owner made these decisions:
 - The Archived section is hidden by default. A switch on the Project settings page shows it.
 - A deleted branch whose channel has no saved message never shows in Archived. Its record stays in
   the database. If the branch comes back, the same channel is used again.
-- Text channels ship with create only. Rename and archive stay visible as disabled `Soon` items.
+- Text channels ship with create only. Rename and archive stay visible as disabled `Soon` items. Rename
+  became a working action in decision 99 below.
 - The agent receives the full source text of a reply. The UI shows only a link row.
 
 These are implementation calls, not owner decisions:
@@ -128,10 +129,28 @@ regard to case. `general` is always taken. Error: "A channel with this name alre
 - The dialog has one name field, a live `#name` preview of the normalized name, and this help text:
   "Use a text channel for a project conversation that has no branch." It shows a server error in
   the dialog.
-- The context menu of a text channel row has **Mute Channel**, **Rename Channel…**, and
-  **Archive Channel…** as planned `Soon` items, each with a `TODO`. `#general` has no rename item.
+- The context menu of a text channel row has **Mute Channel** and **Archive Channel…** as planned `Soon`
+  items, each with a `TODO`, and **Rename Channel…** as a working item (decision 99). `#general` has no
+  rename item.
 - The **Archive Channel…** item of the menu bar works on a text channel as it does on any channel.
   An archived text channel shows in Archived.
+
+### Rename (decision 99)
+
+The designer chose this rule, in the thread actions slice ([Threads — design](2026-11-10-threads-design.md)).
+
+- **Rename Channel…** is a working item in the row menu of a text channel. It sits between **Mute
+  Channel** and **Archive Channel…**, which stay planned.
+- The dialog has one name field with the current name and a live `#name` preview. It uses the same
+  normalization (`normalize_text_channel_name`) and the same uniqueness check as creation: unique among
+  the active `general` and `text` channels of the project, without regard to case. `general` is always
+  taken. The check ignores the channel itself.
+- `#general` and branch channels cannot be renamed here. `#general` has no rename item. An archived text
+  channel cannot be renamed.
+- An unchanged name closes the dialog with no write.
+- Store: `rename_text_channel(project, channel, name) -> Channel`. Command:
+  `rename_text_channel(project_id, channel_id, name) -> stored name`. A backend error shows as a toast,
+  and the dialog stays open with the name intact.
 
 ## 7. Reply
 

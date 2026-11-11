@@ -1,20 +1,29 @@
-import { planned, type PlannedMenuEntry } from './project-menu'
+import type { ThreadState } from '../bridge/types'
 
-type PlannedItem = Extract<PlannedMenuEntry, { kind: 'planned' }>
+/** Labels of the thread actions. Each one works. A state can still block one: see `threadDeleteBlock`. */
+export const threadActionLabels = {
+  list: 'Threads',
+  rename: 'Rename thread',
+  remove: 'Delete thread',
+  removeFromChannel: 'Remove from channel',
+} as const
 
-/** Thread controls that are visible and disabled until their behaviour exists. */
-export const threadActions = {
-  // TODO: List all threads of the channel, including threads that are not followed.
-  list: planned('Threads'),
-  // TODO: Edit the thread name.
-  rename: planned('Rename thread'),
-  // TODO: Delete a thread, with rules for messages that were posted to the parent channel.
-  remove: planned('Delete thread'),
-  // TODO: Remove a posted reference row from the channel, with rules for a parent agent that already read it.
-  removeFromChannel: planned('Remove from channel'),
+/** What the app reports about a thread that decides whether it can be deleted. */
+export interface ThreadActivity {
+  /** A turn runs in the thread. */
+  running?: boolean
+  /** The state of a sub-agent task. */
+  state?: ThreadState | null
+  pendingApprovals?: number
 }
 
-/** Planned entries of the thread panel menu and the thread row menu. */
-export const threadMenuPlanned: PlannedItem[] = [threadActions.rename, threadActions.remove]
-/** Planned entries of the menu of a posted reference row. */
-export const referenceMenuPlanned: PlannedItem[] = [threadActions.removeFromChannel]
+/**
+ * Why a thread cannot be deleted now, or null. This is a temporary state, not a planned action: the item stays
+ * enabled-looking in every other state. The app checks again when the user confirms.
+ */
+export function threadDeleteBlock(thread: ThreadActivity): string | null {
+  if (thread.running) return 'A turn runs in this thread.'
+  if (thread.state === 'running') return 'A sub-agent task runs in this thread.'
+  if ((thread.pendingApprovals ?? 0) > 0) return 'An approval waits in this thread.'
+  return null
+}
