@@ -293,6 +293,7 @@ impl Provider for CodexProvider {
         self.matrix.supports(spec.enforcement)?;
         let mut running_version = None;
         let mut files = None;
+        let mut session_tmp = None;
         let mut startup_args = Vec::new();
         let mut expected_controls = None;
         if spec.mode.replays_transcript() {
@@ -318,6 +319,14 @@ impl Provider for CodexProvider {
             let effective = self.read_effective_config(&spec.cwd, &probe_args).await.map_err(verification_error)?;
             let mut controls = codex_controls(&effective, tools).map_err(verification_error)?;
             controls["model_catalog_json"] = json!(catalog_path);
+            if workspace {
+                // The only writable temp directory of the session. It is deleted with the session files.
+                let tmp = owned.root.path().join("tmp");
+                std::fs::create_dir(&tmp).map_err(|e| setup(e.to_string()))?;
+                let tmp = tmp.canonicalize().map_err(|e| setup(e.to_string()))?;
+                controls["sandbox_workspace_write"]["writable_roots"] = json!([tmp]);
+                session_tmp = Some(tmp);
+            }
             startup_args.extend(config_args(&controls));
             expected_controls = Some(controls);
             files = Some(owned);
@@ -345,6 +354,7 @@ impl Provider for CodexProvider {
 
         let mut command = self.command();
         if workspace { command.env("GIT_OPTIONAL_LOCKS", "0"); }
+        if let Some(tmp) = &session_tmp { command.env("TMPDIR", tmp); }
         let mut child = spawn_tokio(command
             .args(&startup_args)
             .args(["app-server", "--listen", "stdio://"])

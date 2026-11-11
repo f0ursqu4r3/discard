@@ -112,7 +112,8 @@ it does not copy credentials or change the source cache. Production requires a c
 | Shell requests | `item/commandExecution/requestApproval`, `kind=command`, command, cwd, commandActions. | Command above |
 | Decisions | Commands offer accept, acceptWithExecpolicyAmendment, cancel. File-change requests omit availableDecisions. | Command above |
 | Escalation marker | No reliable distinct marker. Classify every Workspace command approval as SandboxEscape. | Command above |
-| Writable roots | Effective `sandbox_workspace_write.writable_roots=[]`, network_access=false; temp directories remain writable by default. | Command above |
+| Writable roots | Effective `sandbox_workspace_write`: network_access=false, `exclude_slash_tmp=true`, `exclude_tmpdir_env_var=true`. The one writable root is a private temp directory of the session, and `TMPDIR` points to it. `/tmp` and the user temp directory are not writable. Checked with `codex sandbox` and `config/read` on Codex 0.166.0 (2026-11-11). | Command above |
+| Approvals reviewer | Discard sets `approvals_reviewer="user"` in the session controls and `approvalsReviewer: "user"` in `thread/start`. It refuses the session when Codex reports another reviewer. Without this, a user config with a reviewer agent (`guardian_subagent`) let Codex approve a sandbox escape with no Discard card. `thread/start` reported `auto_review` without the override and `user` with it on Codex 0.166.0 (2026-11-11). | Command above |
 | Instruction discovery | `project_doc_max_bytes=0`; root AGENTS.md sentinel absent from model requests. | Command above |
 | Approved writes | Approving all requests permits outside patch, temporary-HOME touch, and git add. Ordinary approval must not be described as proof that these operations stay sandboxed. | Command above |
 | Network | curl exits 6 with network_access=false. | Command above |

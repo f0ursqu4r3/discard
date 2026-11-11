@@ -175,7 +175,10 @@ pub(crate) fn codex_controls(effective: &Value, tools: CatalogTools) -> Result<V
     controls["features"]["skip_host_skill_discovery"] = json!(true);
     if tools == CatalogTools::Workspace {
         controls["features"]["shell_tool"] = json!(true);
-        controls["sandbox_workspace_write"] = json!({"network_access":false,"writable_roots":[]});
+        // Codex keeps `/tmp` and `$TMPDIR` writable by default. Both are shared, so a command could write
+        // outside the worktree with no approval. The provider adds one private temp directory instead.
+        controls["sandbox_workspace_write"] =
+            json!({"network_access":false,"writable_roots":[],"exclude_slash_tmp":true,"exclude_tmpdir_env_var":true});
     }
     if let Some(servers) = effective.get("mcp_servers") {
         let servers = servers.as_object().ok_or_else(|| setup("effective Codex mcp_servers is malformed"))?;
@@ -310,6 +313,8 @@ mod tests {
         assert_eq!(c["features"]["shell_tool"], true);
         assert_eq!(c["sandbox_workspace_write"]["network_access"], false);
         assert_eq!(c["sandbox_workspace_write"]["writable_roots"], json!([]));
+        assert_eq!(c["sandbox_workspace_write"]["exclude_slash_tmp"], true);
+        assert_eq!(c["sandbox_workspace_write"]["exclude_tmpdir_env_var"], true);
         assert_eq!(c["approvals_reviewer"], "user");
         assert_eq!(codex_controls(&json!({"approvals_reviewer":"guardian_subagent"}), CatalogTools::None).unwrap()["approvals_reviewer"], "user");
         assert_eq!(c["project_doc_max_bytes"], 0); assert_eq!(c["web_search"], "disabled");
