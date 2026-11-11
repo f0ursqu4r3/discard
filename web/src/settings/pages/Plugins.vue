@@ -5,6 +5,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { runAction } from '@/bridge/api'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
+import SettingsNotice from '../ui/SettingsNotice.vue'
+import SettingsCard from '../ui/SettingsCard.vue'
 type Review = {
   id: string
   name: string
@@ -65,99 +67,111 @@ onUnmounted(() => clearInterval(timer))
 </script>
 <template>
   <div v-if="data" class="space-y-4">
-    <div
-      v-if="data.safeMode"
-      data-protected="true"
-      class="flex items-center gap-2 border border-[var(--protected-border)] bg-[var(--protected-bg)] p-2 text-[var(--protected-fg)]"
-    >
-      <span>Safe mode: user plugins disabled</span>
-      <Button @click="runAction('toggle_safe_mode')">Relaunch normally</Button>
-    </div>
-    <div
-      v-if="data.problems.length || error"
-      data-protected="true"
-      class="border border-[var(--protected-border)] bg-[var(--protected-bg)] p-2 text-[var(--protected-fg)]"
-    >
+    <SettingsNotice v-if="data.safeMode" class="flex items-center gap-2">
+      <span class="flex-1">Safe mode: user plugins disabled</span>
+      <Button size="sm" @click="runAction('toggle_safe_mode')">Relaunch normally</Button>
+    </SettingsNotice>
+    <SettingsNotice v-if="data.problems.length || error">
       <strong>Plugin problems</strong>
       <p v-for="problem in data.problems" :key="problem">{{ problem }}</p>
       <p v-if="error" role="alert">{{ error }}</p>
-    </div>
-    <div
-      v-if="data.notice"
-      data-protected="true"
-      class="flex items-center gap-2 border border-[var(--protected-border)] bg-[var(--protected-bg)] p-2 text-[var(--protected-fg)]"
-    >
+    </SettingsNotice>
+    <SettingsNotice v-if="data.notice" class="flex items-center gap-2">
       <span class="flex-1">{{ data.notice }}</span>
-      <Button variant="outline" @click="run('settings_plugin_dismiss_notice', {})">Dismiss</Button>
-    </div>
-    <h2 class="font-semibold">Waiting for your review</h2>
-    <p v-if="!data.reviews.length">Nothing to review.</p>
-    <article
-      v-for="review in data.reviews"
-      :key="review.id"
-      data-protected="true"
-      class="space-y-2 rounded-md border border-[var(--protected-border)] bg-[var(--protected-bg)] p-3 text-[var(--protected-fg)]"
-    >
-      <h3 class="font-bold">{{ review.kind }}: {{ review.name }}</h3>
-      <p>{{ review.description }}</p>
-      <strong>This plugin asks to:</strong>
-      <p v-for="capability in review.capabilities" :key="capability">• {{ capability }}</p>
-      <p v-if="!review.capabilities.length">• nothing beyond running in the sandbox</p>
-      <strong v-if="review.changes.length">Changed since the approved version:</strong>
-      <p v-for="change in review.changes" :key="change">{{ change }}</p>
-      <p v-if="review.fullAccess" class="border border-[var(--protected-border)] p-2 font-bold">
-        FULL LOCAL ACCESS: this plugin can run programs. A program can read your files, use the
-        network, and start other programs.
-      </p>
-      <strong>Code changes:</strong>
-      <pre
-        class="max-h-72 overflow-auto whitespace-pre-wrap border border-[var(--protected-border)] p-2"
-        >{{ review.diff }}</pre>
-      <div class="flex items-center gap-2">
-        <template v-if="review.trustOffered">
-          <span>Trust future edits</span>
-          <Switch
-            :model-value="!!trusted[review.id]"
-            aria-label="Trust future edits"
-            @update:model-value="setTrust(review.id, $event)"
-          />
-        </template>
-        <Button
-          variant="destructive"
-          @click="run('settings_plugin_reject', { reviewId: review.id })"
+      <Button size="sm" variant="outline" @click="run('settings_plugin_dismiss_notice', {})">
+        Dismiss
+      </Button>
+    </SettingsNotice>
+    <SettingsCard title="Waiting for your review">
+      <template v-if="data.reviews.length" #actions>
+        <span class="text-muted-foreground">{{ data.reviews.length }} pending</span>
+      </template>
+      <div class="flex flex-col gap-3">
+        <p v-if="!data.reviews.length" class="text-sm text-muted-foreground">Nothing to review.</p>
+        <SettingsNotice
+          v-for="review in data.reviews"
+          :key="review.id"
+          as="article"
+          class="space-y-2"
         >
-          Reject
-        </Button>
-        <Button @click="run('settings_plugin_approve', { reviewId: review.id })">
-          Approve and run
-        </Button>
+          <h3 class="font-bold">{{ review.kind }}: {{ review.name }}</h3>
+          <p>{{ review.description }}</p>
+          <strong>This plugin asks to:</strong>
+          <p v-for="capability in review.capabilities" :key="capability">• {{ capability }}</p>
+          <p v-if="!review.capabilities.length">• nothing beyond running in the sandbox</p>
+          <strong v-if="review.changes.length">Changed since the approved version:</strong>
+          <p v-for="change in review.changes" :key="change">{{ change }}</p>
+          <p v-if="review.fullAccess" class="border border-[var(--protected-border)] p-2 font-bold">
+            FULL LOCAL ACCESS: this plugin can run programs. A program can read your files, use the
+            network, and start other programs.
+          </p>
+          <strong>Code changes:</strong>
+          <pre
+            class="max-h-72 overflow-auto border border-[var(--protected-border)] p-2 font-mono text-xs whitespace-pre-wrap"
+            >{{ review.diff }}</pre>
+          <div class="flex items-center gap-2">
+            <template v-if="review.trustOffered">
+              <span>Trust future edits</span>
+              <Switch
+                :model-value="!!trusted[review.id]"
+                aria-label="Trust future edits"
+                @update:model-value="setTrust(review.id, $event)"
+              />
+            </template>
+            <Button
+              size="sm"
+              variant="destructive"
+              class="ml-auto"
+              @click="run('settings_plugin_reject', { reviewId: review.id })"
+            >
+              Reject
+            </Button>
+            <Button size="sm" @click="run('settings_plugin_approve', { reviewId: review.id })">
+              Approve and run
+            </Button>
+          </div>
+        </SettingsNotice>
       </div>
-    </article>
-    <h2 class="font-semibold">Installed plugins</h2>
-    <p v-if="!data.statuses.length">
-      No user plugins are installed. The built-in interface is a bundled plugin and is not listed
-      here.
-    </p>
-    <div v-for="status in data.statuses" :key="status.name" class="space-y-2">
-      <div class="flex items-center gap-2">
-        <strong>{{ status.name }}</strong>
-        <span>{{ status.state }}</span>
-        <span v-if="status.trusted">trusts future edits</span>
-        <Button v-if="status.modified" variant="outline" @click="showDiff(status.name)">
-          Show diff
-        </Button>
-        <Button variant="outline" @click="run('settings_plugin_rollback', { name: status.name })">
-          Roll back
-        </Button>
-      </div>
+    </SettingsCard>
+    <SettingsCard title="Installed plugins" flush>
+      <p v-if="!data.statuses.length" class="px-3 py-2 text-sm text-muted-foreground">
+        No user plugins are installed. The built-in interface is a bundled plugin and is not listed
+        here.
+      </p>
       <div
-        v-if="diffs[status.name] !== undefined"
-        data-protected="true"
-        class="border border-[var(--protected-border)] bg-[var(--protected-bg)] p-2 text-[var(--protected-fg)]"
+        v-for="status in data.statuses"
+        :key="status.name"
+        class="border-b border-dashed border-border px-3 py-2 last:border-b-0 hover:bg-muted/40"
       >
-        <p>Changes against the repository’s current commit</p>
-        <pre class="max-h-72 overflow-auto whitespace-pre-wrap">{{ diffs[status.name] }}</pre>
+        <div class="flex items-center gap-2">
+          <strong class="font-mono text-sm font-medium">{{ status.name }}</strong>
+          <span class="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">
+            {{ status.state }}
+          </span>
+          <span
+            v-if="status.trusted"
+            class="rounded-sm border border-border px-1.5 font-mono text-[10.5px] text-muted-foreground"
+          >
+            trusts future edits
+          </span>
+          <Button v-if="status.modified" size="sm" variant="outline" @click="showDiff(status.name)">
+            Show diff
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            @click="run('settings_plugin_rollback', { name: status.name })"
+          >
+            Roll back
+          </Button>
+        </div>
+        <SettingsNotice v-if="diffs[status.name] !== undefined" class="mt-2">
+          <p>Changes against the repository’s current commit</p>
+          <pre class="max-h-72 overflow-auto font-mono text-xs whitespace-pre-wrap">{{
+            diffs[status.name]
+          }}</pre>
+        </SettingsNotice>
       </div>
-    </div>
+    </SettingsCard>
   </div>
 </template>

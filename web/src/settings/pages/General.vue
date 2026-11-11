@@ -5,6 +5,9 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
+import SettingsNotice from '../ui/SettingsNotice.vue'
+import SettingsRow from '../ui/SettingsRow.vue'
+import SettingsCard from '../ui/SettingsCard.vue'
 type General = {
   defaultProvider: string
   confirmWhileWorking: boolean
@@ -34,59 +37,50 @@ onMounted(async () => {
 onUnmounted(() => stop?.())
 </script>
 <template>
-  <div v-if="value" class="space-y-5">
-    <div
-      v-if="value.issues?.length"
-      data-protected="true"
-      class="rounded-md border border-[var(--protected-border)] bg-[var(--protected-bg)] p-2 text-[var(--protected-fg)]"
-    >
+  <div v-if="value" class="space-y-4">
+    <SettingsNotice v-if="value.issues?.length">
       <strong>Problems in settings.toml</strong>
       <p v-for="issue in value.issues" :key="issue">{{ issue }}</p>
-    </div>
-    <div
-      v-if="value.themeProblems?.length"
-      data-protected="true"
-      class="rounded-md border border-[var(--protected-border)] bg-[var(--protected-bg)] p-2 text-[var(--protected-fg)]"
-    >
+    </SettingsNotice>
+    <SettingsNotice v-if="value.themeProblems?.length">
       <strong>Problems with the theme</strong>
       <p v-for="problem in value.themeProblems" :key="problem">{{ problem }}</p>
-    </div>
-    <p
-      v-if="error"
-      role="alert"
-      data-protected="true"
-      class="rounded-md border border-[var(--protected-border)] bg-[var(--protected-bg)] p-2 text-[var(--protected-fg)]"
-    >
-      {{ error }}
-    </p>
-    <section class="space-y-2">
-      <h2 class="font-semibold">Default provider</h2>
-      <div class="flex gap-2">
-        <Button
-          v-for="provider in value.providers"
-          :key="provider"
-          :variant="value.defaultProvider === provider ? 'default' : 'outline'"
-          @click="patch({ defaultProvider: provider })"
-        >
-          {{ provider }}
+    </SettingsNotice>
+    <SettingsNotice v-if="error" as="p" role="alert">{{ error }}</SettingsNotice>
+    <SettingsCard title="Startup">
+      <SettingsRow label="Default provider" help="Applies at next launch">
+        <div class="flex gap-1.5">
+          <Button
+            v-for="provider in value.providers"
+            :key="provider"
+            size="sm"
+            :variant="value.defaultProvider === provider ? 'default' : 'outline'"
+            @click="patch({ defaultProvider: provider })"
+          >
+            {{ provider }}
+          </Button>
+        </div>
+      </SettingsRow>
+      <!-- TODO: Restore the last selected channel on startup. -->
+      <SettingsRow label="Reopen last channel" help="Restore the last selected channel on startup">
+        <Button size="sm" variant="outline" disabled aria-label="Reopen last channel · Soon">
+          Soon
         </Button>
-      </div>
-      <p class="text-sm text-muted-foreground">Applies at next launch</p>
-    </section>
-    <section class="space-y-2">
-      <div class="flex items-center gap-3">
-        <span class="font-semibold">Confirm while working</span>
+      </SettingsRow>
+    </SettingsCard>
+    <SettingsCard title="Safety">
+      <SettingsRow
+        label="Confirm while working"
+        label-for="confirm-while-working"
+        help="Confirm Quit and Safe Mode relaunch while a turn runs"
+      >
         <Switch
+          id="confirm-while-working"
           aria-label="Confirm while working"
           :model-value="value.confirmWhileWorking"
           @update:model-value="patch({ confirmWhileWorking: $event })"
         />
-      </div>
-      <p class="text-sm text-muted-foreground">
-        Confirm Quit and Safe Mode relaunch while a turn runs
-      </p>
-    </section>
-    <!-- TODO: Restore the last selected channel on startup. -->
-    <Button variant="ghost" disabled>Reopen last channel · Soon</Button>
+      </SettingsRow>
+    </SettingsCard>
   </div>
 </template>

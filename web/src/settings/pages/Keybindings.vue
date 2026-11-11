@@ -5,6 +5,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { runAction } from '@/bridge/api'
 import { Button } from '@/components/ui/button'
 import { captureChord } from '../key_capture'
+import SettingsCard from '../ui/SettingsCard.vue'
+import SettingsNotice from '../ui/SettingsNotice.vue'
 type Row = {
   id: string
   label: string
@@ -53,48 +55,74 @@ onMounted(() => {
 onUnmounted(() => window.removeEventListener('keydown', keydown, true))
 </script>
 <template>
-  <div class="space-y-3">
-    <div v-for="row in rows" :key="row.id">
-      <div class="flex items-center gap-2">
-        <span class="flex-1">{{ row.label }}</span>
-        <span>{{ capture === row.id ? 'Press a key (Escape to cancel)' : row.chord }}</span>
-        <span v-if="row.rule === 'locked'">Locked</span>
-        <template v-else>
-          <Button
-            variant="outline"
-            @click="
-              () => {
-                capture = row.id
-                error = ''
-              }
-            "
-          >
-            Record
-          </Button>
-          <Button v-if="row.custom" variant="outline" @click="setKey(row.id, null, true)">
-            Reset
-          </Button>
-          <Button
-            v-if="row.rule === 'optional' && row.bound"
-            variant="outline"
-            @click="setKey(row.id, null)"
-          >
-            Unbind
-          </Button>
-        </template>
-      </div>
-      <p
-        v-if="error && errorId === row.id"
-        role="alert"
-        data-protected="true"
-        class="border border-[var(--protected-border)] bg-[var(--protected-bg)] p-2 text-[var(--protected-fg)]"
+  <div class="flex flex-col">
+    <SettingsCard title="Shortcuts" flush>
+      <template v-if="rows.length" #actions>
+        <span class="text-muted-foreground">
+          {{ rows.length }} {{ rows.length === 1 ? 'shortcut' : 'shortcuts' }}
+        </span>
+      </template>
+      <div
+        v-for="row in rows"
+        :key="row.id"
+        class="border-b border-dashed border-border px-3 py-2.5 last:border-b-0 hover:bg-muted/40"
       >
-        {{ error }}
-      </p>
-    </div>
-    <div v-if="saved">
-      <p>Applies at next launch</p>
-      <Button @click="runAction('relaunch')">Relaunch</Button>
+        <div class="flex items-center gap-2">
+          <span class="min-w-0 flex-1 font-medium">{{ row.label }}</span>
+          <span v-if="capture === row.id" class="font-mono text-xs text-primary">
+            <span aria-hidden="true">›</span>
+            Press a key (Escape to cancel)
+            <span
+              aria-hidden="true"
+              class="ml-1 inline-block h-[1.1em] w-[0.55em] animate-[cursor-blink_1.05s_steps(1)_infinite] bg-foreground align-[-0.2em]"
+            />
+          </span>
+          <kbd
+            v-else
+            class="rounded-md border border-border bg-muted px-1.5 py-0.5 font-mono text-xs"
+          >
+            {{ row.chord }}
+          </kbd>
+          <span v-if="row.rule === 'locked'" class="font-mono text-xs text-muted-foreground">
+            Locked
+          </span>
+          <template v-else>
+            <Button
+              size="sm"
+              variant="outline"
+              @click="
+                () => {
+                  capture = row.id
+                  error = ''
+                }
+              "
+            >
+              Record
+            </Button>
+            <Button v-if="row.custom" size="sm" variant="ghost" @click="setKey(row.id, null, true)">
+              Reset
+            </Button>
+            <Button
+              v-if="row.rule === 'optional' && row.bound"
+              size="sm"
+              variant="ghost"
+              @click="setKey(row.id, null)"
+            >
+              Unbind
+            </Button>
+          </template>
+        </div>
+        <SettingsNotice v-if="error && errorId === row.id" as="p" role="alert" class="mt-2">
+          {{ error }}
+        </SettingsNotice>
+      </div>
+    </SettingsCard>
+    <div
+      v-if="saved"
+      class="sticky bottom-0 mt-4 flex items-center justify-between gap-3 rounded-lg border border-border bg-card px-3 py-2"
+    >
+      <p class="text-sm">Applies at next launch</p>
+      <Button size="sm" variant="outline" @click="runAction('relaunch')">Relaunch</Button>
     </div>
   </div>
 </template>
