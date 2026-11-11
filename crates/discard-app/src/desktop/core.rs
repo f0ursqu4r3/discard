@@ -254,6 +254,8 @@ struct ChannelState {
     archived: bool,
     archive_busy: bool,
     read_only: bool,
+    /// A muted channel shows no unread marker. Approval badges stay.
+    muted: bool,
     /// The parent channel when this state belongs to a thread. A thread is never the selected channel.
     thread_parent: Option<String>,
     /// Reference rows of this channel: the thread message each one shows.
@@ -265,7 +267,7 @@ impl ChannelState {
         Self { ui: init.state, runtime_generation: 0, commands: init.commands, channel: init.channel, project_name: init.project, agent: init.agent,
             provider: init.provider, channel_id, agent_id: String::new(), project_id: None,
             mode: discard_core::model::WorkspaceMode::MainCheckout, new_anchor: None,
-            archive: None, archived: false, archive_busy: false, read_only: false, thread_parent: None, posted: HashMap::new() }
+            archive: None, archived: false, archive_busy: false, read_only: false, muted: false, thread_parent: None, posted: HashMap::new() }
     }
 }
 struct State {
@@ -678,7 +680,8 @@ impl AppCore {
                         provider: channel.provider.clone(), workspace_mode: channel.mode.as_str().into(),
                         running: channel.ui.turn_running(), pending_approvals: channel.ui.pending_approvals(),
                         thread_pending_approvals: state.threads.values().filter(|r| r.parent == channel.channel_id).map(|r| thread_approvals(&state, &r.id)).sum(),
-                        unread: super::windows::channel_indicators(channel.ui.history(), state.window.last_read(&channel.channel_id), channel.ui.pending_approvals()).0,
+                        unread: super::windows::channel_indicators(channel.ui.history(), state.window.last_read(&channel.channel_id), channel.ui.pending_approvals(), channel.muted).0,
+                        muted: channel.muted,
                     }).collect();
             channels.sort_by(|a, b| a.id.cmp(&b.id));
 
@@ -706,7 +709,7 @@ impl AppCore {
                 live_blocks: ui.live_blocks().to_vec(),
                 prompts: prompt_dtos(ui),
                 pending_approvals: ui.pending_approvals(),
-                unread: super::windows::channel_indicators(ui.history(), state.window.last_read(&state.active.channel_id), ui.pending_approvals()).0,
+                unread: super::windows::channel_indicators(ui.history(), state.window.last_read(&state.active.channel_id), ui.pending_approvals(), state.active.muted).0,
                 new_anchor_id: state.active.new_anchor.clone(),
                 archived: state.active.archived,
                 archive_busy: state.project_busy || state.active.archive_busy,
@@ -1306,6 +1309,55 @@ impl AppCore {
         s.rev += 1;
         self.changed.notify_one();
     }
+    /// Mute or unmute a loaded channel. A muted channel shows no unread marker and counts for no unread marker of
+    /// its project. Read markers, messages and turns do not change.
+    pub fn set_channel_muted(&self, id: &str, muted: bool) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let target = if s.active.channel_id == id { Some(&mut s.active) } else { s.parked.get_mut(id) };
+        let Some(target) = target else { return };
+        if target.muted == muted { return; }
+        target.muted = muted;
+        s.rev += 1;
+        self.changed.notify_one();
+    }
+    /// Why a channel cannot take a Git or archive action now, or `None` when it is idle. A channel is busy while a
+    /// turn runs in it, while an approval waits in it or in one of its threads, while a sub-agent task runs in one of
+    /// its threads, and while an archive or another channel action runs.
+    fn busy_reason(s: &State, id: &str) -> Option<&'static str> {
+        let loaded = std::iter::once(&s.active).chain(s.parked.values()).find(|c| c.channel_id == id && c.thread_parent.is_none());
+        if loaded.is_some_and(|c| c.ui.turn_running()) { return Some("A turn runs in this channel. Stop it first."); }
+        if loaded.is_some_and(|c| c.archive_busy || c.archive.is_some()) { return Some("An archive is in progress for this channel."); }
+        if loaded.is_some_and(|c| c.ui.pending_approvals() > 0) { return Some("An approval waits in this channel. Decide it first."); }
+        if s.changing_channels.contains(id) { return Some("This channel is changing. Try again."); }
+        for record in s.threads.values().filter(|record| record.parent == id) {
+            if record.state == Some(ThreadState::Running) { return Some("A sub-agent task runs in a thread of this channel. Stop it first."); }
+            let thread = s.parked.get(&record.id);
+            if thread.is_some_and(|c| c.ui.turn_running()) { return Some("A turn runs in a thread of this channel. Stop it first."); }
+            if thread.is_some_and(|c| c.ui.pending_approvals() > 0) { return Some("An approval waits in a thread of this channel. Decide it first."); }
+        }
+        None
+    }
+    pub fn channel_busy_reason(&self, id: &str) -> Option<&'static str> {
+        Self::busy_reason(&self.state.lock().unwrap_or_else(|e| e.into_inner()), id)
+    }
+    /// Take a channel out of use for a channel action until `end_channel_change`. Refused while it is busy.
+    pub fn begin_channel_action(&self, id: &str) -> Result<(), String> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(reason) = Self::busy_reason(&s, id) { return Err(reason.into()); }
+        s.changing_channels.insert(id.to_owned());
+        Ok(())
+    }
+    /// `begin_channel_action` with the extra rules of the menu bar archive: no archive while the project or the
+    /// channel's agent changes, and none for a read-only channel.
+    pub fn begin_channel_archive(&self, id: &str) -> Result<(), String> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(reason) = Self::busy_reason(&s, id) { return Err(reason.into()); }
+        let loaded = std::iter::once(&s.active).chain(s.parked.values()).find(|c| c.channel_id == id && c.thread_parent.is_none());
+        if s.project_busy || loaded.is_some_and(|c| s.changing_agents.contains(&c.agent_id)) { return Err("Finish the open operation before you archive the channel.".into()); }
+        if loaded.is_some_and(|c| c.read_only) { return Err("This channel is read only. It cannot be archived.".into()); }
+        s.changing_channels.insert(id.to_owned());
+        Ok(())
+    }
     /// A reference row left its channel: the row, its link and its position in the read marker go. The thread keeps
     /// the message, and the thread panel shows it as not posted.
     pub fn reference_removed(&self, reference: &discard_core::model::MessageId, source: &PostedSource) {
@@ -1641,6 +1693,62 @@ mod read_tests {
         assert!(!after.unread);
         assert!(after.new_anchor_id.is_none());
         assert!(after.rev > before.rev);
+    }
+
+    fn muted_fixture() -> (tempfile::TempDir, AppCore, tokio::sync::mpsc::UnboundedReceiver<Command>) {
+        let dir = tempfile::tempdir().unwrap();
+        let channel = ChannelId("channel".into());
+        let history: Vec<_> = ["one", "two"].into_iter().map(|id| Message { id: MessageId(id.into()), channel_id: channel.clone(), role: Role::Agent, blocks: vec![] }).collect();
+        let mut store = StateStore::open(&dir.path().join("state.toml"));
+        store.set_last_read("channel", "one").unwrap();
+        let (commands, received) = tokio::sync::mpsc::unbounded_channel();
+        let core = AppCore::new(CoreInit { state: UiState::new(channel, history), commands, project: "p".into(), channel: "c".into(), agent: "a".into(), provider: "p".into() });
+        core.configure_read_marker(dir.path(), "channel");
+        (dir, core, received)
+    }
+
+    #[test]
+    fn a_muted_channel_shows_no_unread_marker_anywhere_and_unmuting_shows_it_again() {
+        let (_dir, core, _received) = muted_fixture();
+        let unread = |core: &AppCore| { let snapshot = core.snapshot(); (snapshot.unread, snapshot.channels[0].unread, snapshot.channels[0].muted) };
+        assert_eq!(unread(&core), (true, true, false));
+        let before = core.snapshot().rev;
+        core.set_channel_muted("channel", true);
+        assert_eq!(unread(&core), (false, false, true), "the row and the project rail read the channel unread flag");
+        assert!(core.snapshot().rev > before);
+        // Mute changes no read marker: unmuting shows the unread marker again.
+        core.set_channel_muted("channel", false);
+        assert_eq!(unread(&core), (true, true, false));
+        core.set_channel_muted("unknown", true);
+        assert_eq!(unread(&core), (true, true, false), "an unknown channel changes nothing");
+    }
+
+    #[test]
+    fn a_muted_channel_keeps_its_pending_approval_count() {
+        use discard_core::event::{Event, EventId, EventKind, SessionId};
+        let (_dir, core, _received) = muted_fixture();
+        core.apply(Update::Event(Box::new(Event { id: EventId::new(), session_id: SessionId::new(), seq: 1, raw: None,
+            kind: EventKind::ApprovalRequest { kind: Default::default(), paths: vec![], approval_id: ApprovalId::new(), call_id: "c".into(), tool: "Bash".into(), input: serde_json::json!({"command": "ls"}) } })));
+        core.set_channel_muted("channel", true);
+        let snapshot = core.snapshot();
+        assert_eq!((snapshot.pending_approvals, snapshot.channels[0].pending_approvals, snapshot.channels[0].unread), (1, 1, false));
+    }
+
+    #[test]
+    fn a_channel_is_busy_while_a_turn_runs_an_approval_waits_or_another_action_runs() {
+        let (_dir, core, _received) = muted_fixture();
+        assert_eq!(core.channel_busy_reason("channel"), None);
+        core.send("work".into());
+        assert!(core.channel_busy_reason("channel").unwrap().contains("A turn runs"));
+        assert!(core.begin_channel_action("channel").is_err());
+        core.apply(Update::TurnFinished(discard_core::driver::TurnOutcome::Completed));
+        assert_eq!(core.channel_busy_reason("channel"), None);
+        core.begin_channel_action("channel").unwrap();
+        assert!(core.channel_busy_reason("channel").unwrap().contains("changing"), "a second action waits for the first");
+        assert!(core.begin_channel_archive("channel").is_err());
+        core.end_channel_change("channel");
+        assert_eq!(core.channel_busy_reason("channel"), None);
+        assert_eq!(core.channel_busy_reason("not loaded"), None, "a channel that is not loaded is idle");
     }
 
     #[test]

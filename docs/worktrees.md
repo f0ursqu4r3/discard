@@ -50,9 +50,28 @@ worktree does not create a branch or change the checkout. Discard borrows the ex
 changes, a stale row cannot open it and Coding workspace validation rejects the old binding.
 
 Branch, worktree, and channel rows have custom context menus. Right-click a row, or press Shift+F10 while it has
-focus. Menus open the selected row and copy its name or ID. Worktree menus also copy the directory path. Planned
-management actions stay disabled and show **Soon**. Unread markers on detached worktrees match the saved path
-and commit, so worktrees at the same commit do not share an unread marker.
+focus. Menus open the selected row and copy its name or ID. Worktree menus also copy the directory path.
+Unread markers on detached worktrees match the saved path and commit, so worktrees at the same commit do not
+share an unread marker.
+
+A branch row menu has **Create Worktree…**, **Rename Branch…**, and **Delete Branch…**. A worktree row menu has
+**Create Branch…** and **Remove Worktree…**. Each action asks for a confirm or a name first. Discard runs Git
+with an argument list, checks the rules again in the backend, and refreshes the branch list afterwards.
+
+- **Create Worktree…** calls the same service as the agent request: the worktree gets the path of an owned
+  worktree and a saved record. It is greyed when a working tree holds the branch or the channel has a worktree.
+- **Rename Branch…** works for a checked-out branch and moves the channel binding. It is greyed while the channel
+  is busy.
+- **Delete Branch…** warns about commits that the default branch does not have. You must choose to delete them
+  before Discard runs `git branch -D`. It is greyed for the default branch, for a checked-out branch, and while
+  the channel is busy.
+- **Create Branch…** switches the working tree to a new branch at its HEAD. Uncommitted changes stay.
+- **Remove Worktree…** lists up to ten changed or untracked files and asks you to choose **Discard these
+  changes** before it removes the tree. It never deletes the branch. It is greyed for the main checkout and while
+  a channel that uses the tree is busy.
+
+A channel is busy while a turn runs, a sub-agent task runs, an approval waits, or an archive runs. A greyed
+action shows no **Soon** label. See `docs/settings.md` for the full rules.
 
 ## Archiving
 
@@ -61,13 +80,16 @@ untracked files, no ignored files that hold data. Otherwise it returns what woul
 confirmed call (`force`) removes the directory anyway. **The branch is always kept**, so committed work stays in
 git. Commits that no other branch has are reported but do not block removal, because they stay on the kept branch.
 
-There is no button for archiving yet. The function and its tests exist in `discard-core`.
+**Archive Channel…** in the menu bar and in the row menu of a channel call this function. The row item works on
+the channel of the row, is greyed for `#general`, for an archived channel, and for a busy channel, and asks for a
+second confirm when the removal would lose files.
 
 ## Limits you should know
 
 - Worktrees are a git feature. A project that is not a git repository uses the main checkout.
 - Submodules and sparse checkouts are not handled specially.
-- Discard does not merge or delete the worktree branches. Use git for that.
+- Discard does not merge the worktree branches. Archiving and **Remove Worktree…** keep the branch. **Delete
+  Branch…** deletes a local branch only after you confirm it.
 
 ## Conversation worktree tools
 

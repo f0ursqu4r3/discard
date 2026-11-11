@@ -14,3 +14,7 @@
 ## Communication
 
 Use short, direct sentences and active voice. Lead with the result or required action. Use consistent terms. Preserve essential facts and evidence.
+
+## Web tests
+
+Put web tests in a `__tests__` directory beside the code they test.

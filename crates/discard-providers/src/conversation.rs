@@ -133,6 +133,9 @@ pub(crate) fn load_catalog(home: &Path, selected: &str, tools: CatalogTools, run
 
 pub(crate) fn codex_controls(effective: &Value, tools: CatalogTools) -> Result<Value, ProviderError> {
     let mut controls = json!({
+        // The user's Codex config can route approvals to a reviewer agent. Discard must get every
+        // approval request, so the reviewer is always the user.
+        "approvals_reviewer":"user",
         "web_search":"disabled", "agents":{"enabled":false},
         "memories":{"use_memories":false,"dedicated_tools":false,"generate_memories":false},
         "cloud":{"skills":{"enabled":false}},
@@ -307,6 +310,8 @@ mod tests {
         assert_eq!(c["features"]["shell_tool"], true);
         assert_eq!(c["sandbox_workspace_write"]["network_access"], false);
         assert_eq!(c["sandbox_workspace_write"]["writable_roots"], json!([]));
+        assert_eq!(c["approvals_reviewer"], "user");
+        assert_eq!(codex_controls(&json!({"approvals_reviewer":"guardian_subagent"}), CatalogTools::None).unwrap()["approvals_reviewer"], "user");
         assert_eq!(c["project_doc_max_bytes"], 0); assert_eq!(c["web_search"], "disabled");
     }
 

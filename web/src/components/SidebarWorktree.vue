@@ -15,8 +15,12 @@ defineProps<{
   busy?: boolean
   selected?: boolean
   unread?: boolean
+  /** Create Branch… is blocked: a channel that uses the working tree is busy. */
+  createBranchDisabled?: boolean
+  /** Remove Worktree… is blocked: the main checkout, or a channel that uses the working tree is busy. */
+  removeWorktreeDisabled?: boolean
 }>()
-const emit = defineEmits<{ open: [key: string] }>()
+const emit = defineEmits<{ open: [key: string]; createBranch: []; removeWorktree: [] }>()
 </script>
 <template>
   <div class="flex min-w-0 items-center gap-1 pl-3" data-ui-id="worktree-child">
@@ -34,6 +38,10 @@ const emit = defineEmits<{ open: [key: string] }>()
       :id="row.key"
       :path="row.worktree"
       :busy="busy"
+      :create-branch-disabled="createBranchDisabled"
+      :remove-worktree-disabled="removeWorktreeDisabled"
+      @create-branch="emit('createBranch')"
+      @remove-worktree="emit('removeWorktree')"
       @open="emit('open', row.key)"
     >
       <Button

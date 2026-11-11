@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import {
+  BellOff,
   ChevronDown,
   ChevronRight,
   Monitor,
@@ -16,6 +17,13 @@ import {
 } from '@lucide/vue'
 import NavigationContextMenu from './NavigationContextMenu.vue'
 import { requestAction } from './thread-actions'
+import {
+  branchMenuState,
+  channelBusy,
+  channelMenuState,
+  isDefaultBranch,
+  worktreeMenuState,
+} from './navigation-actions'
 import BrailleSpinner from './BrailleSpinner.vue'
 import SidebarWorktree from './SidebarWorktree.vue'
 import ThreadRow from './ThreadRow.vue'
@@ -28,6 +36,8 @@ import {
   groupBranchRows,
 } from './branch-navigation'
 import CreateTextChannelDialog from './workspace/CreateTextChannelDialog.vue'
+import { toast } from 'vue-sonner'
+import { setChannelMuted } from '../bridge/api'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
@@ -71,6 +81,8 @@ const props = withDefaults(
     target?: ContextTargetDto
     page?: WorkspacePage
     busy?: boolean
+    /** An archive runs, or waits for its second confirm, in the selected channel. */
+    activeChannelBusy?: boolean
     /** The thread panel shows this thread. */
     openThreadId?: string | null
   }>(),
@@ -102,14 +114,92 @@ const textRows = computed(() => [
   ...textChannels.value.map((channel) => ({ general: false, channel })),
 ])
 const createTextOpen = ref(false)
+// A muted channel shows no unread marker. The app already sends `unread: false` for it.
 const unreadChannelIds = computed(
   () =>
     new Set(
       props.channels
-        .filter((channel) => channel.projectId === props.projectId && channel.unread)
+        .filter(
+          (channel) => channel.projectId === props.projectId && channel.unread && !channel.muted,
+        )
         .map((channel) => channel.id),
     ),
 )
+function channelBusyNow(id: string | undefined) {
+  return channelBusy(
+    props.channels.find((channel) => channel.id === id),
+    id === props.channelId && !!props.activeChannelBusy,
+  )
+}
+function textMenu(channel: ProjectChannelDto | undefined) {
+  return channelMenuState(channel, channelBusyNow(channel?.id))
+}
+function requestMute(channel: ProjectChannelDto | undefined) {
+  if (!channel || !props.projectId) return
+  void setChannelMuted(props.projectId, channel.id, !channel.muted).catch((error) =>
+    toast.error(channel.muted ? 'Could not unmute channel' : 'Could not mute channel', {
+      description: String(error),
+    }),
+  )
+}
+function requestArchive(channel: ProjectChannelDto | undefined, name: string) {
+  if (!channel || !props.projectId) return
+  requestAction({
+    kind: 'archive-channel',
+    projectId: props.projectId,
+    channelId: channel.id,
+    name,
+  })
+}
+function requestBranch(
+  kind: 'create-worktree' | 'rename-branch' | 'delete-branch',
+  row: BranchRowDto,
+) {
+  if (!props.projectId) return
+  requestAction({
+    kind,
+    projectId: props.projectId,
+    repository: row.repository ?? '',
+    branch: row.label,
+  })
+}
+function requestWorktree(kind: 'create-branch' | 'remove-worktree', row: BranchRowDto) {
+  if (!props.projectId || !row.worktree) return
+  const target = {
+    projectId: props.projectId,
+    repository: row.repository ?? '',
+    worktree: row.worktree,
+  }
+  requestAction(
+    kind === 'create-branch' ? { kind, ...target, name: row.label } : { kind, ...target },
+  )
+}
+/** The branch row of a group is checked out when any working tree holds the branch. */
+function branchState(group: { row: BranchRowDto; worktrees: BranchRowDto[] }) {
+  const channel = branchChannel(group.row)
+  return branchMenuState({
+    checkedOut: group.worktrees.length > 0,
+    isDefault: isDefaultBranch(props.branches, group.row),
+    channel,
+    busy: channelBusyNow(channel?.id),
+  })
+}
+/** The channels that use a working tree: those with a saved worktree at its path, and the branch channel. */
+function worktreeState(row: BranchRowDto) {
+  const users = props.projectChannels.filter(
+    (channel) =>
+      !channel.archived &&
+      channel.projectId === props.projectId &&
+      !!row.worktree &&
+      channel.worktree?.path === row.worktree,
+  )
+  const branch = row.detached ? undefined : branchChannel(row)
+  if (branch && !users.includes(branch)) users.push(branch)
+  return worktreeMenuState(
+    row,
+    users.some((channel) => channelBusyNow(channel.id)),
+  )
+}
 const unreadBranches = computed(
   () =>
     new Set(
@@ -362,6 +452,10 @@ const approvals = computed(
                 :id="row.channel?.id"
                 :renamable="!row.general"
                 :busy="busy"
+                :muted="textMenu(row.channel).muted"
+                :archive-disabled="textMenu(row.channel).archiveDisabled"
+                @mute="requestMute(row.channel)"
+                @archive="requestArchive(row.channel, row.general ? 'general' : row.channel!.name)"
                 @rename="
                   row.channel &&
                   projectId &&
@@ -387,12 +481,14 @@ const approvals = computed(
                     row.channel?.id === channelId && page === 'conversation' ? 'page' : undefined
                   "
                   :disabled="busy"
+                  :data-muted="row.channel?.muted ? 'true' : undefined"
                   :class="
                     cn(
                       channelRowClass,
                       row.channel?.id === channelId && page === 'conversation'
                         ? 'nav-active-edge bg-sidebar-accent text-sidebar-accent-foreground'
                         : 'text-muted-foreground',
+                      row.channel?.muted && 'opacity-60',
                     )
                   "
                   @click="
@@ -405,6 +501,13 @@ const approvals = computed(
                   <span class="min-w-0 flex-1 truncate font-mono text-[0.92em]">
                     {{ row.general ? 'general' : row.channel!.name }}
                   </span>
+                  <BellOff
+                    v-if="row.channel?.muted"
+                    data-ui-id="channel-muted-icon"
+                    role="img"
+                    aria-label="Muted"
+                    class="size-3.5 shrink-0"
+                  />
                   <BrailleSpinner
                     v-if="runner(row.channel?.id)"
                     :agent-id="runner(row.channel?.id)?.agentId"
@@ -540,6 +643,12 @@ const approvals = computed(
                     :name="branch.row.label"
                     :id="branch.row.key"
                     :busy="busy || !projectId"
+                    :create-worktree-disabled="branchState(branch).createWorktreeDisabled"
+                    :rename-branch-disabled="branchState(branch).renameBranchDisabled"
+                    :delete-branch-disabled="branchState(branch).deleteBranchDisabled"
+                    @create-worktree="requestBranch('create-worktree', branch.row)"
+                    @rename-branch="requestBranch('rename-branch', branch.row)"
+                    @delete-branch="requestBranch('delete-branch', branch.row)"
                     @open="emit('openBranch', branch.row.key)"
                   >
                     <Button
@@ -599,6 +708,10 @@ const approvals = computed(
                     :working-agent-id="branchRunner(worktree)?.agentId"
                     :busy="busy || !projectId"
                     :unread="rowUnread(worktree)"
+                    :create-branch-disabled="worktreeState(worktree).createBranchDisabled"
+                    :remove-worktree-disabled="worktreeState(worktree).removeWorktreeDisabled"
+                    @create-branch="requestWorktree('create-branch', worktree)"
+                    @remove-worktree="requestWorktree('remove-worktree', worktree)"
                     @open="emit('openBranch', $event)"
                   />
                 </div>
@@ -645,6 +758,10 @@ const approvals = computed(
                     :busy="busy || !projectId"
                     :selected="row.current && page === 'conversation'"
                     :unread="rowUnread(row)"
+                    :create-branch-disabled="worktreeState(row).createBranchDisabled"
+                    :remove-worktree-disabled="worktreeState(row).removeWorktreeDisabled"
+                    @create-branch="requestWorktree('create-branch', row)"
+                    @remove-worktree="requestWorktree('remove-worktree', row)"
                     @open="emit('openBranch', $event)"
                   />
                   <ThreadRow
@@ -697,6 +814,10 @@ const approvals = computed(
                 :name="channel.branch ?? channel.name"
                 :id="channel.id"
                 :busy="busy"
+                :muted="textMenu(channel).muted"
+                :archive-disabled="textMenu(channel).archiveDisabled"
+                @mute="requestMute(channel)"
+                @archive="requestArchive(channel, channel.branch ?? channel.name)"
                 @open="emit('selectChannel', channel.id)"
               >
                 <Button
@@ -705,8 +826,10 @@ const approvals = computed(
                   :class="{
                     'nav-active-edge bg-sidebar-accent':
                       channel.id === channelId && page === 'conversation',
+                    'opacity-60': channel.muted,
                   }"
                   :disabled="busy"
+                  :data-muted="channel.muted ? 'true' : undefined"
                   class="flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-xs text-muted-foreground outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"
                   @click="emit('selectChannel', channel.id)"
                 >
@@ -714,6 +837,13 @@ const approvals = computed(
                   <span class="min-w-0 flex-1 truncate font-mono text-[0.92em]">
                     {{ channel.branch ?? channel.name }}
                   </span>
+                  <BellOff
+                    v-if="channel.muted"
+                    data-ui-id="channel-muted-icon"
+                    role="img"
+                    aria-label="Muted"
+                    class="size-3.5 shrink-0"
+                  />
                   <BrailleSpinner
                     v-if="runner(channel.id)"
                     :agent-id="runner(channel.id)?.agentId"

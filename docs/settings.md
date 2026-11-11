@@ -402,9 +402,54 @@ A name cannot match another active text channel or `general`. The new channel op
 **Rename Channel…** works in the row menu of a text channel. The dialog has one name field with the
 current name. It uses the checks of channel creation: the same name rules, and a name that no other
 active text channel or `general` has. An unchanged name closes the dialog with no change. `#general`
-and branch channels cannot be renamed here, and `#general` has no rename item. **Mute Channel** and
-**Archive Channel…** show in the same menu, disabled and marked Soon. **Archive Channel** in the
-menu bar archives the open text channel. An archived text channel shows in Archived.
+and branch channels cannot be renamed here, and `#general` has no rename item. **Archive Channel** in
+the menu bar archives the open text channel. An archived text channel shows in Archived.
+
+### Row menu actions
+
+The row menus of the channel list have working Mute, Archive, Git branch, and Git worktree items. A
+rule that blocks an item greys it with no Soon label. Discard checks every rule again when the item
+runs, so a stale view cannot start a blocked action. The design is in
+`docs/superpowers/specs/2026-11-11-navigation-menu-actions-design.md`.
+
+A channel is busy while a turn runs in it, while a sub-agent task runs in one of its threads, while an
+approval waits in it or in one of its threads, and while an archive runs.
+
+- **Mute Channel** and **Unmute Channel** work at once, with no dialog. Discard saves the flag with the
+  channel (schema version 14). A muted channel row shows no unread marker, dims its name, and shows a bell-off
+  icon labelled `Muted`. A muted channel does not count toward the unread marker of its project on the project
+  rail. Unread threads of the channel still show as unread in its Threads list. Pending approval badges do not
+  change. Mute changes no read marker, message, agent, or turn, so Unmute shows the unread marker again when
+  the channel has unread messages. `#general` can be muted. A thread cannot.
+- **Archive Channel…** archives the channel of the row with the rules, the confirm step, and the store path of
+  the menu bar item. It is greyed for `#general`, for an archived channel, and for a busy channel. A dialog
+  names the channel and opens with Cancel in focus. If the archive would delete a worktree that holds files,
+  the dialog lists them and asks for a second confirm. When the archived channel was open, `#general` opens.
+  There is no restore action yet.
+- **Create Worktree…** (branch row) creates a linked worktree for the branch. The dialog shows the branch and
+  the target path. It is greyed when a working tree holds the branch, or when the channel of the branch already
+  has a worktree. A branch with no channel gets a channel with the worktree. A Git failure shows as an error
+  toast and saves nothing.
+- **Rename Branch…** (branch row) runs `git branch -m` and moves the channel binding to the new name. The
+  channel keeps its messages, sessions, and worktree record. The dialog checks the name with
+  `git check-ref-format --branch` and refuses an empty name, the current name, and the name of another local
+  branch. It works for a checked-out branch. It is greyed while the channel is busy. If the store update
+  fails, Discard renames the branch back.
+- **Delete Branch…** (branch row) is greyed for the default branch (the branch of the main checkout), for a
+  branch that a working tree holds, and while the channel is busy. The dialog opens with Cancel in focus. With
+  no commits that the default branch lacks, one confirm runs `git branch -d`. Otherwise the dialog warns with
+  the count and asks you to choose **Delete N unmerged commits** before it runs `git branch -D`. Discard counts
+  the commits again when you confirm, and refuses unmerged commits without that choice. The channel follows the
+  existing rule for a deleted branch: it moves to Archived only when it has a conversation.
+- **Create Branch…** (worktree row) runs `git switch -c` in the working tree. The branch starts at the HEAD of
+  the tree, and uncommitted changes stay. It is greyed while a channel that uses the tree is busy.
+- **Remove Worktree…** (worktree row) is greyed for the main checkout and while a channel that uses the tree is
+  busy. The dialog shows the path and says that the branch and its commits stay. A clean tree needs one confirm.
+  A tree with changed or untracked files lists up to ten of them with the count of the rest, and asks you to
+  choose **Discard these changes** before it removes the tree. Discard reads the status again when you confirm.
+  The saved worktree record of each channel bound to the path goes. The channels stay.
+
+After a Git action, Discard refreshes the branch list.
 
 Archived holds a channel when one of these is true:
 

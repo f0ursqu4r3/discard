@@ -596,6 +596,13 @@ impl Store {
             tx.pragma_update(None, "user_version", 13)?;
             tx.commit()?;
         }
+        if self.schema_version()? < 14 {
+            let tx = self.conn.unchecked_transaction()?;
+            // A muted channel shows no unread marker. The flag is off for every saved channel.
+            if !has_column("channels", "muted")? { tx.execute_batch("ALTER TABLE channels ADD COLUMN muted INTEGER NOT NULL DEFAULT 0;")?; }
+            tx.pragma_update(None, "user_version", 14)?;
+            tx.commit()?;
+        }
         self.conn.execute_batch("CREATE TABLE IF NOT EXISTS direct_message_list (agent_id TEXT PRIMARY KEY REFERENCES agents(id));")?;
         Ok(())
     }
@@ -2039,6 +2046,33 @@ impl Store {
         )?;
         Ok(())
     }
+    /// Whether the channel is muted. A muted channel shows no unread marker.
+    pub fn channel_muted(&self, channel: &ChannelId) -> Result<bool> {
+        Ok(self.conn.query_row("SELECT muted FROM channels WHERE id=?1", params![channel.0], |r| r.get(0))?)
+    }
+
+    /// Mute or unmute a channel. A thread cannot be muted. Nothing else about the channel changes.
+    pub fn set_channel_muted(&self, channel: &ChannelId, muted: bool) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let row: Option<bool> = tx.query_row("SELECT parent_channel_id IS NOT NULL FROM channels WHERE id=?1", params![channel.0], |r| r.get(0)).optional()?;
+        match row {
+            None => return Err(StoreError::NotFound(format!("channel {}", channel.0))),
+            Some(true) => return Err(StoreError::Invalid("A thread cannot be muted.".into())),
+            Some(false) => {}
+        }
+        tx.execute("UPDATE channels SET muted=?2 WHERE id=?1", params![channel.0, muted])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Delete the worktree records of the given channels in one transaction. The channels stay.
+    pub fn delete_worktrees(&self, channels: &[ChannelId]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for channel in channels { tx.execute("DELETE FROM worktrees WHERE channel_id=?1", params![channel.0])?; }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn archive_channel(&self, channel: &ChannelId) -> Result<()> {
         let n = self.conn.execute(
             "UPDATE channels SET archived = 1 WHERE id = ?1",
@@ -3011,7 +3045,7 @@ mod tests {
         let f = fixture();
         f.store.conn.execute_batch("DROP TABLE always_allow_rules; PRAGMA user_version=8;").unwrap();
         f.store.migrate().unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 13);
+        assert_eq!(f.store.schema_version().unwrap(), 14);
         assert!(f.store.always_allow_rules(&f.project.id).unwrap().is_empty());
     }
 
@@ -3024,7 +3058,7 @@ mod tests {
             store.conn.execute_batch("DROP TABLE autorun_responses; PRAGMA user_version=9;").unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 13);
+        assert_eq!(store.schema_version().unwrap(), 14);
         let columns: Vec<String> = store.conn.prepare("PRAGMA table_info(autorun_responses)").unwrap()
             .query_map([], |r| r.get::<_, String>(1)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
         assert_eq!(columns, ["response_id", "channel_id", "agent_id", "provider", "root", "created_at"]);
@@ -3206,7 +3240,7 @@ mod tests {
         let v1 = Store::open(&path).unwrap().schema_version().unwrap();
         let v2 = Store::open(&path).unwrap().schema_version().unwrap();
         assert!(v1 >= 2);
-        assert_eq!(v1, 13);
+        assert_eq!(v1, 14);
         assert_eq!(v1, v2);
     }
 
@@ -3250,7 +3284,7 @@ mod tests {
             conn.execute("INSERT INTO channels (id, project_id, name, agent_id, workspace_mode) VALUES ('c', 'p', 'general', 'a', 'main_checkout')", []).unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 13);
+        assert_eq!(store.schema_version().unwrap(), 14);
         let channels = store.channels_for_project(&ProjectId("p".into())).unwrap();
         assert_eq!(channels.len(), 1);
         assert_eq!(
@@ -3416,11 +3450,11 @@ mod tests {
         let f = fixture(); let turn = Turn::new(f.session.clone()); f.store.insert_turn(&turn).unwrap();
         let a = Approval::new(turn.id, "Bash", json!({})); f.store.save_approval(&a).unwrap();
         f.store.conn.execute_batch("ALTER TABLE approvals DROP COLUMN kind; DROP TABLE agent_commits; DROP TABLE always_allow_rules;").unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 13);
+        assert_eq!(f.store.schema_version().unwrap(), 14);
         f.store.migrate().unwrap();
         assert_eq!(f.store.load_approval(&a.id).unwrap().kind, crate::approval::ApprovalKind::ProviderTool);
         f.store.migrate().unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 13);
+        assert_eq!(f.store.schema_version().unwrap(), 14);
     }
 
     #[test]
@@ -3761,14 +3795,14 @@ mod tests {
             store.insert_channel(&f.channel).unwrap();
             let message = say(&store, &f.channel.id, Role::User, "old", None);
             store.conn.execute_batch("DROP INDEX one_thread_per_anchor; DROP INDEX one_reference_per_source; DROP INDEX threads_by_parent;
-                ALTER TABLE channels DROP COLUMN parent_channel_id; ALTER TABLE channels DROP COLUMN anchor_message_id;
+                ALTER TABLE channels DROP COLUMN muted; ALTER TABLE channels DROP COLUMN parent_channel_id; ALTER TABLE channels DROP COLUMN anchor_message_id;
                 ALTER TABLE channels DROP COLUMN thread_kind; ALTER TABLE channels DROP COLUMN followed; ALTER TABLE channels DROP COLUMN thread_state; ALTER TABLE channels DROP COLUMN origin_message_id;
                 ALTER TABLE messages DROP COLUMN source_message_id; PRAGMA user_version=10;").unwrap();
             assert!(!columns(&store, "channels").iter().any(|c| c.0 == "followed"));
             (f.channel, message)
         };
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 13);
+        assert_eq!(store.schema_version().unwrap(), 14);
         assert_eq!(columns(&store, "channels"), fresh_channels, "an upgraded database matches a fresh one");
         assert_eq!(columns(&store, "messages"), fresh_messages);
         assert_eq!(texts(&store.messages_for_channel(&channel.id).unwrap()), ["old"]);
@@ -3776,7 +3810,7 @@ mod tests {
         let thread = store.create_thread(&channel.id, &message, "old", &channel.agent_id).unwrap();
         assert!(store.thread_info(&thread.id).unwrap().unwrap().followed);
         store.migrate().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 13);
+        assert_eq!(store.schema_version().unwrap(), 14);
     }
 
     #[test]
@@ -3792,12 +3826,12 @@ mod tests {
             store.insert_channel(&f.channel).unwrap();
             let answer = say(&store, &f.channel.id, Role::Agent, "answer", Some(&f.agent));
             store.create_thread(&f.channel.id, &answer, "question", &f.agent).unwrap();
-            store.conn.execute_batch("DROP INDEX one_thread_per_anchor; ALTER TABLE channels DROP COLUMN thread_state; ALTER TABLE channels DROP COLUMN origin_message_id;
+            store.conn.execute_batch("DROP INDEX one_thread_per_anchor; ALTER TABLE channels DROP COLUMN muted; ALTER TABLE channels DROP COLUMN thread_state; ALTER TABLE channels DROP COLUMN origin_message_id;
                 CREATE UNIQUE INDEX one_thread_per_anchor ON channels(anchor_message_id) WHERE anchor_message_id IS NOT NULL; PRAGMA user_version=11;").unwrap();
             (f.channel, answer)
         };
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 13);
+        assert_eq!(store.schema_version().unwrap(), 14);
         assert_eq!(columns(&store, "channels"), fresh, "an upgraded database matches a fresh one");
         let question = store.thread_for_anchor(&answer).unwrap().unwrap();
         assert_eq!((question.kind, question.state, question.followed), (ThreadKind::Question, None, true), "old threads are question threads");
@@ -5333,7 +5367,7 @@ mod text_channel_tests {
             (project, general, branch)
         };
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 13);
+        assert_eq!(store.schema_version().unwrap(), 14);
         assert!(!store.project_show_archived(&project.id).unwrap(), "the new column defaults to off");
         let general_metadata = store.project_channel_metadata(&general.id).unwrap().unwrap();
         assert_eq!((general_metadata.kind, general_metadata.project_id.clone()), (ProjectChannelKind::General, project.id.clone()));
@@ -5349,7 +5383,7 @@ mod text_channel_tests {
         assert!(store.conn.execute("INSERT INTO project_channels(channel_id,project_id,kind,branch_name,repository) VALUES(?1,?2,'branch','feature','/p/sub')", params![other.id.0, project.id.0]).is_err(), "the branch index still holds");
         assert!(store.conn.execute("INSERT INTO project_channels(channel_id,project_id,kind) VALUES(?1,?2,'general')", params![other.id.0, project.id.0]).is_err(), "the general index still holds");
         store.migrate().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 13);
+        assert_eq!(store.schema_version().unwrap(), 14);
     }
 
     #[test]
@@ -5388,5 +5422,151 @@ mod text_channel_tests {
         f.store.conn.execute("INSERT INTO project_channels(channel_id,project_id,kind,branch_name) VALUES(?1,?2,'branch','feature')", params![branch.id.0, f.project.id.0]).unwrap();
         assert!(matches!(f.store.rename_text_channel(&f.project.id, &branch.id, "other"), Err(StoreError::Invalid(message)) if message.contains("text channel")));
         assert_eq!(f.store.load_channel(&branch.id).unwrap().name, "feature");
+    }
+}
+
+#[cfg(test)]
+mod navigation_action_tests {
+    use super::*;
+    use crate::capability::ApprovalPolicy;
+
+    struct Fixture {
+        store: Store,
+        project: Project,
+        agent: AgentId,
+    }
+
+    fn fixture() -> Fixture {
+        let store = Store::open_in_memory().unwrap();
+        let config = AgentConfig {
+            workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None,
+            name: "Main".into(), avatar: None, provider: "claude".into(), model: Some("model".into()),
+            system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false,
+        };
+        let agent = store.create_agent(&config).unwrap();
+        let project = Project { id: ProjectId::new(), name: "P".into(), path: "/p".into() };
+        store.insert_project(&project).unwrap();
+        Fixture { store, project, agent }
+    }
+
+    fn note(store: &Store, channel: &ChannelId, text: &str) -> MessageId {
+        let message = Message { id: MessageId::new(), channel_id: channel.clone(), role: Role::User, blocks: vec![Block::Markdown { text: text.into() }] };
+        store.insert_message(&message).unwrap();
+        message.id
+    }
+
+    #[test]
+    fn the_mute_flag_is_off_by_default_and_round_trips_without_other_changes() {
+        let f = fixture();
+        let general = f.store.ensure_project_general_channel(&f.project.id, &f.agent).unwrap();
+        let text = f.store.create_project_text_channel(&f.project.id, "plans").unwrap();
+        let message = note(&f.store, &text.id, "hello");
+        assert!(!f.store.channel_muted(&general.id).unwrap());
+        assert!(!f.store.channel_muted(&text.id).unwrap());
+        f.store.set_channel_muted(&text.id, true).unwrap();
+        assert!(f.store.channel_muted(&text.id).unwrap());
+        assert!(!f.store.channel_muted(&general.id).unwrap(), "another channel is not muted");
+        assert_eq!(f.store.load_channel(&text.id).unwrap(), text, "mute does not change the channel");
+        assert_eq!(f.store.messages_for_channel(&text.id).unwrap().iter().map(|m| m.id.clone()).collect::<Vec<_>>(), [message]);
+        f.store.set_channel_muted(&text.id, false).unwrap();
+        assert!(!f.store.channel_muted(&text.id).unwrap());
+        // #general can be muted. An archived channel keeps its flag.
+        f.store.set_channel_muted(&general.id, true).unwrap();
+        assert!(f.store.channel_muted(&general.id).unwrap());
+        f.store.set_channel_muted(&text.id, true).unwrap();
+        f.store.archive_channel(&text.id).unwrap();
+        assert!(f.store.channel_muted(&text.id).unwrap());
+    }
+
+    #[test]
+    fn a_thread_and_an_unknown_channel_cannot_be_muted() {
+        let f = fixture();
+        let general = f.store.ensure_project_general_channel(&f.project.id, &f.agent).unwrap();
+        let anchor = note(&f.store, &general.id, "why?");
+        let thread = f.store.create_thread(&general.id, &anchor, "Why", &f.agent).unwrap();
+        assert!(matches!(f.store.set_channel_muted(&thread.id, true), Err(StoreError::Invalid(message)) if message.contains("thread")));
+        assert!(!f.store.channel_muted(&thread.id).unwrap());
+        assert!(matches!(f.store.set_channel_muted(&ChannelId::new(), true), Err(StoreError::NotFound(_))));
+    }
+
+    #[test]
+    fn migration_14_adds_the_mute_flag_to_a_version_13_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v13.db");
+        let (project, general) = {
+            let f = fixture();
+            drop(f);
+            let store = Store::open(&path).unwrap();
+            let config = AgentConfig {
+                workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None,
+                name: "Main".into(), avatar: None, provider: "claude".into(), model: Some("model".into()),
+                system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false,
+            };
+            let agent = store.create_agent(&config).unwrap();
+            let project = Project { id: ProjectId::new(), name: "P".into(), path: "/p".into() };
+            store.insert_project(&project).unwrap();
+            let general = store.ensure_project_general_channel(&project.id, &agent).unwrap();
+            store.set_channel_muted(&general.id, true).unwrap();
+            store.conn.execute_batch("ALTER TABLE channels DROP COLUMN muted; PRAGMA user_version=13;").unwrap();
+            (project, general)
+        };
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 14);
+        assert!(!store.channel_muted(&general.id).unwrap(), "the new column defaults to off");
+        assert_eq!(store.load_channel(&general.id).unwrap().project_id, Some(project.id));
+        store.set_channel_muted(&general.id, true).unwrap();
+        assert!(Store::open(&path).unwrap().channel_muted(&general.id).unwrap(), "the flag survives a reopen");
+    }
+
+    #[test]
+    fn a_branch_rename_moves_the_binding_and_keeps_the_channel_history_and_worktree() {
+        let f = fixture();
+        f.store.ensure_project_general_channel(&f.project.id, &f.agent).unwrap();
+        let channel = Channel { id: ChannelId::new(), project_id: Some(f.project.id.clone()), name: "feature/one".into(), agent_id: f.agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+        let record = WorktreeRecord { channel_id: channel.id.clone(), path: "/w/feature".into(), branch: "feature/one".into(), base_commit: "abc".into(), repo: "/p".into(), owned: true };
+        f.store.create_named_repository_channel(&channel, "", Some("feature/one"), Some(&record)).unwrap();
+        f.store.register_bootstrap_project_channel(&channel.id).unwrap();
+        let message = note(&f.store, &channel.id, "keep me");
+        let session = f.store.latest_session(&channel.id).unwrap();
+        f.store.rename_project_branch(&f.project.id, &channel.id, "feature/two").unwrap();
+        assert!(f.store.project_branch_channel(&f.project.id, "feature/one").unwrap().is_none());
+        assert_eq!(f.store.project_branch_channel(&f.project.id, "feature/two").unwrap().unwrap().id, channel.id);
+        assert_eq!(f.store.channel_branch(&channel.id).unwrap().as_deref(), Some("feature/two"));
+        assert_eq!(f.store.project_channel_metadata(&channel.id).unwrap().unwrap().branch.as_deref(), Some("feature/two"));
+        assert_eq!(f.store.worktree_for(&channel.id).unwrap().unwrap(), WorktreeRecord { branch: "feature/two".into(), ..record });
+        assert_eq!(f.store.messages_for_channel(&channel.id).unwrap().iter().map(|m| m.id.clone()).collect::<Vec<_>>(), [message]);
+        assert_eq!(f.store.latest_session(&channel.id).unwrap(), session);
+        assert_eq!(f.store.load_channel(&channel.id).unwrap(), channel);
+    }
+
+    #[test]
+    fn a_branch_rename_that_clashes_with_another_branch_channel_changes_nothing() {
+        let f = fixture();
+        let make = |name: &str| {
+            let channel = Channel { id: ChannelId::new(), project_id: Some(f.project.id.clone()), name: name.into(), agent_id: f.agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+            f.store.create_named_repository_channel(&channel, "", Some(name), None).unwrap();
+            channel
+        };
+        let (one, two) = (make("one"), make("two"));
+        assert!(f.store.rename_project_branch(&f.project.id, &one.id, "two").is_err());
+        assert_eq!(f.store.channel_branch(&one.id).unwrap().as_deref(), Some("one"), "the failed rename rolls back");
+        assert_eq!(f.store.channel_branch(&two.id).unwrap().as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn worktree_records_are_deleted_together_and_the_channels_stay() {
+        let f = fixture();
+        let make = |name: &str| {
+            let channel = Channel { id: ChannelId::new(), project_id: Some(f.project.id.clone()), name: name.into(), agent_id: f.agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+            let record = WorktreeRecord { channel_id: channel.id.clone(), path: "/w/shared".into(), branch: name.into(), base_commit: "abc".into(), repo: "/p".into(), owned: false };
+            f.store.create_named_repository_channel(&channel, "", Some(name), Some(&record)).unwrap();
+            channel
+        };
+        let (one, two, other) = (make("one"), make("two"), make("other"));
+        f.store.delete_worktrees(&[one.id.clone(), two.id.clone()]).unwrap();
+        assert!(f.store.worktree_for(&one.id).unwrap().is_none());
+        assert!(f.store.worktree_for(&two.id).unwrap().is_none());
+        assert!(f.store.worktree_for(&other.id).unwrap().is_some());
+        assert_eq!(f.store.load_channel(&one.id).unwrap(), one, "the channel stays");
     }
 }

@@ -35,8 +35,9 @@ const entries = computed(
   () => props.projects ?? [{ id: props.projectId ?? '', name: props.project, path: '' }],
 )
 const selected = (id: string) => id === (props.projectId ?? '') && !props.directMessages
+// A muted channel does not count toward the unread marker of its project. Pending approvals still count.
 const projectUnread = (id: string) =>
-  props.channels?.some((channel) => channel.projectId === id && channel.unread) ??
+  props.channels?.some((channel) => channel.projectId === id && channel.unread && !channel.muted) ??
   (id === (props.projectId ?? '') && props.unread)
 const projectApprovals = (id: string) =>
   props.channels?.reduce(
@@ -44,7 +45,10 @@ const projectApprovals = (id: string) =>
     0,
   ) ?? (id === (props.projectId ?? '') ? props.pendingApprovals : 0)
 const directUnread = computed(
-  () => props.channels?.some((channel) => channel.projectId === null && channel.unread) ?? false,
+  () =>
+    props.channels?.some(
+      (channel) => channel.projectId === null && channel.unread && !channel.muted,
+    ) ?? false,
 )
 const homeHovered = ref(false)
 const homeFocused = ref(false)

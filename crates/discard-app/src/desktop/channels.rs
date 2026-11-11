@@ -54,6 +54,11 @@ impl Channels {
         Ok(())
     }
     fn start(&self, channel: &Channel) -> Result<(), String> { self.start_mode(channel, false) }
+    /// Copy the saved mute flag of a channel to its loaded state, so the unread marker follows it.
+    fn sync_muted(&self, id: &ChannelId) {
+        let muted = self.store.lock().unwrap_or_else(|e| e.into_inner()).channel_muted(id).unwrap_or(false);
+        self.core.set_channel_muted(&id.0, muted);
+    }
     fn refresh_channel_access(&self, channel: &Channel) -> Result<(), String> {
         let (archived, unavailable) = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -71,6 +76,7 @@ impl Channels {
         else if let Some(thread) = &thread { self.core.add_thread(init, channel, thread); }
         else { self.core.add_channel(init, channel); }
         self.refresh_channel_access(channel)?;
+        if thread.is_none() { self.sync_muted(&channel.id); }
         if thread.is_none() && !restart { self.refresh_threads(&channel.id)?; }
         let core = self.core.clone();
         let store = self.store.clone();
@@ -294,8 +300,9 @@ impl Channels {
                 .map(|record| super::dto::ChannelWorktreeDto { path: record.path, branch: record.branch });
             let threads = super::threads::stored_links(&store, &channel.id, |id| self.core.last_read(id))?;
             let has_messages = store.channel_has_messages(&channel.id).map_err(|e| e.to_string())?;
+            let muted = store.channel_muted(&channel.id).map_err(|e| e.to_string())?;
             Ok(super::dto::ProjectChannelDto {
-                worktree, has_messages,
+                worktree, has_messages, muted,
                 id: channel.id.0, project_id: project.0.clone(), name: channel.name,
                 agent_id: channel.agent_id.0, workspace_mode: channel.workspace_mode.as_str().into(),
                 kind: metadata.kind.as_str().into(),
@@ -412,6 +419,7 @@ impl Channels {
         Ok(super::dto::ChannelDetailsDto {
             channel: super::dto::ProjectChannelDto {
                 has_messages,
+                muted: store.channel_muted(&channel.id).map_err(|e| e.to_string())?,
                 worktree: store.worktree_for(&channel.id).map_err(|e| e.to_string())?
                     .map(|record| super::dto::ChannelWorktreeDto { path: record.path, branch: record.branch }),
                 id: channel.id.0.clone(), project_id: project.0.clone(), name: channel.name,
@@ -493,6 +501,7 @@ impl Channels {
         let restart = self.core.has_channel(id) && self.core.channel_session_closed(id);
         if !self.core.has_channel(id) { self.start(&channel)?; }
         if project_change { self.core.switch_channel_for_project(id)?; } else { self.core.switch_channel(id)?; }
+        self.sync_muted(&channel.id);
         if let Some(project) = project { self.core.configure_branch_source(self.store.clone(), channel.id.clone(), channel.workspace_mode, project.path.into()); }
         else { self.core.clear_branch_source(); }
         self.refresh_threads(&channel.id)?;
@@ -770,6 +779,275 @@ impl Channels {
         self.core.send_to_agent_with_attachments(Some(channel), text, recipient, attachments)
     }
 
+    // The menu actions of the channel list: mute, archive, and the Git actions of branch and worktree rows. Each one
+    // checks its own state again, so the webview state is never trusted. Each Git action starts a branch refresh.
+
+    /// Resolve a repository of the current project. The webview names it by ID: empty for the project root.
+    fn repository(&self, project: &ProjectId, id: &str) -> Result<discard_core::worktree::DiscoveredRepository, String> {
+        if self.core.current_project().id != *project { return Err("Open this project first.".into()); }
+        discard_core::worktree::discover_repositories(&self.project_dir()).map_err(|e| e.to_string())?
+            .into_iter().find(|repository| repository.id == id).ok_or_else(|| "This repository is no longer available.".to_string())
+    }
+    fn branch_entries(&self, repository: &discard_core::worktree::DiscoveredRepository) -> Result<Vec<discard_core::worktree::BranchEntry>, String> {
+        discard_core::worktree::list_branches(&repository.path).map_err(|e| e.to_string())
+    }
+    fn branch_channel(&self, project: &ProjectId, repository: &str, branch: &str) -> Result<Option<Channel>, String> {
+        self.store.lock().unwrap_or_else(|e| e.into_inner()).project_repository_branch_channel(project, repository, branch).map_err(|e| e.to_string())
+    }
+    /// Take the channels out of use for one action. Refused, with nothing held, while any of them is busy.
+    fn hold(&self, ids: &[ChannelId]) -> Result<Vec<String>, String> {
+        let mut held: Vec<String> = Vec::new();
+        for id in ids {
+            if held.contains(&id.0) { continue; }
+            if let Err(error) = self.core.begin_channel_action(&id.0) {
+                self.release(held);
+                return Err(error);
+            }
+            held.push(id.0.clone());
+        }
+        Ok(held)
+    }
+    fn release(&self, held: Vec<String>) { for id in held { self.core.end_channel_change(&id); } }
+    /// Show the new Git state: the branch list and the rows that depend on it.
+    fn after_git(&self) { self.core.refresh_branches(self.core.request_branch_refresh()); }
+    /// The channels that use a working tree. The first list holds every channel with a saved worktree record at its
+    /// path, archived or not. The second holds the active ones among them and the branch channel of the branch that the
+    /// tree holds.
+    fn worktree_users(&self, project: &ProjectId, repository: &str, entry: &discard_core::worktree::BranchEntry, root: &std::path::Path) -> Result<(Vec<ChannelId>, Vec<ChannelId>), String> {
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let canonical = root.canonicalize().ok();
+        let same = |path: &str| { let path = std::path::Path::new(path); path == root || (canonical.is_some() && path.canonicalize().ok() == canonical) };
+        let (mut bound, mut active) = (Vec::new(), Vec::new());
+        for owner in store.list_projects().map_err(|e| e.to_string())? {
+            for (channel, archived) in store.all_channels_for_project(&owner.id).map_err(|e| e.to_string())? {
+                if store.worktree_for(&channel.id).map_err(|e| e.to_string())?.is_some_and(|record| same(&record.path)) {
+                    bound.push(channel.id.clone());
+                    if !archived { active.push(channel.id); }
+                }
+            }
+        }
+        if !entry.detached && let Some(channel) = store.project_repository_branch_channel(project, repository, &entry.branch).map_err(|e| e.to_string())? && !active.contains(&channel.id) {
+            active.push(channel.id);
+        }
+        Ok((bound, active))
+    }
+    /// Resolve a working tree of a repository: its entry, and the main checkout path that Git commands run in.
+    fn working_tree(&self, repository: &discard_core::worktree::DiscoveredRepository, worktree: &str) -> Result<(discard_core::worktree::BranchEntry, PathBuf, PathBuf), String> {
+        let entries = self.branch_entries(repository)?;
+        let root = PathBuf::from(worktree);
+        let entry = discard_core::branch_actions::entry_for_worktree(&entries, &root).cloned().ok_or("This working tree is no longer available.")?;
+        let main = entries.iter().find(|candidate| candidate.is_main_checkout).and_then(|candidate| candidate.worktree.clone()).unwrap_or_else(|| repository.path.clone());
+        let root = entry.worktree.clone().unwrap_or(root);
+        Ok((entry, root, main))
+    }
+
+    /// Mute or unmute a channel. A thread cannot be muted. `#general` can.
+    pub fn set_channel_muted(&self, project: &ProjectId, channel: &ChannelId, muted: bool) -> Result<(), String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            let value = store.load_channel(channel).map_err(|e| e.to_string())?;
+            if value.project_id.as_ref() != Some(project) { return Err("Channel does not belong to this project.".into()); }
+            store.set_channel_muted(channel, muted).map_err(|e| e.to_string())?;
+        }
+        self.core.set_channel_muted(&channel.0, muted);
+        Ok(())
+    }
+
+    /// Archive the channel of a row with the rules, the confirm step and the store path of the menu bar item. Also
+    /// refused for `#general`, for an archived channel, and for a busy channel. Returns the items that a forced archive
+    /// would delete when the archive needs the second confirm. When the archived channel was open, `#general` opens.
+    pub fn archive_channel(&self, workspace: &discard_core::workspace::GitWorkspace, project: &ProjectId, channel: &ChannelId, force: bool) -> Result<super::dto::ArchiveChannelDto, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let threads = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            let value = store.load_channel(channel).map_err(|e| e.to_string())?;
+            if value.project_id.as_ref() != Some(project) { return Err("Channel does not belong to this project.".into()); }
+            if store.thread_info(channel).map_err(|e| e.to_string())?.is_some() { return Err("A thread is archived with its channel.".into()); }
+            let metadata = store.project_channel_metadata(channel).map_err(|e| e.to_string())?.ok_or("Project channel metadata is unavailable")?;
+            if metadata.kind == discard_core::model::ProjectChannelKind::General { return Err("#general cannot be archived.".into()); }
+            if store.channel_archived(channel).map_err(|e| e.to_string())? { return Err("This channel is already archived.".into()); }
+            store.threads_for_channel(channel).map_err(|e| e.to_string())?.into_iter().map(|thread| thread.channel_id.0).collect::<Vec<_>>()
+        };
+        self.core.begin_channel_archive(&channel.0)?;
+        let outcome = workspace.archive(channel, force);
+        self.core.end_channel_change(&channel.0);
+        match outcome? {
+            discard_core::workspace::ArchiveOutcome::NeedsConfirmation(items) => Ok(super::dto::ArchiveChannelDto { archived: false, items }),
+            discard_core::workspace::ArchiveOutcome::Archived { .. } => {
+                self.core.channel_read_only(&channel.0, true, true);
+                for thread in threads.iter().filter(|thread| self.core.has_channel(thread)) { self.core.channel_read_only(thread, true, true); }
+                if self.core.active_channel_id() == channel.0 { let _ = self.open_general(project); }
+                self.after_git();
+                Ok(super::dto::ArchiveChannelDto { archived: true, items: vec![] })
+            }
+        }
+    }
+    /// Open `#general` of a project.
+    fn open_general(&self, project: &ProjectId) -> Result<(), String> {
+        let general = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            store.all_channels_for_project(project).map_err(|e| e.to_string())?.into_iter().filter(|(_, archived)| !archived).map(|(channel, _)| channel)
+                .find(|channel| store.project_channel_metadata(&channel.id).ok().flatten().is_some_and(|metadata| metadata.kind == discard_core::model::ProjectChannelKind::General))
+        };
+        let general = general.ok_or("This project has no #general channel.")?;
+        self.select_inner(&general.id.0)
+    }
+
+    /// Check that a branch can get a worktree, and find its channel. A branch with no channel gets one at creation.
+    fn worktree_target(&self, project: &ProjectId, repository: &str, branch: &str) -> Result<(discard_core::worktree::DiscoveredRepository, Option<Channel>), String> {
+        let repo = self.repository(project, repository)?;
+        let entries = self.branch_entries(&repo)?;
+        let entry = entries.iter().find(|entry| entry.branch == branch && !entry.detached).ok_or("This branch no longer exists.")?;
+        if entry.worktree.is_some() { return Err("This branch is checked out in a working tree.".into()); }
+        let channel = self.branch_channel(project, &repo.id, branch)?;
+        if let Some(channel) = &channel && self.store.lock().unwrap_or_else(|e| e.into_inner()).worktree_for(&channel.id).map_err(|e| e.to_string())?.is_some() {
+            return Err("This channel already has a worktree.".into());
+        }
+        Ok((repo, channel))
+    }
+    /// Where Create Worktree… puts the worktree. The path follows the rule of owned worktrees.
+    pub fn worktree_plan(&self, workspace: &discard_core::workspace::GitWorkspace, project: &ProjectId, repository: &str, branch: &str) -> Result<super::dto::WorktreePlanDto, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, channel) = self.worktree_target(project, repository, branch)?;
+        let id = channel.map_or_else(ChannelId::new, |channel| channel.id);
+        let path = workspace.target_for_branch(&repo.path, &id, branch)?;
+        Ok(super::dto::WorktreePlanDto { path: path.to_string_lossy().into_owned(), channel_id: id.0 })
+    }
+    /// Create a linked worktree for a branch with `create_for_branch`. A branch with no channel gets a channel in the
+    /// same transaction as the worktree record, under `new_channel` when that ID is free. A Git failure saves nothing.
+    /// Returns the worktree path.
+    pub fn create_worktree(&self, workspace: &discard_core::workspace::GitWorkspace, project: &ProjectId, repository: &str, branch: &str, new_channel: Option<&str>) -> Result<String, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, channel) = self.worktree_target(project, repository, branch)?;
+        let record = match channel {
+            Some(channel) => workspace.create_for_branch(&repo.path, &channel.id, branch)?,
+            None => {
+                let (agent, name) = {
+                    let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+                    let agent = store.project_main_agent(project).map_err(|e| e.to_string())?.ok_or("This project has no main agent. Open the project first.")?;
+                    let channels = store.channels_for_project(project).map_err(|e| e.to_string())?;
+                    let base = if repo.id.is_empty() { branch.to_owned() } else { format!("{}/{}", repo.label, branch) };
+                    let (mut name, mut suffix) = (base.clone(), 2);
+                    while channels.iter().any(|existing| existing.name.eq_ignore_ascii_case(&name)) { name = format!("{base}-{suffix}"); suffix += 1; }
+                    (agent, name)
+                };
+                // The webview shows the path of this ID. Use it when it is well formed and free.
+                let id = new_channel.filter(|id| !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+                    .map(|id| ChannelId(id.to_owned()))
+                    .filter(|id| self.store.lock().unwrap_or_else(|e| e.into_inner()).load_channel(id).is_err())
+                    .unwrap_or_default();
+                let channel = Channel { id, project_id: Some(project.clone()), name, agent_id: agent, workspace_mode: WorkspaceMode::Worktree };
+                workspace.create_channel_with_worktree(&repo.path, &repo.id, &channel, branch)?
+            }
+        };
+        self.after_git();
+        Ok(record.path)
+    }
+
+    /// Rename a local branch and move the channel binding to the new name. A checked-out branch works. The channel
+    /// must be idle. When Git succeeds and the store fails, the branch gets its old name back. Returns the new name.
+    pub fn rename_branch(&self, project: &ProjectId, repository: &str, branch: &str, new_name: &str) -> Result<String, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let repo = self.repository(project, repository)?;
+        if !self.branch_entries(&repo)?.iter().any(|entry| entry.branch == branch && !entry.detached) { return Err("This branch no longer exists.".into()); }
+        let channel = self.branch_channel(project, &repo.id, branch)?;
+        let held = self.hold(&channel.iter().map(|channel| channel.id.clone()).collect::<Vec<_>>())?;
+        let result = (|| {
+            let new = discard_core::branch_actions::validate_branch_name(&repo.path, new_name, Some(branch))?;
+            discard_core::branch_actions::rename_branch(&repo.path, branch, &new)?;
+            if let Some(channel) = &channel {
+                let saved = self.store.lock().unwrap_or_else(|e| e.into_inner()).rename_project_branch(project, &channel.id, &new).map_err(|e| e.to_string());
+                if let Err(error) = saved {
+                    return Err(match discard_core::branch_actions::rename_branch(&repo.path, &new, branch) {
+                        Ok(()) => format!("Could not save the new branch name: {error}. The branch has its old name again."),
+                        Err(undo) => format!("Could not save the new branch name: {error}. Could not restore the old name `{branch}`: {undo}"),
+                    });
+                }
+            }
+            Ok(new)
+        })();
+        self.release(held);
+        if result.is_ok() { self.after_git(); }
+        result
+    }
+
+    /// The unmerged commits that Delete Branch… would drop, or the reason the branch cannot be deleted. The dialog
+    /// reads this when it opens.
+    pub fn branch_deletion_info(&self, project: &ProjectId, repository: &str, branch: &str) -> Result<usize, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let repo = self.repository(project, repository)?;
+        if let Some(channel) = self.branch_channel(project, &repo.id, branch)? && let Some(reason) = self.core.channel_busy_reason(&channel.id.0) { return Err(reason.into()); }
+        discard_core::branch_actions::deletion_plan(&repo.path, branch)
+    }
+    /// Delete a local branch. The count of unmerged commits is read again here. Unmerged commits need `force`.
+    pub fn delete_branch(&self, project: &ProjectId, repository: &str, branch: &str, force: bool) -> Result<super::dto::BranchDeletionDto, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let repo = self.repository(project, repository)?;
+        let channel = self.branch_channel(project, &repo.id, branch)?;
+        let held = self.hold(&channel.iter().map(|channel| channel.id.clone()).collect::<Vec<_>>())?;
+        let result = discard_core::branch_actions::delete_branch(&repo.path, branch, force);
+        self.release(held);
+        let deletion = match result? {
+            discard_core::branch_actions::BranchDeletion::Deleted => super::dto::BranchDeletionDto { deleted: true, unmerged: 0 },
+            discard_core::branch_actions::BranchDeletion::NeedsForce { unmerged } => super::dto::BranchDeletionDto { deleted: false, unmerged },
+        };
+        if deletion.deleted { self.after_git(); }
+        Ok(deletion)
+    }
+
+    /// Start a new branch at the HEAD of a working tree and switch it to the branch. Uncommitted changes stay. No
+    /// channel that uses the tree may be busy. Returns the new name.
+    pub fn create_branch(&self, project: &ProjectId, repository: &str, worktree: &str, name: &str) -> Result<String, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let repo = self.repository(project, repository)?;
+        let (entry, root, _) = self.working_tree(&repo, worktree)?;
+        let (_, users) = self.worktree_users(project, &repo.id, &entry, &root)?;
+        let held = self.hold(&users)?;
+        let result = (|| {
+            let name = discard_core::branch_actions::validate_branch_name(&repo.path, name, None)?;
+            discard_core::branch_actions::create_branch(&root, &name)?;
+            Ok(name)
+        })();
+        self.release(held);
+        if result.is_ok() { self.after_git(); }
+        result
+    }
+
+    /// The files that Remove Worktree… would discard, or the reason the working tree cannot be removed.
+    pub fn worktree_removal_info(&self, project: &ProjectId, repository: &str, worktree: &str) -> Result<super::dto::WorktreeFilesDto, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let repo = self.repository(project, repository)?;
+        let (entry, root, main) = self.working_tree(&repo, worktree)?;
+        if entry.is_main_checkout { return Err("The main checkout cannot be removed.".into()); }
+        let (_, users) = self.worktree_users(project, &repo.id, &entry, &root)?;
+        if let Some(reason) = users.iter().find_map(|id| self.core.channel_busy_reason(&id.0)) { return Err(reason.into()); }
+        let manager = WorktreeManager::new(&self.project_dir());
+        let files = manager.status(&discard_core::worktree::Worktree { root, branch: entry.branch, base_commit: String::new(), repo: main }).map_err(|e| e.to_string())?.files();
+        Ok(super::dto::WorktreeFilesDto::of(files))
+    }
+    /// Remove a linked working tree with `git worktree remove`. The branch and its commits stay. The status is read
+    /// again here. Files that would be lost need `force`. The saved worktree records of the channels that were bound to
+    /// the path go. The channels stay.
+    pub fn remove_worktree(&self, project: &ProjectId, repository: &str, worktree: &str, force: bool) -> Result<super::dto::WorktreeRemovalDto, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let repo = self.repository(project, repository)?;
+        let (entry, root, main) = self.working_tree(&repo, worktree)?;
+        if entry.is_main_checkout { return Err("The main checkout cannot be removed.".into()); }
+        let (bound, users) = self.worktree_users(project, &repo.id, &entry, &root)?;
+        let held = self.hold(&users)?;
+        let manager = WorktreeManager::new(&self.project_dir());
+        let outcome = manager.remove_checked(&discard_core::worktree::Worktree { root, branch: entry.branch, base_commit: String::new(), repo: main }, force).map_err(|e| e.to_string());
+        let result = match outcome {
+            Ok(discard_core::worktree::RemoveOutcome::Removed) => self.store.lock().unwrap_or_else(|e| e.into_inner()).delete_worktrees(&bound).map_err(|e| e.to_string())
+                .map(|()| super::dto::WorktreeRemovalDto { removed: true, files: vec![], more: 0 }),
+            Ok(discard_core::worktree::RemoveOutcome::NeedsForce(files)) => { let listed = super::dto::WorktreeFilesDto::of(files); Ok(super::dto::WorktreeRemovalDto { removed: false, files: listed.files, more: listed.more }) }
+            Err(error) => Err(error),
+        };
+        self.release(held);
+        if result.as_ref().is_ok_and(|removal| removal.removed) { self.after_git(); }
+        result
+    }
     pub fn open_branch(&self, key: &str) -> Result<String, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         self.core.can_switch()?;
@@ -1739,5 +2017,411 @@ mod tests {
         assert!(core.snapshot().composer_disabled, "canonical selection preserves archived-agent read-only state");
         assert!(core.send_to(Some(&channel.id.0), "must not be sent".into()).is_err());
         assert!(matches!(receivers.lock().unwrap()[0].try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+    }
+}
+
+/// The menu actions of the channel list, against temporary repositories and an in-memory store.
+#[cfg(test)]
+mod navigation_action_tests {
+    use super::*;
+    use discard_core::{agent::AgentConfig, capability::ApprovalPolicy, model::{AgentId, Block, Message, Role}, ui_state::{Command, UiState}, workspace::GitWorkspace};
+    use tokio::sync::mpsc;
+
+    struct Rig {
+        dir: tempfile::TempDir,
+        repo: PathBuf,
+        store: Arc<Mutex<Store>>,
+        core: Arc<AppCore>,
+        service: Channels,
+        workspace: GitWorkspace,
+        project: discard_core::model::Project,
+        general: Channel,
+        agent: AgentId,
+        _receivers: Arc<Mutex<Vec<mpsc::UnboundedReceiver<Command>>>>,
+    }
+
+    fn run(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = discard_core::process::spawn_std(std::process::Command::new("git")
+            .args(["-c", "user.name=T", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
+            .args(args).current_dir(dir).env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output()).unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    /// A project whose folder is a temporary repository with one commit on `main`. Nothing touches another path.
+    async fn rig() -> Rig {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        run(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        run(&repo, &["add", "-A"]);
+        run(&repo, &["commit", "-q", "-m", "init"]);
+        let store = Store::open_in_memory().unwrap();
+        let project = store.import_project_folder(&repo).unwrap();
+        let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Project agent".into(), provider: "codex".into(), model: Some("model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        store.set_project_main_agent(&project.id, &agent).unwrap();
+        let general = store.ensure_project_general_channel(&project.id, &agent).unwrap();
+        let store = Arc::new(Mutex::new(store));
+        let receivers = Arc::new(Mutex::new(Vec::new()));
+        let launch: Launcher = {
+            let receivers = receivers.clone();
+            Arc::new(move |channel| {
+                let (commands, receiver) = mpsc::unbounded_channel();
+                receivers.lock().unwrap().push(receiver);
+                let (_, updates) = mpsc::unbounded_channel();
+                Ok((CoreInit { state: UiState::new(channel.id.clone(), vec![]), commands, project: "Project".into(), channel: channel.name.clone(), agent: "Builder".into(), provider: "codex".into() }, updates))
+            })
+        };
+        let (init, _) = launch(&general).unwrap();
+        let core = Arc::new(AppCore::new(init));
+        core.configure_targets(project.id.0.clone(), &repo, agent.0.clone());
+        core.configure_read_marker(dir.path(), &general.id.0);
+        let service = Channels::new(core.clone(), store.clone(), Handle::current(), launch);
+        service.activate_project(&project.id).unwrap();
+        let workspace = GitWorkspace::new(&dir.path().join("worktrees"), store.clone());
+        Rig { dir, repo, store, core, service, workspace, project, general, agent, _receivers: receivers }
+    }
+    impl Rig {
+        fn git(&self, args: &[&str]) -> String { run(&self.repo, args) }
+        fn branches(&self) -> Vec<String> { self.git(&["for-each-ref", "--format=%(refname:short)", "refs/heads"]).lines().map(str::to_owned).collect() }
+        fn busy(&self, channel: &str) {
+            self.core.send_to(Some(channel), "work".into()).unwrap();
+            assert!(self.core.channel_busy_reason(channel).is_some());
+        }
+        fn idle(&self, channel: &str) { self.core.apply_channel(channel, Update::TurnFinished(discard_core::driver::TurnOutcome::Completed)); }
+        fn branch_channel(&self, branch: &str) -> Option<Channel> { self.store.lock().unwrap().project_branch_channel(&self.project.id, branch).unwrap() }
+        fn worktree_record(&self, channel: &ChannelId) -> Option<WorktreeRecord> { self.store.lock().unwrap().worktree_for(channel).unwrap() }
+        fn create_worktree(&self, branch: &str) -> String { self.service.create_worktree(&self.workspace, &self.project.id, "", branch, None).unwrap() }
+    }
+
+    #[tokio::test]
+    async fn mute_follows_the_store_the_listing_and_the_unread_marker() {
+        let r = rig().await;
+        let plans = ChannelId(r.service.create_text_channel(&r.project.id, "plans").unwrap());
+        let muted = |r: &Rig, id: &ChannelId| r.service.list_project_channels(&r.project.id).unwrap().into_iter().find(|c| c.id == id.0).unwrap().muted;
+        assert!(!muted(&r, &plans));
+        r.service.set_channel_muted(&r.project.id, &plans, true).unwrap();
+        assert!(muted(&r, &plans) && r.store.lock().unwrap().channel_muted(&plans).unwrap());
+        assert!(r.core.snapshot().channels.iter().find(|c| c.id == plans.0).unwrap().muted);
+        r.service.set_channel_muted(&r.project.id, &plans, false).unwrap();
+        assert!(!muted(&r, &plans));
+        // #general can be muted.
+        r.service.set_channel_muted(&r.project.id, &r.general.id, true).unwrap();
+        assert!(muted(&r, &r.general.id));
+        // A thread cannot, and the channel must belong to the project.
+        let anchor = { let store = r.store.lock().unwrap(); let message = Message { id: MessageId::new(), channel_id: plans.clone(), role: Role::Agent, blocks: vec![Block::Markdown { text: "answer".into() }] }; store.insert_message(&message).unwrap(); message.id };
+        let thread = r.store.lock().unwrap().create_thread(&plans, &anchor, "Why", &r.agent).unwrap();
+        assert!(r.service.set_channel_muted(&r.project.id, &thread.id, true).unwrap_err().contains("thread"));
+        assert!(r.service.set_channel_muted(&discard_core::model::ProjectId::new(), &plans, true).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_muted_channel_loads_muted_after_the_service_restarts_it() {
+        let r = rig().await;
+        let plans = ChannelId(r.service.create_text_channel(&r.project.id, "plans").unwrap());
+        r.service.set_channel_muted(&r.project.id, &plans, true).unwrap();
+        r.service.select(&r.general.id.0).unwrap();
+        // Forget the loaded state and load the channel again from storage.
+        r.core.set_channel_muted(&plans.0, false);
+        r.service.select(&plans.0).unwrap();
+        assert!(r.core.snapshot().channels.iter().find(|c| c.id == plans.0).unwrap().muted, "selection copies the saved flag");
+    }
+
+    #[tokio::test]
+    async fn archive_from_a_row_refuses_general_archived_and_busy_channels() {
+        let r = rig().await;
+        let notes = ChannelId(r.service.create_text_channel(&r.project.id, "notes").unwrap());
+        assert_eq!(r.service.archive_channel(&r.workspace, &r.project.id, &r.general.id, false).unwrap_err(), "#general cannot be archived.");
+        assert!(r.service.archive_channel(&r.workspace, &discard_core::model::ProjectId::new(), &notes, false).is_err(), "the channel must belong to the project");
+        r.busy(&notes.0);
+        assert!(r.service.archive_channel(&r.workspace, &r.project.id, &notes, false).unwrap_err().contains("A turn runs"));
+        assert!(!r.store.lock().unwrap().channel_archived(&notes).unwrap(), "a refusal changes nothing");
+        r.idle(&notes.0);
+        // The open channel archives, and #general opens.
+        assert_eq!(r.core.active_channel_id(), notes.0);
+        let outcome = r.service.archive_channel(&r.workspace, &r.project.id, &notes, false).unwrap();
+        assert_eq!(outcome, super::super::dto::ArchiveChannelDto { archived: true, items: vec![] });
+        assert!(r.store.lock().unwrap().channel_archived(&notes).unwrap());
+        assert_eq!(r.core.active_channel_id(), r.general.id.0, "the app opens #general of the same project");
+        assert_eq!(r.service.archive_channel(&r.workspace, &r.project.id, &notes, false).unwrap_err(), "This channel is already archived.");
+    }
+
+    #[tokio::test]
+    async fn archiving_a_channel_that_is_not_open_leaves_the_open_channel_alone() {
+        let r = rig().await;
+        let notes = ChannelId(r.service.create_text_channel(&r.project.id, "notes").unwrap());
+        r.service.select(&r.general.id.0).unwrap();
+        assert!(r.service.archive_channel(&r.workspace, &r.project.id, &notes, false).unwrap().archived);
+        assert_eq!(r.core.active_channel_id(), r.general.id.0);
+        assert!(r.service.select(&notes.0).is_ok(), "an archived channel stays readable");
+    }
+
+    #[tokio::test]
+    async fn a_dirty_owned_worktree_needs_the_second_archive_confirm() {
+        let r = rig().await;
+        r.git(&["branch", "feature"]);
+        let path = r.create_worktree("feature");
+        let channel = r.branch_channel("feature").expect("the worktree gave the branch a channel");
+        std::fs::write(std::path::Path::new(&path).join("wip.txt"), "wip").unwrap();
+        let first = r.service.archive_channel(&r.workspace, &r.project.id, &channel.id, false).unwrap();
+        assert!(!first.archived && first.items.iter().any(|item| item.contains("wip.txt")), "{first:?}");
+        assert!(std::path::Path::new(&path).exists() && !r.store.lock().unwrap().channel_archived(&channel.id).unwrap());
+        assert!(r.service.archive_channel(&r.workspace, &r.project.id, &channel.id, true).unwrap().archived);
+        assert!(!std::path::Path::new(&path).exists());
+        assert!(r.branches().contains(&"feature".to_string()), "the branch is kept");
+        assert!(r.worktree_record(&channel.id).is_none());
+    }
+
+    #[tokio::test]
+    async fn create_worktree_plans_a_path_then_creates_the_channel_and_record_together() {
+        let r = rig().await;
+        r.git(&["branch", "feature"]);
+        let plan = r.service.worktree_plan(&r.workspace, &r.project.id, "", "feature").unwrap();
+        assert!(plan.path.starts_with(r.dir.path().join("worktrees").to_str().unwrap()) && plan.path.contains("feature"), "{}", plan.path);
+        let path = r.service.create_worktree(&r.workspace, &r.project.id, "", "feature", Some(&plan.channel_id)).unwrap();
+        assert_eq!(path, plan.path, "the path of the dialog is the path of the worktree");
+        let channel = r.branch_channel("feature").unwrap();
+        assert_eq!(channel.id.0, plan.channel_id);
+        let record = r.worktree_record(&channel.id).unwrap();
+        assert!(record.owned && record.path == path && record.branch == "feature");
+        assert!(std::path::Path::new(&path).join("a.txt").exists());
+        let created = std::path::Path::new(&path).canonicalize().unwrap();
+        assert!(r.core.snapshot().branches.iter().any(|row| row.worktree.as_deref().is_some_and(|w| std::path::Path::new(w).canonicalize().ok().as_ref() == Some(&created))), "a branch refresh shows the new worktree");
+        // The branch is checked out now, so a second request is refused.
+        assert!(r.service.create_worktree(&r.workspace, &r.project.id, "", "feature", None).unwrap_err().contains("checked out"));
+    }
+
+    #[tokio::test]
+    async fn create_worktree_is_refused_for_a_checked_out_branch_a_bound_channel_and_a_missing_branch() {
+        let r = rig().await;
+        assert!(r.service.create_worktree(&r.workspace, &r.project.id, "", "main", None).unwrap_err().contains("checked out"));
+        assert!(r.service.create_worktree(&r.workspace, &r.project.id, "", "nope", None).unwrap_err().contains("no longer exists"));
+        r.git(&["branch", "bound"]);
+        let channel = Channel { id: ChannelId::new(), project_id: Some(r.project.id.clone()), name: "bound".into(), agent_id: r.agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+        let record = WorktreeRecord { channel_id: channel.id.clone(), path: "/elsewhere".into(), branch: "bound".into(), base_commit: "abc".into(), repo: r.repo.to_string_lossy().into(), owned: false };
+        r.store.lock().unwrap().create_named_repository_channel(&channel, "", Some("bound"), Some(&record)).unwrap();
+        assert_eq!(r.service.create_worktree(&r.workspace, &r.project.id, "", "bound", None).unwrap_err(), "This channel already has a worktree.");
+        assert_eq!(r.worktree_record(&channel.id).unwrap().path, "/elsewhere", "a refusal saves no record");
+        assert!(r.service.create_worktree(&r.workspace, &discard_core::model::ProjectId::new(), "", "bound", None).is_err());
+        assert!(r.service.create_worktree(&r.workspace, &r.project.id, "missing-repo", "bound", None).unwrap_err().contains("repository"));
+    }
+
+    #[tokio::test]
+    async fn a_git_failure_in_create_worktree_saves_no_channel_and_no_record() {
+        let r = rig().await;
+        r.git(&["branch", "feature"]);
+        let plan = r.service.worktree_plan(&r.workspace, &r.project.id, "", "feature").unwrap();
+        // The target folder exists, so Git cannot add the worktree.
+        std::fs::create_dir_all(&plan.path).unwrap();
+        std::fs::write(std::path::Path::new(&plan.path).join("keep"), "keep").unwrap();
+        assert!(r.service.create_worktree(&r.workspace, &r.project.id, "", "feature", Some(&plan.channel_id)).is_err());
+        assert!(r.branch_channel("feature").is_none());
+        assert!(r.store.lock().unwrap().load_channel(&ChannelId(plan.channel_id)).is_err());
+        assert_eq!(std::fs::read_to_string(std::path::Path::new(&plan.path).join("keep")).unwrap(), "keep");
+    }
+
+    #[tokio::test]
+    async fn rename_branch_checks_the_name_moves_the_binding_and_keeps_the_history() {
+        let r = rig().await;
+        r.git(&["branch", "feature"]);
+        let channel = ChannelId(r.service.open_branch("feature").unwrap());
+        let message = Message { id: MessageId::new(), channel_id: channel.clone(), role: Role::User, blocks: vec![Block::Markdown { text: "keep".into() }] };
+        r.store.lock().unwrap().insert_message(&message).unwrap();
+        r.git(&["branch", "taken"]);
+        for (name, reason) in [("", "Enter a branch name"), ("feature", "not the current name"), ("taken", "already exists"), ("bad name", "not a valid branch name")] {
+            assert!(r.service.rename_branch(&r.project.id, "", "feature", name).unwrap_err().contains(reason), "{name}");
+        }
+        assert_eq!(r.branches(), ["feature", "main", "taken"], "a refusal changes nothing");
+        assert_eq!(r.service.rename_branch(&r.project.id, "", "feature", " feature-2 ").unwrap(), "feature-2");
+        assert_eq!(r.branches(), ["feature-2", "main", "taken"]);
+        let moved = r.branch_channel("feature-2").unwrap();
+        assert_eq!(moved.id, channel);
+        assert!(r.branch_channel("feature").is_none());
+        assert_eq!(r.store.lock().unwrap().messages_for_channel(&channel).unwrap().len(), 1);
+        assert!(r.service.rename_branch(&r.project.id, "", "gone", "other").unwrap_err().contains("no longer exists"));
+    }
+
+    #[tokio::test]
+    async fn rename_branch_works_for_a_checked_out_branch_and_updates_the_worktree_record() {
+        let r = rig().await;
+        r.git(&["branch", "feature"]);
+        let path = r.create_worktree("feature");
+        let channel = r.branch_channel("feature").unwrap();
+        assert_eq!(r.service.rename_branch(&r.project.id, "", "feature", "feature-2").unwrap(), "feature-2");
+        assert_eq!(run(std::path::Path::new(&path), &["rev-parse", "--abbrev-ref", "HEAD"]), "feature-2");
+        assert_eq!(r.worktree_record(&channel.id).unwrap().branch, "feature-2");
+        assert_eq!(r.service.rename_branch(&r.project.id, "", "main", "trunk").unwrap(), "trunk");
+        assert_eq!(r.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "trunk");
+    }
+
+    #[tokio::test]
+    async fn rename_branch_is_refused_while_its_channel_is_busy() {
+        let r = rig().await;
+        r.git(&["branch", "feature"]);
+        let channel = ChannelId(r.service.open_branch("feature").unwrap());
+        r.busy(&channel.0);
+        assert!(r.service.rename_branch(&r.project.id, "", "feature", "other").unwrap_err().contains("A turn runs"));
+        assert_eq!(r.branches(), ["feature", "main"]);
+        r.idle(&channel.0);
+        assert!(r.service.rename_branch(&r.project.id, "", "feature", "other").is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_store_failure_after_the_git_rename_renames_the_branch_back() {
+        let r = rig().await;
+        r.git(&["branch", "feature"]);
+        let channel = ChannelId(r.service.open_branch("feature").unwrap());
+        // A stale channel still holds the name `taken` in the store, but Git has no such branch.
+        let stale = Channel { id: ChannelId::new(), project_id: Some(r.project.id.clone()), name: "taken".into(), agent_id: r.agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+        r.store.lock().unwrap().create_named_repository_channel(&stale, "", Some("taken"), None).unwrap();
+        let error = r.service.rename_branch(&r.project.id, "", "feature", "taken").unwrap_err();
+        assert!(error.contains("old name again"), "{error}");
+        assert_eq!(r.branches(), ["feature", "main"], "Git has the old name again");
+        assert_eq!(r.store.lock().unwrap().channel_branch(&channel).unwrap().as_deref(), Some("feature"));
+    }
+
+    #[tokio::test]
+    async fn delete_branch_counts_unmerged_commits_and_needs_the_force_choice() {
+        let r = rig().await;
+        r.git(&["branch", "merged"]);
+        r.git(&["checkout", "-q", "-b", "wip"]);
+        r.git(&["commit", "-q", "--allow-empty", "-m", "one"]);
+        r.git(&["commit", "-q", "--allow-empty", "-m", "two"]);
+        r.git(&["checkout", "-q", "main"]);
+        assert_eq!(r.service.branch_deletion_info(&r.project.id, "", "wip").unwrap(), 2);
+        assert_eq!(r.service.branch_deletion_info(&r.project.id, "", "merged").unwrap(), 0);
+        let refused = r.service.delete_branch(&r.project.id, "", "wip", false).unwrap();
+        assert_eq!((refused.deleted, refused.unmerged), (false, 2));
+        assert!(r.branches().contains(&"wip".to_string()), "the backend refuses without the force choice");
+        assert!(r.service.delete_branch(&r.project.id, "", "merged", false).unwrap().deleted);
+        // A commit that lands after the dialog opened is counted again at confirm time.
+        r.git(&["checkout", "-q", "-b", "late"]);
+        r.git(&["checkout", "-q", "main"]);
+        assert_eq!(r.service.branch_deletion_info(&r.project.id, "", "late").unwrap(), 0);
+        r.git(&["checkout", "-q", "late"]);
+        r.git(&["commit", "-q", "--allow-empty", "-m", "late commit"]);
+        r.git(&["checkout", "-q", "main"]);
+        assert!(!r.service.delete_branch(&r.project.id, "", "late", false).unwrap().deleted);
+        let forced = r.service.delete_branch(&r.project.id, "", "wip", true).unwrap();
+        assert_eq!((forced.deleted, forced.unmerged), (true, 0));
+        assert_eq!(r.branches(), ["late", "main"]);
+    }
+
+    #[tokio::test]
+    async fn delete_branch_is_refused_for_the_default_a_checked_out_branch_and_a_busy_channel() {
+        let r = rig().await;
+        assert!(r.service.delete_branch(&r.project.id, "", "main", true).unwrap_err().contains("default branch"));
+        assert!(r.service.branch_deletion_info(&r.project.id, "", "main").is_err());
+        r.git(&["branch", "feature"]);
+        let path = r.create_worktree("feature");
+        assert!(r.service.delete_branch(&r.project.id, "", "feature", true).unwrap_err().contains("checked out"));
+        assert!(std::path::Path::new(&path).exists());
+        r.service.remove_worktree(&r.project.id, "", &path, false).unwrap();
+        let channel = r.branch_channel("feature").unwrap();
+        r.service.select(&channel.id.0).unwrap();
+        r.busy(&channel.id.0);
+        assert!(r.service.delete_branch(&r.project.id, "", "feature", true).unwrap_err().contains("A turn runs"));
+        assert!(r.service.branch_deletion_info(&r.project.id, "", "feature").unwrap_err().contains("A turn runs"));
+        r.idle(&channel.id.0);
+        assert!(r.service.delete_branch(&r.project.id, "", "feature", false).unwrap().deleted);
+        assert!(r.store.lock().unwrap().load_channel(&channel.id).is_ok(), "the channel stays. The list moves it to Archived when it has a conversation");
+    }
+
+    #[tokio::test]
+    async fn create_branch_switches_the_working_tree_and_keeps_uncommitted_changes() {
+        let r = rig().await;
+        std::fs::write(r.repo.join("a.txt"), "edited\n").unwrap();
+        let head = r.git(&["rev-parse", "HEAD"]);
+        let root = r.repo.to_string_lossy().into_owned();
+        for (name, reason) in [("", "Enter a branch name"), ("main", "already exists"), ("two words", "not a valid branch name")] {
+            assert!(r.service.create_branch(&r.project.id, "", &root, name).unwrap_err().contains(reason), "{name}");
+        }
+        assert_eq!(r.service.create_branch(&r.project.id, "", &root, "topic/new").unwrap(), "topic/new");
+        assert_eq!(r.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "topic/new");
+        assert_eq!(r.git(&["rev-parse", "HEAD"]), head);
+        assert_eq!(std::fs::read_to_string(r.repo.join("a.txt")).unwrap(), "edited\n");
+        assert!(r.core.snapshot().branches.iter().any(|row| row.label == "topic/new"), "a branch refresh lists the new branch");
+        assert!(r.service.create_branch(&r.project.id, "", "/not/a/worktree", "x").unwrap_err().contains("no longer available"));
+    }
+
+    #[tokio::test]
+    async fn create_branch_is_refused_while_a_channel_that_uses_the_tree_is_busy() {
+        let r = rig().await;
+        r.git(&["branch", "feature"]);
+        let path = r.create_worktree("feature");
+        let channel = r.branch_channel("feature").unwrap();
+        r.service.select(&channel.id.0).unwrap();
+        r.busy(&channel.id.0);
+        assert!(r.service.create_branch(&r.project.id, "", &path, "topic").unwrap_err().contains("A turn runs"));
+        assert_eq!(run(std::path::Path::new(&path), &["rev-parse", "--abbrev-ref", "HEAD"]), "feature");
+        r.idle(&channel.id.0);
+        assert_eq!(r.service.create_branch(&r.project.id, "", &path, "topic").unwrap(), "topic");
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_keeps_the_branch_and_the_channel_and_drops_the_record() {
+        let r = rig().await;
+        r.git(&["branch", "feature"]);
+        let path = r.create_worktree("feature");
+        let channel = r.branch_channel("feature").unwrap();
+        assert_eq!(r.service.worktree_removal_info(&r.project.id, "", &path).unwrap().files, Vec::<String>::new());
+        let removal = r.service.remove_worktree(&r.project.id, "", &path, false).unwrap();
+        assert!(removal.removed && removal.files.is_empty());
+        assert!(!std::path::Path::new(&path).exists());
+        assert!(r.branches().contains(&"feature".to_string()), "the branch stays");
+        assert!(r.worktree_record(&channel.id).is_none(), "the record goes");
+        assert!(r.store.lock().unwrap().load_channel(&channel.id).is_ok(), "the channel stays");
+        assert!(r.service.remove_worktree(&r.project.id, "", &path, false).unwrap_err().contains("no longer available"));
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_lists_at_most_ten_files_and_needs_the_force_choice() {
+        let r = rig().await;
+        r.git(&["branch", "feature"]);
+        let path = r.create_worktree("feature");
+        let root = std::path::Path::new(&path);
+        for index in 0..12 { std::fs::write(root.join(format!("new-{index:02}.txt")), "x").unwrap(); }
+        std::fs::write(root.join("a.txt"), "edited\n").unwrap();
+        let info = r.service.worktree_removal_info(&r.project.id, "", &path).unwrap();
+        assert_eq!((info.files.len(), info.more), (10, 3));
+        let refused = r.service.remove_worktree(&r.project.id, "", &path, false).unwrap();
+        assert!(!refused.removed);
+        assert_eq!((refused.files.len(), refused.more), (10, 3), "the refusal returns the file list");
+        assert!(root.exists(), "the backend refuses without the force choice");
+        assert!(r.service.remove_worktree(&r.project.id, "", &path, true).unwrap().removed);
+        assert!(!root.exists());
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_is_refused_for_the_main_checkout_and_a_busy_channel() {
+        let r = rig().await;
+        let main = r.repo.to_string_lossy().into_owned();
+        assert!(r.service.remove_worktree(&r.project.id, "", &main, true).unwrap_err().contains("main checkout"));
+        assert!(r.service.worktree_removal_info(&r.project.id, "", &main).unwrap_err().contains("main checkout"));
+        r.git(&["branch", "feature"]);
+        let path = r.create_worktree("feature");
+        let channel = r.branch_channel("feature").unwrap();
+        r.service.select(&channel.id.0).unwrap();
+        r.busy(&channel.id.0);
+        assert!(r.service.remove_worktree(&r.project.id, "", &path, true).unwrap_err().contains("A turn runs"));
+        assert!(r.service.worktree_removal_info(&r.project.id, "", &path).unwrap_err().contains("A turn runs"));
+        assert!(std::path::Path::new(&path).exists() && r.worktree_record(&channel.id).is_some());
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_drops_the_record_of_every_channel_bound_to_the_path() {
+        let r = rig().await;
+        r.git(&["branch", "feature"]);
+        let path = r.create_worktree("feature");
+        let owner = r.branch_channel("feature").unwrap();
+        // Another channel borrows the same working tree, so it holds its own record.
+        let borrower = Channel { id: ChannelId::new(), project_id: Some(r.project.id.clone()), name: "borrower".into(), agent_id: r.agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+        let record = WorktreeRecord { channel_id: borrower.id.clone(), path: path.clone(), branch: "feature".into(), base_commit: "abc".into(), repo: r.repo.to_string_lossy().into(), owned: false };
+        r.store.lock().unwrap().create_named_channel(&borrower, None, Some(&record)).unwrap();
+        assert!(r.service.remove_worktree(&r.project.id, "", &path, false).unwrap().removed);
+        assert!(r.worktree_record(&owner.id).is_none() && r.worktree_record(&borrower.id).is_none());
+        assert!(r.store.lock().unwrap().load_channel(&borrower.id).is_ok());
     }
 }

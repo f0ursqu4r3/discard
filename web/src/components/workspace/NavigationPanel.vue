@@ -44,7 +44,7 @@ const emit = defineEmits<{
         :project-id="snapshot.projectId"
         :compact="compact"
         :project="snapshot.project"
-        :unread="snapshot.channels.some((channel) => channel.unread)"
+        :unread="snapshot.channels.some((channel) => channel.unread && !channel.muted)"
         :pending-approvals="
           snapshot.channels.reduce((total, channel) => total + channelApprovals(channel), 0)
         "
@@ -75,6 +75,7 @@ const emit = defineEmits<{
         class="min-w-0 flex-1"
         :page="page"
         :busy="busy"
+        :active-channel-busy="snapshot.archiveBusy || !!snapshot.banners.archive"
         :channels="snapshot.channels"
         :project-channels="projectChannels"
         :show-archived="

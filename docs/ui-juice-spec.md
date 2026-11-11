@@ -14,7 +14,7 @@ Goal: make the main window look and feel closer to the Discord desktop client. T
 - Protected surfaces keep their contrast and cannot be hidden: approval card (`render_approval`), review banner, plugin problem line, confirm notice, archive notice. Do not restyle them. Only confirm they still read well.
 - Interactive surfaces stay in Rust. Do not add Lua slots or Lua elements unless a surface below needs one. If you add one, update `crates/discard-lua/src/api_spec.rs` docs and tests.
 - Animations: each lasts 200 ms or less. They stop when the user wants reduced motion. If GPUI exposes no reduce-motion query without a new dependency, add one bool `appearance.reduce_motion` (default `false`) to `settings.toml` with validation and a failure test, and report this in your output.
-- Follow the style of the surrounding code: small functions, doc comments in plain English, tests next to the code.
+- Follow the style of the surrounding code: small functions, doc comments in plain English, tests next to the code (web tests live in a `__tests__` directory beside the code).
 - Do not commit. Do not touch git config or branches.
 
 ## Read state (new, UI-level)
