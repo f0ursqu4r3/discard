@@ -1,8 +1,8 @@
 import { afterEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import type { AgentRequest } from '@/bridge/api'
-import AgentRequestApprovals from './AgentRequestApprovals.vue'
-import MessageList from '../MessageList.vue'
+import AgentRequestApprovals from '../AgentRequestApprovals.vue'
+import MessageList from '../../MessageList.vue'
 import type { ThreadChipDto } from '@/bridge/types'
 
 vi.mock('@tauri-apps/api/core', () => ({

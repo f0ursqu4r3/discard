@@ -64,10 +64,10 @@ The work fails, even if it runs, when any of these is true:
 ### 1. Mono structure
 
 - Add a `--font-mono` token. Its value is the first family in the Ghostty `font-family` setting, followed by `'SF Mono', ui-monospace, Menlo, monospace`. Without a Ghostty setting, use only the fallback stack. *(Claude's call.)* `LiveTheme` in `crates/discard-core/src/ghostty/live.rs` already finds and watches the Ghostty config files. Read `font-family` from those same files and send it to the web app with the theme.
-- **Mono text:** channel, branch, and worktree names; paths; timestamps; agent metadata tags; counts and badges; key-value rows; tool calls; code and diff blocks; the status line; and the composer placeholder's channel name.
+- **Mono text:** channel, branch, and worktree names; paths; timestamps; counts and badges; key-value rows; tool calls; code and diff blocks; the status line; and the composer placeholder's channel name.
 - **Sans text (system font):** message prose, navigation labels (Overview, Agents, Memory, and so on), card titles, buttons, tab labels, dialog text, and settings text.
 - Set mono text at about 0.92 of the surrounding font size so that it matches the visual weight of the sans text.
-- After an agent's name in a message header, add a dim mono tag: `[agent · <provider>]`, for example `[agent · claude]`. The provider comes from the message author (`MessageAuthorDto.provider`). Today the header shows only the name and the time.
+- The message header shows the agent's name and the time. It shows no `[agent · <provider>]` tag. *(An earlier version of this spec added that tag. The tag was removed.)*
 - Put a `›` prompt glyph in the primary color before the composer placeholder.
 
 ### 2. Agent colors

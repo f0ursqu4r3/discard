@@ -1,7 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, expect, test } from 'vite-plus/test'
-import ChannelList from './ChannelList.vue'
-import type { BranchRowDto, ProjectChannelDto } from '../bridge/types'
+import ChannelList from '../ChannelList.vue'
+import type { BranchRowDto, ProjectChannelDto } from '../../bridge/types'
 
 const repositories = [
   { id: '/project/frontend', label: 'frontend', path: '/project/frontend' },

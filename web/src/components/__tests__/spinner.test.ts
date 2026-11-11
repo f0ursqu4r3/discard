@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { defineComponent, h, nextTick } from 'vue'
 import { mount } from '@vue/test-utils'
-import { SPINNER_FRAMES, SPINNER_INTERVAL_MS, STATIC_FRAME, useSpinnerFrame } from './spinner'
-import MemberList from './MemberList.vue'
+import { SPINNER_FRAMES, SPINNER_INTERVAL_MS, STATIC_FRAME, useSpinnerFrame } from '../spinner'
+import MemberList from '../MemberList.vue'
 
 const hosts: ReturnType<typeof mount>[] = []
 let reduced = false

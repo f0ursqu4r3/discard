@@ -1,5 +1,5 @@
 import { expect, test } from 'vite-plus/test'
-import { shortPath } from './paths'
+import { shortPath } from '../paths'
 
 test('infers the macOS home directory from the path', () => {
   expect(shortPath('/Users/ada/git/discard')).toBe('~/git/discard')

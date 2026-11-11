@@ -1,15 +1,15 @@
 import { mount, flushPromises } from '@vue/test-utils'
 import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
-import type { Highlighter } from './ui/code-block/highlighter'
+import type { Highlighter } from '../ui/code-block/highlighter'
 const { load } = vi.hoisted(() => ({
   load: vi.fn(),
 }))
-vi.mock('./ui/code-block/highlighter', () => ({
+vi.mock('../ui/code-block/highlighter', () => ({
   loadHighlighter: load,
   highlightCode: vi.fn(),
 }))
-import CodeBlock from './CodeBlock.vue'
-import { CodeBlockCopyButton } from './ui/code-block'
+import CodeBlock from '../CodeBlock.vue'
+import { CodeBlockCopyButton } from '../ui/code-block'
 
 const wrappers: ReturnType<typeof mount>[] = []
 const originalCopyCommand = Object.getOwnPropertyDescriptor(document, 'execCommand')

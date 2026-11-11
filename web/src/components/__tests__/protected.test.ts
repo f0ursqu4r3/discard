@@ -1,12 +1,12 @@
 import { mount } from '@vue/test-utils'
 import { expect, test, vi } from 'vite-plus/test'
-vi.mock('../bridge/api', () => ({
+vi.mock('../../bridge/api', () => ({
   decideApproval: vi.fn(),
   confirmResolve: vi.fn(),
   archiveConfirm: vi.fn(),
 }))
-import ApprovalCard from './ApprovalCard.vue'
-import Notices from './Notices.vue'
+import ApprovalCard from '../ApprovalCard.vue'
+import Notices from '../Notices.vue'
 const banners = {
   reviewCount: 1,
   problemLines: ['problem'],
@@ -52,7 +52,7 @@ test('review banner names pending plugins and provides a review action', () => {
 })
 
 test('an oversized header slot is contained above the protected notices', async () => {
-  const { default: ChannelHeader } = await import('./ChannelHeader.vue')
+  const { default: ChannelHeader } = await import('../ChannelHeader.vue')
   const header = mount(ChannelHeader, {
     props: { channel: 'general', memberListVisible: true },
     slots: { default: '<div style="height: 5000px">Plugin</div>' },
@@ -81,8 +81,8 @@ test('approval buttons use the protected border for focus', () => {
 })
 
 test('approval decisions in a live transcript include the originating channel', async () => {
-  const { default: MessageList } = await import('./MessageList.vue')
-  const { decideApproval } = await import('../bridge/api')
+  const { default: MessageList } = await import('../MessageList.vue')
+  const { decideApproval } = await import('../../bridge/api')
   const list = mount(MessageList, {
     props: {
       conversationId: 'second-channel',
@@ -120,7 +120,7 @@ test('long notices wrap inside their inset alert and preserve the full error', (
 })
 
 test('changes cards retain the protected surface', async () => {
-  const { default: ChangesCard } = await import('./ChangesCard.vue')
+  const { default: ChangesCard } = await import('../ChangesCard.vue')
   const view = mount(ChangesCard, {
     props: {
       block: {

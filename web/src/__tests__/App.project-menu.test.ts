@@ -1,7 +1,7 @@
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import { beforeEach, afterEach, expect, test, vi } from 'vite-plus/test'
-import fixture from './bridge/fixtures/snapshot.json'
-import type { SnapshotDto } from './bridge/types'
+import fixture from '../bridge/fixtures/snapshot.json'
+import type { SnapshotDto } from '../bridge/types'
 const mocks = vi.hoisted(() => ({
   store: { snapshot: null as SnapshotDto | null, history: [], refresh: vi.fn(async () => {}) },
   selectProject: vi.fn(async () => ''),
@@ -9,9 +9,9 @@ const mocks = vi.hoisted(() => ({
   revealProject: vi.fn(async () => {}),
   error: vi.fn(),
 }))
-vi.mock('./bridge/store', () => ({ useStore: () => mocks.store }))
-vi.mock('./bridge/shortcuts', () => ({ useWebShortcuts: vi.fn() }))
-vi.mock('./bridge/api', async (original) => ({
+vi.mock('../bridge/store', () => ({ useStore: () => mocks.store }))
+vi.mock('../bridge/shortcuts', () => ({ useWebShortcuts: vi.fn() }))
+vi.mock('../bridge/api', async (original) => ({
   ...(await original<object>()),
   getProjects: vi.fn(async () => []),
   selectProject: mocks.selectProject,
@@ -19,8 +19,8 @@ vi.mock('./bridge/api', async (original) => ({
   revealProject: mocks.revealProject,
 }))
 vi.mock('vue-sonner', () => ({ toast: { error: mocks.error } }))
-import App from './App.vue'
-import NavigationPanel from './components/workspace/NavigationPanel.vue'
+import App from '../App.vue'
+import NavigationPanel from '../components/workspace/NavigationPanel.vue'
 const target = { id: 'other-project', name: 'Other project', path: '/other-project' }
 const wrappers: ReturnType<typeof shallowMount>[] = []
 beforeEach(() => {

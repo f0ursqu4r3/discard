@@ -1,5 +1,5 @@
 import { expect, test } from 'vite-plus/test'
-import { parseLogLine } from './log_line'
+import { parseLogLine } from '../log_line'
 
 test('splits a backend line into its parts', () => {
   const raw = '2026-11-10T05:20:07.788482Z Info Other user plugins loaded'

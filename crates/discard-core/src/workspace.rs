@@ -68,6 +68,25 @@ impl GitWorkspace {
         Ok(record)
     }
 
+    /// Create the branch channel and an owned worktree for a branch that has no channel yet. The channel and its
+    /// worktree record save in one transaction. A Git or storage failure leaves no record and no worktree.
+    pub fn create_channel_with_worktree(&self, repo: &Path, repository: &str, channel: &crate::model::Channel, branch: &str) -> Result<WorktreeRecord, String> {
+        let prepared = self.manager.prepare_owned_branch(repo, &channel.id.0, branch).map_err(|e| match e { WorktreeError::Git(message) => message, other => other.to_string() })?;
+        let wt = prepared.worktree;
+        let record = WorktreeRecord {
+            channel_id: channel.id.clone(),
+            path: wt.root.to_string_lossy().into_owned(),
+            branch: wt.branch.clone(),
+            base_commit: wt.base_commit.clone(),
+            repo: wt.repo.to_string_lossy().into_owned(),
+            owned: true,
+        };
+        let saved = self.store().create_named_repository_channel(channel, repository, Some(branch), Some(&record));
+        if let Err(error) = saved { let _ = self.manager.remove(&wt, false); return Err(error.to_string()); }
+        self.store().register_bootstrap_project_channel(&channel.id).map_err(|e| e.to_string())?;
+        Ok(record)
+    }
+
     /// Resolve saved authority under the store lock, then verify Git outside it.
     pub fn write_request_target(&self, channel: &ChannelId, agent: &crate::model::AgentId, project: Option<&crate::model::ProjectId>, kind: crate::write_requests::WriteRequestKind) -> Result<(PathBuf, String, PathBuf), String> {
         let (repo, branch, binding) = {
@@ -229,6 +248,29 @@ mod tests {
         let record = r.ws.create_for_branch(&r.repo, &r.channel.id, "feature").unwrap();
         assert!(record.owned); assert!(Path::new(&record.path).join("a.txt").exists());
         assert_eq!(r.store.lock().unwrap().worktree_for(&r.channel.id).unwrap(), Some(record));
+    }
+    #[test]
+    fn a_new_branch_channel_and_its_worktree_record_save_together() {
+        let r = rig(); git(&r.repo, &["branch", "feature"]);
+        let channel = Channel { id: ChannelId::new(), name: "feature".into(), ..r.channel.clone() };
+        let record = r.ws.create_channel_with_worktree(&r.repo, "", &channel, "feature").unwrap();
+        assert!(record.owned); assert!(Path::new(&record.path).join("a.txt").exists());
+        assert_eq!(PathBuf::from(&record.path), r.ws.target_for_branch(&r.repo, &channel.id, "feature").unwrap());
+        let store = r.store.lock().unwrap();
+        assert_eq!(store.worktree_for(&channel.id).unwrap(), Some(record));
+        assert_eq!(store.project_branch_channel(channel.project_id.as_ref().unwrap(), "feature").unwrap().unwrap().id, channel.id);
+    }
+    #[test]
+    fn a_failed_new_branch_channel_leaves_no_channel_no_record_and_no_worktree() {
+        let r = rig(); git(&r.repo, &["branch", "feature"]);
+        let other = r._dir.path().join("other"); git(&r.repo, &["worktree", "add", other.to_str().unwrap(), "feature"]);
+        let channel = Channel { id: ChannelId::new(), name: "feature".into(), ..r.channel.clone() };
+        assert!(r.ws.create_channel_with_worktree(&r.repo, "", &channel, "feature").is_err());
+        assert!(r.ws.create_channel_with_worktree(&r.repo, "", &channel, "missing").is_err());
+        let store = r.store.lock().unwrap();
+        assert!(store.load_channel(&channel.id).is_err(), "no channel was saved");
+        assert!(store.worktree_for(&channel.id).unwrap().is_none());
+        assert!(!r.ws.target_for_branch(&r.repo, &channel.id, "feature").unwrap().exists());
     }
     #[test]
     fn create_for_branch_fails_when_the_branch_is_checked_out_elsewhere() {

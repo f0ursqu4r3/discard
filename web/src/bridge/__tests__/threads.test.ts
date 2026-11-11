@@ -17,7 +17,7 @@ import {
   sendMessage,
   startThread,
   threadPostedCount,
-} from './api'
+} from '../api'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 beforeEach(() => vi.mocked(invoke).mockReset())

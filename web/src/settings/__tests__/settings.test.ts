@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vite-plus/test'
 import { mount, flushPromises } from '@vue/test-utils'
-import SettingsApp from './SettingsApp.vue'
+import SettingsApp from '../SettingsApp.vue'
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(async (name: string, args: { query?: string }) => {

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { invoke } from '@tauri-apps/api/core'
-import AgentProfileEditor from './AgentProfileEditor.vue'
-import ReasoningSelect from './ReasoningSelect.vue'
+import AgentProfileEditor from '../AgentProfileEditor.vue'
+import ReasoningSelect from '../ReasoningSelect.vue'
 import { Select } from '@/components/ui/select'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))

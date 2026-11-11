@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import { getAgents, setProjectMainAgent, updateProjectProfile } from '@/bridge/api'
-import ProjectIdentitySettings from './ProjectIdentitySettings.vue'
-import AgentIconPicker from '../agents/AgentIconPicker.vue'
-import ServerRail from '../ServerRail.vue'
+import ProjectIdentitySettings from '../ProjectIdentitySettings.vue'
+import AgentIconPicker from '../../agents/AgentIconPicker.vue'
+import ServerRail from '../../ServerRail.vue'
 
 vi.mock('@/bridge/api', () => ({
   getAgents: vi.fn(),

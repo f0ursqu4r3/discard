@@ -276,6 +276,8 @@ The owner chose the posted-message rule of decision 97 and the warning rule of d
 
 100. Mute Channel and Archive Channel… stay planned: disabled, `Soon`, with their `TODO`. The Git branch and worktree items stay planned.
 
+> Superseded by [Navigation menu actions](2026-11-11-navigation-menu-actions-design.md). Mute Channel, Archive Channel…, and the Git branch and worktree items are implemented there. Decision 100 is kept as history.
+
 ### Shared rules
 
 101. The `TODO` comments and planned entries of the five implemented actions are gone. The shared planned-item model stays for the planned items that remain. An action that a state blocks is disabled without `Soon`.

@@ -1,5 +1,5 @@
 import { expect, test } from 'vite-plus/test'
-import type { ChannelDto, MessageDto, ThreadChipDto, ThreadLinkDto } from '../bridge/types'
+import type { ChannelDto, MessageDto, ThreadChipDto, ThreadLinkDto } from '../../bridge/types'
 import {
   THREAD_NAME_MAX,
   agentFollows,
@@ -10,8 +10,8 @@ import {
   threadAction,
   threadLinks,
   threadStates,
-} from './threads'
-import { threadActionLabels, threadDeleteBlock } from './thread-menu'
+} from '../threads'
+import { threadActionLabels, threadDeleteBlock } from '../thread-menu'
 
 const link = (id: string, name = id): ThreadLinkDto => ({
   id,

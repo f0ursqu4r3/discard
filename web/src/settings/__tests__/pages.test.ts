@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
-import Providers from './pages/Providers.vue'
+import Providers from '../pages/Providers.vue'
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(async () => [
     {

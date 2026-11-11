@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createTextChannel } from '@/bridge/api'
-import CreateTextChannelDialog from './CreateTextChannelDialog.vue'
+import CreateTextChannelDialog from '../CreateTextChannelDialog.vue'
 
 vi.mock('@/bridge/api', () => ({ createTextChannel: vi.fn() }))
 let view: ReturnType<typeof mount> | undefined

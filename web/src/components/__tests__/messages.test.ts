@@ -1,12 +1,12 @@
 import { mount, flushPromises } from '@vue/test-utils'
 import { expect, test } from 'vite-plus/test'
-import MessageRow from './MessageRow.vue'
-import AgentAvatar from './agents/AgentAvatar.vue'
-import DiffBlock from './DiffBlock.vue'
-import ToolCallBlock from './ToolCallBlock.vue'
-import MessageList from './MessageList.vue'
-import { parseDiff, hasLiveRow, thinkingLine, messagePresentation } from './messages'
-import type { MessageDto } from '../bridge/types'
+import MessageRow from '../MessageRow.vue'
+import AgentAvatar from '../agents/AgentAvatar.vue'
+import DiffBlock from '../DiffBlock.vue'
+import ToolCallBlock from '../ToolCallBlock.vue'
+import MessageList from '../MessageList.vue'
+import { parseDiff, hasLiveRow, thinkingLine, messagePresentation } from '../messages'
+import type { MessageDto } from '../../bridge/types'
 
 test('continued messages repeat their identity and leave the timestamp gutter empty', () => {
   const row = mount(MessageRow, {
@@ -193,7 +193,7 @@ test('stream cursor appears only when running', async () => {
 })
 
 test('row count includes a live row only when present', async () => {
-  const { rowCount } = await import('./messages')
+  const { rowCount } = await import('../messages')
   expect(rowCount(0, false)).toBe(0)
   expect(rowCount(3, false)).toBe(3)
   expect(rowCount(3, true)).toBe(4)
@@ -205,7 +205,7 @@ test('diff file headers supply the title without appearing as content lines', ()
   expect(diff.findAll('[data-diff="context"]')).toHaveLength(0)
 })
 test('tool output identifies unified diffs without treating lists as diffs', async () => {
-  const { looksLikeUnifiedDiff } = await import('./messages')
+  const { looksLikeUnifiedDiff } = await import('../messages')
   expect(looksLikeUnifiedDiff('@@ -1 +1 @@\n-old\n+new')).toBe(true)
   expect(looksLikeUnifiedDiff('--- a/file\n+++ b/file\n')).toBe(true)
   expect(looksLikeUnifiedDiff('- item\n- another')).toBe(false)
@@ -214,8 +214,8 @@ test('tool output identifies unified diffs without treating lists as diffs', asy
 })
 
 test('a fenced Markdown block uses the code component and offers copy', async () => {
-  const { default: SafeMarkdown } = await import('./SafeMarkdown.vue')
-  const { default: CodeBlock } = await import('./CodeBlock.vue')
+  const { default: SafeMarkdown } = await import('../SafeMarkdown.vue')
+  const { default: CodeBlock } = await import('../CodeBlock.vue')
   const markdown = mount(SafeMarkdown, {
     props: { text: 'Before\n\n```rust\nlet x = 1;\n```\n\nAfter' },
   })
@@ -230,8 +230,8 @@ test('a fenced Markdown block uses the code component and offers copy', async ()
 })
 
 test('a fenced block nested in a list uses the code component', async () => {
-  const { default: SafeMarkdown } = await import('./SafeMarkdown.vue')
-  const { default: CodeBlock } = await import('./CodeBlock.vue')
+  const { default: SafeMarkdown } = await import('../SafeMarkdown.vue')
+  const { default: CodeBlock } = await import('../CodeBlock.vue')
   const markdown = mount(SafeMarkdown, {
     props: { text: '- Item\n\n  ```rust\n  let x = 1;\n  ```' },
   })
@@ -318,7 +318,7 @@ test('saved and live replies use their own author, not the channel default', () 
 })
 
 test('parseDiff numbers lines and reads the path', async () => {
-  const { parseDiff } = await import('./messages')
+  const { parseDiff } = await import('../messages')
   const d = parseDiff(
     '--- a/src/worktree.rs\n+++ b/src/worktree.rs\n@@ -12,3 +12,5 @@\n fn cleanup() {\n-    remove();\n+    if ok {\n+        remove();\n+    }\n }',
   )
@@ -335,14 +335,14 @@ test('parseDiff numbers lines and reads the path', async () => {
   ])
 })
 test('parseDiff handles new files, deleted files, and diffs without hunks', async () => {
-  const { parseDiff } = await import('./messages')
+  const { parseDiff } = await import('../messages')
   expect(parseDiff('--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hi').path).toBe('new.txt')
   expect(parseDiff('--- a/old.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-bye').path).toBe('old.txt')
   const bare = parseDiff('+a\n-b')
   expect(bare.lines.every((line) => line.number === null)).toBe(true)
   expect(bare.path).toBeNull()
 })
-test('agent headers show the provider tag without changing prose to mono', () => {
+test('agent headers show no provider tag and prose stays non-mono', () => {
   const row = mount(MessageRow, {
     props: {
       channelId: 'channel',
@@ -355,7 +355,8 @@ test('agent headers show the provider tag without changing prose to mono', () =>
       },
     },
   })
-  expect(row.get('[data-testid="message-agent-tag"]').text()).toBe('[agent · claude]')
+  expect(row.find('[data-testid="message-agent-tag"]').exists()).toBe(false)
+  expect(row.text()).not.toContain('[agent')
   expect(row.get('article').classes()).not.toContain('font-mono')
   row.unmount()
 })
@@ -439,7 +440,7 @@ test('authorless messages use the channel agent ID for the name and avatar', () 
 })
 
 test('groupBlocks preserves singleton calls, boundaries, and original indexes', async () => {
-  const { groupBlocks } = await import('./messages')
+  const { groupBlocks } = await import('../messages')
   const call = { type: 'tool_call' as const, call_id: 'c', name: 'test', input: {}, output: null }
   const markdown = { type: 'markdown' as const, text: 'Between' }
   const approval = { type: 'approval' as const, approval_id: 'a', tool: 'test', summary: 'Approve' }

@@ -1,9 +1,9 @@
 import { expect, test } from 'vite-plus/test'
-import snapshot from './fixtures/snapshot.json'
-import thread from './fixtures/thread.json'
-import subAgent from './fixtures/subagent.json'
-import type { AgentRequest } from './api'
-import type { HistoryDto, SnapshotDto, ThreadHistoryDto } from './types'
+import snapshot from '../fixtures/snapshot.json'
+import thread from '../fixtures/thread.json'
+import subAgent from '../fixtures/subagent.json'
+import type { AgentRequest } from '../api'
+import type { HistoryDto, SnapshotDto, ThreadHistoryDto } from '../types'
 
 test('the golden snapshot follows the contract', () => {
   const value = snapshot as SnapshotDto satisfies SnapshotDto

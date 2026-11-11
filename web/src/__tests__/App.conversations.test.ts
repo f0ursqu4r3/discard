@@ -2,9 +2,9 @@ import { shallowMount, flushPromises } from '@vue/test-utils'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { beforeEach, afterEach, expect, test, vi } from 'vite-plus/test'
-import fixture from './bridge/fixtures/snapshot.json'
-import type { MessageDto, SnapshotDto } from './bridge/types'
-import type { WorkspacePage } from './components/workspace/types'
+import fixture from '../bridge/fixtures/snapshot.json'
+import type { MessageDto, SnapshotDto } from '../bridge/types'
+import type { WorkspacePage } from '../components/workspace/types'
 const mocks = vi.hoisted(() => ({
   store: {
     snapshot: null as SnapshotDto | null,
@@ -24,9 +24,9 @@ vi.mock('@tauri-apps/api/event', () => ({
     return () => catalogHandlers.get(event)?.delete(handler)
   }),
 }))
-vi.mock('./bridge/store', () => ({ useStore: () => mocks.store }))
-vi.mock('./bridge/shortcuts', () => ({ useWebShortcuts: vi.fn() }))
-vi.mock('./bridge/api', async (original) => ({
+vi.mock('../bridge/store', () => ({ useStore: () => mocks.store }))
+vi.mock('../bridge/shortcuts', () => ({ useWebShortcuts: vi.fn() }))
+vi.mock('../bridge/api', async (original) => ({
   ...(await original<object>()),
   getProjects: vi.fn(async () => []),
   getProjectChannels: vi.fn(async () => []),
@@ -34,25 +34,25 @@ vi.mock('./bridge/api', async (original) => ({
   runAction: mocks.run,
 }))
 vi.mock('vue-sonner', () => ({ toast: { error: vi.fn(), success: vi.fn() } }))
-import App from './App.vue'
-import StatusLine from './components/StatusLine.vue'
-import BrailleSpinner from './components/BrailleSpinner.vue'
+import App from '../App.vue'
+import StatusLine from '../components/StatusLine.vue'
+import BrailleSpinner from '../components/BrailleSpinner.vue'
 import { toast } from 'vue-sonner'
-import { getProjectChannels } from './bridge/api'
-import ChannelHeader from './components/ChannelHeader.vue'
-import AgentHistorySearch from './components/agents/AgentHistorySearch.vue'
-import ContextPanel from './components/workspace/ContextPanel.vue'
-import FriendsList from './components/agents/FriendsList.vue'
-import AddAgentDialog from './components/agents/AddAgentDialog.vue'
-import AgentProfileDialog from './components/agents/AgentProfileDialog.vue'
-import Composer from './components/Composer.vue'
-import MessageList from './components/MessageList.vue'
-import NavigationPanel from './components/workspace/NavigationPanel.vue'
-import DirectMessageSidebar from './components/workspace/DirectMessageSidebar.vue'
-import ChannelList from './components/ChannelList.vue'
-import MemoryBrowser from './components/memory/MemoryBrowser.vue'
-import { Button } from './components/ui/button'
-import { Tabs } from './components/ui/tabs'
+import { getProjectChannels } from '../bridge/api'
+import ChannelHeader from '../components/ChannelHeader.vue'
+import AgentHistorySearch from '../components/agents/AgentHistorySearch.vue'
+import ContextPanel from '../components/workspace/ContextPanel.vue'
+import FriendsList from '../components/agents/FriendsList.vue'
+import AddAgentDialog from '../components/agents/AddAgentDialog.vue'
+import AgentProfileDialog from '../components/agents/AgentProfileDialog.vue'
+import Composer from '../components/Composer.vue'
+import MessageList from '../components/MessageList.vue'
+import NavigationPanel from '../components/workspace/NavigationPanel.vue'
+import DirectMessageSidebar from '../components/workspace/DirectMessageSidebar.vue'
+import ChannelList from '../components/ChannelList.vue'
+import MemoryBrowser from '../components/memory/MemoryBrowser.vue'
+import { Button } from '../components/ui/button'
+import { Tabs } from '../components/ui/tabs'
 let view: ReturnType<typeof shallowMount> | undefined
 beforeEach(() => {
   vi.clearAllMocks()
@@ -935,7 +935,7 @@ test.each([false, true])(
 )
 
 test('the Run view preserves result flags, live state, and tool authors', async () => {
-  const { default: ToolCallBlock } = await import('./components/ToolCallBlock.vue')
+  const { default: ToolCallBlock } = await import('../components/ToolCallBlock.vue')
   mocks.store.snapshot = {
     ...mocks.store.snapshot!,
     activeProjectId: 'p',

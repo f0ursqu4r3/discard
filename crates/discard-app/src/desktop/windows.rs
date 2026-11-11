@@ -25,9 +25,10 @@ pub fn request_main_close(core: &super::core::AppCore, is_main: bool, confirm_wh
     } else { false }
 }
 
-/// The channel unread indicator and pending approval count.
-pub fn channel_indicators(messages: &[discard_core::model::Message], marker: Option<&str>, pending: usize) -> (bool, usize) {
-    (discard_core::ui_state::first_unread_index(messages, marker).is_some(), pending)
+/// The channel unread indicator and pending approval count. A muted channel has no unread indicator. Its pending
+/// approvals still count.
+pub fn channel_indicators(messages: &[discard_core::model::Message], marker: Option<&str>, pending: usize, muted: bool) -> (bool, usize) {
+    (!muted && discard_core::ui_state::first_unread_index(messages, marker).is_some(), pending)
 }
 /// A confirmation no longer applies after the turn ends.
 pub fn should_clear_confirm(running: bool, pending: bool) -> bool { !running && pending }
@@ -79,13 +80,15 @@ mod tests {
         let channel = ChannelId::new();
         let make = |id: &str, role| Message { id: MessageId(id.into()), channel_id: channel.clone(), role, blocks: vec![] };
         let messages = vec![make("a", Role::User), make("b", Role::Agent), make("c", Role::User)];
-        assert_eq!(channel_indicators(&[], Some("a"), 2), (false, 2));
-        assert!(!channel_indicators(&messages[..1], Some("a"), 0).0);
-        assert!(channel_indicators(&messages, None, 0).0);
-        assert!(!channel_indicators(&messages, Some("missing"), 0).0);
-        assert!(channel_indicators(&messages, Some("a"), 0).0);
-        assert!(!channel_indicators(&messages, Some("b"), 0).0);
-        assert!(!channel_indicators(&messages, Some("c"), 0).0);
+        assert_eq!(channel_indicators(&[], Some("a"), 2, false), (false, 2));
+        assert!(!channel_indicators(&messages[..1], Some("a"), 0, false).0);
+        assert!(channel_indicators(&messages, None, 0, false).0);
+        assert!(!channel_indicators(&messages, Some("missing"), 0, false).0);
+        assert!(channel_indicators(&messages, Some("a"), 0, false).0);
+        assert!(!channel_indicators(&messages, Some("b"), 0, false).0);
+        assert!(!channel_indicators(&messages, Some("c"), 0, false).0);
+        // A muted channel shows no unread marker. Its pending approvals still count.
+        assert_eq!(channel_indicators(&messages, None, 3, true), (false, 3));
     }
     #[test]
     fn clears_pending_confirmation_when_turn_ends() {

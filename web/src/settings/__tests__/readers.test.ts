@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
-import Memory from './pages/Memory.vue'
-import Workspaces from './pages/Workspaces.vue'
+import Memory from '../pages/Memory.vue'
+import Workspaces from '../pages/Workspaces.vue'
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(async (name: string) =>

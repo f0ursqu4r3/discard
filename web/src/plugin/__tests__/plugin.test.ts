@@ -1,22 +1,22 @@
 import { enableAutoUnmount, mount } from '@vue/test-utils'
 import { afterEach, expect, test, vi } from 'vite-plus/test'
 import { nextTick } from 'vue'
-vi.mock('../bridge/api', () => ({
+vi.mock('../../bridge/api', () => ({
   pluginAction: vi.fn(),
   confirmResolve: vi.fn(),
   archiveConfirm: vi.fn(),
 }))
-import { pluginAction } from '../bridge/api'
-import PluginElement from './PluginElement.vue'
-import Notices from '../components/Notices.vue'
-import { clampNumber } from './props'
-import type { ElementDto } from '../bridge/types'
-import AgentAvatar from '../components/agents/AgentAvatar.vue'
-import BrailleSpinner from '../components/BrailleSpinner.vue'
-import { agentAvatars } from '../components/agents/useAgentAvatar'
-import { agentIdentity } from '../components/agents/agent-icon'
-import { STATIC_FRAME } from '../components/spinner'
-import { activeTheme, fallbackTokens } from '../bridge/theme'
+import { pluginAction } from '../../bridge/api'
+import PluginElement from '../PluginElement.vue'
+import Notices from '../../components/Notices.vue'
+import { clampNumber } from '../props'
+import type { ElementDto } from '../../bridge/types'
+import AgentAvatar from '../../components/agents/AgentAvatar.vue'
+import BrailleSpinner from '../../components/BrailleSpinner.vue'
+import { agentAvatars } from '../../components/agents/useAgentAvatar'
+import { agentIdentity } from '../../components/agents/agent-icon'
+import { STATIC_FRAME } from '../../components/spinner'
+import { activeTheme, fallbackTokens } from '../../bridge/theme'
 enableAutoUnmount(afterEach)
 afterEach(() => {
   agentAvatars.value = {}

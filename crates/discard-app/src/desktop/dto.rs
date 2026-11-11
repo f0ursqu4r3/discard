@@ -12,7 +12,12 @@ pub type BlockDto = Block;
 pub struct ChannelDto {
     pub agent_id: String, pub project_id: Option<String>,
     pub id: String, pub name: String, pub agent: String, pub provider: String,
-    pub workspace_mode: String, pub running: bool, pub unread: bool, pub pending_approvals: usize,
+    pub workspace_mode: String, pub running: bool,
+    /// An agent message follows the read marker. Always false for a muted channel.
+    pub unread: bool,
+    /// A muted channel shows no unread marker and counts for no unread marker of its project.
+    pub muted: bool,
+    pub pending_approvals: usize,
     /// Approvals that wait in the threads of this channel, followed or not. `pending_approvals` counts the channel only.
     pub thread_pending_approvals: usize,
     /// Followed threads of this channel, oldest first, with live state.
@@ -162,9 +167,50 @@ pub struct ProjectChannelDto {
     pub archived_into: Option<String>,
     /// The channel, or a thread of the channel, has a saved message.
     pub has_messages: bool,
+    /// The channel is muted.
+    pub muted: bool,
     /// Followed threads of this channel, from storage.
     pub threads: Vec<ThreadLinkDto>,
 }
+
+/// Where Create Worktree… will put the worktree, and the channel ID that the path uses. A branch with no channel
+/// gets a new channel with this ID when the worktree is created.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreePlanDto { pub path: String, pub channel_id: String }
+
+/// The result of Delete Branch…. `deleted` is false when the branch has unmerged commits and the request did not
+/// force the delete. Nothing changed then.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchDeletionDto { pub deleted: bool, pub unmerged: usize }
+
+/// Files that live only in a worktree directory: the first `LISTED_FILES`, and the count of the rest.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeFilesDto { pub files: Vec<String>, pub more: usize }
+
+/// How many files the remove dialog lists.
+pub const LISTED_FILES: usize = 10;
+impl WorktreeFilesDto {
+    pub fn of(mut files: Vec<String>) -> Self {
+        let more = files.len().saturating_sub(LISTED_FILES);
+        files.truncate(LISTED_FILES);
+        Self { files, more }
+    }
+}
+
+/// The result of Remove Worktree…. `removed` is false when files would be lost and the request did not force the
+/// removal. The list says which files. Nothing changed then.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeRemovalDto { pub removed: bool, pub files: Vec<String>, pub more: usize }
+
+/// The result of Archive Channel… from a row. `archived` is false when the archive needs the second confirm:
+/// `items` lists what the archive deletes.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveChannelDto { pub archived: bool, pub items: Vec<String> }
 
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -573,7 +619,7 @@ mod tests {
         snapshot.channel_threads = anchor.thread.iter().cloned().collect();
         snapshot.channels = vec![ChannelDto {
             agent_id: "agent".into(), project_id: Some("project".into()), id: "channel".into(), name: "general".into(), agent: "Agent".into(), provider: "example".into(),
-            workspace_mode: "main_checkout".into(), running: false, unread: false, pending_approvals: 0, thread_pending_approvals: 0,
+            workspace_mode: "main_checkout".into(), running: false, unread: false, muted: false, pending_approvals: 0, thread_pending_approvals: 0,
             threads: vec![ThreadLinkDto { id: "thread".into(), parent_channel_id: "channel".into(), name: "Why a thread?".into(), unread: true, running: false, pending_approvals: 0, kind: "question".into(), state: None }],
         }];
         snapshot.open_thread = Some(OpenThreadDto {
@@ -610,7 +656,7 @@ mod tests {
         snapshot.channel_threads = snapshot.live_sub_agent_threads.iter().rev().cloned().collect();
         snapshot.channels = vec![ChannelDto {
             agent_id: "agent".into(), project_id: Some("project".into()), id: "channel".into(), name: "general".into(), agent: "Agent".into(), provider: "example".into(),
-            workspace_mode: "main_checkout".into(), running: true, unread: false, pending_approvals: 0, thread_pending_approvals: 1,
+            workspace_mode: "main_checkout".into(), running: true, unread: false, muted: false, pending_approvals: 0, thread_pending_approvals: 1,
             threads: vec![link("find-callers", "Find callers", "running", 1)],
         }];
         snapshot.thread_approvals = vec![ThreadApprovalDto { thread_id: "find-callers".into(), parent_channel_id: "channel".into(), name: "Find callers".into(), kind: "sub_agent".into(), agent_name: "Reviewer".into(), pending_approvals: 1 }];

@@ -1,8 +1,8 @@
 import { beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
-import Composer from './Composer.vue'
-import MessageRow from './MessageRow.vue'
-import AttachmentCard from './AttachmentCard.vue'
+import Composer from '../Composer.vue'
+import MessageRow from '../MessageRow.vue'
+import AttachmentCard from '../AttachmentCard.vue'
 import type { AttachmentDto } from '@/bridge/types'
 const api = vi.hoisted(() => ({
   chooseAttachments: vi.fn(),

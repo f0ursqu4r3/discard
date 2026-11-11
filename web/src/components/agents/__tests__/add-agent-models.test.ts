@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount, DOMWrapper } from '@vue/test-utils'
 import { invoke } from '@tauri-apps/api/core'
 import { Select } from '@/components/ui/select'
-import AddAgentDialog from './AddAgentDialog.vue'
+import AddAgentDialog from '../AddAgentDialog.vue'
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 const claude = { id: 'claude-exact', name: 'Claude model', description: 'Claude description' }
 const codex = { id: 'codex-exact', name: 'Codex model', description: 'Codex description' }

@@ -73,7 +73,7 @@ export function projectMenu(busy: boolean): ProjectMenuEntry[] {
         planned('Desktop Notifications', 'checkbox'),
       ],
     },
-    // TODO: Implement channel muting and filtering without hiding pending approvals.
+    // TODO: Filter muted channels out of the channel list without hiding pending approvals.
     planned('Hide Muted Channels', 'checkbox'),
     separator,
     { kind: 'action', label: 'Project Settings…', action: 'settings', disabled: busy },

@@ -2,8 +2,8 @@ import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import { invoke } from '@tauri-apps/api/core'
 import { toast } from 'vue-sonner'
-import type { ThreadChipDto } from '../bridge/types'
-import ThreadsPopover from './ThreadsPopover.vue'
+import type { ThreadChipDto } from '../../bridge/types'
+import ThreadsPopover from '../ThreadsPopover.vue'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 vi.mock('vue-sonner', () => ({ toast: { error: vi.fn() } }))

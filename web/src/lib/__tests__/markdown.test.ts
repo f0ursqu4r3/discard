@@ -1,5 +1,5 @@
 import { expect, test } from 'vite-plus/test'
-import { renderMarkdown } from './markdown'
+import { renderMarkdown } from '../markdown'
 
 test('raw HTML stays inert', () => {
   const html = renderMarkdown('<img src=x onerror=alert(1)>')

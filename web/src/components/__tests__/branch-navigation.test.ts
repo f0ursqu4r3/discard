@@ -1,6 +1,6 @@
 import { expect, test } from 'vite-plus/test'
-import { archivedChannels, treePrefix } from './branch-navigation'
-import type { BranchRowDto, ProjectChannelDto } from '../bridge/types'
+import { archivedChannels, treePrefix } from '../branch-navigation'
+import type { BranchRowDto, ProjectChannelDto } from '../../bridge/types'
 test('tree prefixes distinguish middle and last worktree children', () => {
   expect(treePrefix(false)).toBe('├')
   expect(treePrefix(true)).toBe('└')

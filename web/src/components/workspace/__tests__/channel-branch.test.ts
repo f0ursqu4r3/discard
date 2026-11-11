@@ -1,7 +1,7 @@
 import { expect, test } from 'vite-plus/test'
 import fixture from '@/bridge/fixtures/snapshot.json'
 import type { SnapshotDto, ProjectChannelDto } from '@/bridge/types'
-import { channelBranch } from './channel-branch'
+import { channelBranch } from '../channel-branch'
 
 const snapshot: SnapshotDto = {
   ...(fixture as SnapshotDto),

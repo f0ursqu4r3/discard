@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import { invoke } from '@tauri-apps/api/core'
-import type { ChannelDto, ProjectChannelDto, ThreadLinkDto } from '../bridge/types'
-import ChannelList from './ChannelList.vue'
-import ThreadRow from './ThreadRow.vue'
-import AgentsNavigation from './workspace/AgentsNavigation.vue'
-import { ContextMenuItem } from './ui/context-menu'
-import { clearAction, pendingAction } from './thread-actions'
+import type { ChannelDto, ProjectChannelDto, ThreadLinkDto } from '../../bridge/types'
+import ChannelList from '../ChannelList.vue'
+import ThreadRow from '../ThreadRow.vue'
+import AgentsNavigation from '../workspace/AgentsNavigation.vue'
+import { ContextMenuItem } from '../ui/context-menu'
+import { clearAction, pendingAction } from '../thread-actions'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import { toast } from 'vue-sonner'
 import { renameTextChannel } from '@/bridge/api'
-import RenameChannelDialog from './RenameChannelDialog.vue'
+import RenameChannelDialog from '../RenameChannelDialog.vue'
 
 vi.mock('@/bridge/api', () => ({ renameTextChannel: vi.fn() }))
 vi.mock('vue-sonner', () => ({ toast: { error: vi.fn() } }))

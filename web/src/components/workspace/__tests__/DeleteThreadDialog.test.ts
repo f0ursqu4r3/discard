@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import { toast } from 'vue-sonner'
 import { deleteThread, threadPostedCount } from '@/bridge/api'
-import DeleteThreadDialog from './DeleteThreadDialog.vue'
+import DeleteThreadDialog from '../DeleteThreadDialog.vue'
 
 vi.mock('@/bridge/api', () => ({ deleteThread: vi.fn(), threadPostedCount: vi.fn() }))
 vi.mock('vue-sonner', () => ({ toast: { error: vi.fn() } }))

@@ -1,5 +1,5 @@
 import { expect, test } from 'vite-plus/test'
-import { matchesChord } from './shortcuts'
+import { matchesChord } from '../shortcuts'
 test('matches a command chord without accepting extra modifiers', () => {
   const key = new KeyboardEvent('keydown', { key: 'k', metaKey: true })
   expect(matchesChord('cmd-k', key, true)).toBe(true)

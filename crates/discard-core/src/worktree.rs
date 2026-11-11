@@ -206,6 +206,11 @@ impl WorkStatus {
         self.uncommitted.is_empty() && self.untracked.is_empty() && self.ignored_with_content.is_empty() && self.unmerged_commits == 0
     }
 
+    /// The files that live only in the directory: changed, untracked, and ignored files that hold data.
+    pub fn files(&self) -> Vec<String> {
+        self.uncommitted.iter().chain(&self.untracked).chain(&self.ignored_with_content).cloned().collect()
+    }
+
     /// One line per kind of work at risk. Empty when clean.
     pub fn describe(&self) -> Vec<String> {
         let list = |items: &[String]| {
@@ -235,7 +240,7 @@ pub struct WorktreeManager {
     locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
 }
 
-fn git_cmd(dir: &Path, args: &[&str]) -> Command {
+pub(crate) fn git_cmd(dir: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
     // Hooks in the user's repository must not run for Discard's own operations.
     cmd.args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]).args(args).current_dir(dir).env("GIT_TERMINAL_PROMPT", "0");
@@ -243,7 +248,7 @@ fn git_cmd(dir: &Path, args: &[&str]) -> Command {
 }
 
 /// Run git and return stdout. A failure carries git's own message.
-fn git(dir: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let out = crate::process::spawn_std(git_cmd(dir, args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output()).map_err(|e| WorktreeError::Git(format!("could not run git: {e}")))?;
     if !out.status.success() {
         return Err(WorktreeError::Git(String::from_utf8_lossy(&out.stderr).trim().to_string()));
@@ -460,6 +465,36 @@ impl WorktreeManager {
         }
         git(&worktree.repo, &["worktree", "prune"])?;
         Ok(())
+    }
+}
+
+/// The result of a guarded worktree removal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoveOutcome {
+    Removed,
+    /// Files would be lost and the request did not force the removal. Nothing changed.
+    NeedsForce(Vec<String>),
+}
+
+impl WorktreeManager {
+    /// Remove a worktree directory. The branch is kept. The status is read again under the repository lock. Files
+    /// that would be lost stop the removal unless `force` is set, and the caller gets their list.
+    pub fn remove_checked(&self, worktree: &Worktree, force: bool) -> Result<RemoveOutcome> {
+        let lock = self.lock_for(&worktree.repo);
+        let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let files = self.status(worktree)?.files();
+        if !files.is_empty() && !force {
+            return Ok(RemoveOutcome::NeedsForce(files));
+        }
+        if worktree.root.exists() {
+            let root = worktree.root.to_string_lossy();
+            let mut args = vec!["worktree", "remove"];
+            if force { args.push("--force"); }
+            args.extend(["--", root.as_ref()]);
+            git(&worktree.repo, &args)?;
+        }
+        git(&worktree.repo, &["worktree", "prune"])?;
+        Ok(RemoveOutcome::Removed)
     }
 }
 

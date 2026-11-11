@@ -1,9 +1,9 @@
 import { mount, flushPromises } from '@vue/test-utils'
 import { beforeEach, expect, test, vi } from 'vite-plus/test'
-import WorkspacePage from './WorkspacePage.vue'
-import ProjectChannelListSettings from './ProjectChannelListSettings.vue'
+import WorkspacePage from '../WorkspacePage.vue'
+import ProjectChannelListSettings from '../ProjectChannelListSettings.vue'
 import fixture from '@/bridge/fixtures/snapshot.json'
-import ProjectIdentitySettings from './ProjectIdentitySettings.vue'
+import ProjectIdentitySettings from '../ProjectIdentitySettings.vue'
 import type { ProjectChannelDto, SnapshotDto } from '@/bridge/types'
 
 vi.mock('@/bridge/api', () => ({

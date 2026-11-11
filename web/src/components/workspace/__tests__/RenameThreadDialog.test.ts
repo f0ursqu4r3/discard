@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import { toast } from 'vue-sonner'
 import { renameThread } from '@/bridge/api'
-import RenameThreadDialog from './RenameThreadDialog.vue'
+import RenameThreadDialog from '../RenameThreadDialog.vue'
 
 vi.mock('@/bridge/api', () => ({ renameThread: vi.fn() }))
 vi.mock('vue-sonner', () => ({ toast: { error: vi.fn() } }))

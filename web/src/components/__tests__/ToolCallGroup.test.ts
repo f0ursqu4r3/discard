@@ -1,9 +1,9 @@
 import { afterEach, expect, test } from 'vite-plus/test'
 import { mount } from '@vue/test-utils'
-import type { BlockDto } from '../bridge/types'
-import MessageRow from './MessageRow.vue'
-import ToolCallBlock from './ToolCallBlock.vue'
-import ContextMenuHost from './ContextMenuHost.vue'
+import type { BlockDto } from '../../bridge/types'
+import MessageRow from '../MessageRow.vue'
+import ToolCallBlock from '../ToolCallBlock.vue'
+import ContextMenuHost from '../ContextMenuHost.vue'
 
 const views: ReturnType<typeof mount>[] = []
 afterEach(() => views.splice(0).forEach((view) => view.unmount()))

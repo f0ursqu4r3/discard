@@ -1,10 +1,10 @@
 import { beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import { invoke } from '@tauri-apps/api/core'
-import AgentProfileEditor from './AgentProfileEditor.vue'
-import AgentIconPicker from './AgentIconPicker.vue'
-import AgentProfileDialog from './AgentProfileDialog.vue'
-import AddAgentDialog from './AddAgentDialog.vue'
+import AgentProfileEditor from '../AgentProfileEditor.vue'
+import AgentIconPicker from '../AgentIconPicker.vue'
+import AgentProfileDialog from '../AgentProfileDialog.vue'
+import AddAgentDialog from '../AddAgentDialog.vue'
 import { Select } from '@/components/ui/select'
 const original = {
   id: 'a',

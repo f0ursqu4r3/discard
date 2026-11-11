@@ -132,6 +132,96 @@ pub async fn rename_text_channel(app: tauri::AppHandle, channels: State<'_, Arc<
     result
 }
 
+/// Tell the webview that the channel lists changed.
+fn conversations_changed(app: &tauri::AppHandle) {
+    use tauri::Emitter;
+    let _ = app.emit("discard://conversations", ());
+}
+
+/// Mute or unmute a channel. A muted channel shows no unread marker.
+#[tauri::command]
+pub async fn set_channel_muted(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, channel_id: String, muted: bool) -> Result<(), String> {
+    let channels = channels.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || channels.set_channel_muted(&discard_core::model::ProjectId(project_id), &discard_core::model::ChannelId(channel_id), muted)).await.map_err(|e| e.to_string())?;
+    conversations_changed(&app);
+    result
+}
+
+/// Archive the channel of a row. `archived` is false when the archive needs the second confirm: call again with `force`.
+#[tauri::command]
+pub async fn archive_project_channel(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, workspace: State<'_, Arc<discard_core::workspace::GitWorkspace>>, project_id: String, channel_id: String, force: bool) -> Result<super::dto::ArchiveChannelDto, String> {
+    let (channels, workspace) = (channels.inner().clone(), workspace.inner().clone());
+    let result = tauri::async_runtime::spawn_blocking(move || channels.archive_channel(&workspace, &discard_core::model::ProjectId(project_id), &discard_core::model::ChannelId(channel_id), force)).await.map_err(|e| e.to_string())?;
+    conversations_changed(&app);
+    result
+}
+
+/// Where Create Worktree… will put the worktree of a branch.
+#[tauri::command]
+pub async fn worktree_plan(channels: State<'_, Arc<super::channels::Channels>>, workspace: State<'_, Arc<discard_core::workspace::GitWorkspace>>, project_id: String, repository: String, branch: String) -> Result<super::dto::WorktreePlanDto, String> {
+    let (channels, workspace) = (channels.inner().clone(), workspace.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || channels.worktree_plan(&workspace, &discard_core::model::ProjectId(project_id), &repository, &branch)).await.map_err(|e| e.to_string())?
+}
+
+/// Create a linked worktree for a branch. Returns its path.
+#[tauri::command]
+pub async fn create_branch_worktree(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, workspace: State<'_, Arc<discard_core::workspace::GitWorkspace>>, project_id: String, repository: String, branch: String, channel_id: Option<String>) -> Result<String, String> {
+    let (channels, workspace) = (channels.inner().clone(), workspace.inner().clone());
+    let result = tauri::async_runtime::spawn_blocking(move || channels.create_worktree(&workspace, &discard_core::model::ProjectId(project_id), &repository, &branch, channel_id.as_deref())).await.map_err(|e| e.to_string())?;
+    conversations_changed(&app);
+    result
+}
+
+/// Rename a local branch and its channel binding. Returns the new name.
+#[tauri::command]
+pub async fn rename_git_branch(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, repository: String, branch: String, new_name: String) -> Result<String, String> {
+    let channels = channels.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || channels.rename_branch(&discard_core::model::ProjectId(project_id), &repository, &branch, &new_name)).await.map_err(|e| e.to_string())?;
+    conversations_changed(&app);
+    result
+}
+
+/// The unmerged commits that deleting a branch would drop, or the reason it cannot be deleted.
+#[tauri::command]
+pub async fn branch_deletion_info(channels: State<'_, Arc<super::channels::Channels>>, project_id: String, repository: String, branch: String) -> Result<usize, String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.branch_deletion_info(&discard_core::model::ProjectId(project_id), &repository, &branch)).await.map_err(|e| e.to_string())?
+}
+
+/// Delete a local branch. Unmerged commits need `force`.
+#[tauri::command]
+pub async fn delete_git_branch(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, repository: String, branch: String, force: bool) -> Result<super::dto::BranchDeletionDto, String> {
+    let channels = channels.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || channels.delete_branch(&discard_core::model::ProjectId(project_id), &repository, &branch, force)).await.map_err(|e| e.to_string())?;
+    conversations_changed(&app);
+    result
+}
+
+/// Start a new branch in a working tree and switch it to the branch. Returns the new name.
+#[tauri::command]
+pub async fn create_git_branch(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, repository: String, worktree: String, name: String) -> Result<String, String> {
+    let channels = channels.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || channels.create_branch(&discard_core::model::ProjectId(project_id), &repository, &worktree, &name)).await.map_err(|e| e.to_string())?;
+    conversations_changed(&app);
+    result
+}
+
+/// The files that removing a working tree would discard, or the reason it cannot be removed.
+#[tauri::command]
+pub async fn worktree_removal_info(channels: State<'_, Arc<super::channels::Channels>>, project_id: String, repository: String, worktree: String) -> Result<super::dto::WorktreeFilesDto, String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || channels.worktree_removal_info(&discard_core::model::ProjectId(project_id), &repository, &worktree)).await.map_err(|e| e.to_string())?
+}
+
+/// Remove a linked working tree. The branch stays. Files that would be lost need `force`.
+#[tauri::command]
+pub async fn remove_git_worktree(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, repository: String, worktree: String, force: bool) -> Result<super::dto::WorktreeRemovalDto, String> {
+    let channels = channels.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || channels.remove_worktree(&discard_core::model::ProjectId(project_id), &repository, &worktree, force)).await.map_err(|e| e.to_string())?;
+    conversations_changed(&app);
+    result
+}
+
 #[tauri::command]
 pub fn get_worktree_requests(access: State<'_, Arc<discard_core::worktree_access::WorktreeAccess>>, channel_id: String) -> Vec<discard_core::worktree_access::RemovalRequest> {
     access.requests(&discard_core::model::ChannelId(channel_id))

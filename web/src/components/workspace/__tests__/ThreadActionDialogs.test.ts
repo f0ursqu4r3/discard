@@ -2,8 +2,8 @@ import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import { removePostedMessage } from '@/bridge/api'
 import type { MessageDto } from '@/bridge/types'
-import { clearAction, pendingAction, requestAction } from '../thread-actions'
-import ThreadActionDialogs from './ThreadActionDialogs.vue'
+import { clearAction, pendingAction, requestAction } from '../../thread-actions'
+import ThreadActionDialogs from '../ThreadActionDialogs.vue'
 
 vi.mock('@/bridge/api', () => ({
   renameThread: vi.fn(),
@@ -11,6 +11,15 @@ vi.mock('@/bridge/api', () => ({
   threadPostedCount: vi.fn(async () => 0),
   removePostedMessage: vi.fn(async () => undefined),
   renameTextChannel: vi.fn(),
+  archiveProjectChannel: vi.fn(),
+  worktreePlan: vi.fn(async () => ({ path: '/worktrees/feature-1', channelId: 'new' })),
+  createBranchWorktree: vi.fn(),
+  renameGitBranch: vi.fn(),
+  branchDeletionInfo: vi.fn(async () => 0),
+  deleteGitBranch: vi.fn(),
+  createGitBranch: vi.fn(),
+  worktreeRemovalInfo: vi.fn(async () => ({ files: [], more: 0 })),
+  removeGitWorktree: vi.fn(),
 }))
 vi.mock('vue-sonner', () => ({ toast: { error: vi.fn() } }))
 let view: ReturnType<typeof mount> | undefined
@@ -93,4 +102,45 @@ test('confirming the remove dialog calls the app once and clears the request', a
   expect(removePostedMessage).toHaveBeenCalledTimes(1)
   expect(removePostedMessage).toHaveBeenCalledWith('ref')
   expect(pendingAction.value).toBeNull()
+})
+
+test('each navigation request opens its own dialog with its values', async () => {
+  host()
+  const project = { projectId: 'p', repository: '' }
+  const cases: [Parameters<typeof requestAction>[0], string][] = [
+    [{ kind: 'archive-channel', projectId: 'p', channelId: 'c', name: 'plans' }, 'archive-channel'],
+    [{ kind: 'create-worktree', ...project, branch: 'feature' }, 'create-worktree'],
+    [{ kind: 'rename-branch', ...project, branch: 'feature' }, 'rename-branch'],
+    [{ kind: 'delete-branch', ...project, branch: 'feature' }, 'delete-branch'],
+    [{ kind: 'create-branch', ...project, worktree: '/tree', name: 'main' }, 'create-branch'],
+    [{ kind: 'remove-worktree', ...project, worktree: '/tree' }, 'remove-worktree'],
+  ]
+  for (const [request, id] of cases) {
+    requestAction(request)
+    await flushPromises()
+    expect(dialog(id), id).not.toBeNull()
+    expect(document.querySelectorAll('[role="dialog"]'), id).toHaveLength(1)
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+    expect(pendingAction.value, id).toBeNull()
+    expect(dialog(id), id).toBeNull()
+  }
+})
+
+test('the rename branch dialog starts with the branch name, and the create branch dialog starts empty', async () => {
+  host()
+  requestAction({ kind: 'rename-branch', projectId: 'p', repository: '', branch: 'feature/one' })
+  await flushPromises()
+  expect(document.querySelector<HTMLInputElement>('#rename-branch-name')!.value).toBe('feature/one')
+  clearAction()
+  await flushPromises()
+  requestAction({
+    kind: 'create-branch',
+    projectId: 'p',
+    repository: '',
+    worktree: '/tree',
+    name: 'main',
+  })
+  await flushPromises()
+  expect(document.querySelector<HTMLInputElement>('#create-branch-name')!.value).toBe('')
 })

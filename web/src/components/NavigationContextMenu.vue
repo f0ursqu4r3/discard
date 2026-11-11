@@ -8,7 +8,6 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from './ui/context-menu'
-import { planned } from './project-menu'
 import { openContextMenuFromKeyboard } from './context-menu-keyboard'
 
 const props = defineProps<{
@@ -19,18 +18,34 @@ const props = defineProps<{
   busy?: boolean
   /** The channel can be renamed. `#general` cannot. */
   renamable?: boolean
+  /** The channel is muted, so the menu offers Unmute Channel. */
+  muted?: boolean
+  // A blocked action is disabled and has no Soon label. The app checks every rule again when the action runs.
+  /** Archive Channel… is blocked: `#general`, an archived channel, or a busy channel. */
+  archiveDisabled?: boolean
+  /** Create Worktree… is blocked: the branch is checked out, or its channel has a worktree. */
+  createWorktreeDisabled?: boolean
+  /** Rename Branch… is blocked: the branch's channel is busy. */
+  renameBranchDisabled?: boolean
+  /** Delete Branch… is blocked: the branch is checked out, is the default branch, or its channel is busy. */
+  deleteBranchDisabled?: boolean
+  /** Create Branch… is blocked: a channel that uses the working tree is busy. */
+  createBranchDisabled?: boolean
+  /** Remove Worktree… is blocked: the main checkout, or a channel that uses the working tree is busy. */
+  removeWorktreeDisabled?: boolean
 }>()
-const emit = defineEmits<{ open: []; rename: [] }>()
+const emit = defineEmits<{
+  open: []
+  rename: []
+  mute: []
+  archive: []
+  createWorktree: []
+  renameBranch: []
+  deleteBranch: []
+  createBranch: []
+  removeWorktree: []
+}>()
 const label = computed(() => props.kind[0]!.toUpperCase() + props.kind.slice(1))
-const plannedEntries = computed(() => {
-  // TODO: Create worktrees and rename or delete Git branches with validation and confirmation.
-  if (props.kind === 'branch')
-    return [planned('Create Worktree…'), planned('Rename Branch…'), planned('Delete Branch…')]
-  // TODO: Create a branch in a worktree and remove worktrees after checking for local changes.
-  if (props.kind === 'worktree') return [planned('Create Branch…'), planned('Remove Worktree…')]
-  // TODO: Persist channel mute settings and archive channels from the sidebar.
-  return [planned('Mute Channel'), planned('Archive Channel…')]
-})
 async function copy(text: string) {
   try {
     await navigator.clipboard.writeText(text)
@@ -61,19 +76,69 @@ async function copy(text: string) {
         Copy {{ label }} ID
       </ContextMenuItem>
       <ContextMenuSeparator />
-      <template v-for="(entry, index) in plannedEntries" :key="index">
-        <ContextMenuItem disabled>
-          {{ entry.label }}
-          <span class="ml-auto text-xs text-muted-foreground">Soon</span>
-        </ContextMenuItem>
-        <!-- Rename sits between Mute and Archive. -->
+      <template v-if="kind === 'channel'">
         <ContextMenuItem
-          v-if="index === 0 && renamable"
+          data-ui-id="mute-channel-item"
+          :disabled="!id"
+          @select="id && emit('mute')"
+        >
+          {{ muted ? 'Unmute Channel' : 'Mute Channel' }}
+        </ContextMenuItem>
+        <ContextMenuItem
+          v-if="renamable"
           data-ui-id="rename-channel-item"
           :disabled="busy || !id"
           @select="!busy && id && emit('rename')"
         >
           Rename Channel…
+        </ContextMenuItem>
+        <ContextMenuItem
+          data-ui-id="archive-channel-item"
+          :disabled="!id || archiveDisabled"
+          @select="id && !archiveDisabled && emit('archive')"
+        >
+          Archive Channel…
+        </ContextMenuItem>
+      </template>
+      <template v-else-if="kind === 'branch'">
+        <ContextMenuItem
+          data-ui-id="create-worktree-item"
+          :disabled="createWorktreeDisabled"
+          @select="!createWorktreeDisabled && emit('createWorktree')"
+        >
+          Create Worktree…
+        </ContextMenuItem>
+        <ContextMenuItem
+          data-ui-id="rename-branch-item"
+          :disabled="renameBranchDisabled"
+          @select="!renameBranchDisabled && emit('renameBranch')"
+        >
+          Rename Branch…
+        </ContextMenuItem>
+        <ContextMenuItem
+          data-ui-id="delete-branch-item"
+          variant="destructive"
+          :disabled="deleteBranchDisabled"
+          @select="!deleteBranchDisabled && emit('deleteBranch')"
+        >
+          Delete Branch…
+        </ContextMenuItem>
+      </template>
+      <template v-else>
+        <ContextMenuItem
+          data-ui-id="create-branch-item"
+          :disabled="createBranchDisabled"
+          @select="!createBranchDisabled && emit('createBranch')"
+        >
+          Create Branch…
+        </ContextMenuItem>
+        <ContextMenuItem
+          data-ui-id="remove-worktree-item"
+          variant="destructive"
+          :disabled="removeWorktreeDisabled"
+          @select="!removeWorktreeDisabled && emit('removeWorktree')"
+        >
+          Remove Worktree…
         </ContextMenuItem>
       </template>
     </ContextMenuContent>

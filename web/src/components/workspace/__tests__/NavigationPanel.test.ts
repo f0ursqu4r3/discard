@@ -2,8 +2,8 @@ import { expect, test } from 'vite-plus/test'
 import { shallowMount } from '@vue/test-utils'
 import fixture from '@/bridge/fixtures/snapshot.json'
 import type { SnapshotDto } from '@/bridge/types'
-import ChannelList from '../ChannelList.vue'
-import NavigationPanel from './NavigationPanel.vue'
+import ChannelList from '../../ChannelList.vue'
+import NavigationPanel from '../NavigationPanel.vue'
 
 const snapshot = { ...(fixture as SnapshotDto), projectId: 'p' }
 const projects = [

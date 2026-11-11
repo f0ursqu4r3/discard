@@ -1,6 +1,6 @@
 import { expect, test } from 'vite-plus/test'
 import { mount } from '@vue/test-utils'
-import Composer from './Composer.vue'
+import Composer from '../Composer.vue'
 
 const props = { archived: false, busy: false, running: false, channel: 'general' }
 const box = (view: ReturnType<typeof mount>) => view.get('[data-ui-id="composer-also-post"]')

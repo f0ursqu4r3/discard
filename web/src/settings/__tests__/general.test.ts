@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vite-plus/test'
 import { mount, flushPromises } from '@vue/test-utils'
-import General from './pages/General.vue'
+import General from '../pages/General.vue'
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(async (name: string) => {
     if (name === 'settings_get')

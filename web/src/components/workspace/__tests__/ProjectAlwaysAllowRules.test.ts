@@ -1,6 +1,6 @@
 import { expect, test, vi, beforeEach } from 'vite-plus/test'
 import { mount, flushPromises } from '@vue/test-utils'
-import ProjectAlwaysAllowRules from './ProjectAlwaysAllowRules.vue'
+import ProjectAlwaysAllowRules from '../ProjectAlwaysAllowRules.vue'
 import { getAlwaysAllowRules, revokeAlwaysAllowRule } from '@/bridge/api'
 vi.mock('@/bridge/api', () => ({ getAlwaysAllowRules: vi.fn(), revokeAlwaysAllowRule: vi.fn() }))
 beforeEach(() => {

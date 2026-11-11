@@ -1,6 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, expect, test, vi } from 'vite-plus/test'
-import WorktreeApprovals from './WorktreeApprovals.vue'
+import WorktreeApprovals from '../WorktreeApprovals.vue'
 const api = vi.hoisted(() => ({ getWorktreeRequests: vi.fn(), decideWorktreeRemoval: vi.fn() }))
 vi.mock('@/bridge/api', () => api)
 afterEach(() => {

@@ -1,16 +1,16 @@
 import { expect, test, vi, beforeEach } from 'vite-plus/test'
 import { mount } from '@vue/test-utils'
 import { defineComponent, nextTick } from 'vue'
-import snapshotFixture from './fixtures/snapshot.json'
-import threadFixture from './fixtures/thread.json'
-import subAgentFixture from './fixtures/subagent.json'
-import type { AgentRequest } from './api'
-import type { HistoryDto, OpenThreadDto, SnapshotDto, ThreadHistoryDto } from './types'
+import snapshotFixture from '../fixtures/snapshot.json'
+import threadFixture from '../fixtures/thread.json'
+import subAgentFixture from '../fixtures/subagent.json'
+import type { AgentRequest } from '../api'
+import type { HistoryDto, OpenThreadDto, SnapshotDto, ThreadHistoryDto } from '../types'
 const invoke = vi.hoisted(() => vi.fn())
 const listen = vi.hoisted(() => vi.fn())
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))
 vi.mock('@tauri-apps/api/event', () => ({ listen }))
-import { useStore } from './store'
+import { useStore } from '../store'
 const snapshot = snapshotFixture as SnapshotDto
 beforeEach(() => {
   vi.clearAllMocks()

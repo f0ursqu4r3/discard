@@ -1,12 +1,12 @@
 import { flushPromises, mount, shallowMount } from '@vue/test-utils'
 import { describe, expect, test } from 'vite-plus/test'
-import { serverInitials, serverPillHeight } from './layout'
-import ChannelList from './ChannelList.vue'
-import ServerRail from './ServerRail.vue'
-import UserBar from './workspace/UserBar.vue'
-import type { WorkspacePage } from './workspace/types'
-import archivedChannelsFixture from '../bridge/fixtures/project-channels.json'
-import type { ProjectChannelDto } from '../bridge/types'
+import { serverInitials, serverPillHeight } from '../layout'
+import ChannelList from '../ChannelList.vue'
+import ServerRail from '../ServerRail.vue'
+import UserBar from '../workspace/UserBar.vue'
+import type { WorkspacePage } from '../workspace/types'
+import archivedChannelsFixture from '../../bridge/fixtures/project-channels.json'
+import type { ProjectChannelDto } from '../../bridge/types'
 
 describe('server rail', () => {
   test.each([
@@ -135,20 +135,20 @@ test('rail and shared user bar expose project and review labels', () => {
 })
 
 test('panel widths save only for a complete two or three panel layout', async () => {
-  const { savePanelWidths } = await import('./layout')
+  const { savePanelWidths } = await import('../layout')
   expect(savePanelWidths(false, 2)).toBe(true)
   expect(savePanelWidths(false, 3)).toBe(false)
   expect(savePanelWidths(true, 2)).toBe(false)
   expect(savePanelWidths(true, 3)).toBe(true)
 })
 test('settings targets review when reviews are pending', async () => {
-  const { settingsTarget } = await import('./layout')
+  const { settingsTarget } = await import('../layout')
   expect(settingsTarget(0)).toEqual(['open_settings', 'Settings'])
   expect(settingsTarget(3)).toEqual(['review_plugins', 'Review plugins (3)'])
 })
 
 test('bundled chrome icons render for settings and the member list', async () => {
-  const { default: ChannelHeader } = await import('./ChannelHeader.vue')
+  const { default: ChannelHeader } = await import('../ChannelHeader.vue')
   const rail = mount(ServerRail, {
     props: { project: 'Project', unread: false, pendingApprovals: 0, reviewCount: 0 },
   })
@@ -163,7 +163,7 @@ test('bundled chrome icons render for settings and the member list', async () =>
 })
 
 test('page headers omit conversation icons while channel and DM headers retain them', async () => {
-  const { default: ChannelHeader } = await import('./ChannelHeader.vue')
+  const { default: ChannelHeader } = await import('../ChannelHeader.vue')
   const header = mount(ChannelHeader, {
     props: { channel: 'Project overview', memberListVisible: false, conversation: false },
   })
@@ -193,7 +193,7 @@ test('general initializes a project without a channel and is disabled only while
 })
 
 test('saved widths exclude the project rail', async () => {
-  const { panelWidths } = await import('./layout')
+  const { panelWidths } = await import('../layout')
   expect(panelWidths([312, 600, 366])).toEqual([240, 366])
 })
 
@@ -222,7 +222,7 @@ test('a branch row without children has no collapse control', async () => {
 })
 
 test('member status shows its label and presence indicator', async () => {
-  const { default: MemberList } = await import('./MemberList.vue')
+  const { default: MemberList } = await import('../MemberList.vue')
   const member = mount(MemberList, {
     props: { agent: 'Agent', status: 'awaiting_approval', provider: 'claude' },
   })
@@ -231,7 +231,7 @@ test('member status shows its label and presence indicator', async () => {
 })
 
 test('navigation size conversion survives reload and scaled rail widths', async () => {
-  const { navigationWidth, panelWidths } = await import('./layout')
+  const { navigationWidth, panelWidths } = await import('../layout')
   for (const rail of [72, 90, 108]) {
     for (const width of [180, 240, 320, 400]) {
       expect(panelWidths([navigationWidth(width, rail), 600], rail, 366)).toEqual([width, 366])

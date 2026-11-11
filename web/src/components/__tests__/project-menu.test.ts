@@ -1,11 +1,11 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, expect, test, vi } from 'vite-plus/test'
 import { nextTick } from 'vue'
-import { projectMenu, type ProjectMenuEntry } from './project-menu'
-import ProjectContextMenu from './ProjectContextMenu.vue'
-import ProjectMenuItems from './ProjectMenuItems.vue'
-import ServerRail from './ServerRail.vue'
-import { ContextMenu, ContextMenuItem } from './ui/context-menu'
+import { projectMenu, type ProjectMenuEntry } from '../project-menu'
+import ProjectContextMenu from '../ProjectContextMenu.vue'
+import ProjectMenuItems from '../ProjectMenuItems.vue'
+import ServerRail from '../ServerRail.vue'
+import { ContextMenu, ContextMenuItem } from '../ui/context-menu'
 
 const { loadMenu, pluginAction } = vi.hoisted(() => ({
   loadMenu: vi.fn(async () => [

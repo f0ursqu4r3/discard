@@ -10,9 +10,9 @@ import type {
   SnapshotDto,
   ThreadHistoryDto,
 } from '@/bridge/types'
-import ThreadPanel from './ThreadPanel.vue'
-import Composer from '../Composer.vue'
-import { clearAction, pendingAction } from '../thread-actions'
+import ThreadPanel from '../ThreadPanel.vue'
+import Composer from '../../Composer.vue'
+import { clearAction, pendingAction } from '../../thread-actions'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(), isTauri: () => false }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))

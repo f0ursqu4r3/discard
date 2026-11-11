@@ -1,8 +1,8 @@
 import { expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent, h } from 'vue'
-import { useAgentAvatar } from './useAgentAvatar'
-import BrailleSpinner from '../BrailleSpinner.vue'
+import { useAgentAvatar } from '../useAgentAvatar'
+import BrailleSpinner from '../../BrailleSpinner.vue'
 
 vi.mock('@/bridge/api', () => ({
   getAgents: vi.fn(async () => [

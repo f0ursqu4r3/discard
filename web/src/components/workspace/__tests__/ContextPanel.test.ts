@@ -1,10 +1,10 @@
 import { mount } from '@vue/test-utils'
 import { expect, test, vi } from 'vite-plus/test'
-import ContextPanel from './ContextPanel.vue'
-import MemberList from '../MemberList.vue'
+import ContextPanel from '../ContextPanel.vue'
+import MemberList from '../../MemberList.vue'
 import fixture from '@/bridge/fixtures/snapshot.json'
 import type { ProjectChannelDto, SnapshotDto } from '@/bridge/types'
-import ProjectChannelDetails from './ProjectChannelDetails.vue'
+import ProjectChannelDetails from '../ProjectChannelDetails.vue'
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
 test('context values have lowercase keys and dotted leaders without row icons', () => {
   const snapshot: SnapshotDto = {

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
-import Advanced from './pages/Advanced.vue'
-import Plugins from './pages/Plugins.vue'
+import Advanced from '../pages/Advanced.vue'
+import Plugins from '../pages/Plugins.vue'
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(async (name: string) =>
     name === 'settings_advanced_actions'

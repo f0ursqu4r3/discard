@@ -1,12 +1,12 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, expect, test, vi } from 'vite-plus/test'
 import { invoke } from '@tauri-apps/api/core'
-import MemoryBrowser from './memory/MemoryBrowser.vue'
-import WorkspacePage from './workspace/WorkspacePage.vue'
-import { Select } from './ui/select'
+import MemoryBrowser from '../memory/MemoryBrowser.vue'
+import WorkspacePage from '../workspace/WorkspacePage.vue'
+import { Select } from '../ui/select'
 import snapshotFixture from '@/bridge/fixtures/snapshot.json'
 import type { SnapshotDto } from '@/bridge/types'
-import type { MemoryView } from './memory/types'
+import type { MemoryView } from '../memory/types'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))

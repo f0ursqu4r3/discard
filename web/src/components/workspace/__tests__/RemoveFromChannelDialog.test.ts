@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import { toast } from 'vue-sonner'
 import { removePostedMessage } from '@/bridge/api'
-import RemoveFromChannelDialog from './RemoveFromChannelDialog.vue'
+import RemoveFromChannelDialog from '../RemoveFromChannelDialog.vue'
 
 vi.mock('@/bridge/api', () => ({ removePostedMessage: vi.fn() }))
 vi.mock('vue-sonner', () => ({ toast: { error: vi.fn() } }))

@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'vite-plus/test'
 import { DOMWrapper, flushPromises, mount } from '@vue/test-utils'
-import AgentIconPicker from './AgentIconPicker.vue'
-import AgentAvatar from './AgentAvatar.vue'
+import AgentIconPicker from '../AgentIconPicker.vue'
+import AgentAvatar from '../AgentAvatar.vue'
 import {
   formatAgentIcon,
   hashedSlot,
@@ -13,7 +13,7 @@ import {
   iconNames,
   parseAgentIcon,
   searchIcons,
-} from './agent-icon'
+} from '../agent-icon'
 
 const body = new DOMWrapper(document.body)
 let picker: ReturnType<typeof mount> | undefined

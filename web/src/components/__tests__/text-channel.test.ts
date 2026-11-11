@@ -1,5 +1,5 @@
 import { expect, test } from 'vite-plus/test'
-import { normalizeTextChannelName } from './text-channel'
+import { normalizeTextChannelName } from '../text-channel'
 
 test('the preview follows the saved name rules', () => {
   expect(normalizeTextChannelName('  Release Notes  ')).toBe('release-notes')

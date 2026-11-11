@@ -1,9 +1,9 @@
 import { shallowMount, flushPromises } from '@vue/test-utils'
 import { beforeEach, afterEach, expect, test, vi } from 'vite-plus/test'
-import thread from './bridge/fixtures/thread.json'
-import subAgent from './bridge/fixtures/subagent.json'
-import type { AgentRequest } from './bridge/api'
-import type { MessageDto, OpenThreadDto, SnapshotDto, ThreadHistoryDto } from './bridge/types'
+import thread from '../bridge/fixtures/thread.json'
+import subAgent from '../bridge/fixtures/subagent.json'
+import type { AgentRequest } from '../bridge/api'
+import type { MessageDto, OpenThreadDto, SnapshotDto, ThreadHistoryDto } from '../bridge/types'
 const mocks = vi.hoisted(() => ({
   store: null as unknown as {
     snapshot: SnapshotDto | null
@@ -27,7 +27,7 @@ const mocks = vi.hoisted(() => ({
 }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(), isTauri: () => false }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
-vi.mock('./bridge/store', async () => {
+vi.mock('../bridge/store', async () => {
   const { reactive } = await import('vue')
   mocks.store = reactive({
     snapshot: null,
@@ -39,8 +39,8 @@ vi.mock('./bridge/store', async () => {
   }) as unknown as typeof mocks.store
   return { useStore: () => mocks.store }
 })
-vi.mock('./bridge/shortcuts', () => ({ useWebShortcuts: vi.fn() }))
-vi.mock('./bridge/api', async (original) => ({
+vi.mock('../bridge/shortcuts', () => ({ useWebShortcuts: vi.fn() }))
+vi.mock('../bridge/api', async (original) => ({
   ...(await original<object>()),
   ...mocks.api,
   getProjects: vi.fn(async () => []),
@@ -48,15 +48,15 @@ vi.mock('./bridge/api', async (original) => ({
 }))
 vi.mock('vue-sonner', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() } }))
 import { toast } from 'vue-sonner'
-import App from './App.vue'
-import ChannelHeader from './components/ChannelHeader.vue'
-import Composer from './components/Composer.vue'
-import MessageList from './components/MessageList.vue'
-import NavigationPanel from './components/workspace/NavigationPanel.vue'
-import ContextPanel from './components/workspace/ContextPanel.vue'
-import ThreadPanel from './components/workspace/ThreadPanel.vue'
-import { ResizableHandle } from './components/ui/resizable'
-import { Sheet } from './components/ui/sheet'
+import App from '../App.vue'
+import ChannelHeader from '../components/ChannelHeader.vue'
+import Composer from '../components/Composer.vue'
+import MessageList from '../components/MessageList.vue'
+import NavigationPanel from '../components/workspace/NavigationPanel.vue'
+import ContextPanel from '../components/workspace/ContextPanel.vue'
+import ThreadPanel from '../components/workspace/ThreadPanel.vue'
+import { ResizableHandle } from '../components/ui/resizable'
+import { Sheet } from '../components/ui/sheet'
 
 const fixture = thread.snapshot as SnapshotDto
 const openThread = fixture.openThread as OpenThreadDto

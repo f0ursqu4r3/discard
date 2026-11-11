@@ -23,6 +23,8 @@ The owner made these decisions:
   the database. If the branch comes back, the same channel is used again.
 - Text channels ship with create only. Rename and archive stay visible as disabled `Soon` items. Rename
   became a working action in decision 99 below.
+  > Superseded in part by [Navigation menu actions](2026-11-11-navigation-menu-actions-design.md): **Mute
+  > Channel** and **Archive Channel…** work too, and the Git branch and worktree items are no longer planned.
 - The agent receives the full source text of a reply. The UI shows only a link row.
 
 These are implementation calls, not owner decisions:
@@ -134,6 +136,9 @@ regard to case. `general` is always taken. Error: "A channel with this name alre
   rename item.
 - The **Archive Channel…** item of the menu bar works on a text channel as it does on any channel.
   An archived text channel shows in Archived.
+
+  > Superseded in part by [Navigation menu actions](2026-11-11-navigation-menu-actions-design.md): the
+  > planned `Soon` state of **Mute Channel** and **Archive Channel…** in the row menu ended there.
 
 ### Rename (decision 99)
 

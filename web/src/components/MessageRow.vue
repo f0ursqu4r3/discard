@@ -258,13 +258,6 @@ async function copy() {
         >
           {{ byAgent ? authorName : message.role === 'user' ? 'You' : 'System' }}
         </strong>
-        <span
-          v-if="byAgent && message.author?.provider"
-          data-testid="message-agent-tag"
-          class="mr-2 font-mono text-[0.92em] text-muted-foreground"
-        >
-          [agent · {{ message.author.provider }}]
-        </span>
         <template
           v-for="segment in segments"
           :key="segment.kind === 'tools' ? segment.items[0]!.index : segment.index"
@@ -313,7 +306,7 @@ async function copy() {
         <div
           role="group"
           aria-label="Message actions"
-          class="absolute right-0 top-0 -translate-y-3/4 z-10 invisible flex select-none gap-0.5 rounded-md border bg-background p-1 shadow-sm group-hover:visible group-focus-within:visible"
+          class="absolute right-0 top-0 -translate-y-3/4 z-10 invisible flex select-none gap-0.5 rounded-md border bg-background p-1 shadow-sm group-hover:visible group-focus-visible:visible group-has-[:focus-visible]:visible"
         >
           <Tooltip>
             <TooltipTrigger as-child>

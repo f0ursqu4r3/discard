@@ -5,12 +5,12 @@ const { menu } = vi.hoisted(() => ({
     { kind: 'action', label: 'Copy', id: 'copy_channel_name', enabled: true },
   ]),
 }))
-vi.mock('../bridge/api', () => ({
+vi.mock('../../bridge/api', () => ({
   contextMenu: menu,
   runAction: vi.fn(),
   pluginMenuAction: vi.fn(),
 }))
-import ContextMenuHost from './ContextMenuHost.vue'
+import ContextMenuHost from '../ContextMenuHost.vue'
 
 test('the target menu is requested on right click', async () => {
   const target = { type: 'channel' as const, id: 'c' }

@@ -9,14 +9,14 @@ import {
   parseMessageSource,
   parseReply,
   replyPrefix,
-} from './reply'
-import type { MessageDto } from '../bridge/types'
-import type { PendingReply } from './reply'
-import SafeMarkdown from './SafeMarkdown.vue'
-import MessageList from './MessageList.vue'
-import Composer from './Composer.vue'
+} from '../reply'
+import type { MessageDto } from '../../bridge/types'
+import type { PendingReply } from '../reply'
+import SafeMarkdown from '../SafeMarkdown.vue'
+import MessageList from '../MessageList.vue'
+import Composer from '../Composer.vue'
 import { defineComponent, h, ref } from 'vue'
-import { ContextMenuItem } from './ui/context-menu'
+import { ContextMenuItem } from '../ui/context-menu'
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(async (name: string) =>

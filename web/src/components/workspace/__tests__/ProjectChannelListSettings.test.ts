@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import { setProjectShowArchived } from '@/bridge/api'
-import ProjectChannelListSettings from './ProjectChannelListSettings.vue'
+import ProjectChannelListSettings from '../ProjectChannelListSettings.vue'
 
 vi.mock('@/bridge/api', () => ({ setProjectShowArchived: vi.fn() }))
 const project = { id: 'p', name: 'Discard', path: '/project' }

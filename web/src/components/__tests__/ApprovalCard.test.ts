@@ -1,7 +1,7 @@
 import { expect, test, vi } from 'vite-plus/test'
 import { mount } from '@vue/test-utils'
-import ApprovalCard from './ApprovalCard.vue'
-vi.mock('../bridge/api', () => ({ decideApproval: vi.fn() }))
+import ApprovalCard from '../ApprovalCard.vue'
+vi.mock('../../bridge/api', () => ({ decideApproval: vi.fn() }))
 for (const mode of ['available', 'unavailable']) {
   test(`Always allow is ${mode}`, () => {
     const view = mount(ApprovalCard, {
@@ -45,7 +45,7 @@ test('escape describes full access and has no Always allow', () => {
 })
 
 test('saved escape cards retain the full-access warning after live prompts clear', async () => {
-  const { default: BlockView } = await import('./BlockView.vue')
+  const { default: BlockView } = await import('../BlockView.vue')
   const view = mount(BlockView, {
     props: {
       channelId: 'c',
@@ -62,7 +62,7 @@ test('saved escape cards retain the full-access warning after live prompts clear
   expect(view.text()).not.toContain('Always allow')
 })
 
-import { decideApproval } from '../bridge/api'
+import { decideApproval } from '../../bridge/api'
 const commandPrompt = {
   approvalId: 'a',
   tool: 'Bash',

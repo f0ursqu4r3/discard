@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import { invoke } from '@tauri-apps/api/core'
-import type { MessageDto, ThreadChipDto } from '../bridge/types'
-import MessageRow from './MessageRow.vue'
-import ThreadChip from './ThreadChip.vue'
-import AgentAvatar from './agents/AgentAvatar.vue'
-import { ContextMenuItem } from './ui/context-menu'
-import { clearAction, pendingAction } from './thread-actions'
+import type { MessageDto, ThreadChipDto } from '../../bridge/types'
+import MessageRow from '../MessageRow.vue'
+import ThreadChip from '../ThreadChip.vue'
+import AgentAvatar from '../agents/AgentAvatar.vue'
+import { ContextMenuItem } from '../ui/context-menu'
+import { clearAction, pendingAction } from '../thread-actions'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 vi.mock('vue-sonner', () => ({ toast: { error: vi.fn() } }))
@@ -51,6 +51,14 @@ function row(message: Partial<MessageDto> = {}, props: Record<string, unknown> =
   return view
 }
 const toolbar = (view: ReturnType<typeof row>) => view.get('[aria-label="Message actions"]')
+test('the actions bar shows on hover and keyboard focus, not on a mouse click focus', () => {
+  const classes = toolbar(row()).classes()
+  expect(classes).toContain('invisible')
+  expect(classes).toContain('group-hover:visible')
+  expect(classes).toContain('group-focus-visible:visible')
+  expect(classes).toContain('group-has-[:focus-visible]:visible')
+  expect(classes).not.toContain('group-focus-within:visible')
+})
 async function menuItems(view: ReturnType<typeof row>) {
   await view.get('article').trigger('contextmenu', { button: 2, clientX: 20, clientY: 20 })
   await flushPromises()
@@ -294,7 +302,7 @@ test('a brief shows the parent agent as its author, not You', () => {
     { surface: 'thread' },
   )
   expect(view.get('[data-testid="message-identity"]').text()).toBe('Quinn')
-  expect(view.get('[data-testid="message-agent-tag"]').text()).toContain('claude')
+  expect(view.find('[data-testid="message-agent-tag"]').exists()).toBe(false)
   expect(view.findComponent(AgentAvatar).exists()).toBe(true)
   expect(view.text()).not.toContain('You')
 })

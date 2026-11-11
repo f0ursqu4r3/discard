@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
-import type { ThreadChipDto } from '../bridge/types'
-import ChannelHeader from './ChannelHeader.vue'
+import type { ThreadChipDto } from '../../bridge/types'
+import ChannelHeader from '../ChannelHeader.vue'
 
 const props = { channel: 'general', memberListVisible: false }
 const views: ReturnType<typeof mount>[] = []

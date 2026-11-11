@@ -1,8 +1,8 @@
 import { mount, flushPromises } from '@vue/test-utils'
 import { beforeEach, expect, test, vi } from 'vite-plus/test'
-import MemoryBrowser from './memory/MemoryBrowser.vue'
-import { Select } from './ui/select'
-import MemoryResponse from './memory/MemoryResponse.vue'
+import MemoryBrowser from '../memory/MemoryBrowser.vue'
+import { Select } from '../ui/select'
+import MemoryResponse from '../memory/MemoryResponse.vue'
 import { invoke } from '@tauri-apps/api/core'
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
@@ -189,7 +189,7 @@ test('response cards use persisted versions for undo and resolve proposals after
 })
 
 test('transcript attaches saved cards only to their persisted response and never to unsaved live reply', async () => {
-  const { default: MessageList } = await import('./MessageList.vue')
+  const { default: MessageList } = await import('../MessageList.vue')
   vi.mocked(invoke).mockImplementation(async (name) =>
     name === 'memory_get'
       ? {
@@ -224,7 +224,7 @@ test('transcript attaches saved cards only to their persisted response and never
 })
 
 test('runtime memory revision reloads cards after response text is already present', async () => {
-  const { default: MessageList } = await import('./MessageList.vue')
+  const { default: MessageList } = await import('../MessageList.vue')
   let saved = false
   vi.mocked(invoke).mockImplementation(async (name) =>
     name === 'memory_get'
@@ -255,7 +255,7 @@ test('runtime memory revision reloads cards after response text is already prese
 })
 
 test('committed approval with a pending response notice disables decisions and refreshes clients', async () => {
-  const { default: MemoryProposalCard } = await import('./memory/MemoryProposal.vue')
+  const { default: MemoryProposalCard } = await import('../memory/MemoryProposal.vue')
   vi.mocked(invoke).mockResolvedValueOnce({
     status: 'approved',
     committed: true,
@@ -292,7 +292,7 @@ test('pending notice warnings provide a working reload and rejection settles its
   expect(browser.get('[role="status"]').text()).toContain('Memory is approved and saved')
   await button(browser, 'Reload memory')
   expect(browser.find('[role="status"]').exists()).toBe(false)
-  const { default: MemoryProposalCard } = await import('./memory/MemoryProposal.vue')
+  const { default: MemoryProposalCard } = await import('../memory/MemoryProposal.vue')
   vi.mocked(invoke).mockResolvedValueOnce({
     status: 'rejected',
     committed: false,

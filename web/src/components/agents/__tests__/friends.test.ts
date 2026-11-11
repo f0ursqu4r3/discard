@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import { getAgents, type AgentEntry } from '@/bridge/api'
 import { listen } from '@tauri-apps/api/event'
-import FriendsList from './FriendsList.vue'
+import FriendsList from '../FriendsList.vue'
 import { Tabs } from '@/components/ui/tabs'
 vi.mock('@/bridge/api', () => ({ getAgents: vi.fn() }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }))

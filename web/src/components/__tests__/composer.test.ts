@@ -1,7 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { expect, test, vi } from 'vite-plus/test'
-import Composer from './Composer.vue'
-import { maySend } from './composer'
+import Composer from '../Composer.vue'
+import { maySend } from '../composer'
 
 test('maySend rejects archived and blank messages', () => {
   expect(maySend(true, 'hello')).toBe(false)
@@ -125,7 +125,7 @@ test('DM composer names the agent and has no channel labels or footer', () => {
 })
 
 const api = vi.hoisted(() => ({ getAgents: vi.fn(), getProjectMembers: vi.fn() }))
-vi.mock('../bridge/api', () => api)
+vi.mock('../../bridge/api', () => api)
 const configured = (id: string, name: string) => ({
   id,
   name,

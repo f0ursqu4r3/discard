@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
+  ArchiveChannelDto,
   AttachmentDto,
+  BranchDeletionDto,
   ChannelDetailsDto,
   ChannelMemberDto,
   ChannelTopicDto,
@@ -9,6 +11,9 @@ import type {
   SnapshotDto,
   ThreadHistoryDto,
   ThreadLinkDto,
+  WorktreeFilesDto,
+  WorktreePlanDto,
+  WorktreeRemovalDto,
 } from './types'
 export const getSnapshot = () => invoke<SnapshotDto>('get_snapshot')
 export const getHistory = () => invoke<HistoryDto>('get_history')
@@ -135,6 +140,65 @@ export const createTextChannel = (projectId: string, name: string) =>
 /** Rename a text channel with the checks of channel creation. Returns the stored name. */
 export const renameTextChannel = (projectId: string, channelId: string, name: string) =>
   invoke<string>('rename_text_channel', { projectId, channelId, name })
+/** Mute or unmute a channel. A muted channel shows no unread marker. A thread cannot be muted. */
+export const setChannelMuted = (projectId: string, channelId: string, muted: boolean) =>
+  invoke<void>('set_channel_muted', { projectId, channelId, muted })
+/**
+ * Archive the channel of a row. Resolves with `archived: false` and the items that the archive deletes when it
+ * needs the second confirm. Call again with `force` to archive. When the open channel is archived, `#general` opens.
+ */
+export const archiveProjectChannel = (projectId: string, channelId: string, force = false) =>
+  invoke<ArchiveChannelDto>('archive_project_channel', { projectId, channelId, force })
+/** Where Create Worktree… would put the worktree of a branch. `repository` is empty for the project root. */
+export const worktreePlan = (projectId: string, repository: string, branch: string) =>
+  invoke<WorktreePlanDto>('worktree_plan', { projectId, repository, branch })
+/** Create a linked worktree for a branch. Pass the `channelId` of the plan. Returns the worktree path. */
+export const createBranchWorktree = (
+  projectId: string,
+  repository: string,
+  branch: string,
+  channelId?: string,
+) =>
+  invoke<string>('create_branch_worktree', {
+    projectId,
+    repository,
+    branch,
+    ...(channelId ? { channelId } : {}),
+  })
+/** Rename a local branch and move its channel binding. Returns the new name. Rejects with the reason. */
+export const renameGitBranch = (
+  projectId: string,
+  repository: string,
+  branch: string,
+  newName: string,
+) => invoke<string>('rename_git_branch', { projectId, repository, branch, newName })
+/** The unmerged commits that deleting a branch would drop. Rejects with the reason a delete is refused. */
+export const branchDeletionInfo = (projectId: string, repository: string, branch: string) =>
+  invoke<number>('branch_deletion_info', { projectId, repository, branch })
+/** Delete a local branch. Unmerged commits need `force`. */
+export const deleteGitBranch = (
+  projectId: string,
+  repository: string,
+  branch: string,
+  force = false,
+) => invoke<BranchDeletionDto>('delete_git_branch', { projectId, repository, branch, force })
+/** Start a new branch in a working tree and switch it to the branch. Returns the new name. */
+export const createGitBranch = (
+  projectId: string,
+  repository: string,
+  worktree: string,
+  name: string,
+) => invoke<string>('create_git_branch', { projectId, repository, worktree, name })
+/** The files that removing a working tree would discard. Rejects with the reason a removal is refused. */
+export const worktreeRemovalInfo = (projectId: string, repository: string, worktree: string) =>
+  invoke<WorktreeFilesDto>('worktree_removal_info', { projectId, repository, worktree })
+/** Remove a linked working tree. The branch stays. Files that would be lost need `force`. */
+export const removeGitWorktree = (
+  projectId: string,
+  repository: string,
+  worktree: string,
+  force = false,
+) => invoke<WorktreeRemovalDto>('remove_git_worktree', { projectId, repository, worktree, force })
 export const getProjectChannels = (projectId: string) =>
   invoke<ProjectChannelDto[]>('get_project_channels', { projectId })
 export const getProjectMembers = (projectId: string) =>

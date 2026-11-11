@@ -1,9 +1,9 @@
 import { beforeEach, expect, test, vi } from 'vite-plus/test'
 import { mount, flushPromises } from '@vue/test-utils'
 import { invoke } from '@tauri-apps/api/core'
-import AgentsNavigation from './AgentsNavigation.vue'
-import CreateChannelDialog from './CreateChannelDialog.vue'
-import { Select } from '../ui/select'
+import AgentsNavigation from '../AgentsNavigation.vue'
+import CreateChannelDialog from '../CreateChannelDialog.vue'
+import { Select } from '../../ui/select'
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 const handlers = new Map<string, () => void>()
 vi.mock('@tauri-apps/api/event', () => ({

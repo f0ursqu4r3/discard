@@ -1,7 +1,7 @@
 import { beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
-import Workspaces from './pages/Workspaces.vue'
-import Logs from './pages/Logs.vue'
+import Workspaces from '../pages/Workspaces.vue'
+import Logs from '../pages/Logs.vue'
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))

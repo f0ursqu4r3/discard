@@ -1,7 +1,7 @@
 import { mount } from '@vue/test-utils'
 import { expect, test } from 'vite-plus/test'
-import ChangesCard from './ChangesCard.vue'
-import type { BlockDto } from '../bridge/types'
+import ChangesCard from '../ChangesCard.vue'
+import type { BlockDto } from '../../bridge/types'
 const block: Extract<BlockDto, { type: 'changes' }> = {
   type: 'changes',
   root: '/worktree',

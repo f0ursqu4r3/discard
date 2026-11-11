@@ -176,7 +176,10 @@ export interface ChannelDto {
   provider: string
   workspaceMode: string
   running: boolean
+  /** An agent message follows the read marker. Always false for a muted channel. */
   unread: boolean
+  /** A muted channel shows no unread marker and counts for no unread marker of its project. */
+  muted?: boolean
   pendingApprovals: number
   /** Approvals that wait in the threads of this channel, followed or not. `pendingApprovals` counts the channel only. The app always sends it. */
   threadPendingApprovals?: number
@@ -197,6 +200,8 @@ export interface ProjectChannelDto {
   archivedInto: string | null
   /** The channel, or a thread of the channel, has a saved message. */
   hasMessages: boolean
+  /** The channel is muted. The app always sends it. */
+  muted?: boolean
   /** Followed threads of this channel, from storage. */
   threads?: ThreadLinkDto[]
 }
@@ -345,3 +350,28 @@ export type MenuEntryDto =
   | { kind: 'action'; id: string; label: string; enabled: boolean }
   | { kind: 'plugin'; plugin: string; index: number; label: string }
   | { kind: 'separator' }
+
+/** Where Create Worktree… puts the worktree. A branch with no channel gets a channel with this ID. */
+export interface WorktreePlanDto {
+  path: string
+  channelId: string
+}
+/** `deleted` is false when the branch has unmerged commits and the request did not force the delete. */
+export interface BranchDeletionDto {
+  deleted: boolean
+  unmerged: number
+}
+/** Files that live only in a worktree directory: the first ten, and the count of the rest. */
+export interface WorktreeFilesDto {
+  files: string[]
+  more: number
+}
+/** `removed` is false when files would be lost and the request did not force the removal. */
+export interface WorktreeRemovalDto extends WorktreeFilesDto {
+  removed: boolean
+}
+/** `archived` is false when the archive needs the second confirm. `items` lists what it deletes. */
+export interface ArchiveChannelDto {
+  archived: boolean
+  items: string[]
+}

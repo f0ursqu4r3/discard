@@ -9,6 +9,12 @@ export type ActionRequest =
   | { kind: 'delete-thread'; threadId: string; name: string }
   | { kind: 'remove-from-channel'; messageId: string; threadName: string }
   | { kind: 'rename-channel'; projectId: string; channelId: string; name: string }
+  | { kind: 'archive-channel'; projectId: string; channelId: string; name: string }
+  | { kind: 'create-worktree'; projectId: string; repository: string; branch: string }
+  | { kind: 'rename-branch'; projectId: string; repository: string; branch: string }
+  | { kind: 'delete-branch'; projectId: string; repository: string; branch: string }
+  | { kind: 'create-branch'; projectId: string; repository: string; worktree: string; name: string }
+  | { kind: 'remove-worktree'; projectId: string; repository: string; worktree: string }
 
 export const pendingAction = shallowRef<ActionRequest | null>(null)
 

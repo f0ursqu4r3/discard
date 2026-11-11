@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { DOMWrapper, flushPromises, mount } from '@vue/test-utils'
 import { invoke } from '@tauri-apps/api/core'
 import { Select } from '@/components/ui/select'
-import AgentProfileEditor from './AgentProfileEditor.vue'
+import AgentProfileEditor from '../AgentProfileEditor.vue'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 const agent = {

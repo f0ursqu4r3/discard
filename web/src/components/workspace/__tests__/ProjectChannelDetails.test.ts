@@ -1,6 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
-import ProjectChannelDetails from './ProjectChannelDetails.vue'
+import ProjectChannelDetails from '../ProjectChannelDetails.vue'
 
 const api = vi.hoisted(() => ({
   getAgents: vi.fn(),

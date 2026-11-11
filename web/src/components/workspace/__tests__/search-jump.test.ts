@@ -1,9 +1,9 @@
-import { afterEach, expect, test, vi } from 'vite-plus/test'
+import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { mount, flushPromises } from '@vue/test-utils'
-import MessageList from '../MessageList.vue'
+import MessageList from '../../MessageList.vue'
 const calls = vi.hoisted(() => ({ jump: vi.fn() }))
-vi.mock('../ui/message-scroller/useMessageScroller', async (original) => {
-  const actual = await original<typeof import('../ui/message-scroller/useMessageScroller')>()
+vi.mock('../../ui/message-scroller/useMessageScroller', async (original) => {
+  const actual = await original<typeof import('../../ui/message-scroller/useMessageScroller')>()
   return {
     ...actual,
     useMessageScrollerContext: () => {
@@ -29,9 +29,15 @@ vi.mock('@tauri-apps/api/core', () => ({
 }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
 let view: ReturnType<typeof mount>
+// Wait on real animation frames. vi.waitFor would advance the fake timers and eat into the highlight time.
+const nextFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+})
 afterEach(() => {
   view?.unmount()
   calls.jump.mockClear()
+  vi.useRealTimers()
 })
 test('a history result scrolls to and highlights its message, including a repeated selection', async () => {
   view = mount(MessageList, {
@@ -48,11 +54,24 @@ test('a history result scrolls to and highlights its message, including a repeat
     },
   })
   await flushPromises()
-  await vi.waitFor(() =>
-    expect(calls.jump).toHaveBeenCalledWith('older', { align: 'center', behavior: 'auto' }),
-  )
+  await nextFrame()
+  expect(calls.jump).toHaveBeenCalledWith('older', { align: 'center', behavior: 'auto' })
   expect(view.get('[data-search-match="true"]').attributes('data-message-id')).toBe('older')
+  expect(view.get('[data-message-id="older"]').classes()).toContain('bg-accent')
+  await vi.advanceTimersByTimeAsync(1499)
+  expect(view.find('[data-search-match="true"]').exists()).toBe(true)
+  await vi.advanceTimersByTimeAsync(1)
+  expect(view.find('[data-search-match="true"]').exists()).toBe(false)
+  expect(view.get('[data-message-id="older"]').classes()).not.toContain('bg-accent')
   calls.jump.mockClear()
   await view.setProps({ jumpTo: { messageId: 'older', request: 2 } })
-  await vi.waitFor(() => expect(calls.jump).toHaveBeenCalledOnce())
+  await nextFrame()
+  expect(calls.jump).toHaveBeenCalledOnce()
+  expect(view.get('[data-search-match="true"]').attributes('data-message-id')).toBe('older')
+  await vi.advanceTimersByTimeAsync(1000)
+  await view.setProps({ jumpTo: { messageId: 'older', request: 3 } })
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(view.find('[data-search-match="true"]').exists()).toBe(true)
+  await vi.advanceTimersByTimeAsync(500)
+  expect(view.find('[data-search-match="true"]').exists()).toBe(false)
 })

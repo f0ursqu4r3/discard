@@ -1,9 +1,9 @@
 import { beforeEach, afterEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import { getAgents, searchAgentHistory } from '@/bridge/api'
-import AgentSummary from './AgentSummary.vue'
-import AgentHistorySearch from './AgentHistorySearch.vue'
-import ChannelHeader from '../ChannelHeader.vue'
+import AgentSummary from '../AgentSummary.vue'
+import AgentHistorySearch from '../AgentHistorySearch.vue'
+import ChannelHeader from '../../ChannelHeader.vue'
 vi.mock('@/bridge/api', () => ({ getAgents: vi.fn(), searchAgentHistory: vi.fn() }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
 let view: ReturnType<typeof mount>

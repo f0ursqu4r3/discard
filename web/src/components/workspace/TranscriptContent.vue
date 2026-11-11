@@ -80,10 +80,22 @@ const emit = defineEmits<{
 const host = ref<HTMLElement | null>(null)
 const scroller = useMessageScrollerContext()
 let restoreFrame = 0
+const JUMP_HIGHLIGHT_MS = 1500
+// The jumped-to row stays highlighted for a short time only.
+const highlightedId = ref<string | null>(null)
+let highlightTimer: ReturnType<typeof setTimeout> | undefined
 watch(
   () => props.jumpTo,
   async (jump) => {
-    if (!jump) return
+    clearTimeout(highlightTimer)
+    if (!jump) {
+      highlightedId.value = null
+      return
+    }
+    highlightedId.value = jump.messageId
+    highlightTimer = setTimeout(() => {
+      highlightedId.value = null
+    }, JUMP_HIGHLIGHT_MS)
     await nextTick()
     cancelAnimationFrame(restoreFrame)
     restoreFrame = requestAnimationFrame(() => {
@@ -207,7 +219,10 @@ onBeforeUnmount(() => {
     following: !scrollable.value.end,
   })
 })
-onUnmounted(() => window.removeEventListener('focus', read))
+onUnmounted(() => {
+  window.removeEventListener('focus', read)
+  clearTimeout(highlightTimer)
+})
 </script>
 <template>
   <div
@@ -278,13 +293,13 @@ onUnmounted(() => window.removeEventListener('focus', read))
             </div>
           </MessageScrollerItem>
           <MessageScrollerItem
-            class="[content-visibility:visible]"
+            class="[content-visibility:visible] transition-colors duration-500 motion-reduce:transition-none"
             v-for="{ message, date, startsDate } in historyRows"
             :key="message.id"
             :message-id="message.id"
-            :data-search-match="message.id === jumpTo?.messageId || undefined"
+            :data-search-match="message.id === highlightedId || undefined"
             :class="{
-              'bg-accent ring-1 ring-inset ring-ring': message.id === jumpTo?.messageId,
+              'bg-accent ring-1 ring-inset ring-ring': message.id === highlightedId,
             }"
             :scroll-anchor="message.role === 'user'"
           >

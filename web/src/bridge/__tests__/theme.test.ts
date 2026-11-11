@@ -1,6 +1,6 @@
 import { expect, test } from 'vite-plus/test'
-import { activeTheme, applyTheme } from './theme'
-import type { ThemeDto } from './types'
+import { activeTheme, applyTheme } from '../theme'
+import type { ThemeDto } from '../types'
 test('applyTheme sets every token and toggles dark', () => {
   const tokens = Object.fromEntries(
     [

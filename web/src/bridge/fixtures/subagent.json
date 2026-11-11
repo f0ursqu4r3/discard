@@ -138,6 +138,7 @@
         "agent": "Agent",
         "agentId": "agent",
         "id": "channel",
+        "muted": false,
         "name": "general",
         "pendingApprovals": 0,
         "projectId": "project",

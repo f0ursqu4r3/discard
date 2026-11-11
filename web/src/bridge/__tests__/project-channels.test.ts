@@ -8,7 +8,7 @@ import {
   selectCanonicalProjectChannel,
   setProjectMainAgent,
   updateChannelTopic,
-} from './api'
+} from '../api'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 

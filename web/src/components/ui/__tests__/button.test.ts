@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import { mount } from '@vue/test-utils'
 import { expect, test } from 'vite-plus/test'
-import Button from './button/Button.vue'
+import Button from '../button/Button.vue'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 

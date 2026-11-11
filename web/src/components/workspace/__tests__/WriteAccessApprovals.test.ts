@@ -1,6 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, expect, test, vi } from 'vite-plus/test'
-import WriteAccessApprovals from './WriteAccessApprovals.vue'
+import WriteAccessApprovals from '../WriteAccessApprovals.vue'
 const api = vi.hoisted(() => ({ getWriteRequests: vi.fn(), decideWriteRequest: vi.fn() }))
 vi.mock('@/bridge/api', () => api)
 afterEach(() => vi.clearAllMocks())

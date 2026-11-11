@@ -1,5 +1,5 @@
 import { beforeEach, expect, test, vi } from 'vite-plus/test'
-import { importAttachmentFiles } from './api'
+import { importAttachmentFiles } from '../api'
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))
 beforeEach(() => {

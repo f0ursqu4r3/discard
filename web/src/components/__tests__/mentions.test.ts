@@ -1,5 +1,5 @@
 import { expect, test } from 'vite-plus/test'
-import { mentionQuery, mentionToken } from './mentions'
+import { mentionQuery, mentionToken } from '../mentions'
 
 test('finds a partial name at the caret and replaces the complete token', () => {
   expect(mentionQuery('Ask @Jordan please', 7)).toEqual({ start: 4, end: 11, query: 'Jo' })

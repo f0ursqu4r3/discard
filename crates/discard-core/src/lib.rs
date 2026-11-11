@@ -25,6 +25,7 @@ pub mod observer;
 pub mod bootstrap;
 pub mod memory;
 pub mod worktree;
+pub mod branch_actions;
 pub mod branch_tree;
 pub mod workspace;
 pub mod settings;

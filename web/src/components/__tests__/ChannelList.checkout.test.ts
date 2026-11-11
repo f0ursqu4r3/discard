@@ -1,8 +1,8 @@
 import { mount } from '@vue/test-utils'
 import { expect, test } from 'vite-plus/test'
-import ChannelList from './ChannelList.vue'
-import type { BranchRowDto, ProjectChannelDto } from '../bridge/types'
-import { groupBranchRows, worktreeName } from './branch-navigation'
+import ChannelList from '../ChannelList.vue'
+import type { BranchRowDto, ProjectChannelDto } from '../../bridge/types'
+import { groupBranchRows, worktreeName } from '../branch-navigation'
 
 const base = { repository: 'repo', depth: 0, current: false, collapsed: false, hasChildren: false }
 const branches: BranchRowDto[] = [

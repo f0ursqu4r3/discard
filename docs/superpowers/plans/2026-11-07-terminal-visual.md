@@ -381,7 +381,7 @@ Update the assertions that look for `▍` or `LoaderCircle`.
 - **`MessageRow`, agent rows.**
   - Set `style="--agent-color: <identity.mark>"` on the row root.
   - The name gets `color: identity.text`.
-  - After the name, add `<span data-testid="message-agent-tag" class="font-mono text-[0.92em] text-muted-foreground">[agent · {{ author.provider }}]</span>`. Render it only when `author.provider` is non-empty.
+  - Do not add a provider tag after the name. An earlier version of this plan added `[agent · <provider>]`. The tag was removed.
   - The timestamp gets `font-mono`.
   - User rows stay as they are.
 - **`ToolCallBlock`** props: `name`, `input`, `output`, `isError?: boolean`, `running?: boolean`. The block stays collapsed by default.
@@ -444,7 +444,7 @@ test('parseDiff handles a new file and a diff without hunks', () => {
 For `ToolCallBlock`, write one test per right-end state. Each test finds the mark by its `aria-label`: "Running", "Awaiting result", "Succeeded", "Failed", and "Returned". Also assert that `$` renders. Add a `BlockView` test: a stored `tool_call` block without `is_error` and with output shows "Returned" and no "Succeeded".
 
 For `MessageRow`, add these tests:
-- an agent message from provider `claude` renders `[agent · claude]`;
+- an agent message from provider `claude` renders no agent tag;
 - a user message renders no agent tag.
 
 - [ ] **Step 2: Run the tests and confirm they fail**

@@ -258,6 +258,7 @@ pub fn run(
             commands::get_thread_history, commands::start_thread, commands::open_thread, commands::close_thread, commands::select_thread,
             commands::post_thread_message, commands::follow_thread, commands::leave_thread,
             commands::rename_thread, commands::thread_posted_count, commands::delete_thread, commands::remove_posted_message, commands::rename_text_channel,
+            commands::set_channel_muted, commands::archive_project_channel, commands::worktree_plan, commands::create_branch_worktree, commands::rename_git_branch, commands::branch_deletion_info, commands::delete_git_branch, commands::create_git_branch, commands::worktree_removal_info, commands::remove_git_worktree,
             attachments::choose_attachments,
             attachments::import_attachments,
             attachments::attachment_preview,

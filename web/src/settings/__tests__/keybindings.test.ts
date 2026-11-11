@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
-import Keybindings from './pages/Keybindings.vue'
+import Keybindings from '../pages/Keybindings.vue'
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(async (name: string) => {
     if (name === 'settings_keymap_rows')

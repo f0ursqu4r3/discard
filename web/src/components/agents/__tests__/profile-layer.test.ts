@@ -1,7 +1,7 @@
 import { defineComponent } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 import { expect, test, vi } from 'vite-plus/test'
-import AgentProfileDialog from './AgentProfileDialog.vue'
+import AgentProfileDialog from '../AgentProfileDialog.vue'
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => []) }))
