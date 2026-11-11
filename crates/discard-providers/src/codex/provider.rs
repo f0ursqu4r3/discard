@@ -149,7 +149,8 @@ pub fn thread_params(spec: &SessionSpec) -> (&'static str, Value) {
         (SessionMode::Coding | SessionMode::Workspace, EnforcementMode::HostPrompts) => ("untrusted", "workspace-write"),
         _ => ("never", "read-only"),
     };
-    let mut params = json!({"cwd": spec.cwd.to_string_lossy(), "approvalPolicy": policy, "sandbox": sandbox});
+    // `approvalsReviewer: "user"` keeps Codex from sending approvals to its own reviewer agent.
+    let mut params = json!({"cwd": spec.cwd.to_string_lossy(), "approvalPolicy": policy, "sandbox": sandbox, "approvalsReviewer": "user"});
     if let Some(model) = &spec.model {
         params["model"] = json!(model);
     }
@@ -544,6 +545,10 @@ async fn handshake(
     }
     send_raw(stdin, &json!({"jsonrpc": "2.0", "id": 2, "method": method, "params": params})).await?;
     let result = response_for(lines, 2).await?;
+    // Codex reports who answers approvals. Any reviewer but the user would approve without Discard.
+    if let Some(reviewer) = result.get("approvalsReviewer").filter(|r| !r.is_null() && *r != &json!("user")) {
+        return Err(Failure::Controls(format!("Codex sends approvals to {reviewer}, not to the user")));
+    }
     result
         .pointer("/thread/id")
         .and_then(Value::as_str)
@@ -710,6 +715,7 @@ mod tests {
         let mut s = spec(EnforcementMode::HostPrompts); s.mode = SessionMode::Workspace;
         let (_, p) = thread_params(&s);
         assert_eq!(p["approvalPolicy"], "untrusted"); assert_eq!(p["sandbox"], "workspace-write");
+        assert_eq!(p["approvalsReviewer"], "user");
         assert_eq!(p["ephemeral"], true); assert_eq!(p["allowProviderModelFallback"], false);
         assert_eq!(p["cwd"], s.cwd.to_string_lossy().as_ref());
     }
