@@ -31,6 +31,17 @@ pub fn summary_limit(budget: usize) -> usize {
     (budget / 20).clamp(MIN_SUMMARY_LIMIT, MAX_SUMMARY_LIMIT)
 }
 
+/// Bytes of a tool output that replay keeps.
+pub const TOOL_OUTPUT_REPLAY_BYTES: usize = 1024;
+/// Bytes of a `delegate` result that replay keeps: the results of sub-agents are the point of the call.
+pub const DELEGATE_REPLAY_BYTES: usize = 8 * 1024;
+
+/// True for the Discard `delegate` tool. Providers name it `mcp__<server>__delegate`, and the UI matches the last
+/// `__` segment of the name, so this does too.
+pub fn is_delegate_tool(name: &str) -> bool {
+    name.rsplit("__").next() == Some("delegate")
+}
+
 /// Bound provider replay without changing the saved transcript.
 pub fn compact_blocks(blocks: &[Block]) -> serde_json::Value {
     serde_json::Value::Array(blocks.iter().map(|block| match block {
@@ -39,9 +50,10 @@ pub fn compact_blocks(blocks: &[Block]) -> serde_json::Value {
             for key in ["command", "cmd", "file_path", "path", "paths", "notebook_path", "pattern"] {
                 if let Some(value) = input.get(key) { target.insert(key.into(), value.clone()); }
             }
+            let limit = if is_delegate_tool(name) { DELEGATE_REPLAY_BYTES } else { TOOL_OUTPUT_REPLAY_BYTES };
             let output = output.as_ref().map(|text| {
-                if text.len() <= 1024 { return text.clone(); }
-                let mut end = 1024;
+                if text.len() <= limit { return text.clone(); }
+                let mut end = limit;
                 while !text.is_char_boundary(end) { end -= 1; }
                 format!("{}…[truncated {} bytes]", &text[..end], text.len() - end)
             });
@@ -263,6 +275,29 @@ mod tests {
         assert_eq!(after_boundary(&messages, Some(&a)), &messages[1..]);
         assert_eq!(after_boundary(&messages, None), &messages);
     }
+    fn tool(name: &str, output: &str) -> Block {
+        Block::ToolCall { call_id: "c".into(), name: name.into(), input: serde_json::json!({}), output: Some(output.into()), is_error: None, sandboxed: None }
+    }
+    fn output_of(block: &Block) -> String {
+        compact_blocks(std::slice::from_ref(block))[0]["output"].as_str().unwrap().to_owned()
+    }
+    #[test]
+    fn a_delegate_result_keeps_eight_kilobytes_and_other_tools_keep_one() {
+        let big = "é".repeat(10_000);
+        let other = output_of(&tool("mcp__discard-memory__memory_read", &big));
+        assert!(other.starts_with(&"é".repeat(512)) && other.contains("…[truncated"), "{}", other.len());
+        assert!(other.len() < 1200);
+        for name in ["mcp__discard-memory__delegate", "delegate", "mcp__other__delegate"] {
+            let kept = output_of(&tool(name, &big));
+            assert!(kept.len() > 8000 && kept.len() < 8300 && kept.contains("…[truncated"), "{name}: {}", kept.len());
+            assert!(kept.starts_with(&"é".repeat(4096)));
+        }
+        let small = "x".repeat(8000);
+        assert_eq!(output_of(&tool("mcp__discard-memory__delegate", &small)), small, "a result under the limit is whole");
+        for name in ["mcp__discard-memory__delegate_all", "mcp__discard-memory__agents_list", "mcp__delegate__memory_read", "undelegate"] {
+            assert!(output_of(&tool(name, &small)).contains("…[truncated"), "{name} is not the delegate tool");
+        }
+    }
     fn markdown(role: Role, text: &str) -> Message {
         Message { id: MessageId::new(), channel_id: crate::model::ChannelId::new(), role, blocks: vec![Block::Markdown { text: text.into() }] }
     }
@@ -281,7 +316,7 @@ mod tests {
     fn a_summary_boundary_in_a_threads_parent_prefix_stays_valid_as_the_conversation_grows() {
         use crate::{agent::AgentConfig, capability::ApprovalPolicy, store::Store};
         let store = Store::open_in_memory().unwrap();
-        let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "fake".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "fake".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         let parent = store.create_conversation(&agent, None, "chat").unwrap();
         let add = |channel: &crate::model::ChannelId, role: Role, text: &str| {
             let message = Message { id: MessageId::new(), channel_id: channel.clone(), role, blocks: vec![Block::Markdown { text: text.into() }] };

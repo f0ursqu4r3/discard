@@ -1,16 +1,50 @@
 import { onMounted, onUnmounted, reactive, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { getHistory, getSnapshot, getThreadHistory } from './api'
+import {
+  decideAgentRequest as decideAgentRequestApi,
+  getAgentRequests,
+  getHistory,
+  getSnapshot,
+  getThreadHistory,
+  type AgentRequest,
+} from './api'
 import { applyTheme } from './theme'
-import type { HistoryDto, MessageDto, SnapshotDto, ThreadHistoryDto } from './types'
+import type {
+  HistoryDto,
+  MessageDto,
+  SnapshotDto,
+  ThreadApprovalDto,
+  ThreadChipDto,
+  ThreadHistoryDto,
+} from './types'
 export function useStore() {
   const state = reactive<{
     snapshot: SnapshotDto | null
     history: MessageDto[]
     /** The transcript of `snapshot.openThread`, at a revision that is at least `openThread.historyRev`. Null when no thread is open or it has not loaded. */
     threadHistory: ThreadHistoryDto | null
+    /**
+     * The chips of the sub-agent threads of the running turn of the selected channel, in task order. They have no
+     * anchor yet. When the turn ends they appear on `MessageDto.subAgentThreads` of the saved response.
+     */
+    liveSubAgentThreads: ThreadChipDto[]
+    /** Threads with an approval that waits, followed or not. The Approvals page lists these next to the channels'. */
+    threadApprovals: ThreadApprovalDto[]
+    /**
+     * The agent add requests of the selected channel, oldest first, decided or not. They load when the channel
+     * changes and when its turn ends (an agent asks during a turn and the turn ends), and after a decision.
+     */
+    agentRequests: AgentRequest[]
     error: string | null
-  }>({ snapshot: null, history: [], threadHistory: null, error: null })
+  }>({
+    snapshot: null,
+    history: [],
+    threadHistory: null,
+    liveSubAgentThreads: [],
+    threadApprovals: [],
+    agentRequests: [],
+    error: null,
+  })
   watch(
     () => state.snapshot?.theme,
     (theme) => {
@@ -22,7 +56,28 @@ export function useStore() {
   // Only the open thread's transcript is kept. A closed or replaced thread drops its entry.
   const threadHistories = new Map<string, ThreadHistoryDto>()
   let threadFetch = ''
+  let requestsFetch = 0
   let disposed = false
+  async function loadAgentRequests(channelId: string) {
+    const current = ++requestsFetch
+    try {
+      const rows = await getAgentRequests(channelId)
+      if (disposed || current !== requestsFetch || state.snapshot?.channelId !== channelId) return
+      state.agentRequests = Array.isArray(rows) ? rows : []
+    } catch (error) {
+      if (!disposed && current === requestsFetch) state.error = String(error)
+    }
+  }
+  /** Decide a request of the selected channel. The list loads again either way: a decision can save and its follow-up still fail. */
+  async function decideAgentRequest(requestId: string, decision: 'add' | 'deny') {
+    const channelId = state.snapshot?.channelId
+    if (!channelId) throw new Error('No channel is selected.')
+    try {
+      return await decideAgentRequestApi(channelId, requestId, decision)
+    } finally {
+      await loadAgentRequests(channelId)
+    }
+  }
   function acceptThreadHistory(history: ThreadHistoryDto) {
     if (disposed || (threadHistories.get(history.channelId)?.rev ?? -1) > history.rev) return
     threadHistories.set(history.channelId, history)
@@ -65,7 +120,12 @@ export function useStore() {
   function acceptSnapshot(snapshot: SnapshotDto) {
     if (disposed || (state.snapshot && snapshot.rev < state.snapshot.rev)) return
     const changed = state.snapshot?.channelId !== snapshot.channelId
+    const turnEnded = !!state.snapshot?.turnRunning && !snapshot.turnRunning
     state.snapshot = snapshot
+    state.liveSubAgentThreads = snapshot.liveSubAgentThreads ?? []
+    state.threadApprovals = snapshot.threadApprovals ?? []
+    if (changed) state.agentRequests = []
+    if (snapshot.channelId && (changed || turnEnded)) void loadAgentRequests(snapshot.channelId)
     syncThread(snapshot)
     const cached = histories.get(snapshot.channelId)
     if (cached && cached.rev >= snapshot.historyRev) state.history = cached.messages
@@ -102,5 +162,12 @@ export function useStore() {
     disposed = true
     unlisten.forEach((stop) => stop())
   })
-  return Object.assign(state, { refresh: async () => acceptSnapshot(await getSnapshot()) })
+  return Object.assign(state, {
+    refresh: async () => acceptSnapshot(await getSnapshot()),
+    decideAgentRequest,
+    refreshAgentRequests: async () => {
+      const channelId = state.snapshot?.channelId
+      if (channelId) await loadAgentRequests(channelId)
+    },
+  })
 }

@@ -75,6 +75,10 @@ const systemText = computed(() =>
     .flatMap((block) => (block.type === 'markdown' ? [block.text] : []))
     .join('\n'),
 )
+// An agent writes a reply. A user-role message with an author is a brief that an agent wrote for a sub-agent.
+const byAgent = computed(
+  () => props.message.role === 'agent' || (props.message.role === 'user' && !!props.message.author),
+)
 const authorName = computed(() => props.message.author?.name ?? props.agent ?? 'Agent')
 const authorAvatar = computed(() =>
   props.message.author ? props.message.author.avatar : props.agentAvatar,
@@ -164,7 +168,7 @@ async function copy() {
       v-else
       :data-ui-id="`message-${message.id}`"
       :tabindex="target ? 0 : undefined"
-      :style="message.role === 'agent' ? { '--agent-color': identity.mark } : undefined"
+      :style="byAgent ? { '--agent-color': identity.mark } : undefined"
       class="group relative flex gap-2 px-3 text-sm leading-relaxed hover:bg-muted/30 sm:px-6"
       :class="compact ? 'py-1' : 'py-2'"
     >
@@ -189,7 +193,7 @@ async function copy() {
       >
         <AgentAvatar
           :agent-id="message.author?.agentId ?? agentId"
-          v-if="!message.continuesGroup && message.role === 'agent'"
+          v-if="!message.continuesGroup && byAgent"
           :name="authorName"
           :avatar="authorAvatar"
           class="size-5"
@@ -216,12 +220,12 @@ async function copy() {
         <strong
           data-testid="message-identity"
           class="mr-2 font-semibold"
-          :style="message.role === 'agent' ? { color: identity.text } : undefined"
+          :style="byAgent ? { color: identity.text } : undefined"
         >
-          {{ message.role === 'user' ? 'You' : message.role === 'agent' ? authorName : 'System' }}
+          {{ byAgent ? authorName : message.role === 'user' ? 'You' : 'System' }}
         </strong>
         <span
-          v-if="message.role === 'agent' && message.author?.provider"
+          v-if="byAgent && message.author?.provider"
           data-testid="message-agent-tag"
           class="mr-2 font-mono text-[0.92em] text-muted-foreground"
         >
@@ -261,6 +265,14 @@ async function copy() {
           :thread="message.thread"
           @open="emit('openThread', $event)"
         />
+        <template v-if="surface === 'channel'">
+          <ThreadChip
+            v-for="thread in message.subAgentThreads"
+            :key="thread.channelId"
+            :thread="thread"
+            @open="emit('openThread', $event)"
+          />
+        </template>
       </div>
       <TooltipProvider v-if="target" :delay-duration="500" :skip-delay-duration="0">
         <!-- Keep button transitions off visibility so the toolbar hides as one unit. -->

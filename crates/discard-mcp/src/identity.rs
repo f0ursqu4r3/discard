@@ -25,6 +25,10 @@ pub struct Identity {
     pub surface: Surface,
     pub scopes: BTreeSet<ScopeKindOrd>,
     pub can_write: bool,
+    /// The session may use the delegation tools (`delegate`, `agents_list`, `agent_request_add`). The engine sets it for
+    /// a Conversation or Workspace response of an agent with `delegation`, never for a thread, Coding mode, or
+    /// summarization.
+    pub delegation: bool,
 }
 
 /// `ScopeKind` with an ordering, so identities can hold them in a set.
@@ -115,6 +119,7 @@ mod tests {
             surface,
             scopes: [ScopeKindOrd::Agent, ScopeKindOrd::Project].into(),
             can_write: true,
+            delegation: false,
         }
     }
 

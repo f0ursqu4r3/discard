@@ -47,7 +47,15 @@ export interface ThreadLastMessageDto {
   /** Plain text on one line, cut at 80 characters. Empty when the message has no text. */
   preview: string
 }
-/** The chip under an anchor message. */
+/** Why a thread exists. A `sub_agent` thread is a read-only research run that an agent started with `delegate`. */
+export type ThreadKind = 'question' | 'sub_agent'
+/** The run state of a sub-agent thread. `running` is the only state that changes; the others are final. */
+export type ThreadState = 'running' | 'done' | 'failed' | 'cancelled' | 'timed_out'
+/**
+ * The chip of a thread. A question thread chip sits under its anchor message (`MessageDto.thread`). The chips of
+ * sub-agent threads sit under the response that started them (`MessageDto.subAgentThreads`), and while that turn
+ * runs they come from `SnapshotDto.liveSubAgentThreads`.
+ */
 export interface ThreadChipDto {
   /** The thread channel ID. Pass it to `openThread`, `followThread` and `leaveThread`. */
   channelId: string
@@ -57,6 +65,13 @@ export interface ThreadChipDto {
   lastMessage: ThreadLastMessageDto | null
   followed: boolean
   unread: boolean
+  kind: ThreadKind
+  /** Null for a question thread. */
+  state: ThreadState | null
+  /** The thread's agent: the sub-agent of a sub-agent thread, the default responder of a question thread. */
+  agentName: string
+  /** Approvals that wait in the thread. */
+  pendingApprovals: number
 }
 /** A followed thread in the channel bar, indented under its parent channel. */
 export interface ThreadLinkDto {
@@ -65,6 +80,18 @@ export interface ThreadLinkDto {
   name: string
   unread: boolean
   running: boolean
+  pendingApprovals: number
+  kind: ThreadKind
+  /** Null for a question thread. */
+  state: ThreadState | null
+}
+/** A thread with an approval that waits, followed or not. The Approvals page lists these. */
+export interface ThreadApprovalDto {
+  threadId: string
+  parentChannelId: string
+  name: string
+  kind: ThreadKind
+  agentName: string
   pendingApprovals: number
 }
 /** Where a reference row in a parent channel comes from. */
@@ -81,8 +108,10 @@ export interface MessageDto {
   role: string
   blocks: BlockDto[]
   continuesGroup: boolean
-  /** The thread that starts from this message. Set only on a message of a normal channel. */
+  /** The question thread that starts from this message. Set only on a message of a normal channel. */
   thread?: ThreadChipDto | null
+  /** The sub-agent threads of this response, in task order. Empty on any other message. */
+  subAgentThreads?: ThreadChipDto[]
   /** Set on a reference row: the thread message it shows ("from thread"). */
   postedFrom?: PostedFromDto | null
   /** Set on a thread message that is also posted to the parent channel. */
@@ -109,7 +138,13 @@ export interface OpenThreadDto {
   parentChannelId: string
   name: string
   followed: boolean
-  anchorMessageId: string
+  kind: ThreadKind
+  /** The run state of a sub-agent thread. Null for a question thread. */
+  state: ThreadState | null
+  /** The thread's agent name (the sub-agent of a sub-agent thread). */
+  agentName: string
+  /** Null for a sub-agent thread whose parent turn still runs. */
+  anchorMessageId: string | null
   /** The revision of the transcript this snapshot goes with. Hold the `ThreadHistoryDto` whose `rev` is at least this. */
   historyRev: number
   agentId: string
@@ -124,7 +159,13 @@ export interface OpenThreadDto {
   pendingApprovals: number
   unread: boolean
   composerDisabled: boolean
-  /** Says that question threads are read-only. Always present. */
+  /**
+   * Why the composer is off: `steering_soon` in a sub-agent thread (planned work: steering and follow-up turns,
+   * shown with the `Soon` label), `read_only` when the thread, its agent or its channel is archived or
+   * unavailable. Null when the composer is on.
+   */
+  composerDisabledReason: 'steering_soon' | 'read_only' | null
+  /** Says that threads are read-only. Always present. */
   readOnlyNote: string
 }
 export interface ChannelDto {
@@ -138,6 +179,8 @@ export interface ChannelDto {
   running: boolean
   unread: boolean
   pendingApprovals: number
+  /** Approvals that wait in the threads of this channel, followed or not. `pendingApprovals` counts the channel only. The app always sends it. */
+  threadPendingApprovals?: number
   /** Followed threads of this channel with live state, oldest first. */
   threads?: ThreadLinkDto[]
 }
@@ -272,6 +315,13 @@ export interface SnapshotDto {
   repositories?: RepositoryDto[]
   repositoriesLoading?: boolean
   channels: ChannelDto[]
+  /**
+   * The sub-agent threads of the running turn of the selected channel, in task order. They have no anchor yet.
+   * When the turn ends they move to `MessageDto.subAgentThreads` of the saved response. The app always sends it.
+   */
+  liveSubAgentThreads?: ThreadChipDto[]
+  /** Threads with an approval that waits, followed or not, in the loaded channels. The app always sends it. */
+  threadApprovals?: ThreadApprovalDto[]
   /** The thread beside the selected channel, or null. */
   openThread?: OpenThreadDto | null
   slots: Record<string, SlotDto>

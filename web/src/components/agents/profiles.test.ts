@@ -323,3 +323,53 @@ test('does not label autorun Soon when the provider is missing', async () => {
   expect(view.text()).not.toContain('Soon')
   view.unmount()
 })
+
+test('the Delegation switch is off by default and explains itself', async () => {
+  const view = await editor()
+  const toggle = view.get('#agent-delegation')
+  expect(toggle.attributes('aria-checked')).toBe('false')
+  expect(view.get('label[for="agent-delegation"]').text()).toBe('Delegation')
+  expect(view.get(`#${toggle.attributes('aria-describedby')}`).text()).toBe(
+    'This agent can start read-only sub-agents in threads.',
+  )
+  view.unmount()
+})
+
+test('turning Delegation on goes through review and confirmation like other permissions', async () => {
+  const view = await editor()
+  await view.get('#agent-delegation').trigger('click')
+  await flushPromises()
+  expect(invoke).toHaveBeenLastCalledWith(
+    'settings_agent_review',
+    expect.objectContaining({ id: 'a', draft: expect.objectContaining({ delegation: true }) }),
+  )
+  vi.mocked(invoke).mockRejectedValueOnce('Confirmation is required')
+  await view.get('form').trigger('submit')
+  await flushPromises()
+  expect(view.emitted('saved')).toBeUndefined()
+  const alert = view.get('[data-protected="true"]')
+  expect(alert.text()).toContain('This lets the agent do more without asking.')
+  expect(view.text()).not.toContain(keychainWarning)
+  await view
+    .findAll('button')
+    .find((b) => b.text() === 'Confirm and save')!
+    .trigger('click')
+  await flushPromises()
+  expect(invoke).toHaveBeenCalledWith(
+    'settings_agent_save',
+    expect.objectContaining({
+      id: 'a',
+      confirmed: true,
+      draft: expect.objectContaining({ delegation: true }),
+    }),
+  )
+  expect(view.emitted('saved')).toHaveLength(1)
+  view.unmount()
+})
+
+test('an agent with Delegation on shows the switch on', async () => {
+  const view = mount(AgentProfileEditor, { props: { agent: { ...original, delegation: true } } })
+  await flushPromises()
+  expect(view.get('#agent-delegation').attributes('aria-checked')).toBe('true')
+  view.unmount()
+})

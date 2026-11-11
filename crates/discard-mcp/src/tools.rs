@@ -18,6 +18,7 @@ pub struct McpHandler {
     plugins: Option<Arc<PluginService>>,
     worktrees: Option<Arc<discard_core::worktree_access::WorktreeAccess>>,
     writes: Option<(Arc<discard_core::write_requests::WriteRequests>, Arc<discard_core::workspace::GitWorkspace>)>,
+    delegation: Option<discard_core::delegation::DelegationServices>,
 }
 
 impl McpHandler {
@@ -42,6 +43,7 @@ impl McpHandler {
                         tools.push(main_checkout_tool());
                     }
                 }
+                if identity.delegation && identity.can_write && self.delegation.is_some() { tools.extend(delegation_tool_list()); }
                 tools
             }
             Surface::Plugins if self.plugins.is_some() => plugin_tool_list(identity),
@@ -50,7 +52,7 @@ impl McpHandler {
     }
 
     pub fn new(store: Arc<MemoryStore>) -> Self {
-        Self { store, plugins: None, worktrees: None, writes: None }
+        Self { store, plugins: None, worktrees: None, writes: None, delegation: None }
     }
 
     pub fn with_worktrees(mut self, worktrees: Arc<discard_core::worktree_access::WorktreeAccess>) -> Self { self.worktrees = Some(worktrees); self }
@@ -58,6 +60,47 @@ impl McpHandler {
     pub fn with_write_requests(mut self, requests: Arc<discard_core::write_requests::WriteRequests>, workspace: Arc<discard_core::workspace::GitWorkspace>) -> Self {
         self.writes = Some((requests, workspace)); self
     }
+    /// Serve `delegate`, `agents_list`, and `agent_request_add` to sessions whose identity may delegate.
+    pub fn with_delegation(mut self, services: discard_core::delegation::DelegationServices) -> Self { self.delegation = Some(services); self }
+
+    /// `delegate` blocks until its sub-agents finish. It holds no lock while it waits: the store lock covers only
+    /// the validation, and the delegator comes out of its slot as a cloned handle.
+    fn run_delegation_tool(&self, identity: &Identity, name: &str, args: &Value) -> Result<String, String> {
+        use discard_core::delegation::{self, TaskInput};
+        let services = self.delegation.as_ref().ok_or("Sub-agents are unavailable.")?;
+        if !identity.delegation || !identity.can_write { return Err("This session cannot start sub-agents.".into()); }
+        let channel = identity.source_conversation.as_ref().ok_or("A conversation is required.")?;
+        let args = args.as_object().ok_or("Arguments must be an object.")?;
+        let lock = || services.store.lock().unwrap_or_else(|e| e.into_inner());
+        match name {
+            "agents_list" => {
+                if !args.is_empty() { return Err("This tool accepts no arguments.".into()); }
+                let agents = delegation::agent_summaries(&lock(), identity.project.as_ref(), &identity.agent)?;
+                Ok(json!({"agents": agents.iter().map(|a| json!({"name": a.name, "provider": a.provider, "model": a.model, "member": a.member, "personality": a.personality})).collect::<Vec<_>>()}).to_string())
+            }
+            "agent_request_add" => {
+                if args.keys().any(|k| k != "name" && k != "reason") { return Err("Only `name` and `reason` are accepted.".into()); }
+                let request = services.requests.request(&lock(), channel, &identity.agent, str_arg(&Value::Object(args.clone()), "name")?, str_arg(&Value::Object(args.clone()), "reason")?)?;
+                Ok(json!({"approvalRequired": true, "request": request, "message": format!("Adding {} is pending the user's approval in the app. Do not call delegate with it yet. The app continues this conversation after the user decides. You cannot approve this request.", request.agent_name)}).to_string())
+            }
+            "delegate" => {
+                if args.keys().any(|k| k != "tasks") { return Err("Only `tasks` is accepted.".into()); }
+                let list = args.get("tasks").and_then(Value::as_array).ok_or("`tasks` is required and must be a list of 1 to 4 tasks.")?;
+                let inputs = list.iter().enumerate().map(|(index, task)| {
+                    let task = task.as_object().filter(|t| t.keys().all(|k| matches!(k.as_str(), "title" | "brief" | "agent"))).ok_or_else(|| format!("Task {}: give an object with `title`, `brief`, and optionally `agent`.", index + 1))?;
+                    let text = |key: &str| -> Result<Option<String>, String> { match task.get(key) { None | Some(Value::Null) => Ok(None), Some(Value::String(s)) => Ok(Some(s.clone())), Some(_) => Err(format!("Task {}: `{key}` must be a string.", index + 1)) } };
+                    Ok(TaskInput { title: text("title")?.unwrap_or_default(), brief: text("brief")?.unwrap_or_default(), agent: text("agent")? })
+                }).collect::<Result<Vec<_>, String>>()?;
+                // Every task is checked before any sub-agent starts.
+                let tasks = delegation::plan(&lock(), channel, &identity.agent, &inputs)?;
+                let delegator = services.delegator.get().ok_or("Sub-agents are not ready yet. Try again in a moment.")?;
+                let results = delegator.delegate(channel, &identity.agent, tasks)?;
+                Ok(delegation::format_results(&results))
+            }
+            _ => Err("unknown tool".into()),
+        }
+    }
+
     fn run_write_request(&self, identity: &Identity, name: &str, args: &Value) -> Result<String, String> {
         if name == "main_checkout_request_write" && !identity.main_checkout_requests {
             return Err("This agent's provider cannot protect Git metadata in the main checkout. The user can move this branch to a worktree, or use another branch.".into());
@@ -177,7 +220,7 @@ impl McpHandler {
     fn call(&self, identity: &Identity, id: &Value, params: &Value) -> Value {
         let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
         let known = match identity.surface {
-            Surface::Memory => (matches!(name, "worktree_request_creation" | "main_checkout_request_write") && self.writes.is_some() && identity.can_write && identity.project.is_some()) || ALL_TOOLS.contains(&name) || (self.worktrees.is_some() && identity.project.is_some() && identity.can_write && (WORKTREE_TOOLS.contains(&name) || PROJECT_TOOLS.contains(&name))),
+            Surface::Memory => (DELEGATION_TOOLS.contains(&name) && self.delegation.is_some() && identity.delegation && identity.can_write) || (matches!(name, "worktree_request_creation" | "main_checkout_request_write") && self.writes.is_some() && identity.can_write && identity.project.is_some()) || ALL_TOOLS.contains(&name) || (self.worktrees.is_some() && identity.project.is_some() && identity.can_write && (WORKTREE_TOOLS.contains(&name) || PROJECT_TOOLS.contains(&name))),
             Surface::Plugins => self.plugins.is_some() && PLUGIN_ALL_TOOLS.contains(&name),
         };
         if !known {
@@ -185,6 +228,7 @@ impl McpHandler {
         }
         let args = params.get("arguments").unwrap_or(&Value::Null);
         let outcome = match identity.surface {
+            Surface::Memory if DELEGATION_TOOLS.contains(&name) => self.run_delegation_tool(identity, name, args),
             Surface::Memory if matches!(name, "worktree_request_creation" | "main_checkout_request_write") => self.run_write_request(identity, name, args),
             Surface::Memory if PROJECT_TOOLS.contains(&name) => self.run_project_tool(identity, name, args),
             Surface::Memory if WORKTREE_TOOLS.contains(&name) => self.run_worktree_tool(identity, name, args),
@@ -370,6 +414,16 @@ fn memory_tool_list(identity: &Identity) -> Vec<Value> {
         names.extend(WRITE_TOOLS);
     }
     names.into_iter().map(defs).collect()
+}
+
+pub const DELEGATION_TOOLS: &[&str] = &["delegate", "agents_list", "agent_request_add"];
+
+fn delegation_tool_list() -> Vec<Value> {
+    vec![
+        json!({"name":"delegate","description":"Start 1 to 4 read-only sub-agents and wait for their results. Each task runs in its own thread, at the same time as the others, and the call returns when all have finished: one result per task, in task order, with the thread name, the state, and the sub-agent's final message (or an error that says failed, cancelled, or timed out). A task is limited to 10 minutes. Sub-agents are research workers: they read and search, they never edit files. They cannot see this conversation, so each brief must be self-contained: state the goal, the files or questions to look at, and the form of the answer you want. By default a task runs with your own configuration. Set `agent` to a name from agents_list to use another agent; a name that is not a project member fails the whole call, and agent_request_add asks the user to add it. Sub-agents cannot delegate.","inputSchema":{"type":"object","properties":{"tasks":{"type":"array","minItems":1,"maxItems":4,"items":{"type":"object","properties":{"title":{"type":"string","description":"A short name for the thread, about 40 characters."},"brief":{"type":"string","description":"The complete request. The sub-agent sees only this text, never this conversation."},"agent":{"type":"string","description":"Optional agent name from agents_list. Leave out to use your own configuration."}},"required":["title","brief"],"additionalProperties":false}}},"required":["tasks"],"additionalProperties":false}}),
+        json!({"name":"agents_list","description":"List the active agents you can name in delegate: name, provider, model, whether the agent is a member of this project, and the first 200 characters of its personality prompt. Only members can be used in delegate. Use agent_request_add for an agent that is not a member.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":true}}),
+        json!({"name":"agent_request_add","description":"Ask the user to add an agent to this project so that delegate can use it. Returns at once with approvalRequired: the user decides on an approval card in the app, and the app then continues this conversation with the decision. You cannot approve the request. Give the reason the user needs to decide. Not available in a direct message. After a decline, do not ask for the same agent again until the user writes another message.","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"The agent's name from agents_list."},"reason":{"type":"string","description":"Why this agent is needed. The user reads it on the card."}},"required":["name","reason"],"additionalProperties":false}}),
+    ]
 }
 
 const WORKTREE_TOOLS: &[&str] = &["worktree_inspect", "worktree_request_removal", "worktree_commit"];
@@ -613,6 +667,7 @@ mod tests {
             surface: Surface::Memory,
             scopes: scopes.iter().copied().collect(),
             can_write,
+            delegation: false,
         }
     }
 
@@ -777,7 +832,7 @@ mod tests {
         use discard_core::{agent::AgentConfig, capability::ApprovalPolicy, model::{Channel, ChannelId, Project, WorkspaceMode}, store::{Store, WorktreeRecord}};
         let mut r = rig();
         let store = Store::open_in_memory().unwrap();
-        let config = AgentConfig { workspace_write: false, sandbox_autorun: false, name:"Agent".into(), provider:"fake".into(), model:Some("test".into()), avatar:None, reasoning_effort:None, system_prompt:String::new(), policy:ApprovalPolicy::Ask, plugin_write:false };
+        let config = AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, name:"Agent".into(), provider:"fake".into(), model:Some("test".into()), avatar:None, reasoning_effort:None, system_prompt:String::new(), policy:ApprovalPolicy::Ask, plugin_write:false };
         let agent = store.create_agent(&config).unwrap();
         let project = Project { id:ProjectId::new(), name:"Project".into(), path:"/unused".into() };
         store.insert_project(&project).unwrap();
@@ -811,7 +866,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("README.md"), "A project description").unwrap();
         let store = Store::open_in_memory().unwrap();
-        let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, name:"Agent".into(), provider:"fake".into(), model:Some("test".into()), avatar:None, reasoning_effort:None, system_prompt:String::new(), policy:ApprovalPolicy::Ask, plugin_write:false }).unwrap();
+        let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, name:"Agent".into(), provider:"fake".into(), model:Some("test".into()), avatar:None, reasoning_effort:None, system_prompt:String::new(), policy:ApprovalPolicy::Ask, plugin_write:false }).unwrap();
         let project = store.import_project_folder(dir.path()).unwrap();
         let channel = store.ensure_project_general_channel(&project.id, &agent).unwrap();
         r.handler = r.handler.with_worktrees(Arc::new(WorktreeAccess::new(Arc::new(std::sync::Mutex::new(store)))));

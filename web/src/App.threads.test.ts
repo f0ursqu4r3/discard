@@ -1,13 +1,17 @@
 import { shallowMount, flushPromises } from '@vue/test-utils'
 import { beforeEach, afterEach, expect, test, vi } from 'vite-plus/test'
 import thread from './bridge/fixtures/thread.json'
+import subAgent from './bridge/fixtures/subagent.json'
+import type { AgentRequest } from './bridge/api'
 import type { MessageDto, OpenThreadDto, SnapshotDto, ThreadHistoryDto } from './bridge/types'
 const mocks = vi.hoisted(() => ({
   store: null as unknown as {
     snapshot: SnapshotDto | null
     history: MessageDto[]
     threadHistory: ThreadHistoryDto | null
+    agentRequests: AgentRequest[]
     refresh: ReturnType<typeof vi.fn>
+    decideAgentRequest: ReturnType<typeof vi.fn>
   },
   api: {
     sendMessage: vi.fn(async () => {}),
@@ -15,6 +19,7 @@ const mocks = vi.hoisted(() => ({
     openThread: vi.fn(async () => {}),
     closeThread: vi.fn(async () => {}),
     selectThread: vi.fn(async () => 'channel'),
+    switchChannel: vi.fn(async () => {}),
     leaveThread: vi.fn(async () => {}),
     cancelTurn: vi.fn(async () => {}),
     setPanels: vi.fn<(channelList: number, memberList: number) => Promise<void>>(async () => {}),
@@ -28,7 +33,9 @@ vi.mock('./bridge/store', async () => {
     snapshot: null,
     history: [],
     threadHistory: null,
+    agentRequests: [],
     refresh: vi.fn(async () => {}),
+    decideAgentRequest: vi.fn(async () => ({})),
   }) as unknown as typeof mocks.store
   return { useStore: () => mocks.store }
 })
@@ -67,6 +74,7 @@ beforeEach(() => {
   mocks.store.snapshot = { ...structuredClone(fixture), openThread: null }
   mocks.store.history = [plain]
   mocks.store.threadHistory = null
+  mocks.store.agentRequests = []
   vi.stubGlobal(
     'matchMedia',
     vi.fn((query: string) => ({
@@ -328,4 +336,140 @@ test('the header project context button closes the thread panel', async () => {
   wrapper.getComponent(ChannelHeader).vm.$emit('toggle-members')
   await flushPromises()
   expect(mocks.api.closeThread).toHaveBeenCalledTimes(1)
+})
+
+const subSnapshot = subAgent.snapshot as unknown as SnapshotDto
+const subHistory = subAgent.threadHistory as unknown as ThreadHistoryDto
+const openSub = () => {
+  mocks.store.snapshot = { ...structuredClone(subSnapshot) }
+  mocks.store.threadHistory = structuredClone(subHistory)
+}
+const request: AgentRequest = {
+  id: 'request',
+  channelId: 'channel',
+  requestingAgentId: 'agent',
+  requestingAgentName: 'Agent',
+  agentId: 'reviewer',
+  agentName: 'Reviewer',
+  provider: 'example',
+  model: 'model',
+  reason: 'It reads code well.',
+  state: 'pending',
+  result: null,
+  createdAt: 1,
+}
+
+test('the channel list gets the live sub-agent chips and the thread opens from a chip', async () => {
+  mocks.store.snapshot = { ...structuredClone(subSnapshot), openThread: null }
+  const wrapper = app()
+  const list = wrapper.getComponent(MessageList)
+  expect(list.props('liveSubAgentThreads')).toEqual(subSnapshot.liveSubAgentThreads)
+  list.vm.$emit('open-thread', 'find-callers')
+  await flushPromises()
+  expect(mocks.api.openThread).toHaveBeenCalledWith('find-callers')
+})
+
+test('Stop in a sub-agent thread cancels that thread and not the channel turn', async () => {
+  openSub()
+  const wrapper = app()
+  expect(wrapper.getComponent(ThreadPanel).props('thread')).toMatchObject({
+    kind: 'sub_agent',
+    channelId: 'find-callers',
+  })
+  wrapper.getComponent(ThreadPanel).vm.$emit('stop')
+  await flushPromises()
+  expect(mocks.api.cancelTurn).toHaveBeenCalledTimes(1)
+  expect(mocks.api.cancelTurn).toHaveBeenCalledWith('find-callers')
+})
+
+test('a quote from a sub-agent thread goes to the channel composer, which stays on', async () => {
+  openSub()
+  const wrapper = app()
+  const panel = wrapper.getComponent(ThreadPanel)
+  expect(panel.props('quoteDisabled')).toBe(false)
+  panel.vm.$emit('quote', subHistory.messages[0])
+  await flushPromises()
+  expect(wrapper.getComponent(Composer).props('draft')).toContain(
+    '(#discard-message/find-callers/brief)',
+  )
+  expect(wrapper.getComponent(ThreadPanel).props('draft')).toBeUndefined()
+})
+
+test('the agent request cards get the requests of the store and decide through it', async () => {
+  mocks.store.agentRequests = [request]
+  const wrapper = app()
+  const list = wrapper.getComponent(MessageList)
+  expect(list.props('agentRequests')).toEqual([request])
+  list.vm.$emit('decide-agent-request', 'request', 'add')
+  await flushPromises()
+  expect(mocks.store.decideAgentRequest).toHaveBeenCalledWith('request', 'add')
+  list.vm.$emit('decide-agent-request', 'request', 'deny')
+  await flushPromises()
+  expect(mocks.store.decideAgentRequest).toHaveBeenLastCalledWith('request', 'deny')
+  expect(mocks.store.refresh).toHaveBeenCalled()
+})
+
+test('a failed decision shows an error and frees the buttons', async () => {
+  const { toast } = await import('vue-sonner')
+  mocks.store.agentRequests = [request]
+  mocks.store.decideAgentRequest.mockRejectedValueOnce(new Error('The channel is busy.'))
+  const wrapper = app()
+  wrapper.getComponent(MessageList).vm.$emit('decide-agent-request', 'request', 'add')
+  await flushPromises()
+  expect(toast.error).toHaveBeenCalledWith('Could not decide request', {
+    description: 'Error: The channel is busy.',
+  })
+  expect(wrapper.getComponent(MessageList).props('agentRequestBusy')).toBeNull()
+})
+
+test('Approvals opens a thread approval with selectThread', async () => {
+  mocks.store.snapshot = {
+    ...structuredClone(subSnapshot),
+    openThread: null,
+    channels: structuredClone(subSnapshot.channels).map((channel) => ({
+      ...channel,
+      pendingApprovals: 0,
+      threadPendingApprovals: 1,
+    })),
+  }
+  const wrapper = app()
+  expect(mocks.store.snapshot.threadApprovals).toHaveLength(1)
+  wrapper.getComponent(NavigationPanel).vm.$emit('approvals')
+  await flushPromises()
+  expect(mocks.api.selectThread).toHaveBeenCalledWith('find-callers')
+  expect(mocks.api.switchChannel).not.toHaveBeenCalled()
+})
+
+test('Approvals prefers a channel approval to a thread approval', async () => {
+  mocks.store.snapshot = {
+    ...structuredClone(subSnapshot),
+    openThread: null,
+    channels: structuredClone(subSnapshot.channels).map((channel) => ({
+      ...channel,
+      pendingApprovals: 1,
+    })),
+  }
+  const wrapper = app()
+  wrapper.getComponent(NavigationPanel).vm.$emit('approvals')
+  await flushPromises()
+  expect(mocks.api.selectThread).not.toHaveBeenCalled()
+  expect(mocks.api.switchChannel).toHaveBeenCalled()
+})
+
+test('Approvals says so when nothing waits', async () => {
+  const { toast } = await import('vue-sonner')
+  mocks.store.snapshot = {
+    ...structuredClone(subSnapshot),
+    openThread: null,
+    threadApprovals: [],
+    channels: structuredClone(subSnapshot.channels).map((channel) => ({
+      ...channel,
+      pendingApprovals: 0,
+      threadPendingApprovals: 0,
+    })),
+  }
+  const wrapper = app()
+  wrapper.getComponent(NavigationPanel).vm.$emit('approvals')
+  await flushPromises()
+  expect(toast.info).toHaveBeenCalledWith('No pending approvals')
 })

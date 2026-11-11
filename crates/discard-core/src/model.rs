@@ -129,12 +129,12 @@ pub struct Channel {
     pub workspace_mode: WorkspaceMode,
 }
 
-/// Why a thread exists. Slice 1 writes only `Question`.
+/// Why a thread exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadKind {
     Question,
-    /// Reserved for sub-agent threads. Nothing writes this kind yet.
+    /// A read-only research run that an agent started with the `delegate` tool. It has a `ThreadState`.
     SubAgent,
 }
 
@@ -154,16 +154,55 @@ impl ThreadKind {
     }
 }
 
+/// Where a sub-agent thread is in its run. `Running` is the only state that changes; the others are final.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadState {
+    Running,
+    Done,
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
+impl ThreadState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "running" => Some(Self::Running),
+            "done" => Some(Self::Done),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            "timed_out" => Some(Self::TimedOut),
+            _ => None,
+        }
+    }
+}
+
 /// The thread columns of a channel row. A normal channel has none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadInfo {
     pub channel_id: ChannelId,
     pub parent_channel_id: ChannelId,
-    pub anchor_message_id: MessageId,
+    /// The message the thread hangs under. A sub-agent thread has none while its parent turn runs.
+    pub anchor_message_id: Option<MessageId>,
     pub kind: ThreadKind,
     /// Whether the thread shows in the channel bar.
     pub followed: bool,
     pub name: String,
+    /// The run state of a sub-agent thread. `None` for a question thread.
+    pub state: Option<ThreadState>,
+    /// The thread's agent: the sub-agent of a sub-agent thread, the default responder of a question thread.
+    pub agent_id: AgentId,
+    pub agent_name: String,
 }
 
 /// Where a reference row in a parent channel points: the thread message it shows.

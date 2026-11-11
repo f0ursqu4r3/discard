@@ -52,7 +52,8 @@ Agents in project channels can only read today. They must be able to edit files,
 7. Tool set for write sessions:
    - Claude: `Read`, `Glob`, `Grep`, `Edit`, `Write`, `Bash`, and the scoped Discard MCP tools.
    - Codex: shell, `apply_patch`, and the scoped Discard MCP tools.
-   - Off: web fetch and web search, subagents and delegation, skills, slash commands, user MCP servers, hooks, provider plugins, code mode, and the node REPL.
+   - Off: web fetch and web search, provider-native subagents and delegation, skills, slash commands, user MCP servers, hooks, provider plugins, code mode, and the node REPL.
+   - On for agents with `delegation`: Discard delegation to read-only sub-agents through the Discard MCP `delegate` tool. See [Threads — design](2026-11-10-threads-design.md), slice 2.
 8. Repository instructions: Discard reads `AGENTS.md` and `CLAUDE.md` from the session root and adds them to the system prompt, labelled as repository instructions. Each file is limited to 32 KiB, and a longer file gets a truncation notice. System instructions and the current user message take precedence. Provider discovery of instruction files stays off (Claude `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`; Codex project-doc discovery off). The user's global provider instructions stay off where the provider allows it. Codex's stated limit for global `AGENTS.md` and administrator policy still applies.
 
 ### Approvals

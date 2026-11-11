@@ -489,6 +489,21 @@ async function remove() {
         </Field>
         <Field orientation="horizontal">
           <FieldContent>
+            <FieldLabel for="agent-delegation">Delegation</FieldLabel>
+            <FieldDescription id="agent-delegation-description">
+              This agent can start read-only sub-agents in threads.
+            </FieldDescription>
+          </FieldContent>
+          <Switch
+            id="agent-delegation"
+            :model-value="!!draft.delegation"
+            :disabled="busy"
+            aria-describedby="agent-delegation-description"
+            @update:model-value="draft.delegation = $event === true"
+          />
+        </Field>
+        <Field orientation="horizontal">
+          <FieldContent>
             <FieldLabel for="agent-plugin-write">Allow plugin writes</FieldLabel>
             <FieldDescription id="agent-plugin-write-description">
               Works only in a builder session. Start Discard with

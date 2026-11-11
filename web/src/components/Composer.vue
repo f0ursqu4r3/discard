@@ -14,6 +14,7 @@ import AttachmentCard from './AttachmentCard.vue'
 import type { AttachmentDto } from '../bridge/types'
 import { Send, Square, AtSign, Paperclip, LoaderCircle, ChevronRight } from '@lucide/vue'
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from './ui/input-group'
+import { Badge } from './ui/badge'
 import { Checkbox } from './ui/checkbox'
 import { Label } from './ui/label'
 import { maySend, mayStop } from './composer'
@@ -32,6 +33,8 @@ const props = defineProps<{
   placeholder?: string
   /** Shows the "Also post to" checkbox. The thread composer sets it to the parent channel name. */
   alsoPostLabel?: string
+  /** The composer is off because its feature is planned. Shows a `Soon` label with this text in place of the archived note. */
+  soon?: string
 }>()
 const emit = defineEmits<{
   send: [text: string, attachments?: AttachmentDto[], alsoPost?: boolean]
@@ -510,7 +513,15 @@ function keydown(event: KeyboardEvent) {
       </Label>
     </div>
     <p
-      v-if="archived && !directMessage && alsoPostLabel === undefined"
+      v-if="soon"
+      data-ui-id="composer-soon"
+      class="mt-2 flex items-center gap-2 px-1 text-xs text-muted-foreground"
+    >
+      <Badge variant="secondary">Soon</Badge>
+      {{ soon }}
+    </p>
+    <p
+      v-else-if="archived && !directMessage && alsoPostLabel === undefined"
       class="mt-2 text-xs text-muted-foreground"
     >
       Channel archived

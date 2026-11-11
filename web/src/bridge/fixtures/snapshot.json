@@ -39,6 +39,8 @@
   "repositories": [],
   "repositoriesLoading": false,
   "channels": [],
+  "liveSubAgentThreads": [],
+  "threadApprovals": [],
   "openThread": null,
   "slots": {},
   "banners": {

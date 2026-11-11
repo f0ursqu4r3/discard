@@ -22,6 +22,8 @@ const link = (id: string, patch: Partial<ThreadLinkDto> = {}): ThreadLinkDto => 
   unread: false,
   running: false,
   pendingApprovals: 0,
+  kind: 'question',
+  state: null,
   ...patch,
 })
 function track<T extends ReturnType<typeof mount>>(view: T) {
@@ -240,4 +242,59 @@ test('followed threads show under project conversations', async () => {
   const rows = view.findAll('[data-ui-id="thread-row"]')
   expect(rows.map((row) => row.get('button').text())).toEqual(['Thread p-thread'])
   expect(rows[0]!.get('button').attributes('aria-current')).toBe('page')
+})
+
+test('a sub-agent thread row has its own icon and shows running, unread and approvals like a question row', () => {
+  const question = track(mount(ThreadRow, { props: { link: link('q') } }))
+  const sub = track(
+    mount(ThreadRow, {
+      props: {
+        link: link('s', {
+          kind: 'sub_agent',
+          state: 'running',
+          running: true,
+          unread: true,
+          pendingApprovals: 1,
+        }),
+      },
+    }),
+  )
+  expect(question.get('[data-ui-id="thread-row"]').attributes('data-kind')).toBe('question')
+  expect(sub.get('[data-ui-id="thread-row"]').attributes('data-kind')).toBe('sub_agent')
+  expect(sub.get('svg').classes().join(' ')).not.toBe(question.get('svg').classes().join(' '))
+  expect(sub.find('[aria-label="Working"]').exists()).toBe(true)
+  expect(sub.find('[aria-label="Unread messages"]').exists()).toBe(true)
+  expect(sub.get('[aria-label="1 pending approval"]').text()).toBe('1')
+})
+
+test('a sub-agent row shows the running state even when the live flag is off', () => {
+  const view = track(
+    mount(ThreadRow, { props: { link: link('s', { kind: 'sub_agent', state: 'running' }) } }),
+  )
+  expect(view.find('[aria-label="Working"]').exists()).toBe(true)
+})
+
+test('a finished sub-agent row marks failure, cancel and timeout, and stays quiet when done', () => {
+  const mark = (state: ThreadLinkDto['state']) =>
+    track(mount(ThreadRow, { props: { link: link('s', { kind: 'sub_agent', state }) } }))
+  expect(mark('failed').get('[role="img"]').attributes('aria-label')).toBe('Failed')
+  expect(mark('cancelled').get('[role="img"]').attributes('aria-label')).toBe('Cancelled')
+  expect(mark('timed_out').get('[role="img"]').attributes('aria-label')).toBe('Timed out')
+  expect(mark('done').find('[role="img"]').exists()).toBe(false)
+})
+
+test('the Approvals count in the channel bar includes thread approvals', () => {
+  const view = track(
+    mount(ChannelList, {
+      props: {
+        ...listProps,
+        projectChannels: [projectChannel('general')],
+        channels: [
+          { ...live('general'), pendingApprovals: 1, threadPendingApprovals: 2 },
+          { ...live('other'), pendingApprovals: 0, threadPendingApprovals: 1 },
+        ],
+      },
+    }),
+  )
+  expect(view.get('[data-ui-id="nav-approvals"]').text()).toContain('4')
 })

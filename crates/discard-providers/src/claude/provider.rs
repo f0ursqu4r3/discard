@@ -112,7 +112,7 @@ pub fn build_args(spec: &SessionSpec, protected_git_paths: &[PathBuf], read_deni
         // Permit only these exact names; native tools remain absent.
         args.extend([
             "--allowedTools".into(),
-            crate::conversation::MEMORY_TOOLS.iter().chain(if spec.mode == SessionMode::Workspace { crate::conversation::WORKSPACE_TOOLS } else { &[] }).map(|name| format!("mcp__discard-memory__{name}")).collect::<Vec<_>>().join(","),
+            crate::conversation::conversation_tools(spec).iter().map(|name| format!("mcp__discard-memory__{name}")).collect::<Vec<_>>().join(","),
         ]);
         args.extend(
             ["--tools", if spec.mode == SessionMode::Workspace { "Read,Glob,Grep,Edit,Write,Bash" } else { "" }, "--strict-mcp-config", "--disable-slash-commands", "--restricted", "--system-prompt-snapshot", "off"]
@@ -736,6 +736,30 @@ mod tests {
                 "mcp__discard-memory__memory_search,mcp__discard-memory__memory_list,mcp__discard-memory__memory_read,mcp__discard-memory__memory_save,mcp__discard-memory__memory_edit,mcp__discard-memory__memory_forget,mcp__discard-memory__worktree_inspect,mcp__discard-memory__worktree_request_removal,mcp__discard-memory__worktree_request_creation,mcp__discard-memory__main_checkout_request_write,mcp__discard-memory__project_list_files,mcp__discard-memory__project_read_file,mcp__discard-memory__project_search,mcp__discard-memory__project_git_branches,mcp__discard-memory__project_git_log,mcp__discard-memory__project_git_compare"
             );
             assert!(args.windows(2).any(|pair| pair == ["--tools", ""]));
+        }
+    }
+
+    #[test]
+    fn the_delegation_tools_are_allowed_only_for_a_session_whose_config_has_the_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = |timeout: Option<u64>| {
+            let mut entry = json!({"type":"http","url":"http://127.0.0.1:1/mcp","headers":{"Authorization":"Bearer t"}});
+            if let Some(ms) = timeout { entry["timeout"] = json!(ms); }
+            let path = dir.path().join(format!("{timeout:?}.json"));
+            std::fs::write(&path, json!({"mcpServers":{"discard-memory":entry}}).to_string()).unwrap();
+            path
+        };
+        let allowed = |mode: SessionMode, path: PathBuf| {
+            let mut s = spec(EnforcementMode::HostPrompts); s.mode = mode; s.mcp_config = Some(path);
+            let args = build_args(&s, &[PathBuf::from("/w/.git")], None).unwrap();
+            args[args.iter().position(|arg| arg == "--allowedTools").unwrap() + 1].clone()
+        };
+        for mode in [SessionMode::Conversation, SessionMode::Workspace] {
+            let without = allowed(mode, config(None));
+            assert!(!without.contains("delegate") && !without.contains("agents_list") && !without.contains("agent_request_add"), "{mode:?}: {without}");
+            let with = allowed(mode, config(Some(660_000)));
+            for name in ["delegate", "agents_list", "agent_request_add"] { assert!(with.split(',').any(|t| t == format!("mcp__discard-memory__{name}")), "{mode:?} {name}: {with}"); }
+            assert!(with.starts_with(&without), "the other tools are unchanged");
         }
     }
 

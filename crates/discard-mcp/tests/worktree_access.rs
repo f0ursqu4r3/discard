@@ -30,7 +30,7 @@ async fn scoped_http_tool_requests_removal_but_only_app_approval_executes_it() {
     git(&repo,&["init","-q","-b","main"]); git(&repo,&["commit","--allow-empty","-m","initial"]);
     let path = dir.path().join("linked"); git(&repo,&["worktree","add","--detach",path.to_str().unwrap()]);
     let store = Store::open_in_memory().unwrap();
-    let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, name:"Agent".into(),provider:"fake".into(),model:Some("test".into()),avatar:None,reasoning_effort:None,system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false }).unwrap();
+    let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, name:"Agent".into(),provider:"fake".into(),model:Some("test".into()),avatar:None,reasoning_effort:None,system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false }).unwrap();
     let project = store.import_project_folder(&repo).unwrap();
     let channel = Channel {id:ChannelId::new(),project_id:Some(project.id.clone()),name:"linked".into(),agent_id:agent.clone(),workspace_mode:WorkspaceMode::Worktree};
     store.create_named_repository_channel(&channel,"",None,Some(&WorktreeRecord {channel_id:channel.id.clone(),path:path.to_string_lossy().into(),repo:repo.to_string_lossy().into(),branch:"detached".into(),base_commit:String::new(),owned:false})).unwrap();
@@ -67,7 +67,7 @@ async fn general_channel_runtime_exposes_project_files_without_worktree_tools() 
     let repo = dir.path().join("project"); std::fs::create_dir(&repo).unwrap();
     std::fs::write(repo.join("README.md"), "Project overview").unwrap();
     let store = Store::open_in_memory().unwrap();
-    let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, name:"Agent".into(),provider:"fake".into(),model:Some("test".into()),avatar:None,reasoning_effort:None,system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false }).unwrap();
+    let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, name:"Agent".into(),provider:"fake".into(),model:Some("test".into()),avatar:None,reasoning_effort:None,system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false }).unwrap();
     let project = store.import_project_folder(&repo).unwrap();
     let channel = store.ensure_project_general_channel(&project.id, &agent).unwrap();
     let access = Arc::new(WorktreeAccess::new(Arc::new(Mutex::new(store))));
@@ -103,7 +103,7 @@ async fn project_git_and_search_options_use_scoped_http_tools() {
     std::fs::write(repo.join("other.txt"), "new\n").unwrap();
     git(&repo, &["add", "."]); git(&repo, &["commit", "-qm", "second"]);
     let store = Store::open_in_memory().unwrap();
-    let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, name:"Agent".into(),provider:"fake".into(),model:Some("test".into()),avatar:None,reasoning_effort:None,system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false }).unwrap();
+    let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, name:"Agent".into(),provider:"fake".into(),model:Some("test".into()),avatar:None,reasoning_effort:None,system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false }).unwrap();
     let project = store.import_project_folder(&repo).unwrap();
     let channel = store.ensure_project_general_channel(&project.id, &agent).unwrap();
     let access = Arc::new(WorktreeAccess::new(Arc::new(Mutex::new(store))));
@@ -163,5 +163,86 @@ async fn project_git_and_search_options_use_scoped_http_tools() {
         assert!(!reply.to_string().contains(dir.path().to_str().unwrap()), "{reply}");
     }
     runtime.finish(&prepared.token);
+    runtime.shutdown().await;
+}
+
+fn failed(reply: &Value) -> bool { reply["error"].is_object() || reply["result"]["isError"] == true }
+
+fn tool_names(listed: &Value) -> Vec<String> {
+    listed["result"]["tools"].as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap().to_owned()).collect()
+}
+
+#[tokio::test]
+async fn a_thread_of_a_worktree_channel_reads_the_parents_worktree_and_gets_no_write_or_worktree_tools() {
+    use discard_core::{model::{Block, Message, MessageId, Role}, workspace::GitWorkspace, write_requests::WriteRequests};
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo"); std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("README.md"), "main checkout\n").unwrap();
+    git(&repo, &["add", "."]); git(&repo, &["commit", "-qm", "initial"]);
+    std::fs::write(repo.join("ONLY_MAIN.md"), "only in the main checkout\n").unwrap();
+    git(&repo, &["branch", "no-worktree"]);
+    let linked = dir.path().join("linked");
+    git(&repo, &["worktree", "add", "-q", "-b", "feature", linked.to_str().unwrap()]);
+    std::fs::write(linked.join("NOTE.md"), "uncommitted in the worktree\n").unwrap();
+    let store = Store::open_in_memory().unwrap();
+    let agent = store.create_agent(&AgentConfig { workspace_write: true, sandbox_autorun: false, delegation: false, name: "Agent".into(), provider: "fake".into(), model: Some("test".into()), avatar: None, reasoning_effort: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+    let project = store.import_project_folder(&repo).unwrap();
+    let bound = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "feature".into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+    store.create_named_repository_channel(&bound, "", Some("feature"), Some(&WorktreeRecord { channel_id: bound.id.clone(), path: linked.to_string_lossy().into(), repo: repo.to_string_lossy().into(), branch: "feature".into(), base_commit: String::new(), owned: false })).unwrap();
+    let unbound = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "no-worktree".into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+    store.create_named_repository_channel(&unbound, "", Some("no-worktree"), None).unwrap();
+    let say = |channel: &ChannelId, role| { let message = Message { id: MessageId::new(), channel_id: channel.clone(), role, blocks: vec![Block::Markdown { text: "x".into() }] }; store.insert_message(&message).unwrap(); message.id };
+    say(&bound.id, Role::User); let answer = say(&bound.id, Role::Agent); say(&unbound.id, Role::User);
+    let sub_agent = store.create_sub_agent_thread(&bound.id, "research", &agent).unwrap();
+    let question = store.create_thread(&bound.id, &answer, "why?", &agent).unwrap();
+    let unbound_thread = store.create_sub_agent_thread(&unbound.id, "research", &agent).unwrap();
+    let store = Arc::new(Mutex::new(store));
+    let access = Arc::new(WorktreeAccess::new(store.clone()));
+    let workspace = Arc::new(GitWorkspace::new(&dir.path().join("worktrees"), store.clone()));
+    let memory = Arc::new(MemoryStore::open_in_memory_index(&dir.path().join("memory")).unwrap());
+    let runtime = MemoryRuntime::start_with_write_services(memory, &dir.path().join("runtime"), None, Some(access), Some((Arc::new(WriteRequests::default()), workspace))).await.unwrap();
+
+    // Control: the bound channel itself has the worktree tools. The unbound branch channel may ask for a worktree.
+    let own = runtime.prepare_turn(&agent, Some(&project.id), &bound.id, None, false, "q").unwrap();
+    let own_config: Value = serde_json::from_slice(&std::fs::read(&own.mcp_config).unwrap()).unwrap();
+    let names = tool_names(&rpc(&own_config, "tools/list", json!({})).await);
+    assert!(names.contains(&"worktree_inspect".into()) && names.contains(&"worktree_request_removal".into()), "{names:?}");
+    let unbound_turn = runtime.prepare_turn(&agent, Some(&project.id), &unbound.id, None, false, "q").unwrap();
+    let unbound_config: Value = serde_json::from_slice(&std::fs::read(&unbound_turn.mcp_config).unwrap()).unwrap();
+    assert!(tool_names(&rpc(&unbound_config, "tools/list", json!({})).await).contains(&"worktree_request_creation".into()), "the control can ask for a worktree");
+
+    for thread in [&sub_agent.id, &question.id] {
+        let prepared = runtime.prepare_turn(&agent, Some(&project.id), thread, None, false, "research").unwrap();
+        let config: Value = serde_json::from_slice(&std::fs::read(&prepared.mcp_config).unwrap()).unwrap();
+        let names = tool_names(&rpc(&config, "tools/list", json!({})).await);
+        for read in ["project_list_files", "project_read_file", "project_search", "project_git_branches", "project_git_log", "project_git_compare"] {
+            assert!(names.contains(&read.to_owned()), "{read} in {names:?}");
+        }
+        for write in ["worktree_inspect", "worktree_request_removal", "worktree_commit", "worktree_request_creation", "main_checkout_request_write"] {
+            assert!(!names.contains(&write.to_owned()), "{write} must stay unavailable to a thread: {names:?}");
+            assert!(failed(&call_args(&config, write, json!({})).await), "{write} cannot be called either");
+        }
+        assert!(!prepared.system_prompt.contains("Worktree access:") && !prepared.system_prompt.contains("worktree_request_creation"), "{}", prepared.system_prompt);
+        // The project tools read the parent's worktree, with its uncommitted file, and not the main checkout.
+        let listing = data(&call(&config, "project_list_files").await).to_string();
+        assert!(listing.contains("NOTE.md") && !listing.contains("ONLY_MAIN.md"), "{listing}");
+        let note = data(&call_args(&config, "project_read_file", json!({"path": "NOTE.md"})).await);
+        assert_eq!(note["text"], "uncommitted in the worktree\n");
+        assert!(failed(&call_args(&config, "project_read_file", json!({"path": "ONLY_MAIN.md"})).await), "the main checkout is not read");
+        let found = data(&call_args(&config, "project_search", json!({"query": "uncommitted"})).await);
+        assert_eq!(found["matches"][0]["path"], "NOTE.md");
+        let branches = data(&call(&config, "project_git_branches").await).to_string();
+        assert!(branches.contains("feature"), "{branches}");
+        runtime.finish(&prepared.token);
+    }
+
+    // A thread of a channel with no worktree reads the project folder, as that channel does.
+    let prepared = runtime.prepare_turn(&agent, Some(&project.id), &unbound_thread.id, None, false, "research").unwrap();
+    let config: Value = serde_json::from_slice(&std::fs::read(&prepared.mcp_config).unwrap()).unwrap();
+    let names = tool_names(&rpc(&config, "tools/list", json!({})).await);
+    assert!(names.contains(&"project_read_file".into()) && !names.contains(&"worktree_request_creation".into()) && !names.contains(&"worktree_inspect".into()), "{names:?}");
+    assert_eq!(data(&call_args(&config, "project_read_file", json!({"path": "ONLY_MAIN.md"})).await)["text"], "only in the main checkout\n");
+    for token in [&own.token, &unbound_turn.token, &prepared.token] { runtime.finish(token); }
     runtime.shutdown().await;
 }

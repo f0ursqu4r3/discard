@@ -13,6 +13,9 @@ pub trait Emit: Send + Sync {
     fn history(&self, h: &HistoryDto);
     /// The transcript of the open thread. Called when its revision changes.
     fn thread_history(&self, _: &ThreadHistoryDto) {}
+    /// A thread list that the webview reads from storage changed without a command of the webview: the engine
+    /// followed a thread, or a followed sub-agent thread changed state. Called at most once per change burst.
+    fn conversations(&self) {}
 }
 pub async fn pump(
     core: Arc<AppCore>,
@@ -32,6 +35,7 @@ async fn run(core: Arc<AppCore>, mut updates: UnboundedReceiver<Update>, emit: A
     let mut last = tokio::time::Instant::now() - min_interval;
     let mut history_rev = 0;
     let mut thread_rev = (String::new(), 0);
+    let mut conversations_rev = core.conversations_rev();
     let mut dirty = false;
     loop {
         tokio::select! {
@@ -45,13 +49,13 @@ async fn run(core: Arc<AppCore>, mut updates: UnboundedReceiver<Update>, emit: A
                     dirty = true;
                 }
                 None => {
-                    if dirty { emit_current(&core, &*emit, &mut history_rev, &mut thread_rev); }
+                    if dirty { emit_current(&core, &*emit, &mut history_rev, &mut thread_rev, &mut conversations_rev); }
                     if keep_alive { connected = false; } else { break; }
                 }
             },
             _ = core.changed.notified() => { dirty = true; }
             _ = tokio::time::sleep_until(last + min_interval), if dirty => {
-                emit_current(&core, &*emit, &mut history_rev, &mut thread_rev);
+                emit_current(&core, &*emit, &mut history_rev, &mut thread_rev, &mut conversations_rev);
                 last = tokio::time::Instant::now();
                 dirty = false;
             }
@@ -59,8 +63,10 @@ async fn run(core: Arc<AppCore>, mut updates: UnboundedReceiver<Update>, emit: A
     }
 }
 
-fn emit_current(core: &AppCore, emit: &dyn Emit, history_rev: &mut u64, thread_rev: &mut (String, u64)) {
+fn emit_current(core: &AppCore, emit: &dyn Emit, history_rev: &mut u64, thread_rev: &mut (String, u64), conversations_rev: &mut u64) {
     let snapshot = core.snapshot();
+    let conversations = core.conversations_rev();
+    if conversations != *conversations_rev { *conversations_rev = conversations; emit.conversations(); }
     // Send the open thread's transcript once per revision. Closing the thread forgets the revision.
     match snapshot.open_thread.as_ref() {
         Some(open) if (open.channel_id.as_str(), open.history_rev) != (thread_rev.0.as_str(), thread_rev.1) => {

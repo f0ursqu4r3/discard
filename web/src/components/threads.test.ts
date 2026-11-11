@@ -1,6 +1,13 @@
 import { expect, test } from 'vite-plus/test'
-import type { ChannelDto, MessageDto, ThreadLinkDto } from '../bridge/types'
-import { messageCountLabel, threadAction, threadLinks } from './threads'
+import type { ChannelDto, MessageDto, ThreadChipDto, ThreadLinkDto } from '../bridge/types'
+import {
+  channelApprovals,
+  messageCountLabel,
+  selectedChannelApprovals,
+  threadAction,
+  threadLinks,
+  threadStates,
+} from './threads'
 import { referenceMenuPlanned, threadActions, threadMenuPlanned } from './thread-menu'
 
 const link = (id: string, name = id): ThreadLinkDto => ({
@@ -10,6 +17,8 @@ const link = (id: string, name = id): ThreadLinkDto => ({
   unread: false,
   running: false,
   pendingApprovals: 0,
+  kind: 'question',
+  state: null,
 })
 const message: MessageDto = { id: 'm', role: 'agent', continuesGroup: false, blocks: [] }
 
@@ -26,13 +35,17 @@ test('live thread links win over stored links', () => {
 
 test('a message starts a thread, an anchor opens its thread, a reference row opens its source', () => {
   expect(threadAction(message)).toEqual({ kind: 'start', label: 'Start thread', threadId: null })
-  const chip = {
+  const chip: ThreadChipDto = {
     channelId: 't1',
     name: 'Why?',
     messageCount: 2,
     lastMessage: null,
     followed: true,
     unread: false,
+    kind: 'question',
+    state: null,
+    agentName: 'Quinn',
+    pendingApprovals: 0,
   }
   expect(threadAction({ ...message, thread: chip })).toEqual({
     kind: 'open',
@@ -61,4 +74,25 @@ test('every planned thread control uses the shared planned model', () => {
     expect(entry.kind).toBe('planned')
   expect(threadMenuPlanned.map((entry) => entry.label)).toEqual(['Rename thread', 'Delete thread'])
   expect(referenceMenuPlanned.map((entry) => entry.label)).toEqual(['Remove from channel'])
+})
+
+test('approval counts add the threads of a channel to the channel itself', () => {
+  expect(channelApprovals({ pendingApprovals: 1, threadPendingApprovals: 2 })).toBe(3)
+  expect(channelApprovals({ pendingApprovals: 1 })).toBe(1)
+  const channels = [
+    { id: 'a', pendingApprovals: 0, threadPendingApprovals: 2 },
+    { id: 'b', pendingApprovals: 4, threadPendingApprovals: 0 },
+  ] as ChannelDto[]
+  expect(selectedChannelApprovals({ channelId: 'a', channels, pendingApprovals: 0 })).toBe(2)
+  expect(selectedChannelApprovals({ channelId: 'b', channels, pendingApprovals: 4 })).toBe(4)
+})
+
+test('every run state has a label', () => {
+  expect(Object.values(threadStates).map((state) => state.label)).toEqual([
+    'Running',
+    'Done',
+    'Failed',
+    'Cancelled',
+    'Timed out',
+  ])
 })

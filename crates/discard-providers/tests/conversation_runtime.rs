@@ -55,7 +55,7 @@ impl Rig {
         let store = Store::open(&dir.path().join("store.db")).unwrap();
         let agent = store
             .create_agent(&AgentConfig {
-                workspace_write: false, sandbox_autorun: false,
+                workspace_write: false, sandbox_autorun: false, delegation: false,
                 reasoning_effort: None,
                 name: "A".into(),
                 avatar: None,

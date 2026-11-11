@@ -176,6 +176,12 @@ export interface AgentEntry {
   pluginWrite: boolean
   workspaceWrite: boolean
   sandboxAutorun: boolean
+  /**
+   * The agent may start read-only sub-agents with the `delegate` tool in Conversation and Workspace responses.
+   * Off by default; the app always sends it. Turning it on goes through the policy-loosening confirmation (`settings_agent_review`
+   * lists it as "Delegation"). A new agent cannot start with it on.
+   */
+  delegation?: boolean
   sandboxAutorunUnavailable: string | null
   /** True when the provider does not support autorun yet. False for a missing provider. */
   sandboxAutorunPlanned: boolean
@@ -262,3 +268,35 @@ export const getWriteRequests = (channelId: string) =>
   invoke<WriteRequest[]>('get_write_requests', { channelId })
 export const decideWriteRequest = (channelId: string, requestId: string, approve: boolean) =>
   invoke<WriteRequest>('decide_write_request', { channelId, requestId, approve })
+
+/** A request from an agent to add another agent to the project. Requests are not stored: none survives a restart. */
+export interface AgentRequest {
+  id: string
+  channelId: string
+  requestingAgentId: string
+  requestingAgentName: string
+  /** The agent to add. */
+  agentId: string
+  agentName: string
+  provider: string
+  model: string | null
+  /** What the requesting agent wrote. At most 500 characters. */
+  reason: string
+  state: 'pending' | 'added' | 'denied' | 'failed' | 'expired'
+  result: string | null
+  /** Unix milliseconds. */
+  createdAt: number
+}
+/** The requests of a channel, oldest first, decided or not. */
+export const getAgentRequests = (channelId: string) =>
+  invoke<AgentRequest[]>('get_agent_requests', { channelId })
+/**
+ * Decide a request. `add` makes the agent a project member and continues the requesting agent; `deny` continues it
+ * with the note that the user declined. The channel must be the selected channel and idle. Refreshes
+ * `discard://channel-details` and `discard://conversations`.
+ */
+export const decideAgentRequest = (
+  channelId: string,
+  requestId: string,
+  decision: 'add' | 'deny',
+) => invoke<AgentRequest>('decide_agent_request', { channelId, requestId, decision })

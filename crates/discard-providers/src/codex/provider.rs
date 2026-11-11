@@ -179,6 +179,11 @@ fn mcp_thread_config(path: &Path) -> Result<Value, ProviderError> {
     for (name, server) in servers {
         let url = server.get("url").and_then(Value::as_str).ok_or_else(|| setup(format!("MCP server `{name}` has no url")))?;
         let mut entry = json!({"url": url});
+        // Claude's per-server `timeout` (milliseconds) is Codex's `tool_timeout_sec` (seconds, rounded up). Without it
+        // Codex gives a tool call 60 seconds, which ends a `delegate` call early.
+        if let Some(ms) = server.get("timeout").and_then(Value::as_u64).filter(|ms| *ms > 0) {
+            entry["tool_timeout_sec"] = json!(ms.div_ceil(1000));
+        }
         if let Some(headers) = server.get("headers").filter(|h| h.is_object()) {
             entry["http_headers"] = headers.clone();
         }
@@ -305,7 +310,7 @@ impl Provider for CodexProvider {
                 // mode would require a CLI prompt that never policy cannot answer.
                 params["config"]["mcp_servers"]["discard-memory"]["default_tools_approval_mode"] = json!("approve");
                 params["config"]["mcp_servers"]["discard-memory"]["omit_tools_from"] = json!(["deferred", "code_mode"]);
-                params["config"]["mcp_servers"]["discard-memory"]["enabled_tools"] = json!(crate::conversation::MEMORY_TOOLS.iter().chain(if workspace { crate::conversation::WORKSPACE_TOOLS } else { &[] }).collect::<Vec<_>>());
+                params["config"]["mcp_servers"]["discard-memory"]["enabled_tools"] = json!(crate::conversation::conversation_tools(&spec));
             }
         }
 
@@ -698,6 +703,21 @@ mod tests {
         assert_eq!(p["approvalPolicy"], "never");
         assert_eq!(p["sandbox"], "read-only");
         assert_eq!(p["model"], "exact-model");
+    }
+
+    #[test]
+    fn the_discard_server_timeout_becomes_the_codex_tool_timeout_in_seconds() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |entry: Value| { let path = dir.path().join("c.json"); std::fs::write(&path, json!({"mcpServers":{"discard-memory":entry}}).to_string()).unwrap(); path };
+        let base = json!({"type":"http","url":"http://127.0.0.1:9/mcp","headers":{"Authorization":"Bearer t"}});
+        let none = mcp_thread_config(&write(base.clone())).unwrap();
+        assert!(none["mcp_servers"]["discard-memory"].get("tool_timeout_sec").is_none(), "Codex keeps its 60 second default without a timeout");
+        let mut with = base.clone(); with["timeout"] = json!(660_000);
+        let config = mcp_thread_config(&write(with)).unwrap();
+        assert_eq!(config["mcp_servers"]["discard-memory"]["tool_timeout_sec"], 660);
+        assert_eq!(config["mcp_servers"]["discard-memory"]["http_headers"]["Authorization"], "Bearer t");
+        let mut odd = base; odd["timeout"] = json!(1500);
+        assert_eq!(mcp_thread_config(&write(odd)).unwrap()["mcp_servers"]["discard-memory"]["tool_timeout_sec"], 2, "rounded up");
     }
 
     #[test]

@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
-import { AtSign, BellOff, BellPlus, Ellipsis, Hash, MessagesSquare, X } from '@lucide/vue'
+import { AtSign, BellOff, BellPlus, Bot, Ellipsis, Hash, MessagesSquare, X } from '@lucide/vue'
 import type { AttachmentDto, MessageDto, OpenThreadDto, ThreadHistoryDto } from '@/bridge/types'
 import { followThread, leaveThread } from '@/bridge/api'
 import { thinkingLine } from '../messages'
 import { threadMenuPlanned } from '../thread-menu'
 import BrailleSpinner from '../BrailleSpinner.vue'
 import Composer from '../Composer.vue'
+import ThreadStateMark from '../ThreadStateMark.vue'
 import MessageList from '../MessageList.vue'
 import { Alert, AlertDescription } from '../ui/alert'
 import { Button } from '../ui/button'
@@ -61,6 +62,9 @@ const key = computed(() => props.thread?.channelId ?? `draft-${props.draftAnchor
 const disabled = computed(() =>
   props.thread ? props.thread.composerDisabled : !!props.composerDisabled,
 )
+const subAgent = computed(() => props.thread?.kind === 'sub_agent')
+// A sub-agent thread has a planned composer. A read-only composer is a state, not planned work.
+const steeringSoon = computed(() => props.thread?.composerDisabledReason === 'steering_soon')
 const typing = computed(() =>
   thinkingLine(!!props.thread?.turnRunning, [
     props.thread?.responder?.name ?? props.thread?.agent ?? '',
@@ -98,9 +102,24 @@ defineExpose({ focusComposer: () => composer.value?.focusEnd?.() })
       data-ui-id="thread-header"
       class="flex h-16 shrink-0 items-center gap-1 border-b border-border/60 pr-2 pl-4"
     >
-      <MessagesSquare class="mr-2 size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
+      <Bot v-if="subAgent" class="mr-2 size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
+      <MessagesSquare
+        v-else
+        class="mr-2 size-5 shrink-0 text-muted-foreground"
+        aria-hidden="true"
+      />
       <div class="min-w-0 flex-1">
         <h2 class="truncate text-sm font-semibold">{{ thread?.name ?? 'New thread' }}</h2>
+        <p
+          v-if="subAgent && thread"
+          data-ui-id="thread-subagent-line"
+          class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
+        >
+          <span data-ui-id="thread-agent" class="min-w-0 truncate font-mono">
+            {{ thread.agentName }}
+          </span>
+          <ThreadStateMark v-if="thread.state" :state="thread.state" :agent-id="thread.agentId" />
+        </p>
         <p class="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
           <component
             :is="directMessage ? AtSign : Hash"
@@ -178,7 +197,7 @@ defineExpose({ focusComposer: () => composer.value?.focusEnd?.() })
       :agent-avatar="agentAvatar"
       :prompts="thread?.prompts"
       :quote-disabled="quoteDisabled"
-      :thread-disabled="disabled"
+      :thread-disabled="disabled && !steeringSoon"
       :jump-to="jumpTo"
       @quote="emit('quote', $event)"
     />
@@ -198,7 +217,10 @@ defineExpose({ focusComposer: () => composer.value?.focusEnd?.() })
     >
       {{ thread.readOnlyNote }}
     </p>
-    <p v-if="disabled" class="px-5 py-2 text-xs text-muted-foreground">Read only.</p>
+    <p v-if="disabled && !steeringSoon" class="px-5 py-2 text-xs text-muted-foreground">
+      Read only.
+    </p>
+    <!-- TODO: Steer a running sub-agent and send follow-up turns to a finished one. The composer stays off until then. -->
     <Composer
       ref="composer"
       :key="key"
@@ -212,8 +234,17 @@ defineExpose({ focusComposer: () => composer.value?.focusEnd?.() })
       :archived="disabled"
       :busy="!!busy"
       :running="!!thread?.turnRunning"
-      :placeholder="thread ? 'Reply in thread' : 'Ask about this message'"
-      :also-post-label="directMessage ? 'the conversation' : `#${parentName}`"
+      :placeholder="
+        steeringSoon
+          ? 'Steer this sub-agent'
+          : thread
+            ? 'Reply in thread'
+            : 'Ask about this message'
+      "
+      :also-post-label="
+        steeringSoon ? undefined : directMessage ? 'the conversation' : `#${parentName}`
+      "
+      :soon="steeringSoon ? 'Steering a sub-agent and follow-up turns.' : undefined"
       @update:draft="emit('update:draft', $event)"
       @update:attachments="emit('update:attachments', $event)"
       @send="(text, files, alsoPost) => emit('send', text, files ?? [], !!alsoPost)"

@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, ref, watch } from 'vue'
 import { MessageSquare } from '@lucide/vue'
-import type { BlockDto, MessageDto, MessageAuthorDto, PromptDto } from '@/bridge/types'
+import type {
+  BlockDto,
+  MessageDto,
+  MessageAuthorDto,
+  PromptDto,
+  ThreadChipDto,
+} from '@/bridge/types'
+import type { AgentRequest } from '@/bridge/api'
 import type { TranscriptPosition } from './transcript'
 import { useMessageScrollerContext } from '../ui/message-scroller/useMessageScroller'
 import { markRead } from '@/bridge/api'
@@ -19,6 +26,7 @@ import MessageRow from '../MessageRow.vue'
 import { useAppearance } from '@/bridge/appearance'
 import WorktreeApprovals from './WorktreeApprovals.vue'
 import WriteAccessApprovals from './WriteAccessApprovals.vue'
+import AgentRequestApprovals from './AgentRequestApprovals.vue'
 import MemoryResponse from '../memory/MemoryResponse.vue'
 import MemoryCaptureStatus from '../memory/MemoryCaptureStatus.vue'
 import { useMemory } from '../memory/useMemory'
@@ -48,6 +56,11 @@ const props = defineProps<{
   /** The channel that holds the anchor message. */
   anchorChannelId?: string
   threadDisabled?: boolean
+  /** The sub-agent threads of the running turn. They show on the live row. */
+  liveSubAgentThreads?: ThreadChipDto[]
+  /** Agent add requests of this channel. A thread transcript shows none. */
+  agentRequests?: AgentRequest[]
+  agentRequestBusy?: string | null
 }>()
 const appearance = useAppearance()
 const memory = useMemory(
@@ -62,6 +75,7 @@ const emit = defineEmits<{
   quote: [message: MessageDto]
   startThread: [message: MessageDto]
   openThread: [threadId: string]
+  decideAgentRequest: [requestId: string, decision: 'add' | 'deny']
 }>()
 const host = ref<HTMLElement | null>(null)
 const scroller = useMessageScrollerContext()
@@ -100,8 +114,12 @@ const anchorRow = computed(() => {
   return { message, ...messagePresentation(message) }
 })
 const liveStartedAt = ref<number | null>(null)
+// The live row shows while the turn has text or sub-agent threads, so a chip never waits for the first block.
+const liveVisible = computed(
+  () => hasLiveRow(props.running, props.live.length) || !!props.liveSubAgentThreads?.length,
+)
 watch(
-  [() => props.conversationId, () => hasLiveRow(props.running, props.live.length)],
+  [() => props.conversationId, () => liveVisible.value],
   ([, visible]) => {
     liveStartedAt.value = visible ? Date.now() : null
   },
@@ -112,6 +130,7 @@ const liveMessage = computed<MessageDto>(() => ({
   createdAt: liveStartedAt.value,
   role: 'agent',
   blocks: props.live,
+  subAgentThreads: props.liveSubAgentThreads ?? [],
   author: props.liveAuthor,
   continuesGroup:
     props.messages.at(-1)?.role === 'agent' &&
@@ -195,7 +214,7 @@ onUnmounted(() => window.removeEventListener('focus', read))
     ref="host"
     data-ui-id="message-view"
     class="relative flex min-h-0 flex-1 flex-col"
-    :data-row-count="rowCount(messages.length, hasLiveRow(running, live.length))"
+    :data-row-count="rowCount(messages.length, liveVisible)"
   >
     <div v-if="memory.data.value.paused" class="mx-6 my-2">
       <MemoryCaptureStatus :channel-id="conversationId" :paused="true" @changed="memory.reload" />
@@ -313,7 +332,7 @@ onUnmounted(() => window.removeEventListener('focus', read))
           </MessageScrollerItem>
           <MessageScrollerItem
             class="[content-visibility:visible]"
-            v-if="hasLiveRow(running, live.length)"
+            v-if="liveVisible"
             message-id="streaming-reply"
           >
             <div
@@ -338,11 +357,19 @@ onUnmounted(() => window.removeEventListener('focus', read))
               :agent-avatar="agentAvatar"
               :prompts="prompts"
               :show-cursor="running"
+              @open-thread="emit('openThread', $event)"
             />
           </MessageScrollerItem>
           <WorktreeApprovals v-if="projectId" :channel-id="conversationId" :running="running" />
           <WriteAccessApprovals v-if="projectId" :channel-id="conversationId" :running="running" />
-          <Empty v-if="!messages.length && !hasLiveRow(running, live.length)" class="m-auto">
+          <AgentRequestApprovals
+            v-if="projectId && surface !== 'thread'"
+            :requests="agentRequests ?? []"
+            :running="running"
+            :busy="agentRequestBusy"
+            @decide="(id, decision) => emit('decideAgentRequest', id, decision)"
+          />
+          <Empty v-if="!messages.length && !liveVisible" class="m-auto">
             <EmptyHeader>
               <EmptyMedia variant="icon"><MessageSquare /></EmptyMedia>
               <EmptyTitle>

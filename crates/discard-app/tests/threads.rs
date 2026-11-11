@@ -25,7 +25,7 @@ fn channel(id: &str) -> Channel {
     Channel { id: ChannelId(id.into()), project_id: Some(discard_core::model::ProjectId("p".into())), name: id.into(), agent_id: AgentId("agent".into()), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout }
 }
 fn thread_info(id: &str, parent: &str, anchor: &str) -> ThreadInfo {
-    ThreadInfo { channel_id: ChannelId(id.into()), parent_channel_id: ChannelId(parent.into()), anchor_message_id: MessageId(anchor.into()), kind: ThreadKind::Question, followed: true, name: "Why?".into() }
+    ThreadInfo { channel_id: ChannelId(id.into()), parent_channel_id: ChannelId(parent.into()), anchor_message_id: Some(MessageId(anchor.into())), kind: ThreadKind::Question, followed: true, name: "Why?".into(), state: None, agent_id: AgentId("g".into()), agent_name: "Gus".into() }
 }
 
 /// A selected channel `parent` with a question and an answer, and a loaded thread `thread` on the answer.
@@ -113,8 +113,8 @@ fn the_open_thread_streams_beside_a_selected_channel_that_streams_too() {
     assert!(open.turn_running);
     assert_eq!(open.live_blocks, vec![Block::Markdown { text: "thread stream".into() }]);
     assert_eq!(open.parent_channel_id, "parent");
-    assert_eq!(open.anchor_message_id, "a");
-    assert!(open.read_only_note.contains("question threads are read-only"), "{}", open.read_only_note);
+    assert_eq!(open.anchor_message_id.as_deref(), Some("a"));
+    assert!(open.read_only_note.contains("threads are read-only"), "{}", open.read_only_note);
     assert!(!open.composer_disabled);
     assert!(r.core.send_in_thread("thread", "again".into(), vec![], false, None).is_err(), "one turn at a time in a thread");
     r.core.apply_channel("thread", Update::TurnFinished(TurnOutcome::Completed));
@@ -359,7 +359,7 @@ async fn start_thread_creates_the_thread_with_its_first_message_and_opens_it() {
     assert!(w.core.history().iter().all(|m| m.thread.is_none()));
     let thread = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "Why  a\nthread?".into(), vec![], false).unwrap();
     let info = w.store.lock().unwrap().thread_info(&ChannelId(thread.clone())).unwrap().expect("the thread row exists");
-    assert_eq!((info.name.as_str(), info.parent_channel_id.clone(), info.anchor_message_id.clone(), info.followed), ("Why a thread?", w.parent.id.clone(), w.answer.clone(), true));
+    assert_eq!((info.name.as_str(), info.parent_channel_id.clone(), info.anchor_message_id.clone(), info.followed), ("Why a thread?", w.parent.id.clone(), Some(w.answer.clone()), true));
     assert_eq!(info.kind, ThreadKind::Question);
     assert_eq!(w.core.snapshot().open_thread.as_ref().map(|t| t.channel_id.clone()), Some(thread.clone()), "the new thread is open");
     until("the thread reply", || w.core.thread_history_snapshot().is_some_and(|h| h.messages.len() == 2) && !w.core.snapshot().open_thread.is_some_and(|t| t.turn_running)).await;

@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { MessagesSquare } from '@lucide/vue'
+import { computed } from 'vue'
+import { Bot, MessagesSquare } from '@lucide/vue'
 import type { ThreadLinkDto } from '../bridge/types'
 import { openContextMenuFromKeyboard } from './context-menu-keyboard'
 import { treePrefix } from './branch-navigation'
 import { threadMenuPlanned } from './thread-menu'
+import { pendingApprovalsLabel, threadStates } from './threads'
 import BrailleSpinner from './BrailleSpinner.vue'
 import ProjectMenuItems from './ProjectMenuItems.vue'
 import { Badge } from './ui/badge'
@@ -16,7 +18,7 @@ import {
   ContextMenuTrigger,
 } from './ui/context-menu'
 
-defineProps<{
+const props = defineProps<{
   link: ThreadLinkDto
   /** The thread panel shows this thread. */
   active?: boolean
@@ -24,11 +26,19 @@ defineProps<{
   busy?: boolean
 }>()
 const emit = defineEmits<{ select: [threadId: string]; leave: [threadId: string] }>()
+const subAgent = computed(() => props.link.kind === 'sub_agent')
+const running = computed(() => props.link.running || props.link.state === 'running')
+// A finished run that did not succeed keeps a mark. A done run is quiet, like a thread with no news.
+const endState = computed(() => {
+  const state = props.link.state
+  return state && state !== 'running' && state !== 'done' ? threadStates[state] : null
+})
 </script>
 <template>
   <div
     data-ui-id="thread-row"
     :data-thread-id="link.id"
+    :data-kind="link.kind"
     class="flex min-w-0 items-center gap-1 pl-3"
   >
     <span
@@ -53,12 +63,21 @@ const emit = defineEmits<{ select: [threadId: string]; leave: [threadId: string]
           "
           @click="emit('select', link.id)"
         >
-          <MessagesSquare class="size-3.5 shrink-0" aria-hidden="true" />
+          <Bot v-if="subAgent" class="size-3.5 shrink-0" aria-hidden="true" />
+          <MessagesSquare v-else class="size-3.5 shrink-0" aria-hidden="true" />
           <span class="min-w-0 flex-1 truncate">{{ link.name }}</span>
-          <BrailleSpinner v-if="link.running" class="shrink-0" />
+          <BrailleSpinner v-if="running" class="shrink-0" />
+          <component
+            :is="endState.icon"
+            v-else-if="endState?.icon"
+            role="img"
+            :aria-label="endState.label"
+            class="size-3 shrink-0"
+            :class="endState.class"
+          />
           <Badge
             v-if="link.pendingApprovals > 0"
-            :aria-label="`${link.pendingApprovals} pending ${link.pendingApprovals === 1 ? 'approval' : 'approvals'}`"
+            :aria-label="pendingApprovalsLabel(link.pendingApprovals)"
             class="h-4 min-w-4 shrink-0 rounded-full px-1 font-mono text-xs tabular-nums"
           >
             {{ link.pendingApprovals }}

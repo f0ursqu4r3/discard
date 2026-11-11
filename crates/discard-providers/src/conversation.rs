@@ -8,6 +8,27 @@ pub(crate) const WORKSPACE_TOOLS: &[&str] = &["worktree_commit"];
 
 pub(crate) const MEMORY_TOOLS: &[&str] = &["memory_search", "memory_list", "memory_read", "memory_save", "memory_edit", "memory_forget", "worktree_inspect", "worktree_request_removal", "worktree_request_creation", "main_checkout_request_write", "project_list_files", "project_read_file", "project_search", "project_git_branches", "project_git_log", "project_git_compare"];
 
+/// Discard's delegation tools. A session may call them only when its MCP config carries the delegation timeout.
+pub(crate) const DELEGATION_TOOLS: &[&str] = &["delegate", "agents_list", "agent_request_add"];
+
+/// True when the Discard server entry has a positive `timeout`. Discard writes that per-server tool-call timeout
+/// (in milliseconds, from `discard_core::delegation::provider_tool_timeout`) exactly when the session may delegate,
+/// because a `delegate` call blocks for minutes. The adapters read it as the condition for the delegation tools.
+pub(crate) fn delegation_enabled(doc: &Value) -> bool {
+    doc["mcpServers"]["discard-memory"].get("timeout").and_then(Value::as_u64).is_some_and(|ms| ms > 0)
+}
+
+/// The tool names a conversation session may call on the Discard server: memory and project tools, the commit tool
+/// in a Workspace session, and the delegation tools when the session's MCP config enables them. A config that cannot
+/// be read adds nothing.
+pub(crate) fn conversation_tools(spec: &SessionSpec) -> Vec<&'static str> {
+    let mut tools: Vec<&'static str> = MEMORY_TOOLS.to_vec();
+    if spec.mode == discard_core::provider::SessionMode::Workspace { tools.extend(WORKSPACE_TOOLS); }
+    let delegates = spec.mcp_config.as_ref().and_then(|path| std::fs::read(path).ok()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()).is_some_and(|doc| delegation_enabled(&doc));
+    if delegates { tools.extend(DELEGATION_TOOLS); }
+    tools
+}
+
 pub(crate) fn setup(message: impl Into<String>) -> ProviderError {
     ProviderError::Setup(format!("conversation mode: {}", message.into()))
 }
@@ -392,6 +413,30 @@ mod tests {
     fn cli_overrides_use_literal_top_level_keys_and_safe_inline_server_names() {
         let args = config_args(&json!({"features":{"shell_tool":false},"mcp_servers":{"a.b":{"enabled":false}}}));
         assert_eq!(args, vec!["-c", "features={\"shell_tool\" = false}", "-c", "mcp_servers={\"a.b\" = {\"enabled\" = false}}"]);
+    }
+
+    fn session_with_config(mode: discard_core::provider::SessionMode, doc: Option<Value>) -> (SessionSpec, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = doc.map(|doc| { let path = dir.path().join("session.json"); std::fs::write(&path, doc.to_string()).unwrap(); path });
+        let spec = SessionSpec { reasoning_effort: None, mode, cwd: dir.path().to_path_buf(), model: None, system_prompt: None, enforcement: discard_core::capability::EnforcementMode::HostPrompts, resume_handle: None, mcp_config: path, sandbox_autorun: false };
+        (spec, dir)
+    }
+
+    #[test]
+    fn the_delegation_tools_are_allowed_only_when_the_config_carries_the_delegation_timeout() {
+        use discard_core::provider::SessionMode::{Conversation, Workspace};
+        let entry = |timeout: Option<u64>| { let mut e = json!({"type":"http","url":"http://127.0.0.1:1/mcp","headers":{"Authorization":"Bearer t"}}); if let Some(ms) = timeout { e["timeout"] = json!(ms); } json!({"mcpServers":{"discard-memory":e}}) };
+        assert!(delegation_enabled(&entry(Some(660_000))));
+        for off in [entry(None), entry(Some(0)), json!({"mcpServers":{}}), json!({}), json!({"mcpServers":{"discard-memory":{"timeout":"660"}}})] { assert!(!delegation_enabled(&off), "{off}"); }
+        let names = |mode, doc| { let (spec, _dir) = session_with_config(mode, doc); conversation_tools(&spec) };
+        let plain = names(Conversation, Some(entry(None)));
+        assert_eq!(plain, MEMORY_TOOLS, "no timeout, no delegation tools");
+        assert_eq!(names(Conversation, None), MEMORY_TOOLS, "an unreadable config adds nothing");
+        let delegating = names(Conversation, Some(entry(Some(660_000))));
+        assert_eq!(&delegating[..MEMORY_TOOLS.len()], MEMORY_TOOLS);
+        assert_eq!(&delegating[MEMORY_TOOLS.len()..], DELEGATION_TOOLS);
+        let workspace = names(Workspace, Some(entry(Some(660_000))));
+        assert_eq!(workspace[MEMORY_TOOLS.len()..], ["worktree_commit", "delegate", "agents_list", "agent_request_add"]);
     }
 
     #[test]

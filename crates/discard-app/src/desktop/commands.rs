@@ -424,3 +424,31 @@ pub async fn decide_write_request(
     let requests = requests.inner().clone(); let workspace = workspace.inner().clone(); let channels = channels.inner().clone();
     tauri::async_runtime::spawn_blocking(move || channels.decide_write_request(&requests, &workspace, &grants, &channel_id, &request_id, approve)).await.map_err(|e| e.to_string())?
 }
+
+/// The requests of agents in `channel_id` to add an agent to the project, oldest first, decided or not.
+/// The card shows a pending one. Requests are not stored: none survives an app restart.
+#[tauri::command]
+pub fn get_agent_requests(requests: State<'_, Arc<discard_core::agent_requests::AgentRequests>>, channel_id: String) -> Vec<super::dto::AgentRequestDto> {
+    requests.list(&discard_core::model::ChannelId(channel_id)).into_iter().map(Into::into).collect()
+}
+
+/// Decide a pending request: `add` makes the agent a project member and continues the requesting agent, `deny`
+/// continues it with the note that the user declined. The channel must be the selected channel and idle.
+/// Refreshes `discard://channel-details` (members) and `discard://conversations`.
+#[tauri::command]
+pub async fn decide_agent_request(
+    app: tauri::AppHandle,
+    requests: State<'_, Arc<discard_core::agent_requests::AgentRequests>>,
+    channels: State<'_, Arc<super::channels::Channels>>,
+    channel_id: String, request_id: String, decision: String,
+) -> Result<super::dto::AgentRequestDto, String> {
+    let approve = match decision.as_str() { "add" => true, "deny" => false, _ => return Err("Decide with add or deny.".into()) };
+    let requests = requests.inner().clone(); let channels = channels.inner().clone();
+    let channel = channel_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || channels.decide_agent_request(&requests, &channel, &request_id, approve)).await.map_err(|e| e.to_string())?;
+    // The decision can save and its follow-up still fail, so refresh in either case.
+    use tauri::Emitter;
+    let _ = app.emit("discard://channel-details", channel_id);
+    let _ = app.emit("discard://conversations", ());
+    result.map(Into::into)
+}

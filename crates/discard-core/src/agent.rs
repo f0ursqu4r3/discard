@@ -26,6 +26,9 @@ pub struct AgentConfig {
     /// May run sandboxed shell commands without approval cards. Needs `workspace_write`. Off by default.
     #[serde(default)]
     pub sandbox_autorun: bool,
+    /// May start read-only sub-agents in threads through the `delegate` tool. Off by default.
+    #[serde(default)]
+    pub delegation: bool,
 }
 
 /// Generate an editable human name without using a model as identity.
@@ -94,6 +97,7 @@ pub enum AgentChange {
     SetPluginWrite { agent: AgentId, enabled: bool },
     SetWorkspaceWrite { agent: AgentId, enabled: bool },
     SetSandboxAutorun { agent: AgentId, enabled: bool },
+    SetDelegation { agent: AgentId, enabled: bool },
 }
 
 /// Strictness rank. Higher is stricter.
@@ -111,7 +115,7 @@ impl AgentChange {
         match (initiator, self) {
             (Initiator::User, AgentChange::Create { .. }) => false,
             (Initiator::User, AgentChange::SetPolicy { from, to, .. }) => strictness(*to) < strictness(*from),
-            (Initiator::User, AgentChange::SetPluginWrite { enabled, .. } | AgentChange::SetWorkspaceWrite { enabled, .. } | AgentChange::SetSandboxAutorun { enabled, .. }) => *enabled,
+            (Initiator::User, AgentChange::SetPluginWrite { enabled, .. } | AgentChange::SetWorkspaceWrite { enabled, .. } | AgentChange::SetSandboxAutorun { enabled, .. } | AgentChange::SetDelegation { enabled, .. }) => *enabled,
             (Initiator::Plugin(_) | Initiator::Agent(_), _) => true,
         }
     }
@@ -140,6 +144,23 @@ mod tests {
     }
 
     #[test]
+    fn enabling_delegation_needs_user_approval() {
+        let on = AgentChange::SetDelegation { agent: AgentId("a".into()), enabled: true };
+        assert!(on.needs_user_approval(&Initiator::User));
+        let off = AgentChange::SetDelegation { agent: AgentId("a".into()), enabled: false };
+        assert!(!off.needs_user_approval(&Initiator::User));
+        assert!(off.needs_user_approval(&Initiator::Plugin("p".into())));
+    }
+
+    #[test]
+    fn old_agent_toml_reads_delegation_as_false_and_round_trips_it() {
+        assert!(!AgentConfig::from_toml("name = 'A'\nprovider = 'claude'\npolicy = 'ask'\n").unwrap().delegation);
+        let mut on = cfg(ApprovalPolicy::Ask);
+        on.delegation = true;
+        assert!(AgentConfig::from_toml(&on.to_toml().unwrap()).unwrap().delegation);
+    }
+
+    #[test]
     fn old_agent_toml_reads_sandbox_autorun_as_false() {
         assert!(!AgentConfig::from_toml("name = 'A'\nprovider = 'claude'\npolicy = 'ask'\n").unwrap().sandbox_autorun);
     }
@@ -151,7 +172,7 @@ mod tests {
 
     fn cfg(policy: ApprovalPolicy) -> AgentConfig {
         AgentConfig {
-            workspace_write: false, sandbox_autorun: false,
+            workspace_write: false, sandbox_autorun: false, delegation: false,
             reasoning_effort: None,
             name: "Scout".into(),
             avatar: None,

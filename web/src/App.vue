@@ -51,6 +51,7 @@ import { useAgentIdentity } from './components/agents/useAgentIdentity'
 import { agentIdentity } from './components/agents/agent-icon'
 import { activeTheme } from './bridge/theme'
 import { thinkingLine } from './components/messages'
+import { selectedChannelApprovals } from './components/threads'
 import { navigationWidth, panelWidths, savePanelWidths } from './components/layout'
 import PluginElement from './plugin/PluginElement.vue'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from './components/ui/resizable'
@@ -660,6 +661,8 @@ const threadStartDisabled = computed(
 )
 const threadQuoteDisabled = computed(() => {
   const open = openThreadView.value
+  // A sub-agent thread has no composer to take a quote. Its quote goes to the channel composer.
+  if (open?.kind === 'sub_agent') return quoteDisabled.value
   return (
     !threadActive.value ||
     (open ? open.composerDisabled : threadStartDisabled.value) ||
@@ -768,6 +771,11 @@ function quoteInThread(message: MessageDto) {
   if (!source || !channelId) return
   const quoted = quoteMessage(source, channelId, open?.agent ?? snapshot.agent)
   if (!quoted) return
+  if (open?.kind === 'sub_agent') {
+    drafts[snapshot.channelId] = appendQuote(drafts[snapshot.channelId] ?? '', quoted)
+    void composer.value?.focusEnd?.()
+    return
+  }
   const key = threadKey.value
   drafts[key] = appendQuote(drafts[key] ?? '', quoted)
   void threadPanel.value?.focusComposer?.()
@@ -802,6 +810,21 @@ async function retry() {
     .filter(Boolean)
     .join('\n\n')
   if (text) await send(text)
+}
+/** The agent request that a decision is working on. The card disables its buttons meanwhile. */
+const decidingRequest = ref<string | null>(null)
+async function decideAgentRequest(requestId: string, decision: 'add' | 'deny') {
+  if (decidingRequest.value || switching.value) return
+  decidingRequest.value = requestId
+  try {
+    await store.decideAgentRequest(requestId, decision)
+    // A decision can continue the requesting agent. Load the snapshot again.
+    await store.refresh()
+  } catch (error) {
+    toast.error('Could not decide request', { description: String(error) })
+  } finally {
+    decidingRequest.value = null
+  }
 }
 async function stop() {
   if (store.snapshot)
@@ -867,16 +890,31 @@ async function openBranch(key: string) {
   }
 }
 async function showApprovals() {
-  const channels = store.snapshot?.channels ?? []
+  const snapshot = store.snapshot
+  const channels = snapshot?.channels ?? []
+  const threads = snapshot?.threadApprovals ?? []
+  // The selected channel and its threads come first. Then the other channels, then the other threads.
   const channel =
-    channels.find(
-      (channel) => channel.id === store.snapshot?.channelId && channel.pendingApprovals,
-    ) ?? channels.find((channel) => channel.pendingApprovals)
-  if (!channel) {
+    channels.find((entry) => entry.id === snapshot?.channelId && entry.pendingApprovals) ??
+    undefined
+  const ownThread = threads.find((entry) => entry.parentChannelId === snapshot?.channelId)
+  const otherChannel = channels.find((entry) => entry.pendingApprovals)
+  const anyThread = threads[0]
+  const target: { channelId: string } | { threadId: string } | null = channel
+    ? { channelId: channel.id }
+    : ownThread
+      ? { threadId: ownThread.threadId }
+      : otherChannel
+        ? { channelId: otherChannel.id }
+        : anyThread
+          ? { threadId: anyThread.threadId }
+          : null
+  if (!target) {
     toast.info('No pending approvals')
     return
   }
-  await selectChannel(channel.id)
+  if ('threadId' in target) await openThreadFromBar(target.threadId)
+  else await selectChannel(target.channelId)
   await nextTick()
   document
     .querySelector<HTMLElement>('[data-ui-id="approval-card"]')
@@ -1096,6 +1134,10 @@ watch(
                 @quote="quote"
                 @start-thread="startThreadDraft"
                 @open-thread="openThreadById"
+                @decide-agent-request="decideAgentRequest"
+                :live-sub-agent-threads="store.snapshot.liveSubAgentThreads ?? []"
+                :agent-requests="store.agentRequests"
+                :agent-request-busy="decidingRequest"
                 :live="store.snapshot.liveBlocks"
                 :live-author="store.snapshot.responder"
                 :running="store.snapshot.turnRunning"
@@ -1489,7 +1531,7 @@ watch(
       :project="store.snapshot.project"
       :branch="statusBranch"
       :working-agents="workingAgents"
-      :pending-approvals="store.snapshot.pendingApprovals"
+      :pending-approvals="selectedChannelApprovals(store.snapshot)"
     />
     <AddAgentDialog
       v-model:open="addAgentOpen"

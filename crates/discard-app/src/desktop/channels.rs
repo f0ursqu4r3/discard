@@ -73,6 +73,7 @@ impl Channels {
         self.refresh_channel_access(channel)?;
         if thread.is_none() && !restart { self.refresh_threads(&channel.id)?; }
         let core = self.core.clone();
+        let store = self.store.clone();
         let id = channel.id.0.clone();
         let generation = core.channel_runtime_generation(&id).ok_or("Conversation unavailable")?;
         self.runtime.spawn(async move {
@@ -83,6 +84,8 @@ impl Channels {
                     tokio::task::spawn_blocking(move || core.refresh_branches(generation));
                 }
             }
+            // The engine of a sub-agent thread ended without a final state: the task fails.
+            if core.sub_agents().is_running(&id) { sub_agent_stream_closed(&core, &store, &id); }
         });
         Ok(())
     }
@@ -124,11 +127,34 @@ impl Channels {
         else if self.core.channel_session_closed(&thread.0) { self.start_mode(&channel, true) }
         else { Ok(()) }
     }
+    /// Start the engine of a new sub-agent thread and send its brief. The thread loads as a parked thread: it does
+    /// not open in the panel, it does not become followed, and its parent need not be the selected channel. It
+    /// stays loaded when the run ends, so the user can open it later. It never takes another message.
+    pub(crate) fn start_sub_agent_thread(&self, thread: &Channel, brief: String, author: discard_core::model::MessageAuthor) -> Result<(), String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        // The caller is a worker thread. The launcher spawns the engine on the runtime.
+        let _runtime = self.runtime.enter();
+        self.start_mode(thread, false)?;
+        self.core.send_brief(&thread.id.0, brief, author)
+    }
+    /// End a sub-agent thread whose task could not start: it is `Failed` in storage, and the thread shows why. The
+    /// parked runtime and its engine go, so a failed start leaves nothing running.
+    pub(crate) fn fail_sub_agent_thread(&self, thread: &ChannelId, error: &str) {
+        let _ = self.store.lock().unwrap_or_else(|e| e.into_inner()).finish_sub_agent_thread(thread, discard_core::model::ThreadState::Failed);
+        if self.core.has_channel(&thread.0) {
+            self.core.apply_channel(&thread.0, Update::Error(error.to_owned()));
+            self.core.apply_channel(&thread.0, Update::SubAgentFinished { state: discard_core::model::ThreadState::Failed, text: String::new() });
+            self.core.drop_thread_runtime(&thread.0);
+        }
+    }
     /// Read the threads and reference rows of a channel from storage into the app state.
     pub fn refresh_threads(&self, channel: &ChannelId) -> Result<(), String> {
         let (records, posted) = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
             if store.thread_info(channel).map_err(|e| e.to_string())?.is_some() { return Ok(()); }
+            // A sub-agent thread has no anchor while its parent turn runs. With no turn running, a thread that is
+            // still unanchored lost its parent turn (a crash): hang it under the user message it came from.
+            if !self.core.channel_running(&channel.0) { store.anchor_sub_agent_threads(channel, None).map_err(|e| e.to_string())?; }
             let mut records = Vec::new();
             for info in store.threads_for_channel(channel).map_err(|e| e.to_string())? {
                 let messages = store.messages_for_channel(&info.channel_id).map_err(|e| e.to_string())?;
@@ -152,6 +178,9 @@ impl Channels {
     pub fn start_thread(&self, parent: &str, anchor: &str, text: String, attachments: Vec<discard_core::attachments::Attachment>, also_post: bool) -> Result<String, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         if text.trim().is_empty() && attachments.is_empty() { return Err("Enter a message to start the thread.".into()); }
+        if self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(&ChannelId(parent.to_owned())).map_err(|e| e.to_string())?.is_some_and(|thread| thread.kind == discard_core::model::ThreadKind::SubAgent) {
+            return Err("A sub-agent thread cannot start another thread.".into());
+        }
         self.core.can_start_thread(parent)?;
         let (parent_id, anchor_id) = (ChannelId(parent.to_owned()), MessageId(anchor.to_owned()));
         let (thread, recipient) = {
@@ -607,6 +636,32 @@ impl Channels {
         Ok(request)
     }
 
+    /// Decide a request to add an agent to the project. Adding makes the agent a project member and continues the
+    /// requesting agent in the channel; denying continues it with the note that the user declined. The channel must
+    /// be the selected channel and idle, as for a write request, so a decision never saves without its follow-up.
+    /// The transcript gets a note of the result.
+    pub fn decide_agent_request(&self, requests: &discard_core::agent_requests::AgentRequests, channel: &str, id: &str, approve: bool) -> Result<discard_core::agent_requests::AgentAddRequest, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        self.core.can_continue_in(channel)?;
+        let channel_id = ChannelId(channel.into());
+        let decision = requests.decide(&self.store.lock().unwrap_or_else(|e| e.into_inner()), &channel_id, id, approve)?;
+        let message = discard_core::model::Message {
+            id: discard_core::model::MessageId::new(), channel_id,
+            role: discard_core::model::Role::System,
+            blocks: vec![discard_core::model::Block::Markdown { text: decision.request.result.clone().unwrap_or_else(|| decision.request.state.clone()) }],
+        };
+        // The note is a courtesy to the reader. A storage error must not leave the agent without its follow-up.
+        match self.store.lock().unwrap_or_else(|e| e.into_inner()).insert_message(&message) {
+            Ok(()) => { self.core.apply_channel(channel, Update::ConversationMarker(message)); }
+            Err(error) => tracing::warn!(%error, "could not save the note of an agent request"),
+        }
+        if let Some(follow_up) = decision.follow_up {
+            if follow_up.declined { self.core.continue_declined_in(channel, follow_up.agent, follow_up.note)?; }
+            else { self.core.continue_in(channel, follow_up.agent, follow_up.note)?; }
+        }
+        Ok(decision.request)
+    }
+
     pub fn continue_after_approval(&self, channel: &str, agent: AgentId, note: String) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         self.core.continue_in(channel, agent, note)
@@ -621,7 +676,10 @@ impl Channels {
     /// Send a user message. In a thread, `also_post` also posts it to the parent channel. Anywhere else it is an error.
     pub fn send_with_options(&self, channel: &str, text: String, attachments: Vec<discard_core::attachments::Attachment>, also_post: bool) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        let thread = self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(&ChannelId(channel.into())).map_err(|e| e.to_string())?.is_some();
+        let thread_info = self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(&ChannelId(channel.into())).map_err(|e| e.to_string())?;
+        // TODO: steering a sub-agent and follow-up turns. Until then a sub-agent thread takes only its brief.
+        if thread_info.as_ref().is_some_and(|thread| thread.kind == discard_core::model::ThreadKind::SubAgent) { return Err("A sub-agent thread takes no messages yet.".into()); }
+        let thread = thread_info.is_some();
         if also_post && !thread { return Err("Only a message in a thread can be posted to a channel.".into()); }
         let recipient = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -691,6 +749,17 @@ impl Channels {
     }
 }
 
+/// The engine of a running sub-agent thread ended without a final state: the task fails.
+fn sub_agent_stream_closed(core: &AppCore, store: &Arc<Mutex<Store>>, thread: &str) {
+    use discard_core::model::ThreadState;
+    let error = "The sub-agent session ended before it finished.";
+    let _ = store.lock().unwrap_or_else(|e| e.into_inner()).finish_sub_agent_thread(&ChannelId(thread.to_owned()), ThreadState::Failed);
+    core.apply_channel(thread, Update::Error(error.into()));
+    core.apply_channel(thread, Update::SubAgentFinished { state: ThreadState::Failed, text: String::new() });
+    // The updates reach the registry only while the runtime is loaded. The task ends here in any case.
+    core.sub_agents().end(thread, ThreadState::Failed, "");
+}
+
 pub fn validate_name(name: &str) -> Result<String, String> {
     let name = name.trim().trim_start_matches('#').trim().to_lowercase();
     if name.is_empty() || name.chars().count() > 64 { return Err("Use a channel name with 1–64 characters.".into()); }
@@ -705,7 +774,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn configured_agent(store: &Store) -> AgentId {
-        store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "Project agent".into(), provider: "codex".into(), model: Some("model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap()
+        store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Project agent".into(), provider: "codex".into(), model: Some("model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap()
     }
 
     fn launcher() -> Launcher {
@@ -1035,7 +1104,7 @@ mod tests {
         let project = Project { id: ProjectId::new(), name: "Project".into(), path: dir.path().to_string_lossy().into_owned() };
         store.insert_project(&project).unwrap();
         let agent = AgentId::new();
-        store.insert_agent(&agent, &AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "Builder".into(), provider: "codex".into(), model: Some("agent-model".into()), avatar: None, system_prompt: "Review changes".into(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        store.insert_agent(&agent, &AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Builder".into(), provider: "codex".into(), model: Some("agent-model".into()), avatar: None, system_prompt: "Review changes".into(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         let first = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "general".into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::MainCheckout };
         store.create_named_channel(&first, None, None).unwrap();
         let store = Arc::new(Mutex::new(store));
@@ -1072,7 +1141,7 @@ mod tests {
         let project = Project { id: ProjectId::new(), name: "p".into(), path: dir.path().to_string_lossy().into_owned() };
         let agent = AgentId::new();
         store.insert_project(&project).unwrap();
-        store.insert_agent(&agent, &AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "Builder".into(), provider: "codex".into(), model: None, avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        store.insert_agent(&agent, &AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Builder".into(), provider: "codex".into(), model: None, avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         store.set_project_main_agent(&project.id, &agent).unwrap();
         let first = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "old".into(), agent_id: agent, workspace_mode: WorkspaceMode::Worktree };
         let manager = WorktreeManager::new(dir.path());
@@ -1083,7 +1152,7 @@ mod tests {
         let core = core(&first, dir.path());
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
         service.activate_project(&project.id).unwrap();
-        let direct_agent = store.lock().unwrap().create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "Direct".into(), provider: "codex".into(), model: Some("direct-model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        let direct_agent = store.lock().unwrap().create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Direct".into(), provider: "codex".into(), model: Some("direct-model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         service.open_agent(&direct_agent).unwrap();
         git(&["checkout", "-b", "new"]);
         let new = service.open_branch("new").unwrap();
@@ -1158,7 +1227,7 @@ mod tests {
 
         assert_eq!(service.activate_project(&project_id).unwrap(), general_id.0);
         let unrelated = store.lock().unwrap().create_agent(&AgentConfig {
-            workspace_write: false, sandbox_autorun: false,
+            workspace_write: false, sandbox_autorun: false, delegation: false,
             reasoning_effort: None,
             name: "Direct agent".into(),
             provider: "codex".into(),
@@ -1345,7 +1414,7 @@ mod tests {
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let project = store.lock().unwrap().import_project_folder(dir.path()).unwrap();
         let old_agent = configured_agent(&store.lock().unwrap());
-        let new_agent = store.lock().unwrap().create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "New main".into(), provider: "claude".into(), model: Some("new-model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        let new_agent = store.lock().unwrap().create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "New main".into(), provider: "claude".into(), model: Some("new-model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         store.lock().unwrap().set_project_main_agent(&project.id, &old_agent).unwrap();
         let general = store.lock().unwrap().ensure_project_general_channel(&project.id, &old_agent).unwrap();
         let retry_receivers = Arc::new(Mutex::new(Vec::new()));
@@ -1394,8 +1463,8 @@ mod tests {
             let first = store.import_project_folder(first_dir.path()).unwrap();
             let second = store.import_project_folder(second_dir.path()).unwrap();
             let old = configured_agent(&store);
-            let first_replacement = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "Replacement one".into(), provider: "codex".into(), model: Some("one".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
-            let second_replacement = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "Replacement two".into(), provider: "codex".into(), model: Some("two".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+            let first_replacement = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Replacement one".into(), provider: "codex".into(), model: Some("one".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+            let second_replacement = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Replacement two".into(), provider: "codex".into(), model: Some("two".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
             store.set_project_main_agent(&first.id, &old).unwrap();
             store.set_project_main_agent(&second.id, &old).unwrap();
             let first_general = store.ensure_project_general_channel(&first.id, &old).unwrap();

@@ -13,7 +13,7 @@ A thread is a side conversation that starts from one message in a channel. Threa
 
 A thread message can also be posted to the parent channel. Behaviour follows Discord where this document does not state a difference.
 
-The work has two slices. Slice 1 is question threads. Slice 2 is sub-agent threads. This document specifies slice 1 in full. For slice 2 it records the decisions already made and the open questions.
+The work has two slices. Slice 1 is question threads. Slice 2 is sub-agent threads. This document specifies both.
 
 ## Current state
 
@@ -87,7 +87,7 @@ The work has two slices. Slice 1 is question threads. Slice 2 is sub-agent threa
 27. A user-initiated thread starts followed.
 28. "Leave" sets the thread to not followed and removes it from the channel bar.
 29. A thread becomes followed again when the user replies in it or chooses "Follow".
-30. The mention trigger (decision 44) is slice 2.
+30. The follow triggers (decisions 71–73) are slice 2.
 
 ### Layout
 
@@ -119,20 +119,87 @@ These controls are visible and disabled, with the label `Soon` and a `TODO` comm
 
 ## Decisions — slice 2, sub-agent threads
 
-Slice 2 needs its own design session. These decisions are fixed:
+Approved by the owner through the design interview on 2026-11-10.
 
-41. When an agent starts a sub-agent, Discard creates a thread with `thread_kind = sub_agent`. The anchor is the message that contains the spawning tool call.
-42. The sub-agent transcript streams into the thread. The parent channel shows only the spawn chip and the final result.
-43. A sub-agent thread is read-only for the user. Steering a running sub-agent is a planned action: visible, disabled, `Soon`, with a `TODO`.
-44. A thread becomes followed when its agent mentions the user in plain text outside code and quotes, or when the thread has a pending approval. The text parser reuses the rules in `mentions.rs`.
-45. A sub-agent that starts a sub-agent gets a sibling thread in the same parent channel.
+### Facts that shape slice 2
 
-Open questions for slice 2:
+- Provider-native sub-agents need one parser for each provider. Claude marks sub-agent lines with `parent_tool_use_id`; Codex reports `collabAgentToolCall` and `subAgentActivity` items on separate provider threads. Discard could not apply its approval rules or sandbox to them.
+- The MCP handler has an `Identity` (agent, project, channel) but no access to `Channels` or `AppCore`, and no turn id or tool-call id (`crates/discard-mcp/src/identity.rs:17-28`).
+- The response message id is created only when the message is saved at the end of the turn (`engine.rs`, `store_message`). `agent_commits.response` already handles this: it is null during the turn and set at the save.
+- Claude aborts an HTTP MCP call that sends no response for 5 minutes, unless the server entry has a `timeout`. Codex `tool_timeout_sec` defaults to 60 seconds. Discard sets neither today.
+- Codex `supports_parallel_tool_calls` is off by default. Parallel MCP calls are not verified for Claude.
+- Replay cuts a tool output to 1024 bytes in later turns (`conversation_context::compact_blocks`).
+- Request-style tools return "approval required" at once. On approval, Discard sends `Command::Continue` and the agent continues (`discard-mcp/src/tools.rs`, `engine.rs`).
 
-- Which session modes enable sub-agents.
-- The change to the delegation rule in the workspace-writes spec.
-- Provider parsing: Claude `parent_tool_use_id` and sidechain messages, and the Codex equivalent.
-- The form of the final-result post in the parent channel.
+### Mechanism and scope
+
+41. Discard runs the sub-agent. The parent agent calls the Discard MCP tool `delegate`. Provider-native sub-agents stay off.
+42. A sub-agent is for read-only research. It runs with the read-only Conversation profile, as every thread does.
+43. Only agents start sub-agent threads. A user command to delegate is out of scope.
+44. A sub-agent cannot delegate. Depth is 1. The sub-agent session has no `delegate`, `agents_list`, or `agent_request_add` tool.
+45. Conversation and Workspace parent sessions get the tools. Coding mode does not. A thread session does not.
+46. Each agent has `delegation: bool` in `AgentConfig`, false by default. Turning it on uses the policy-loosening confirmation. An agent without it does not get the tools. A `delegate` call shows no approval card.
+
+### The `delegate` call
+
+47. One call takes a list of 1 to 4 tasks. Each task has a `title`, a `brief`, and an optional `agent` name.
+48. The tasks run at the same time. The call blocks until all finish, then returns one result for each task, in task order.
+49. The default sub-agent is the calling agent's own configuration. A named agent must be active and a member of the project. In a direct message only the default is permitted.
+50. If any task names an agent that is not a member, or is invalid in another way, the whole call fails before any sub-agent starts. The error names `agent_request_add` for a non-member.
+51. A task result is the sub-agent's final message text. A failed, cancelled, or timed-out task returns an error text that states which.
+52. A sub-agent turn has a limit of 10 minutes. At the limit Discard stops it and returns "timed out".
+53. Discard sets the Claude per-server `timeout` and the Codex `tool_timeout_sec` for the Discard server to that limit plus a margin.
+54. Replay keeps a `delegate` result up to 8 KB in later turns.
+55. Stopping the parent turn stops its sub-agents. Stopping one sub-agent from its thread returns "cancelled" to the parent and does not stop the parent.
+56. If the app quits during a run, both turns stop. The thread keeps its partial transcript and its state is "cancelled".
+
+### The sub-agent thread
+
+57. Each task gets a new thread with `thread_kind = sub_agent` and one sub-agent turn. A later `delegate` call makes new threads; it does not continue an old one.
+58. The thread name is the `title`, cut to about 40 characters. An empty title uses the start of the brief.
+59. The brief is the first message of the thread. Its author is the parent agent. The sub-agent receives it as its request.
+60. Sub-agent context is the brief, the normal project context, and the sub-agent's own memory. The parent transcript is not replayed.
+61. The sub-agent has the same tools as a normal read-only Conversation response of that agent, including memory save.
+62. The thread has no anchor during the run. At the end of the parent turn the engine sets the anchor to the saved response message. If the parent turn saves no response, the anchor is the user message that started the turn.
+63. "One thread for each message" applies to question threads only. A response can hold several sub-agent threads and one question thread.
+64. The "parent must be the active channel" check does not apply to sub-agent threads.
+65. A sub-agent thread is not followed at creation. It shows in the channel bar only after a follow trigger or the Follow action.
+66. A sub-agent thread has a state: running, done, failed, cancelled, or timed out.
+
+### UI
+
+67. The chip shows the title, the sub-agent's name, and the state. During the run the chips show on the live message. After the turn they show under the saved response, in task order.
+68. Opening the chip shows the thread panel with the live transcript.
+69. In a sub-agent thread, Post to channel, Copy, Quote, Follow, and Leave work. The composer is disabled, labelled `Soon`, with a `TODO`: steering a sub-agent and follow-up turns.
+70. The read-only note covers both kinds: "threads are read-only".
+
+### Follow triggers, all thread kinds
+
+71. A thread becomes followed when it has a pending approval.
+72. A thread becomes followed when a saved agent message in it contains `@you` in plain text outside code and quotes. The parser reuses the rules in `mentions.rs`. The thread agent's prompt states the `@you` syntax.
+73. Thread approvals show on the Approvals page and in the pending-approval counts.
+
+### Agents outside the project
+
+74. `agents_list` returns each active agent's name, provider, model, member flag, and the first 200 characters of its personality prompt.
+75. `agent_request_add(name, reason)` returns "approval required" at once and shows an approval card in the parent channel.
+76. The card shows the requesting agent, the requested agent with its provider and model, and the reason as a quote. The choices are "Add to project" and "Deny".
+77. "Add to project" makes the agent a normal project member with no end date, and continues the parent agent.
+78. "Deny" continues the parent agent with the note that the user declined. A repeat request for the same agent in the same channel is refused until the next user message.
+79. In a direct message `agent_request_add` returns an error.
+
+### Spec change
+
+80. `2026-11-09-agent-workspace-writes-design.md` decision on the tool set: provider-native sub-agents stay off. Discard delegation to read-only sub-agents is on.
+
+### Out of scope for slice 2
+
+- Sub-agents that write.
+- Nesting.
+- Follow-up turns and steering.
+- A user command to delegate.
+- An agent description field.
+- Settings for the limits.
 
 ## Out of scope
 

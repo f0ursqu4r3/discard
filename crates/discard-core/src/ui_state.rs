@@ -39,6 +39,13 @@ pub fn new_divider_anchor(messages: &[Message], last_read: Option<&str>, anchor:
 pub enum Command {
     Send(String),
     Continue { agent: crate::model::AgentId, note: String },
+    /// Like `Continue`, after the user declined a request of the agent: the turn text says the user declined.
+    ContinueDeclined { agent: crate::model::AgentId, note: String },
+    /// The brief of a sub-agent: the first and only request in a new sub-agent thread. The engine saves it as a user
+    /// message that `author` (the delegating agent) wrote, and the thread's agent answers it. The text is never
+    /// searched for `@mentions`, and the thread is not followed. Any other command that carries text is refused in a
+    /// sub-agent thread, and so is a second brief.
+    SendBrief { text: String, author: crate::model::MessageAuthor },
     SendAttachments { text: String, attachments: Vec<crate::attachments::Attachment> },
     /// A user message in a thread channel. With `also_post`, the saved message also shows in the parent channel.
     /// `Send` and `SendAttachments` never post.
@@ -71,6 +78,17 @@ pub enum Update {
     /// The engine saved the user message that `UiState::user_sent` showed. The saved ID replaces the local one,
     /// so the message can anchor a thread or be posted from one.
     UserMessageSaved(MessageId),
+    /// The engine followed the thread of this channel: it got a pending approval, or an agent message in it wrote
+    /// `@you`. The thread's `followed` flag is now true in storage. Read the thread again to update lists.
+    ThreadFollowed,
+    /// The parent turn ended and these sub-agent threads now have their anchor (the saved response, or the user
+    /// message that started the turn). Sent on the parent channel after `ResponseCompleted`. Read the threads again.
+    ThreadsAnchored(Vec<crate::model::ThreadInfo>),
+    /// The brief turn of a sub-agent thread ended. Sent on the thread's channel just before `TurnFinished`. `state`
+    /// is the thread's final state in storage (the first final state wins, so a timeout that the delegator set
+    /// before it stopped the turn stays `TimedOut`). `text` is `delegation::final_text` of the thread's last agent
+    /// message, empty when it saved none. An error of the turn arrives before this as `Update::Error`.
+    SubAgentFinished { state: crate::model::ThreadState, text: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -139,10 +157,13 @@ impl UiState {
                 self.live = Timeline::new(); self.history.push(message);
             },
             Update::ConversationMarker(message) => self.history.push(message),
-            Update::MemoryChanges { .. } | Update::MessagePosted { .. } => {},
+            Update::MemoryChanges { .. } | Update::MessagePosted { .. } | Update::ThreadFollowed | Update::ThreadsAnchored(_) | Update::SubAgentFinished { .. } => {},
             Update::UserMessageSaved(saved) => {
-                if let Some(local) = self.unsaved_user.take()
-                    && let Some(message) = self.history.iter_mut().rev().find(|m| m.id == local) { message.id = saved; }
+                if let Some(local) = self.unsaved_user.take() {
+                    // An author set on the local message (a sub-agent brief) follows the saved ID.
+                    if let Some(author) = self.authors.remove(&local) { self.authors.insert(saved.clone(), author); }
+                    if let Some(message) = self.history.iter_mut().rev().find(|m| m.id == local) { message.id = saved; }
+                }
             }
             Update::Event(event) => self.live.apply(&event.kind),
             Update::ApprovalState { approval_id, state } => self.live.mark_approval(&approval_id, state),
@@ -365,6 +386,23 @@ mod tests {
         // A second report has nothing left to replace.
         s.apply(Update::UserMessageSaved(MessageId::new()));
         assert_eq!(s.history()[0].id, saved);
+    }
+
+    #[test]
+    fn the_author_of_a_local_message_follows_its_saved_id() {
+        let mut s = state();
+        s.user_sent("brief");
+        let local = s.history()[0].id.clone();
+        let author = discard_core_author();
+        s.set_author(local.clone(), author.clone());
+        let saved = MessageId::new();
+        s.apply(Update::UserMessageSaved(saved.clone()));
+        assert_eq!(s.authors().get(&saved), Some(&author));
+        assert!(!s.authors().contains_key(&local));
+    }
+
+    fn discard_core_author() -> crate::model::MessageAuthor {
+        crate::model::MessageAuthor { agent_id: crate::model::AgentId("a".into()), name: "Main".into(), provider: "fake".into(), avatar: None }
     }
 
     #[test]

@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import type { BlockDto, MessageDto, MessageAuthorDto, PromptDto } from '../bridge/types'
+import type {
+  BlockDto,
+  MessageDto,
+  MessageAuthorDto,
+  PromptDto,
+  ThreadChipDto,
+} from '../bridge/types'
+import type { AgentRequest } from '../bridge/api'
 import { MessageScrollerProvider } from './ui/message-scroller'
 import type { TranscriptPosition } from './workspace/transcript'
 import TranscriptContent from './workspace/TranscriptContent.vue'
@@ -23,12 +30,16 @@ defineProps<{
   anchor?: MessageDto | null
   anchorChannelId?: string
   threadDisabled?: boolean
+  liveSubAgentThreads?: ThreadChipDto[]
+  agentRequests?: AgentRequest[]
+  agentRequestBusy?: string | null
 }>()
 const emit = defineEmits<{
   savePosition: [id: string, position: TranscriptPosition]
   quote: [message: MessageDto]
   startThread: [message: MessageDto]
   openThread: [threadId: string]
+  decideAgentRequest: [requestId: string, decision: 'add' | 'deny']
 }>()
 </script>
 <template>
@@ -42,6 +53,7 @@ const emit = defineEmits<{
       @quote="emit('quote', $event)"
       @start-thread="emit('startThread', $event)"
       @open-thread="emit('openThread', $event)"
+      @decide-agent-request="(id, decision) => emit('decideAgentRequest', id, decision)"
       @save-position="(id, position) => emit('savePosition', id, position)"
     />
   </MessageScrollerProvider>

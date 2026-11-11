@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import { invoke } from '@tauri-apps/api/core'
 import fixture from '@/bridge/fixtures/thread.json'
+import subAgentFixture from '@/bridge/fixtures/subagent.json'
 import type {
   MessageDto,
   OpenThreadDto,
@@ -216,4 +217,122 @@ test('a draft names an agent anchor without a saved author after the parent agen
     parentAgentId: 'agent-1',
   })
   expect(view.get('[data-testid="message-identity"]').text()).toBe('Quinn')
+})
+
+const subThread = (subAgentFixture.snapshot as SnapshotDto).openThread as OpenThreadDto
+const subHistory = subAgentFixture.threadHistory as ThreadHistoryDto
+const briefAuthor = { agentId: 'parent', name: 'Quinn', provider: 'claude', avatar: null }
+function subPanel(patch: Partial<OpenThreadDto> = {}, props: Record<string, unknown> = {}) {
+  return panel({
+    thread: { ...subThread, ...patch },
+    history: {
+      ...subHistory,
+      messages: subHistory.messages.map((message) => ({ ...message, author: briefAuthor })),
+    },
+    parentAgent: 'Quinn',
+    ...props,
+  })
+}
+
+test('a sub-agent thread header shows the title, the sub-agent and the state', () => {
+  const view = subPanel()
+  const header = view.get('[data-ui-id="thread-header"]')
+  expect(header.text()).toContain('Find callers')
+  expect(header.get('[data-ui-id="thread-agent"]').text()).toBe('Reviewer')
+  expect(header.get('[data-ui-id="thread-state"]').text()).toContain('Running')
+  const done = subPanel({ state: 'done', turnRunning: false })
+  expect(done.get('[data-ui-id="thread-state"]').text()).toBe('Done')
+  // A question thread shows neither.
+  expect(panel().find('[data-ui-id="thread-state"]').exists()).toBe(false)
+})
+
+test('a sub-agent thread with no anchor shows no anchor row and no divider', () => {
+  const view = subPanel()
+  expect(subHistory.anchor).toBeNull()
+  const ids = view
+    .findAll('article[data-ui-id^="message-"]')
+    .map((node) => node.attributes('data-ui-id'))
+  expect(ids).toEqual(['message-brief'])
+  expect(view.find('[data-testid="thread-divider"]').exists()).toBe(false)
+})
+
+test('a sub-agent thread with an anchor still shows it above the brief', () => {
+  const view = subPanel(
+    { anchorMessageId: 'answer' },
+    {
+      history: {
+        ...subHistory,
+        anchor: (history as ThreadHistoryDto).anchor,
+      },
+    },
+  )
+  const ids = view
+    .findAll('article[data-ui-id^="message-"]')
+    .map((node) => node.attributes('data-ui-id'))
+  expect(ids).toEqual(['message-answer', 'message-brief'])
+  expect(view.get('[data-testid="thread-divider"]').text()).toBe('1 message')
+})
+
+test('the brief shows the parent agent as its author', () => {
+  const view = subPanel()
+  const brief = view.get('[data-ui-id="message-brief"]')
+  expect(brief.get('[data-testid="message-identity"]').text()).toBe('Quinn')
+  expect(brief.text()).toContain('Find the callers of foo.')
+  expect(brief.text()).not.toContain('You')
+})
+
+test('the sub-agent composer is disabled, labelled Soon and has no Also post box', () => {
+  const view = subPanel()
+  expect(view.get('textarea').attributes('disabled')).toBeDefined()
+  expect(view.get('[data-ui-id="composer-soon"]').text()).toContain('Soon')
+  expect(view.find('[data-ui-id="composer-also-post"]').exists()).toBe(false)
+  expect(view.getComponent(Composer).props('alsoPostLabel')).toBeUndefined()
+  expect(view.text()).not.toContain('Channel archived')
+  expect(view.text()).not.toContain('Read only.')
+  // The read-only note about file edits still shows.
+  expect(view.get('[data-ui-id="thread-read-only-note"]').text()).toBe(subThread.readOnlyNote)
+})
+
+test('a read-only reason is not a planned label', () => {
+  const view = subPanel({ composerDisabledReason: 'read_only' })
+  expect(view.find('[data-ui-id="composer-soon"]').exists()).toBe(false)
+  expect(view.text()).toContain('Read only.')
+})
+
+test('Stop in a running sub-agent thread asks the app to stop, and Send stays off', async () => {
+  const view = subPanel()
+  expect(view.find('[data-ui-id="composer-send"]').exists()).toBe(false)
+  await view.get('[data-ui-id="composer-stop"]').trigger('click')
+  expect(view.emitted('stop')).toHaveLength(1)
+  const done = subPanel({ turnRunning: false, state: 'done' })
+  expect(done.find('[data-ui-id="composer-stop"]').exists()).toBe(false)
+  expect(done.get('[data-ui-id="composer-send"]').attributes('disabled')).toBeDefined()
+})
+
+test('Post to channel, Follow and Leave keep working in a sub-agent thread', async () => {
+  const view = subPanel()
+  const post = view.get('[data-ui-id="message-brief"] [aria-label="Post to channel"]')
+  expect(post.attributes('disabled')).toBeUndefined()
+  await post.trigger('click')
+  expect(invoke).toHaveBeenCalledWith('post_thread_message', { messageId: 'brief' })
+  expect(
+    view.get('[data-ui-id="message-brief"] [aria-label="Quote message"]').attributes('disabled'),
+  ).toBeUndefined()
+  await view.get('[aria-label="Leave thread"]').trigger('click')
+  expect(invoke).toHaveBeenCalledWith('leave_thread', { threadId: 'find-callers' })
+  const other = subPanel({ followed: false })
+  await other.get('[aria-label="Follow thread"]').trigger('click')
+  expect(invoke).toHaveBeenCalledWith('follow_thread', { threadId: 'find-callers' })
+})
+
+test('a sub-agent thread offers no way to start another thread and keeps Rename and Delete planned', async () => {
+  const view = subPanel()
+  expect(view.find('[aria-label="Start thread"]').exists()).toBe(false)
+  await view.get('[aria-label="Thread menu"]').trigger('keydown', { key: 'Enter' })
+  await flushPromises()
+  const items = [...document.querySelectorAll('[role="menuitem"]')]
+  expect(items.map((item) => item.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
+    'Rename thread Soon',
+    'Delete thread Soon',
+  ])
 })

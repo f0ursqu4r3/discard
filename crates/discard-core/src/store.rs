@@ -8,7 +8,7 @@ use crate::event::{ApprovalId, Event, EventId, EventKind, SessionId, TurnId};
 use crate::model::{
     AgentId, Block, Channel, ChannelId, ChannelTopic, ChannelTopicRevision, Message, MessageAuthor,
     MessageId, PostedSource, Project, ProjectChannelKind, ProjectChannelMetadata, ProjectId, Role,
-    ThreadInfo, ThreadKind, TopicAuthorKind, WorkspaceMode,
+    ThreadInfo, ThreadKind, ThreadState, TopicAuthorKind, WorkspaceMode,
 };
 use crate::turn::{Turn, TurnState};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -206,18 +206,18 @@ pub fn thread_name(text: &str) -> String {
     }
 }
 
-const THREAD_COLUMNS: &str = "id,parent_channel_id,anchor_message_id,thread_kind,followed,name";
-
-type RawThread = (String, String, String, Option<String>, bool, String);
-
-fn raw_thread(r: &rusqlite::Row<'_>) -> rusqlite::Result<RawThread> {
-    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+/// Name a sub-agent thread from the task title, or from the start of the brief when the title is empty.
+pub fn sub_agent_thread_name(title: &str, brief: &str) -> String {
+    let named = thread_name(title);
+    if title.trim().is_empty() { thread_name(brief) } else { named }
 }
 
-fn thread_from(raw: RawThread) -> Result<ThreadInfo> {
-    let (id, parent, anchor, kind, followed, name) = raw;
-    let kind = kind.as_deref().and_then(ThreadKind::parse).ok_or_else(|| StoreError::Corrupt(format!("thread_kind {kind:?}")))?;
-    Ok(ThreadInfo { channel_id: ChannelId(id), parent_channel_id: ChannelId(parent), anchor_message_id: MessageId(anchor), kind, followed, name })
+const THREAD_COLUMNS: &str = "id,parent_channel_id,anchor_message_id,thread_kind,followed,name,thread_state,agent_id";
+
+type RawThread = (String, String, Option<String>, Option<String>, bool, String, Option<String>, String);
+
+fn raw_thread(r: &rusqlite::Row<'_>) -> rusqlite::Result<RawThread> {
+    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
 }
 
 fn decision_str(d: Decision) -> &'static str {
@@ -254,10 +254,13 @@ fn parse_approval_state(s: &str) -> Option<ApprovalState> {
 }
 
 impl Store {
+    /// Open the database file. A sub-agent run cannot survive a restart, so threads still `Running` become `Cancelled`.
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        Self::init(conn)
+        let store = Self::init(conn)?;
+        store.cancel_running_sub_agents()?;
+        Ok(store)
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -485,6 +488,20 @@ impl Store {
                 CREATE UNIQUE INDEX IF NOT EXISTS one_reference_per_source ON messages(source_message_id) WHERE source_message_id IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS threads_by_parent ON channels(parent_channel_id) WHERE parent_channel_id IS NOT NULL;")?;
             tx.pragma_update(None, "user_version", 11)?;
+            tx.commit()?;
+        }
+        if self.schema_version()? < 12 {
+            let tx = self.conn.unchecked_transaction()?;
+            for (column, definition) in [
+                ("thread_state", "TEXT CHECK(thread_state IN ('running','done','failed','cancelled','timed_out'))"),
+                ("origin_message_id", "TEXT"),
+            ] {
+                if !has_column("channels", column)? { tx.execute_batch(&format!("ALTER TABLE channels ADD COLUMN {column} {definition};"))?; }
+            }
+            // Only question threads are limited to one for each anchor. A response can hold several sub-agent threads.
+            tx.execute_batch("DROP INDEX IF EXISTS one_thread_per_anchor;
+                CREATE UNIQUE INDEX one_thread_per_anchor ON channels(anchor_message_id) WHERE anchor_message_id IS NOT NULL AND thread_kind='question';")?;
+            tx.pragma_update(None, "user_version", 12)?;
             tx.commit()?;
         }
         self.conn.execute_batch("CREATE TABLE IF NOT EXISTS direct_message_list (agent_id TEXT PRIMARY KEY REFERENCES agents(id));")?;
@@ -1524,7 +1541,7 @@ impl Store {
         tx.execute("DELETE FROM always_allow_rules WHERE agent_id=?1", params![id.0])?;
         // Keep a minimal tombstone so retained history still has a readable author.
         let tombstone = AgentConfig {
-            workspace_write: false, sandbox_autorun: false,
+            workspace_write: false, sandbox_autorun: false, delegation: false,
             reasoning_effort: None,
             name: "Deleted agent".into(),
             avatar: None,
@@ -2319,23 +2336,49 @@ impl Store {
         Ok(out)
     }
 
+    fn thread_from(&self, raw: RawThread) -> Result<ThreadInfo> {
+        let (id, parent, anchor, kind, followed, name, state, agent) = raw;
+        let kind = kind.as_deref().and_then(ThreadKind::parse).ok_or_else(|| StoreError::Corrupt(format!("thread_kind {kind:?}")))?;
+        let state = state.as_deref().map(|s| ThreadState::parse(s).ok_or_else(|| StoreError::Corrupt(format!("thread_state {s}")))).transpose()?;
+        let agent = AgentId(agent);
+        let agent_name = self.load_agent(&agent).map(|config| config.name).unwrap_or_default();
+        Ok(ThreadInfo { channel_id: ChannelId(id), parent_channel_id: ChannelId(parent), anchor_message_id: anchor.map(MessageId), kind, followed, name, state, agent_id: agent, agent_name })
+    }
+
+    fn threads_where(&self, condition: &str, value: &str) -> Result<Vec<ThreadInfo>> {
+        let mut stmt = self.conn.prepare(&format!("SELECT {THREAD_COLUMNS} FROM channels WHERE {condition} ORDER BY ord"))?;
+        let rows = stmt.query_map(params![value], raw_thread)?.collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.into_iter().map(|raw| self.thread_from(raw)).collect()
+    }
+
     /// Thread columns of a channel, or `None` for a normal channel.
     pub fn thread_info(&self, channel: &ChannelId) -> Result<Option<ThreadInfo>> {
-        self.conn.query_row(&format!("SELECT {THREAD_COLUMNS} FROM channels WHERE id=?1 AND parent_channel_id IS NOT NULL"), params![channel.0], raw_thread)
-            .optional()?.map(thread_from).transpose()
+        Ok(self.threads_where("id=?1 AND parent_channel_id IS NOT NULL", &channel.0)?.into_iter().next())
     }
 
-    /// The thread that starts from this message, if any.
+    /// The channel whose worktree and branch binding `channel` reads. A thread has no binding of its own and reads its
+    /// parent's, so a read-only thread sees the same files as a read-only response in the parent. Any other channel
+    /// reads its own. This is for read tools only: a write grant, a worktree lock, and the `worktree_*` tools use the
+    /// channel's own binding, so a thread never has them.
+    pub fn binding_channel(&self, channel: &ChannelId) -> Result<ChannelId> {
+        Ok(self.thread_info(channel)?.map_or_else(|| channel.clone(), |thread| thread.parent_channel_id))
+    }
+
+    /// The question thread that starts from this message, if any. Sub-agent threads on the message are not
+    /// counted; `threads_at_anchor` lists every thread.
     pub fn thread_for_anchor(&self, anchor: &MessageId) -> Result<Option<ThreadInfo>> {
-        self.conn.query_row(&format!("SELECT {THREAD_COLUMNS} FROM channels WHERE anchor_message_id=?1"), params![anchor.0], raw_thread)
-            .optional()?.map(thread_from).transpose()
+        Ok(self.threads_at_anchor(anchor)?.into_iter().find(|thread| thread.kind == ThreadKind::Question))
     }
 
-    /// Every thread of a parent channel, oldest first, followed or not.
+    /// Every thread on this message: its question thread and the sub-agent threads of its response, oldest first.
+    pub fn threads_at_anchor(&self, anchor: &MessageId) -> Result<Vec<ThreadInfo>> {
+        self.threads_where("anchor_message_id=?1", &anchor.0)
+    }
+
+    /// Every thread of a parent channel, oldest first, followed or not. A sub-agent thread whose parent turn
+    /// is still running has no anchor yet.
     pub fn threads_for_channel(&self, parent: &ChannelId) -> Result<Vec<ThreadInfo>> {
-        let mut stmt = self.conn.prepare(&format!("SELECT {THREAD_COLUMNS} FROM channels WHERE parent_channel_id=?1 ORDER BY ord"))?;
-        let rows = stmt.query_map(params![parent.0], raw_thread)?.collect::<std::result::Result<Vec<_>, _>>()?;
-        rows.into_iter().map(thread_from).collect()
+        self.threads_where("parent_channel_id=?1", &parent.0)
     }
 
     /// Start a question thread from a saved message of a normal channel. The thread inherits the project,
@@ -2375,6 +2418,85 @@ impl Store {
         self.create_session(&SessionId::new(), &thread.id)?;
         tx.commit()?;
         Ok(thread)
+    }
+
+    /// The latest user message that someone wrote in a channel. Posted references do not count.
+    pub fn last_user_message_id(&self, channel: &ChannelId) -> Result<Option<MessageId>> {
+        Ok(self.conn.query_row("SELECT id FROM messages WHERE channel_id=?1 AND role='user' AND source_message_id IS NULL ORDER BY ord DESC LIMIT 1", params![channel.0], |r| r.get::<_, String>(0)).optional()?.map(MessageId))
+    }
+
+    /// The latest agent message of a channel, for the result of a sub-agent run.
+    pub fn last_agent_message(&self, channel: &ChannelId) -> Result<Option<Message>> {
+        Ok(self.messages_for_channel(channel)?.into_iter().rev().find(|m| m.role == Role::Agent))
+    }
+
+    /// Start a sub-agent thread under a normal channel. It inherits the project, has its own session, is not
+    /// followed, and is `Running`. It has no anchor: `anchor_sub_agent_threads` sets it when the parent turn ends.
+    /// `agent` is the sub-agent. The thread remembers the parent's latest user message, which anchors it when the
+    /// parent turn saves no response. The brief is not stored here: the engine saves it as the first message.
+    pub fn create_sub_agent_thread(&self, parent: &ChannelId, name: &str, agent: &AgentId) -> Result<Channel> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(StoreError::Invalid("Enter a thread name.".into()));
+        }
+        self.require_active_agent(agent)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let parent_channel = self.load_channel(parent)?;
+        if self.thread_info(parent)?.is_some() {
+            return Err(StoreError::Invalid("A thread cannot start another thread.".into()));
+        }
+        let origin = self.last_user_message_id(parent)?.ok_or_else(|| StoreError::Invalid("A sub-agent needs a user message in the parent channel.".into()))?;
+        let thread = Channel { id: ChannelId::new(), project_id: parent_channel.project_id, name: name.into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::MainCheckout };
+        self.insert_channel(&thread)?;
+        self.conn.execute(
+            "UPDATE channels SET parent_channel_id=?2,thread_kind=?3,followed=0,thread_state=?4,origin_message_id=?5 WHERE id=?1",
+            params![thread.id.0, parent.0, ThreadKind::SubAgent.as_str(), ThreadState::Running.as_str(), origin.0],
+        )?;
+        self.create_session(&SessionId::new(), &thread.id)?;
+        tx.commit()?;
+        Ok(thread)
+    }
+
+    /// End a sub-agent run. Only a `Running` thread changes, so the first final state wins. Returns whether this
+    /// call changed it. A question thread, an unknown thread, or `Running` as the new state is an error.
+    pub fn finish_sub_agent_thread(&self, thread: &ChannelId, state: ThreadState) -> Result<bool> {
+        if state == ThreadState::Running {
+            return Err(StoreError::Invalid("Choose a final state.".into()));
+        }
+        let changed = self.conn.execute("UPDATE channels SET thread_state=?2 WHERE id=?1 AND thread_kind='sub_agent' AND thread_state='running'", params![thread.0, state.as_str()])?;
+        if changed == 0 && self.thread_info(thread)?.is_none_or(|info| info.kind != ThreadKind::SubAgent) {
+            return Err(StoreError::NotFound(format!("sub-agent thread {}", thread.0)));
+        }
+        Ok(changed > 0)
+    }
+
+    /// At the end of a parent turn, hang the sub-agent threads that the turn started under their anchor. A thread
+    /// of the turn that started from the parent's latest user message takes `response`; with no response, and for a
+    /// thread of an older turn that was never anchored, the anchor is the user message the thread remembers.
+    /// Returns the threads that changed.
+    pub fn anchor_sub_agent_threads(&self, parent: &ChannelId, response: Option<&MessageId>) -> Result<Vec<ThreadInfo>> {
+        let current = self.last_user_message_id(parent)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let mut stmt = self.conn.prepare("SELECT id,origin_message_id FROM channels WHERE parent_channel_id=?1 AND thread_kind='sub_agent' AND anchor_message_id IS NULL ORDER BY ord")?;
+        let pending = stmt.query_map(params![parent.0], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut changed = Vec::new();
+        for (id, origin) in pending {
+            let anchor = match (response, &origin) {
+                (Some(response), Some(origin)) if current.as_ref().is_some_and(|c| &c.0 == origin) => Some(response.0.clone()),
+                _ => origin,
+            };
+            let Some(anchor) = anchor else { continue };
+            self.conn.execute("UPDATE channels SET anchor_message_id=?2 WHERE id=?1", params![id, anchor])?;
+            changed.push(ChannelId(id));
+        }
+        tx.commit()?;
+        changed.iter().filter_map(|id| self.thread_info(id).transpose()).collect()
+    }
+
+    /// Startup recovery: a sub-agent run cannot outlive the app, so every `Running` thread becomes `Cancelled`.
+    /// Its partial transcript stays. Returns how many threads changed.
+    pub fn cancel_running_sub_agents(&self) -> Result<usize> {
+        Ok(self.conn.execute("UPDATE channels SET thread_state='cancelled' WHERE thread_kind='sub_agent' AND thread_state='running'", [])?)
     }
 
     pub fn set_thread_followed(&self, thread: &ChannelId, followed: bool) -> Result<()> {
@@ -2450,13 +2572,16 @@ impl Store {
     }
 
     /// The messages a response in this channel replays, with their authors and posted-source labels.
-    /// A thread replays its parent channel up to and including the anchor message, then its own messages.
+    /// A question thread replays its parent channel up to and including the anchor message, then its own messages.
+    /// A sub-agent thread replays only its own messages.
     pub fn channel_history(&self, channel: &ChannelId) -> Result<ChannelHistory> {
         let mut history = ChannelHistory { messages: self.messages_for_channel(channel)?, authors: self.message_authors(channel)?, posted: self.posted_sources(channel)? };
         let Some(thread) = self.thread_info(channel)? else { return Ok(history) };
+        // A sub-agent sees only its own messages: the brief, its replies, and the project context the engine adds.
+        let Some(anchor) = thread.anchor_message_id.filter(|_| thread.kind == ThreadKind::Question) else { return Ok(history) };
         let parent = self.messages_for_channel(&thread.parent_channel_id)?;
-        let end = parent.iter().position(|m| m.id == thread.anchor_message_id)
-            .ok_or_else(|| StoreError::Corrupt(format!("thread anchor {}", thread.anchor_message_id.0)))?;
+        let end = parent.iter().position(|m| m.id == anchor)
+            .ok_or_else(|| StoreError::Corrupt(format!("thread anchor {}", anchor.0)))?;
         let mut messages = parent[..=end].to_vec();
         messages.append(&mut history.messages);
         history.messages = messages;
@@ -2638,7 +2763,7 @@ mod tests {
         let f = fixture();
         f.store.conn.execute_batch("DROP TABLE always_allow_rules; PRAGMA user_version=8;").unwrap();
         f.store.migrate().unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 11);
+        assert_eq!(f.store.schema_version().unwrap(), 12);
         assert!(f.store.always_allow_rules(&f.project.id).unwrap().is_empty());
     }
 
@@ -2651,7 +2776,7 @@ mod tests {
             store.conn.execute_batch("DROP TABLE autorun_responses; PRAGMA user_version=9;").unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 11);
+        assert_eq!(store.schema_version().unwrap(), 12);
         let columns: Vec<String> = store.conn.prepare("PRAGMA table_info(autorun_responses)").unwrap()
             .query_map([], |r| r.get::<_, String>(1)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
         assert_eq!(columns, ["response_id", "channel_id", "agent_id", "provider", "root", "created_at"]);
@@ -2703,7 +2828,7 @@ mod tests {
             .insert_agent(
                 &agent,
                 &AgentConfig {
-                    workspace_write: false, sandbox_autorun: false,
+                    workspace_write: false, sandbox_autorun: false, delegation: false,
                     reasoning_effort: None,
                     name: "Scout".into(),
                     avatar: None,
@@ -2833,7 +2958,7 @@ mod tests {
         let v1 = Store::open(&path).unwrap().schema_version().unwrap();
         let v2 = Store::open(&path).unwrap().schema_version().unwrap();
         assert!(v1 >= 2);
-        assert_eq!(v1, 11);
+        assert_eq!(v1, 12);
         assert_eq!(v1, v2);
     }
 
@@ -2877,7 +3002,7 @@ mod tests {
             conn.execute("INSERT INTO channels (id, project_id, name, agent_id, workspace_mode) VALUES ('c', 'p', 'general', 'a', 'main_checkout')", []).unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 11);
+        assert_eq!(store.schema_version().unwrap(), 12);
         let channels = store.channels_for_project(&ProjectId("p".into())).unwrap();
         assert_eq!(channels.len(), 1);
         assert_eq!(
@@ -3043,11 +3168,11 @@ mod tests {
         let f = fixture(); let turn = Turn::new(f.session.clone()); f.store.insert_turn(&turn).unwrap();
         let a = Approval::new(turn.id, "Bash", json!({})); f.store.save_approval(&a).unwrap();
         f.store.conn.execute_batch("ALTER TABLE approvals DROP COLUMN kind; DROP TABLE agent_commits; DROP TABLE always_allow_rules;").unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 11);
+        assert_eq!(f.store.schema_version().unwrap(), 12);
         f.store.migrate().unwrap();
         assert_eq!(f.store.load_approval(&a.id).unwrap().kind, crate::approval::ApprovalKind::ProviderTool);
         f.store.migrate().unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 11);
+        assert_eq!(f.store.schema_version().unwrap(), 12);
     }
 
     #[test]
@@ -3219,7 +3344,7 @@ mod tests {
                 .insert_agent(
                     &agent,
                     &AgentConfig {
-                        workspace_write: false, sandbox_autorun: false,
+                        workspace_write: false, sandbox_autorun: false, delegation: false,
                         reasoning_effort: None,
                         name: "Friend".into(),
                         avatar: None,
@@ -3322,7 +3447,7 @@ mod tests {
                 .insert_agent(
                     &agent,
                     &AgentConfig {
-                        workspace_write: false, sandbox_autorun: false,
+                        workspace_write: false, sandbox_autorun: false, delegation: false,
                         reasoning_effort: None,
                         name: "A".into(),
                         avatar: None,
@@ -3389,13 +3514,13 @@ mod tests {
             let message = say(&store, &f.channel.id, Role::User, "old", None);
             store.conn.execute_batch("DROP INDEX one_thread_per_anchor; DROP INDEX one_reference_per_source; DROP INDEX threads_by_parent;
                 ALTER TABLE channels DROP COLUMN parent_channel_id; ALTER TABLE channels DROP COLUMN anchor_message_id;
-                ALTER TABLE channels DROP COLUMN thread_kind; ALTER TABLE channels DROP COLUMN followed;
+                ALTER TABLE channels DROP COLUMN thread_kind; ALTER TABLE channels DROP COLUMN followed; ALTER TABLE channels DROP COLUMN thread_state; ALTER TABLE channels DROP COLUMN origin_message_id;
                 ALTER TABLE messages DROP COLUMN source_message_id; PRAGMA user_version=10;").unwrap();
             assert!(!columns(&store, "channels").iter().any(|c| c.0 == "followed"));
             (f.channel, message)
         };
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 11);
+        assert_eq!(store.schema_version().unwrap(), 12);
         assert_eq!(columns(&store, "channels"), fresh_channels, "an upgraded database matches a fresh one");
         assert_eq!(columns(&store, "messages"), fresh_messages);
         assert_eq!(texts(&store.messages_for_channel(&channel.id).unwrap()), ["old"]);
@@ -3403,11 +3528,39 @@ mod tests {
         let thread = store.create_thread(&channel.id, &message, "old", &channel.agent_id).unwrap();
         assert!(store.thread_info(&thread.id).unwrap().unwrap().followed);
         store.migrate().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 11);
+        assert_eq!(store.schema_version().unwrap(), 12);
+    }
+
+    #[test]
+    fn migration_12_adds_sub_agent_state_and_limits_the_anchor_index_to_question_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v11.db");
+        let fresh = columns(&fixture().store, "channels");
+        let (channel, answer) = {
+            let f = fixture();
+            let store = Store::open(&path).unwrap();
+            store.insert_project(&f.project).unwrap();
+            store.insert_agent(&f.agent, &store_agent_config()).unwrap();
+            store.insert_channel(&f.channel).unwrap();
+            let answer = say(&store, &f.channel.id, Role::Agent, "answer", Some(&f.agent));
+            store.create_thread(&f.channel.id, &answer, "question", &f.agent).unwrap();
+            store.conn.execute_batch("DROP INDEX one_thread_per_anchor; ALTER TABLE channels DROP COLUMN thread_state; ALTER TABLE channels DROP COLUMN origin_message_id;
+                CREATE UNIQUE INDEX one_thread_per_anchor ON channels(anchor_message_id) WHERE anchor_message_id IS NOT NULL; PRAGMA user_version=11;").unwrap();
+            (f.channel, answer)
+        };
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 12);
+        assert_eq!(columns(&store, "channels"), fresh, "an upgraded database matches a fresh one");
+        let question = store.thread_for_anchor(&answer).unwrap().unwrap();
+        assert_eq!((question.kind, question.state, question.followed), (ThreadKind::Question, None, true), "old threads are question threads");
+        say(&store, &channel.id, Role::User, "go", None);
+        let sub = store.create_sub_agent_thread(&channel.id, "research", &channel.agent_id).unwrap();
+        store.conn.execute("UPDATE channels SET anchor_message_id=?2 WHERE id=?1", params![sub.id.0, answer.0]).unwrap();
+        assert_eq!(store.threads_at_anchor(&answer).unwrap().len(), 2, "a sub-agent thread may share the anchor of a question thread");
     }
 
     fn store_agent_config() -> AgentConfig {
-        AgentConfig { workspace_write: false, sandbox_autorun: false, reasoning_effort: None, name: "Scout".into(), avatar: None, provider: "claude".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }
+        AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Scout".into(), avatar: None, provider: "claude".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }
     }
 
     #[test]
@@ -3419,7 +3572,7 @@ mod tests {
         assert_eq!(thread.agent_id, f.agent);
         assert_eq!(thread.name, "Why?");
         let info = f.store.thread_info(&thread.id).unwrap().unwrap();
-        assert_eq!(info, ThreadInfo { channel_id: thread.id.clone(), parent_channel_id: f.channel.id.clone(), anchor_message_id: anchor.clone(), kind: ThreadKind::Question, followed: true, name: "Why?".into() });
+        assert_eq!(info, ThreadInfo { channel_id: thread.id.clone(), parent_channel_id: f.channel.id.clone(), anchor_message_id: Some(anchor.clone()), kind: ThreadKind::Question, followed: true, name: "Why?".into(), state: None, agent_id: f.agent.clone(), agent_name: "Scout".into() });
         assert_eq!(f.store.thread_for_anchor(&anchor).unwrap(), Some(info.clone()));
         assert_eq!(f.store.threads_for_channel(&f.channel.id).unwrap(), vec![info]);
         assert!(f.store.latest_session(&thread.id).unwrap().is_some());
@@ -3479,6 +3632,141 @@ mod tests {
         let second = Channel { id: ChannelId::new(), project_id: None, name: "dup".into(), agent_id: f.agent.clone(), workspace_mode: WorkspaceMode::MainCheckout };
         f.store.insert_channel(&second).unwrap();
         assert!(f.store.conn.execute("UPDATE channels SET parent_channel_id=?2,anchor_message_id=?3,thread_kind='question' WHERE id=?1", params![second.id.0, f.channel.id.0, anchor.0]).is_err());
+    }
+
+    fn sub_thread(f: &Fixture, name: &str) -> Channel { f.store.create_sub_agent_thread(&f.channel.id, name, &f.agent).unwrap() }
+
+    #[test]
+    fn a_sub_agent_thread_starts_running_unanchored_and_not_followed() {
+        let f = fixture();
+        assert!(invalid(f.store.create_sub_agent_thread(&f.channel.id, "x", &f.agent)).contains("user message"), "the parent needs a user message");
+        let user = say(&f.store, &f.channel.id, Role::User, "research this", None);
+        let thread = sub_thread(&f, "Find callers");
+        assert_eq!((thread.project_id.clone(), thread.agent_id.clone(), thread.name.as_str()), (f.channel.project_id.clone(), f.agent.clone(), "Find callers"));
+        let info = f.store.thread_info(&thread.id).unwrap().unwrap();
+        assert_eq!(info, ThreadInfo { channel_id: thread.id.clone(), parent_channel_id: f.channel.id.clone(), anchor_message_id: None, kind: ThreadKind::SubAgent, followed: false, name: "Find callers".into(), state: Some(ThreadState::Running), agent_id: f.agent.clone(), agent_name: "Scout".into() });
+        assert!(f.store.latest_session(&thread.id).unwrap().is_some());
+        assert_eq!(f.store.threads_for_channel(&f.channel.id).unwrap(), vec![info]);
+        assert!(f.store.thread_for_anchor(&user).unwrap().is_none(), "no anchor yet");
+        assert!(invalid(f.store.create_sub_agent_thread(&thread.id, "nested", &f.agent)).contains("cannot start another thread"));
+        assert!(invalid(f.store.create_sub_agent_thread(&f.channel.id, "  ", &f.agent)).contains("name"));
+        f.store.set_agent_archived(&f.agent, true).unwrap();
+        assert!(invalid(f.store.create_sub_agent_thread(&f.channel.id, "late", &f.agent)).contains("Restore the agent"));
+    }
+
+    #[test]
+    fn the_parent_response_anchors_the_threads_of_its_turn_in_creation_order() {
+        let f = fixture();
+        let user = say(&f.store, &f.channel.id, Role::User, "go", None);
+        let (a, b) = (sub_thread(&f, "a"), sub_thread(&f, "b"));
+        assert!(f.store.anchor_sub_agent_threads(&f.channel.id, None).unwrap().len() == 2, "no response: both fall back to the user message");
+        let response = say(&f.store, &f.channel.id, Role::Agent, "done", Some(&f.agent));
+        assert!(f.store.anchor_sub_agent_threads(&f.channel.id, Some(&response)).unwrap().is_empty(), "an anchored thread never moves");
+        for thread in [&a, &b] { assert_eq!(f.store.thread_info(&thread.id).unwrap().unwrap().anchor_message_id, Some(user.clone())); }
+
+        let user2 = say(&f.store, &f.channel.id, Role::User, "again", None);
+        let (c, d) = (sub_thread(&f, "c"), sub_thread(&f, "d"));
+        let response2 = say(&f.store, &f.channel.id, Role::Agent, "done again", Some(&f.agent));
+        let changed = f.store.anchor_sub_agent_threads(&f.channel.id, Some(&response2)).unwrap();
+        assert_eq!(changed.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["c", "d"]);
+        for thread in [&c, &d] { assert_eq!(f.store.thread_info(&thread.id).unwrap().unwrap().anchor_message_id, Some(response2.clone())); }
+        let on_response = f.store.threads_at_anchor(&response2).unwrap();
+        assert_eq!(on_response.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["c", "d"], "several threads on one anchor, in creation order");
+        assert_ne!(user, user2);
+    }
+
+    #[test]
+    fn a_stale_unanchored_thread_falls_back_to_its_own_user_message_not_the_new_response() {
+        let f = fixture();
+        let first = say(&f.store, &f.channel.id, Role::User, "one", None);
+        let stale = sub_thread(&f, "stale");
+        say(&f.store, &f.channel.id, Role::User, "two", None);
+        let fresh = sub_thread(&f, "fresh");
+        let response = say(&f.store, &f.channel.id, Role::Agent, "ok", Some(&f.agent));
+        f.store.anchor_sub_agent_threads(&f.channel.id, Some(&response)).unwrap();
+        assert_eq!(f.store.thread_info(&stale.id).unwrap().unwrap().anchor_message_id, Some(first));
+        assert_eq!(f.store.thread_info(&fresh.id).unwrap().unwrap().anchor_message_id, Some(response));
+    }
+
+    #[test]
+    fn a_question_thread_and_sub_agent_threads_share_one_anchor() {
+        let f = fixture();
+        say(&f.store, &f.channel.id, Role::User, "go", None);
+        let sub = sub_thread(&f, "sub");
+        let response = say(&f.store, &f.channel.id, Role::Agent, "done", Some(&f.agent));
+        f.store.anchor_sub_agent_threads(&f.channel.id, Some(&response)).unwrap();
+        let question = f.store.create_thread(&f.channel.id, &response, "why", &f.agent).unwrap();
+        assert_eq!(f.store.thread_for_anchor(&response).unwrap().unwrap().channel_id, question.id, "the question lookup skips sub-agent threads");
+        assert_eq!(f.store.threads_at_anchor(&response).unwrap().iter().map(|t| t.channel_id.clone()).collect::<Vec<_>>(), vec![sub.id.clone(), question.id.clone()]);
+        assert!(invalid(f.store.create_thread(&f.channel.id, &response, "again", &f.agent)).contains("already has a thread"), "one question thread for each message");
+        assert!(f.store.conn.execute("UPDATE channels SET anchor_message_id=?2 WHERE id=?1", params![sub_thread(&f, "x").id.0, response.0]).is_ok(), "the index lets sub-agent threads share an anchor");
+    }
+
+    #[test]
+    fn the_first_final_state_of_a_sub_agent_thread_wins() {
+        let f = fixture();
+        say(&f.store, &f.channel.id, Role::User, "go", None);
+        let thread = sub_thread(&f, "t");
+        assert!(f.store.finish_sub_agent_thread(&thread.id, ThreadState::TimedOut).unwrap());
+        assert!(!f.store.finish_sub_agent_thread(&thread.id, ThreadState::Cancelled).unwrap(), "a later state does not replace the first");
+        assert_eq!(f.store.thread_info(&thread.id).unwrap().unwrap().state, Some(ThreadState::TimedOut));
+        assert!(matches!(f.store.finish_sub_agent_thread(&thread.id, ThreadState::Running), Err(StoreError::Invalid(_))));
+        let answer = say(&f.store, &f.channel.id, Role::Agent, "a", Some(&f.agent));
+        let question = f.store.create_thread(&f.channel.id, &answer, "q", &f.agent).unwrap();
+        assert!(matches!(f.store.finish_sub_agent_thread(&question.id, ThreadState::Done), Err(StoreError::NotFound(_))), "a question thread has no state");
+        assert!(matches!(f.store.finish_sub_agent_thread(&f.channel.id, ThreadState::Done), Err(StoreError::NotFound(_))));
+        for state in [ThreadState::Running, ThreadState::Done, ThreadState::Failed, ThreadState::Cancelled, ThreadState::TimedOut] {
+            assert_eq!(ThreadState::parse(state.as_str()), Some(state));
+        }
+        assert_eq!(ThreadState::parse("other"), None);
+    }
+
+    #[test]
+    fn opening_the_database_cancels_sub_agent_runs_that_were_still_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.db");
+        let f = fixture();
+        let (running, done) = {
+            let store = Store::open(&path).unwrap();
+            store.insert_project(&f.project).unwrap();
+            store.insert_agent(&f.agent, &store_agent_config()).unwrap();
+            store.insert_channel(&f.channel).unwrap();
+            say(&store, &f.channel.id, Role::User, "go", None);
+            let running = store.create_sub_agent_thread(&f.channel.id, "running", &f.agent).unwrap();
+            let done = store.create_sub_agent_thread(&f.channel.id, "done", &f.agent).unwrap();
+            store.finish_sub_agent_thread(&done.id, ThreadState::Done).unwrap();
+            (running, done)
+        };
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.thread_info(&running.id).unwrap().unwrap().state, Some(ThreadState::Cancelled));
+        assert_eq!(store.thread_info(&done.id).unwrap().unwrap().state, Some(ThreadState::Done));
+        assert_eq!(store.cancel_running_sub_agents().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_sub_agent_thread_replays_only_its_own_messages_and_a_question_thread_keeps_the_parent_prefix() {
+        let f = fixture();
+        say(&f.store, &f.channel.id, Role::User, "parent one", None);
+        let sub = sub_thread(&f, "sub");
+        say(&f.store, &sub.id, Role::User, "the brief", Some(&f.agent));
+        say(&f.store, &sub.id, Role::Agent, "the result", Some(&f.agent));
+        let response = say(&f.store, &f.channel.id, Role::Agent, "parent two", Some(&f.agent));
+        f.store.anchor_sub_agent_threads(&f.channel.id, Some(&response)).unwrap();
+        assert_eq!(texts(&f.store.channel_history(&sub.id).unwrap().messages), ["the brief", "the result"], "no parent prefix, before or after anchoring");
+        let question = f.store.create_thread(&f.channel.id, &response, "q", &f.agent).unwrap();
+        say(&f.store, &question.id, Role::User, "side", None);
+        assert_eq!(texts(&f.store.channel_history(&question.id).unwrap().messages), ["parent one", "parent two", "side"]);
+        assert_eq!(f.store.last_agent_message(&sub.id).unwrap().map(|m| texts(&[m])), Some(vec!["the result".to_string()]));
+        assert!(f.store.last_agent_message(&question.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_sub_agent_thread_name_uses_the_title_or_the_start_of_the_brief() {
+        assert_eq!(sub_agent_thread_name("  Find   callers ", "ignored"), "Find callers");
+        assert_eq!(sub_agent_thread_name("", "Search the repo\nfor every use of the cache"), "Search the repo for every use of the cac", "cut at 40 characters");
+        assert_eq!(sub_agent_thread_name("   ", &"é".repeat(80)), "é".repeat(THREAD_NAME_CHARS));
+        assert_eq!(sub_agent_thread_name(&"t".repeat(60), "brief"), "t".repeat(THREAD_NAME_CHARS));
+        assert_eq!(sub_agent_thread_name("", " "), "Thread");
     }
 
     #[test]
@@ -3737,7 +4025,7 @@ mod agent_lifecycle_tests {
     }
     fn config() -> AgentConfig {
         AgentConfig {
-            workspace_write: false, sandbox_autorun: false,
+            workspace_write: false, sandbox_autorun: false, delegation: false,
             reasoning_effort: None,
             name: crate::agent::generated_name(),
             avatar: None,

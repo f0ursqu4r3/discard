@@ -6,7 +6,9 @@ mod plugin_events;
 use discard_app::plugin_memory;
 mod relaunch;
 
+use discard_core::agent_requests::AgentRequests;
 use discard_core::bootstrap::{Role, WorkspaceChoice};
+use discard_core::delegation::{DelegationServices, DelegatorSlot};
 use discard_core::engine::Engine;
 use discard_core::logging;
 use discard_core::store::Store;
@@ -182,12 +184,16 @@ fn run_app(
     let git_workspace = Arc::new(GitWorkspace::new(&data_dir.join("worktrees"), Arc::clone(&store)));
     let main_checkout_grants = Arc::new(discard_core::workspace_grants::MainCheckoutGrants::default());
     let write_requests = Arc::new(discard_core::write_requests::WriteRequests::default());
-    let memory = runtime.block_on(MemoryRuntime::start_with_write_services(
+    // `delegate` needs the app's channels, which exist only after the window code runs. The slot starts empty and
+    // `desktop::run` installs the app's `Delegator` in it.
+    let delegation = DelegationServices { store: Arc::clone(&store), requests: Arc::new(AgentRequests::default()), delegator: Arc::new(DelegatorSlot::default()) };
+    let memory = runtime.block_on(MemoryRuntime::start_with_delegation(
         Arc::clone(&memory_store),
         &data_dir.join("run"),
         Some(Arc::clone(&plugins)),
         Some(worktree_access.clone()),
         Some((write_requests.clone(), git_workspace.clone())),
+        Some(delegation.clone()),
     ))?;
 
     let launcher: desktop::channels::Launcher = {
@@ -255,6 +261,7 @@ fn run_app(
     desktop::run(init, updates_rx, runtime.handle().clone(), settings, plugins, data_dir.to_path_buf(), desktop::DesktopConfig { startup_channel, sidebar_project, load_report, workspace: git_workspace, store, relaunch, providers, recheck, memory: memory_store, worktree_access, launcher, on_ready,
         write_requests,
         main_checkout_grants,
+        delegation,
     })?;
     Ok(())
 }

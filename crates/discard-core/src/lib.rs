@@ -57,6 +57,9 @@ pub mod always_allow;
 
 pub mod write_requests;
 
+pub mod delegation;
+pub mod agent_requests;
+
 pub mod workspace_grants;
 
 pub mod process;

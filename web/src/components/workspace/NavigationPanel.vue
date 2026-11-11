@@ -8,6 +8,7 @@ import type { ProjectEntry } from '@/bridge/api'
 import ChannelList from '../ChannelList.vue'
 import UserBar from './UserBar.vue'
 import DirectMessageSidebar from './DirectMessageSidebar.vue'
+import { channelApprovals } from '../threads'
 defineProps<{
   projects?: import('@/bridge/api').ProjectEntry[]
   snapshot: SnapshotDto
@@ -45,7 +46,7 @@ const emit = defineEmits<{
         :project="snapshot.project"
         :unread="snapshot.channels.some((channel) => channel.unread)"
         :pending-approvals="
-          snapshot.channels.reduce((total, channel) => total + channel.pendingApprovals, 0)
+          snapshot.channels.reduce((total, channel) => total + channelApprovals(channel), 0)
         "
         :direct-messages="page === 'direct-messages'"
         @direct-messages="emit('navigate', 'direct-messages')"

@@ -16,9 +16,12 @@
         "postedFrom": null,
         "postedToChannel": false,
         "role": "agent",
+        "subAgentThreads": [],
         "thread": {
+          "agentName": "Agent",
           "channelId": "thread",
           "followed": true,
+          "kind": "question",
           "lastMessage": {
             "authorName": "Agent",
             "preview": "It keeps the channel clean.",
@@ -26,6 +29,8 @@
           },
           "messageCount": 2,
           "name": "Why a thread?",
+          "pendingApprovals": 0,
+          "state": null,
           "unread": true
         }
       },
@@ -47,6 +52,7 @@
         },
         "postedToChannel": false,
         "role": "agent",
+        "subAgentThreads": [],
         "thread": null
       }
     ],
@@ -81,13 +87,16 @@
         "projectId": "project",
         "provider": "example",
         "running": false,
+        "threadPendingApprovals": 0,
         "threads": [
           {
             "id": "thread",
+            "kind": "question",
             "name": "Why a thread?",
             "parentChannelId": "channel",
             "pendingApprovals": 0,
             "running": false,
+            "state": null,
             "unread": true
           }
         ],
@@ -103,6 +112,7 @@
         "type": "markdown"
       }
     ],
+    "liveSubAgentThreads": [],
     "memberListVisible": true,
     "memoryRev": 0,
     "newAnchorId": null,
@@ -110,12 +120,15 @@
     "openThread": {
       "agent": "Agent",
       "agentId": "agent",
+      "agentName": "Agent",
       "agentStatus": "idle",
       "anchorMessageId": "answer",
       "channelId": "thread",
       "composerDisabled": false,
+      "composerDisabledReason": null,
       "followed": true,
       "historyRev": 4,
+      "kind": "question",
       "liveBlocks": [],
       "name": "Why a thread?",
       "notice": null,
@@ -123,8 +136,9 @@
       "pendingApprovals": 0,
       "prompts": [],
       "provider": "example",
-      "readOnlyNote": "File edits are unavailable in this response: question threads are read-only.",
+      "readOnlyNote": "File edits are unavailable in this response: threads are read-only.",
       "responder": null,
+      "state": null,
       "turnRunning": false,
       "unread": true
     },
@@ -161,6 +175,7 @@
       "spacingScale": 1.0,
       "tokens": {}
     },
+    "threadApprovals": [],
     "turnRunning": true,
     "unread": false
   },
@@ -179,9 +194,12 @@
       "postedFrom": null,
       "postedToChannel": false,
       "role": "agent",
+      "subAgentThreads": [],
       "thread": {
+        "agentName": "Agent",
         "channelId": "thread",
         "followed": true,
+        "kind": "question",
         "lastMessage": {
           "authorName": "Agent",
           "preview": "It keeps the channel clean.",
@@ -189,6 +207,8 @@
         },
         "messageCount": 2,
         "name": "Why a thread?",
+        "pendingApprovals": 0,
+        "state": null,
         "unread": true
       }
     },
@@ -208,6 +228,7 @@
         "postedFrom": null,
         "postedToChannel": false,
         "role": "user",
+        "subAgentThreads": [],
         "thread": null
       },
       {
@@ -224,6 +245,7 @@
         "postedFrom": null,
         "postedToChannel": true,
         "role": "agent",
+        "subAgentThreads": [],
         "thread": null
       }
     ],

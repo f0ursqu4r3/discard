@@ -18,7 +18,7 @@ import NavigationContextMenu from './NavigationContextMenu.vue'
 import BrailleSpinner from './BrailleSpinner.vue'
 import SidebarWorktree from './SidebarWorktree.vue'
 import ThreadRow from './ThreadRow.vue'
-import { threadLinks } from './threads'
+import { channelApprovals, threadLinks } from './threads'
 import { branchActions, channelRowClass, groupBranchRows } from './branch-navigation'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
@@ -221,7 +221,7 @@ watch(sections, (value) => {
 })
 const approvals = computed(
   () =>
-    props.channels.reduce((count, channel) => count + channel.pendingApprovals, 0) ||
+    props.channels.reduce((count, channel) => count + channelApprovals(channel), 0) ||
     props.pendingApprovals ||
     0,
 )

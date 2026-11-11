@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import type { MessageDto, ThreadChipDto } from '../bridge/types'
 import MessageRow from './MessageRow.vue'
 import ThreadChip from './ThreadChip.vue'
+import AgentAvatar from './agents/AgentAvatar.vue'
 import { ContextMenuItem } from './ui/context-menu'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
@@ -28,6 +29,10 @@ const chip: ThreadChipDto = {
   lastMessage: { role: 'agent', authorName: 'Quinn', preview: 'It keeps the channel clean.' },
   followed: true,
   unread: true,
+  kind: 'question',
+  state: null,
+  agentName: 'Quinn',
+  pendingApprovals: 0,
 }
 const base: MessageDto = {
   id: 'm1',
@@ -207,4 +212,84 @@ test('a user message in the chip is named You', () => {
     thread: { ...chip, lastMessage: { role: 'user', authorName: null, preview: 'Why?' } },
   })
   expect(view.get('[data-ui-id="thread-chip"]').text()).toContain('You: Why?')
+})
+
+const subAgentChip = (id: string, patch: Partial<ThreadChipDto> = {}): ThreadChipDto => ({
+  ...chip,
+  channelId: id,
+  name: `Task ${id}`,
+  lastMessage: null,
+  followed: false,
+  unread: false,
+  kind: 'sub_agent',
+  state: 'done',
+  agentName: 'Reviewer',
+  ...patch,
+})
+const chipLabels = (view: ReturnType<typeof row>) =>
+  view
+    .findAll('[data-ui-id="thread-chip"]')
+    .map((node) => node.get('button').attributes('aria-label'))
+
+test('several sub-agent chips show in task order under the question chip', async () => {
+  const view = row({
+    thread: chip,
+    subAgentThreads: [
+      subAgentChip('b', { state: 'running' }),
+      subAgentChip('a', { state: 'failed' }),
+      subAgentChip('c', { state: 'timed_out' }),
+    ],
+  })
+  const chips = view.findAll('[data-ui-id="thread-chip"]')
+  expect(chips.map((node) => node.attributes('data-kind'))).toEqual([
+    'question',
+    'sub_agent',
+    'sub_agent',
+    'sub_agent',
+  ])
+  expect(chipLabels(view)).toEqual([
+    'Open thread Why a thread?',
+    'Open thread Task b, Reviewer, Running',
+    'Open thread Task a, Reviewer, Failed',
+    'Open thread Task c, Reviewer, Timed out',
+  ])
+  await chips[2]!.get('button').trigger('click')
+  expect(view.emitted('openThread')).toEqual([['a']])
+})
+
+test('a response with no question thread still shows its sub-agent chips', () => {
+  const view = row({ subAgentThreads: [subAgentChip('a')] })
+  expect(view.findAll('[data-ui-id="thread-chip"]')).toHaveLength(1)
+  // Sub-agent chips do not change the message thread action.
+  expect(toolbar(view).find('button[aria-label="Start thread"]').exists()).toBe(true)
+})
+
+test('the anchor row and a thread row show no sub-agent chips', () => {
+  const subAgentThreads = [subAgentChip('a')]
+  expect(
+    row({ subAgentThreads }, { surface: 'anchor' }).find('[data-ui-id="thread-chip"]').exists(),
+  ).toBe(false)
+  expect(
+    row({ subAgentThreads }, { surface: 'thread' }).find('[data-ui-id="thread-chip"]').exists(),
+  ).toBe(false)
+})
+
+test('a brief shows the parent agent as its author, not You', () => {
+  const view = row(
+    {
+      role: 'user',
+      author: { agentId: 'parent', name: 'Quinn', provider: 'claude', avatar: null },
+      blocks: [{ type: 'markdown', text: 'Find the callers.' }],
+    },
+    { surface: 'thread' },
+  )
+  expect(view.get('[data-testid="message-identity"]').text()).toBe('Quinn')
+  expect(view.get('[data-testid="message-agent-tag"]').text()).toContain('claude')
+  expect(view.findComponent(AgentAvatar).exists()).toBe(true)
+  expect(view.text()).not.toContain('You')
+})
+
+test('a user message without an author is still You', () => {
+  const view = row({ role: 'user' })
+  expect(view.get('[data-testid="message-identity"]').text()).toBe('You')
 })

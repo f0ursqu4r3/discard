@@ -2,7 +2,7 @@
 use super::dto::*;
 use crate::plugin_memory::PluginMemory;
 use super::threads::ThreadRecord;
-use discard_core::model::{AgentId, Message, PostedSource};
+use discard_core::model::{AgentId, Message, PostedSource, ThreadKind, ThreadState};
 use discard_core::approval::Decision;
 use discard_core::event::{AgentStatus, ApprovalId};
 use discard_core::timeline::ApprovalView;
@@ -83,21 +83,47 @@ fn channel_messages(s: &State, channel: &ChannelState) -> Vec<MessageDto> {
         for message in &mut messages { message.posted_to_channel = posted.contains(message.id.as_str()); }
         return messages;
     }
-    let chips: HashMap<&str, ThreadChipDto> = s.threads.values().filter(|r| r.parent == channel.channel_id && r.count() > 0)
-        .map(|r| (r.anchor.as_str(), r.chip(s.window.last_read(&r.id)))).collect();
+    // Chips come in creation order: the thread map is ordered by thread ID, which is time-ordered.
+    let mut chips: HashMap<&str, ThreadChipDto> = HashMap::new();
+    let mut sub_agent_chips: HashMap<&str, Vec<ThreadChipDto>> = HashMap::new();
+    for record in s.threads.values().filter(|r| r.parent == channel.channel_id && r.visible() && !r.anchor.is_empty()) {
+        let chip = record.chip(s.window.last_read(&record.id), thread_approvals(s, &record.id));
+        match record.kind {
+            ThreadKind::Question => { chips.insert(record.anchor.as_str(), chip); }
+            ThreadKind::SubAgent => sub_agent_chips.entry(record.anchor.as_str()).or_default().push(chip),
+        }
+    }
     for message in &mut messages {
         message.thread = chips.get(message.id.as_str()).cloned();
+        message.sub_agent_threads = sub_agent_chips.get(message.id.as_str()).cloned().unwrap_or_default();
         message.posted_from = channel.posted.get(&discard_core::model::MessageId(message.id.clone()))
             .map(|source| PostedFromDto { source_message_id: source.source_message_id.0.clone(), thread_channel_id: source.thread_channel_id.0.clone(), thread_name: source.thread_name.clone() });
     }
     messages
 }
 
+/// Approvals that wait in a loaded thread.
+fn thread_approvals(s: &State, thread: &str) -> usize { s.parked.get(thread).map_or(0, |c| c.ui.pending_approvals()) }
+
 /// The followed threads of a channel with live state, oldest first.
 fn followed_links(s: &State, channel: &str) -> Vec<ThreadLinkDto> {
-    s.threads.values().filter(|r| r.parent == channel && r.followed && r.count() > 0).map(|r| {
+    s.threads.values().filter(|r| r.parent == channel && r.followed && r.visible()).map(|r| {
         let live = s.parked.get(&r.id);
         r.link(s.window.last_read(&r.id), live.is_some_and(|c| c.ui.turn_running()), live.map_or(0, |c| c.ui.pending_approvals()))
+    }).collect()
+}
+
+/// The sub-agent threads of the running turn of `channel`: they have no anchor yet.
+fn live_sub_agent_chips(s: &State, channel: &str) -> Vec<ThreadChipDto> {
+    s.threads.values().filter(|r| r.parent == channel && r.kind == ThreadKind::SubAgent && r.anchor.is_empty())
+        .map(|r| r.chip(s.window.last_read(&r.id), thread_approvals(s, &r.id))).collect()
+}
+
+/// Every loaded thread with an approval that waits, followed or not.
+fn pending_thread_approvals(s: &State) -> Vec<ThreadApprovalDto> {
+    s.threads.values().filter_map(|r| {
+        let pending = thread_approvals(s, &r.id);
+        (pending > 0).then(|| ThreadApprovalDto { thread_id: r.id.clone(), parent_channel_id: r.parent.clone(), name: r.name.clone(), kind: r.kind.as_str().into(), agent_name: r.agent_name.clone(), pending_approvals: pending })
     }).collect()
 }
 
@@ -111,14 +137,19 @@ fn open_thread_dto(s: &State) -> Option<OpenThreadDto> {
     let channel = s.parked.get(id)?;
     let record = s.threads.get(id)?;
     let ui = &channel.ui;
+    let steering_soon = record.kind == ThreadKind::SubAgent;
+    let blocked = thread_blocked(s, channel);
     Some(OpenThreadDto {
         channel_id: id.clone(), parent_channel_id: record.parent.clone(), name: record.name.clone(), followed: record.followed,
-        anchor_message_id: record.anchor.clone(), history_rev: s.thread_rev,
+        kind: record.kind.as_str().into(), state: record.state.map(|state| state.as_str().into()), agent_name: record.agent_name.clone(),
+        anchor_message_id: Some(record.anchor.clone()).filter(|anchor| !anchor.is_empty()), history_rev: s.thread_rev,
         agent_id: channel.agent_id.clone(), agent: channel.agent.clone(), provider: channel.provider.clone(),
         responder: ui.responder().cloned(), agent_status: agent_status_name(ui.agent_status()).into(), turn_running: ui.turn_running(),
         notice: ui.notice().map(str::to_owned), live_blocks: ui.live_blocks().to_vec(), prompts: prompt_dtos(ui),
         pending_approvals: ui.pending_approvals(), unread: record.unread(s.window.last_read(id)),
-        composer_disabled: thread_blocked(s, channel),
+        composer_disabled: blocked || steering_soon,
+        // TODO: steering a sub-agent and follow-up turns in a sub-agent thread. Until then its composer stays off.
+        composer_disabled_reason: if steering_soon { Some("steering_soon".into()) } else if blocked { Some("read_only".into()) } else { None },
         read_only_note: discard_core::workspace_session::ReadOnlyReason::Thread.note(),
     })
 }
@@ -129,6 +160,11 @@ fn refresh_thread(s: &mut State, thread: &str) {
     let Some(record) = s.threads.get_mut(thread) else { return };
     record.refresh(channel.ui.history(), channel.ui.authors());
     let parent = record.parent.clone();
+    touch_thread(s, &parent, thread);
+}
+
+/// Tell the views that show a thread that its record changed: the parent transcript with the chip, the open panel.
+fn touch_thread(s: &mut State, parent: &str, thread: &str) {
     if s.open_thread.as_deref() == Some(thread) { s.thread_rev += 1; }
     if s.active.channel_id == parent { s.history_rev += 1; }
 }
@@ -159,6 +195,32 @@ fn command_target<'a>(s: &'a State, channel: Option<&str>) -> Option<&'a Channel
         None => Some(&s.active),
         Some(id) if id == s.active.channel_id => Some(&s.active),
         Some(id) => s.parked.get(id).filter(|c| c.thread_parent.is_some()),
+    }
+}
+
+/// What an update means for the sub-agent tasks and thread records.
+pub(crate) enum SubAgentNote {
+    None,
+    /// The text of an `Update::Error` or `Update::ResponseSaveFailed`: kept as the detail of a task that does not finish.
+    Detail(String),
+    /// The text of an `Update::SetupNeeded`: a detail, and the end of the turn.
+    SetupNeeded(String),
+    Finished { state: ThreadState, text: String },
+    TurnEnded,
+    Followed,
+    Anchored(Vec<discard_core::model::ThreadInfo>),
+}
+impl SubAgentNote {
+    fn of(update: &Update) -> Self {
+        match update {
+            Update::Error(text) | Update::ResponseSaveFailed(text) => Self::Detail(text.clone()),
+            Update::SetupNeeded(text) => Self::SetupNeeded(text.clone()),
+            Update::SubAgentFinished { state, text } => Self::Finished { state: *state, text: text.clone() },
+            Update::TurnFinished(_) => Self::TurnEnded,
+            Update::ThreadFollowed => Self::Followed,
+            Update::ThreadsAnchored(infos) => Self::Anchored(infos.clone()),
+            _ => Self::None,
+        }
     }
 }
 
@@ -243,6 +305,9 @@ pub struct AppCore {
     plugin_signature: Mutex<String>,
     branch_source: Mutex<Option<BranchSource>>,
     branch_generation: AtomicU64,
+    /// Moves when a thread list that the webview reads from storage changed without a command of the webview.
+    conversations_rev: AtomicU64,
+    sub_agents: super::delegation::SubAgents,
     pub(crate) changed: Notify,
 }
 impl AppCore {
@@ -293,9 +358,16 @@ impl AppCore {
             plugin_signature: Mutex::new(String::new()),
             branch_source: Mutex::new(None),
             branch_generation: AtomicU64::new(0),
+            conversations_rev: AtomicU64::new(0),
+            sub_agents: super::delegation::SubAgents::default(),
             changed: Notify::new(),
         }
     }
+    /// The running sub-agent tasks.
+    pub fn sub_agents(&self) -> &super::delegation::SubAgents { &self.sub_agents }
+    /// Moves when the engine followed a thread or a followed sub-agent thread changed state. The pump tells the
+    /// webview (`discard://conversations`) so lists that it reads from storage load again.
+    pub fn conversations_rev(&self) -> u64 { self.conversations_rev.load(Ordering::SeqCst) }
     pub fn clear_project(&self) {
         let (commands, _) = tokio::sync::mpsc::unbounded_channel();
         let project = discard_core::model::Project { id: discard_core::model::ProjectId(String::new()), name: String::new(), path: String::new() };
@@ -327,6 +399,11 @@ impl AppCore {
         }
     }
     pub fn saved_conversation(&self) -> Option<String> { self.state.lock().unwrap_or_else(|e| e.into_inner()).window.state().selected_conversation }
+    /// Whether the channel has a turn that runs.
+    pub fn channel_running(&self, id: &str) -> bool {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        std::iter::once(&s.active).chain(s.parked.values()).find(|c| c.channel_id == id).is_some_and(|c| c.ui.turn_running())
+    }
     pub fn has_channel(&self, id: &str) -> bool { let s = self.state.lock().unwrap_or_else(|e| e.into_inner()); s.active.channel_id == id || s.parked.contains_key(id) }
     pub fn agent_channel_ids(&self, id: &str) -> Vec<String> {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -510,9 +587,15 @@ impl AppCore {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.active.ui.turn_running() || s.parked.values().any(|c| c.ui.turn_running())
     }
+    /// Stop every running turn. Threads are loaded channels too, so this stops every sub-agent with its parent.
     pub fn cancel_all(&self) {
-        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        for channel in std::iter::once(&s.active).chain(s.parked.values()) { let _ = channel.commands.send(Command::Cancel); }
+        let running = {
+            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            for channel in std::iter::once(&s.active).chain(s.parked.values()) { let _ = channel.commands.send(Command::Cancel); }
+            std::iter::once(&s.active).chain(s.parked.values()).filter(|c| c.ui.turn_running()).map(|c| c.channel_id.clone()).collect::<Vec<_>>()
+        };
+        // Every loaded channel got its stop. A sub-agent that a running parent would still start must stop too.
+        for parent in running { self.sub_agents.request_cancel_parent(&parent, true); }
     }
     pub fn add_channel(&self, init: CoreInit, channel: &discard_core::model::Channel) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -589,6 +672,7 @@ impl AppCore {
                         id: channel.channel_id.clone(), agent_id: channel.agent_id.clone(), project_id: channel.project_id.as_ref().map(|id| id.0.clone()), name: channel.channel.clone(), agent: channel.agent.clone(),
                         provider: channel.provider.clone(), workspace_mode: channel.mode.as_str().into(),
                         running: channel.ui.turn_running(), pending_approvals: channel.ui.pending_approvals(),
+                        thread_pending_approvals: state.threads.values().filter(|r| r.parent == channel.channel_id).map(|r| thread_approvals(&state, &r.id)).sum(),
                         unread: super::windows::channel_indicators(channel.ui.history(), state.window.last_read(&channel.channel_id), channel.ui.pending_approvals()).0,
                     }).collect();
             channels.sort_by(|a, b| a.id.cmp(&b.id));
@@ -627,6 +711,8 @@ impl AppCore {
                     member_list: window.panels.member_list,
                 },
                 channels,
+                live_sub_agent_threads: live_sub_agent_chips(&state, &state.active.channel_id),
+                thread_approvals: pending_thread_approvals(&state),
                 open_thread: open_thread_dto(&state),
                 branches,
                 repositories: state.repositories.clone(),
@@ -987,13 +1073,32 @@ impl AppCore {
         Ok(())
     }
     pub fn continue_in(&self, channel: &str, agent: AgentId, note: String) -> Result<(), String> {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if s.active.channel_id != channel { return Err("The channel changed. Open the channel and try again.".into()); }
+        self.continue_with(channel, agent, note, false)
+    }
+    /// Like `continue_in`, after the user declined a request of the agent.
+    pub fn continue_declined_in(&self, channel: &str, agent: AgentId, note: String) -> Result<(), String> {
+        self.continue_with(channel, agent, note, true)
+    }
+    /// Check what must hold before a decision may continue the agent of `channel`, so a decision is never saved
+    /// when its follow-up cannot be sent.
+    pub fn can_continue_in(&self, channel: &str) -> Result<(), String> {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        Self::continue_blocked(&s, channel, None)
+    }
+    fn continue_blocked(s: &State, channel: &str, agent: Option<&AgentId>) -> Result<(), String> {
+        if s.active.channel_id != channel { return Err("Open this channel first.".into()); }
         if s.active.ui.turn_running() { return Err("Wait for the current response to finish.".into()); }
-        if s.active.read_only || s.active.archived || s.active.archive_busy || s.active.archive.is_some() || s.project_busy || s.changing_channels.contains(channel) || s.changing_agents.contains(&agent.0) {
+        if s.active.read_only || s.active.archived || s.active.archive_busy || s.active.archive.is_some() || s.project_busy || s.changing_channels.contains(channel) || agent.is_some_and(|agent| s.changing_agents.contains(&agent.0)) {
             return Err("This channel cannot send a message right now.".into());
         }
-        s.active.commands.send(Command::Continue { agent, note }).map_err(|_| "The agent session is unavailable.")?;
+        Ok(())
+    }
+    fn continue_with(&self, channel: &str, agent: AgentId, note: String, declined: bool) -> Result<(), String> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.active.channel_id != channel { return Err("The channel changed. Open the channel and try again.".into()); }
+        Self::continue_blocked(&s, channel, Some(&agent))?;
+        let command = if declined { Command::ContinueDeclined { agent, note } } else { Command::Continue { agent, note } };
+        s.active.commands.send(command).map_err(|_| "The agent session is unavailable.")?;
         s.active.ui.response_started();
         s.rev += 1;
         self.changed.notify_one();
@@ -1018,10 +1123,30 @@ impl AppCore {
         });
     }
     pub fn cancel(&self) { self.cancel_in(None); }
+    /// Stop the turn of the selected channel or of a loaded thread. Stopping a parent channel also stops the
+    /// sub-agents that its turn started. Stopping a sub-agent thread ends only that task.
     pub fn cancel_in(&self, channel: Option<&str>) {
+        let parent = {
+            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(target) = command_target(&s, channel) else { return };
+            let _ = target.commands.send(Command::Cancel);
+            target.channel_id.clone()
+        };
+        self.cancel_sub_agents_of(&parent);
+    }
+    /// Stop every running sub-agent task of the turn of `parent`. While that turn still runs, the stop is also
+    /// recorded, so a task that a `delegate` call starts later in the same turn stops too.
+    pub fn cancel_sub_agents_of(&self, parent: &str) {
+        let running = self.channel_running(parent);
+        self.cancel_threads(self.sub_agents.request_cancel_parent(parent, running));
+    }
+    /// Stop every running sub-agent task of one `delegate` call.
+    pub fn cancel_sub_agent_call(&self, call: u64) { self.cancel_threads(self.sub_agents.request_cancel_call(call)); }
+    /// Stop the turn of one loaded thread.
+    pub fn cancel_thread(&self, thread: &str) { self.cancel_threads(vec![thread.to_owned()]); }
+    fn cancel_threads(&self, threads: Vec<String>) {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(target) = command_target(&s, channel) else { return };
-        let _ = target.commands.send(Command::Cancel);
+        for thread in threads { if let Some(channel) = s.parked.get(&thread).filter(|c| c.thread_parent.is_some()) { let _ = channel.commands.send(Command::Cancel); } }
     }
     /// Track a thread. Its state lives beside the parked channels and never becomes the selected channel.
     /// A thread starts with no read marker, so an agent message that nobody read counts as unread.
@@ -1037,6 +1162,18 @@ impl AppCore {
         s.parked.insert(channel.id.0.clone(), runtime);
         s.threads.insert(channel.id.0.clone(), record);
         if s.active.channel_id == info.parent_channel_id.0 { s.history_rev += 1; }
+        s.rev += 1;
+        self.changed.notify_one();
+    }
+    /// Drop the runtime of a sub-agent thread whose task could not start, and stop its engine. The thread keeps its
+    /// record, so its chip shows the final state. Opening the thread later loads it again from storage.
+    pub fn drop_thread_runtime(&self, id: &str) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(runtime) = s.parked.get(id).filter(|c| c.thread_parent.is_some()) else { return };
+        // The engine ends its turn on a stop, and its loop ends when the sender is dropped.
+        let _ = runtime.commands.send(Command::Cancel);
+        s.parked.remove(id);
+        if s.open_thread.as_deref() == Some(id) { s.open_thread = None; s.thread_rev += 1; }
         s.rev += 1;
         self.changed.notify_one();
     }
@@ -1121,6 +1258,8 @@ impl AppCore {
         if text.trim().is_empty() && attachments.is_empty() { return Ok(()); }
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(target) = s.parked.get(thread).filter(|c| c.thread_parent.is_some()) else { return Err("This thread is unavailable.".into()) };
+        // TODO: steering a sub-agent and follow-up turns. Until then a sub-agent thread takes only its brief.
+        if s.threads.get(thread).is_some_and(|record| record.kind == ThreadKind::SubAgent) { return Err("A sub-agent thread takes no messages yet.".into()); }
         if thread_blocked(&s, target) || s.changing_agents.contains(&target.agent_id) || s.changing_channels.contains(thread) || s.project_busy || target.ui.turn_running() {
             return Err("This thread cannot send a message right now.".into());
         }
@@ -1133,6 +1272,19 @@ impl AppCore {
         if let Some(author) = recipient { target.ui.apply(Update::Responding(author)); }
         // The engine follows a thread when the user sends in it. The record follows too.
         if let Some(record) = s.threads.get_mut(thread) { record.followed = true; }
+        refresh_thread(&mut s, thread);
+        s.rev += 1;
+        self.changed.notify_one();
+        Ok(())
+    }
+    /// Send the brief of a new sub-agent thread: the first and only request of its engine. The brief shows at once
+    /// as a message of `author` (the delegating agent). The thread does not become followed or open.
+    pub fn send_brief(&self, thread: &str, text: String, author: discard_core::model::MessageAuthor) -> Result<(), String> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(target) = s.parked.get_mut(thread).filter(|c| c.thread_parent.is_some()) else { return Err("This thread is unavailable.".into()) };
+        target.commands.send(Command::SendBrief { text: text.clone(), author: author.clone() }).map_err(|_| "The agent session is unavailable.")?;
+        target.ui.user_sent(&text);
+        if let Some(local) = target.ui.unsaved_user().cloned() { target.ui.set_author(local, author); }
         refresh_thread(&mut s, thread);
         s.rev += 1;
         self.changed.notify_one();
@@ -1180,7 +1332,11 @@ impl AppCore {
     pub fn apply_runtime(&self, channel: &str, generation: Option<u64>, update: Update) -> bool {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let current = std::iter::once(&s.active).chain(s.parked.values()).find(|c| c.channel_id == channel).map(|c| c.runtime_generation);
-        if generation.is_some_and(|generation| Some(generation) != current) { return false; }
+        if generation.is_some_and(|generation| Some(generation) != current) {
+            // The runtime of a thread is gone, but its task still waits for an end.
+            if current.is_none() { drop(s); self.sub_agents.observe(channel, &SubAgentNote::of(&update)); }
+            return false;
+        }
         let memory_changed = matches!(&update, Update::MemoryChanges { .. });
         // A posted thread message is a message of the parent channel. The thread's own state has nothing to change.
         if let Update::MessagePosted { reference, source } = update {
@@ -1195,10 +1351,13 @@ impl AppCore {
             _ => None,
         };
         let thread_len = s.parked.get(channel).filter(|c| c.thread_parent.is_some()).map(|c| c.ui.history().len());
+        let thread_pending = s.parked.get(channel).filter(|c| c.thread_parent.is_some()).map(|c| c.ui.pending_approvals());
+        // What a sub-agent task or its parent needs from this update, read before the update moves into the state.
+        let note = SubAgentNote::of(&update);
         let finished;
         if s.active.channel_id != channel {
             let marker = s.window.last_read(channel).map(str::to_owned);
-            let Some(parked) = s.parked.get_mut(channel) else { return false };
+            let Some(parked) = s.parked.get_mut(channel) else { drop(s); self.sub_agents.observe(channel, &note); return false };
             let was_running = parked.ui.turn_running();
             parked.ui.apply(update);
             parked.new_anchor = new_divider_anchor(parked.ui.history(), marker.as_deref(), parked.new_anchor.as_deref(), false);
@@ -1227,9 +1386,53 @@ impl AppCore {
         if let Some(before) = thread_len {
             let after = s.parked.get(channel).map(|c| c.ui.history().len());
             if after != Some(before) || id_replaced { refresh_thread(&mut s, channel); }
+            // The chip shows the approvals that wait in its thread.
+            else if thread_pending != s.parked.get(channel).map(|c| c.ui.pending_approvals()) && let Some(parent) = s.threads.get(channel).map(|r| r.parent.clone()) { touch_thread(&mut s, &parent, channel); }
+        }
+        let conversations = self.apply_thread_note(&mut s, channel, &note);
+        drop(s);
+        if conversations { self.conversations_rev.fetch_add(1, Ordering::SeqCst); }
+        // Tell the task of a sub-agent thread, and stop the tasks of a parent whose turn ended while they ran.
+        self.sub_agents.observe(channel, &note);
+        if matches!(note, SubAgentNote::TurnEnded | SubAgentNote::SetupNeeded(_)) {
+            self.cancel_sub_agents_of(channel);
+            self.sub_agents.parent_turn_ended(channel);
         }
         self.changed.notify_one();
         finished
+    }
+
+    /// Apply what an update says about a thread record. Returns whether a list that the webview reads from storage changed.
+    fn apply_thread_note(&self, s: &mut State, channel: &str, note: &SubAgentNote) -> bool {
+        match note {
+            SubAgentNote::Followed => {
+                let Some(record) = s.threads.get_mut(channel) else { return false };
+                let changed = !record.followed;
+                record.followed = true;
+                let parent = record.parent.clone();
+                touch_thread(s, &parent, channel);
+                changed
+            }
+            SubAgentNote::Finished { state, .. } => {
+                let Some(record) = s.threads.get_mut(channel) else { return false };
+                record.state = Some(*state);
+                let (parent, followed) = (record.parent.clone(), record.followed);
+                touch_thread(s, &parent, channel);
+                followed
+            }
+            SubAgentNote::Anchored(infos) => {
+                for info in infos {
+                    match s.threads.get_mut(&info.channel_id.0) {
+                        Some(record) => record.set_anchor(info),
+                        // A thread that never loaded (its engine failed to start) still hangs under its response.
+                        None => { s.threads.insert(info.channel_id.0.clone(), ThreadRecord::build(info, &[], &HashMap::new())); }
+                    }
+                    touch_thread(s, &info.parent_channel_id.0, &info.channel_id.0);
+                }
+                false
+            }
+            _ => false,
+        }
     }
 }
 

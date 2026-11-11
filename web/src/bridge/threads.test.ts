@@ -2,6 +2,8 @@ import { beforeEach, expect, test, vi } from 'vite-plus/test'
 import { invoke } from '@tauri-apps/api/core'
 import {
   closeThread,
+  decideAgentRequest,
+  getAgentRequests,
   followThread,
   getThreadHistory,
   leaveThread,
@@ -58,5 +60,16 @@ test('sendMessage adds alsoPost only when asked', async () => {
   expect(vi.mocked(invoke).mock.calls).toEqual([
     ['send_message', { channelId: 'thread-1', text: 'hello' }],
     ['send_message', { channelId: 'thread-1', text: 'hello', alsoPost: true }],
+  ])
+})
+
+test('agent request commands use the channel, the request and the decision', async () => {
+  await getAgentRequests('channel-1')
+  await decideAgentRequest('channel-1', 'request-1', 'add')
+  await decideAgentRequest('channel-1', 'request-1', 'deny')
+  expect(vi.mocked(invoke).mock.calls).toEqual([
+    ['get_agent_requests', { channelId: 'channel-1' }],
+    ['decide_agent_request', { channelId: 'channel-1', requestId: 'request-1', decision: 'add' }],
+    ['decide_agent_request', { channelId: 'channel-1', requestId: 'request-1', decision: 'deny' }],
   ])
 })

@@ -222,8 +222,8 @@ The thread panel takes the place of the context panel and closes back to it. It 
 On narrow screens it shows in the right sheet. Only one thread is open at a time. The header shows
 the thread name and its channel, **Follow** or **Leave**, and a close button. The anchor message shows
 at the top, then the thread messages. They use the same rows as the channel, so live replies, approvals,
-and tool calls work the same way. Approvals and Stop act on the thread. A note says that question
-threads are read-only. The composer has the same attachments and mentions as the channel composer. A
+and tool calls work the same way. Approvals and Stop act on the thread. A note says that threads
+are read-only. The composer has the same attachments and mentions as the channel composer. A
 quote of a thread message goes to the thread composer. The thread is marked read when its panel
 shows the newest message.
 
@@ -241,6 +241,44 @@ pending approval marks. Select it to open its channel with the thread panel. The
 The **Threads** list in the channel header, **Rename thread**, **Delete thread**, and **Remove from
 channel** on a posted row are planned. They show disabled with **Soon**. The design is in
 [Threads — design](superpowers/specs/2026-11-10-threads-design.md).
+
+A **sub-agent thread** is a read-only research run. An agent starts it with the `delegate` tool.
+You cannot start one. Each task of one `delegate` call makes one thread. During the run, the chips
+show under the live message. After the turn, they show under the saved response, in task order,
+below the question thread chip if there is one. A chip shows the title, the sub-agent's name, and
+the state: **Running** (with the spinner), **Done**, **Failed**, **Cancelled**, or **Timed out**.
+A chip also shows an unread mark, a **Follow** button, and the number of pending approvals. Select
+a chip to open the thread, also while it runs. A sub-agent thread is not followed at creation. It
+shows in the channel bar only after you follow it or a follow trigger fires. Its row has its own
+icon, and it shows running, unread, and pending approval marks. A failed, cancelled, or timed out
+thread keeps a mark in the row.
+
+The sub-agent thread panel header shows the title, the sub-agent's name, and the state. While the
+parent turn runs, the thread has no anchor, so no anchor message shows. After the turn, the anchor
+is the saved response. The first message is the brief. It shows the parent agent as its author, not
+**You**. The transcript is live while the sub-agent runs. **Stop** in the thread stops that
+sub-agent only. The parent agent gets "cancelled" for that task and continues. **Post to channel**,
+Copy, Quote, **Follow**, and **Leave** work. A quote from a sub-agent thread goes to the channel
+composer. The composer is disabled and labelled **Soon**, because steering a sub-agent and
+follow-up turns are planned. There is no **Also post** box. A sub-agent thread cannot start
+another thread.
+
+The **Delegation** switch is in the agent's tool permissions. It is off by default. When it is on,
+the agent can start read-only sub-agents in threads in Conversation and Workspace responses. Turning
+it on goes through the same confirmation as the other permission changes.
+
+An agent that wants a sub-agent that is not a project member asks with `agent_request_add`. The
+channel then shows an **Add an agent to this project?** card. It names the requesting agent and the
+requested agent with its provider and model. The reason shows as a quote in plain text: it is the
+agent's own words. **Add to project** makes the agent a project member with no end date and
+continues the requesting agent. **Deny** continues the requesting agent with the note that you
+declined. Both buttons are off while a response runs. A decided or failed request keeps its card
+with the result. Restarting Discard cancels pending requests. Direct messages show no card.
+
+Approvals that wait in a thread, followed or not, count with the channel approvals in the navigation
+and in the status line. **Approvals** in the navigation goes to the first approval that waits: the selected
+channel, then its threads, then the other channels, then the other threads. A thread opens in its
+channel with the thread panel.
 
 - **Theme source.** Default, Ghostty, or Custom. A line under the buttons says what each one does.
 - **Themes.** Shown only for Custom. Pick a light theme and a dark theme from searchable lists. Discard switches
