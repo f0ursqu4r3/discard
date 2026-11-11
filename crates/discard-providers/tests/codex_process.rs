@@ -514,9 +514,16 @@ async fn autorun_workspace_thread_starts_with_on_request_and_workspace_write() {
     let params = rig.request("thread/start")["params"].clone();
     assert_eq!(params["approvalPolicy"], "on-request");
     assert_eq!(params["sandbox"], "workspace-write");
-    // The sandbox controls stay in force: no network, no extra writable roots.
-    assert_eq!(params["config"]["sandbox_workspace_write"]["network_access"], false);
-    assert_eq!(params["config"]["sandbox_workspace_write"]["writable_roots"], json!([]));
+    // The sandbox controls stay in force: no network, no shared temp directories.
+    let sandbox = &params["config"]["sandbox_workspace_write"];
+    assert_eq!(sandbox["network_access"], false);
+    assert_eq!(sandbox["exclude_slash_tmp"], true);
+    assert_eq!(sandbox["exclude_tmpdir_env_var"], true);
+    // The one writable root is the private temp directory of the session.
+    let roots = sandbox["writable_roots"].as_array().unwrap();
+    assert_eq!(roots.len(), 1);
+    let root = roots[0].as_str().unwrap();
+    assert!(root.ends_with("/tmp") && root.contains("discard-conversation-"), "{root}");
 }
 
 #[cfg(target_os = "macos")]
