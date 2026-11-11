@@ -78,12 +78,14 @@ test('detached worktrees are selectable and every sidebar row has a target menu'
     workspaceMode: 'worktree',
     archived: false,
     archivedInto: null,
+    hasMessages: false,
     branch: null,
   }
   const wrapper = mount(ChannelList, {
     props: {
       projectId: 'p',
       projectPath: '/repo',
+      showArchived: true,
       branches: [
         { ...base, key: 'main', label: 'main', kind: 'main' },
         { ...base, key, label: 'abcdef1', kind: 'worktree', detached: true, worktree: '/detached' },
@@ -101,7 +103,7 @@ test('detached worktrees are selectable and every sidebar row has a target menu'
   expect(detached.attributes('disabled')).toBeUndefined()
   await detached.trigger('click')
   expect(wrapper.emitted('openBranch')).toEqual([[key]])
-  await wrapper.get('[data-ui-id="saved-channel-toggle"]').trigger('click')
+  await wrapper.get('[data-ui-id="archived-channel-toggle"]').trigger('click')
   const menus = wrapper.findAllComponents(NavigationContextMenu)
   expect(menus.map((menu) => [menu.props('kind'), menu.props('id')])).toEqual([
     ['channel', 'general'],

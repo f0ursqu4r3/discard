@@ -94,6 +94,7 @@ const projectChannel = (id: string, threads?: ThreadLinkDto[]): ProjectChannelDt
   branch: null,
   archived: false,
   archivedInto: null,
+  hasMessages: false,
   threads,
 })
 const live = (id: string, threads?: ThreadLinkDto[]): ChannelDto => ({
@@ -170,18 +171,19 @@ test('selecting or leaving a thread row in the channel bar emits the thread id a
   expect(view.emitted('leaveThread')).toEqual([['b']])
 })
 
-test('threads show under saved channels too', () => {
+test('threads show under archived channels too', () => {
   const view = track(
     mount(ChannelList, {
       props: {
         ...listProps,
+        showArchived: true,
         projectChannels: [projectChannel('general'), projectChannel('saved', [link('s')])],
       },
     }),
   )
   expect(view.findAll('[data-ui-id="thread-row"]')).toHaveLength(0)
   return view
-    .get('[data-ui-id="saved-channel-toggle"]')
+    .get('[data-ui-id="archived-channel-toggle"]')
     .trigger('click')
     .then(() => {
       expect(view.findAll('[data-ui-id="thread-row"]')).toHaveLength(1)

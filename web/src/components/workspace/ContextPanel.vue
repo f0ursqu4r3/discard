@@ -47,12 +47,14 @@ const member = computed(() =>
         avatar: props.agentAvatar,
       },
 )
-const generalRunning = computed(() => {
-  const general = props.projectChannels?.find((channel) => channel.kind === 'general')
-  return (
-    !!general && !!props.snapshot.channels.find((channel) => channel.id === general.id)?.running
-  )
-})
+// A running general or text channel blocks a main agent change. Both follow the main agent.
+const generalRunning = computed(() =>
+  (props.projectChannels ?? [])
+    .filter(
+      (channel) => (channel.kind === 'general' || channel.kind === 'text') && !channel.archived,
+    )
+    .some((channel) => props.snapshot.channels.find((entry) => entry.id === channel.id)?.running),
+)
 </script>
 <template>
   <Tabs v-model="tab" data-ui-id="context-panel" class="flex h-full min-h-0 flex-col gap-0 bg-card">

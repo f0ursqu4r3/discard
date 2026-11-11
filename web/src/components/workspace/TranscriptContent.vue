@@ -48,7 +48,7 @@ const props = defineProps<{
   projectId?: string | null
   jumpTo?: { messageId: string; request: number }
   position?: TranscriptPosition
-  quoteDisabled?: boolean
+  replyDisabled?: boolean
   /** A thread transcript has no memory notices and no worktree requests, and its rows can post to the channel. */
   surface?: 'channel' | 'thread'
   /** The message a thread starts from. It shows above the thread messages. */
@@ -72,7 +72,7 @@ watch([() => props.messages.at(-1)?.id, () => props.running, () => props.memoryR
 })
 const emit = defineEmits<{
   savePosition: [id: string, position: TranscriptPosition]
-  quote: [message: MessageDto]
+  reply: [message: MessageDto]
   startThread: [message: MessageDto]
   openThread: [threadId: string]
   decideAgentRequest: [requestId: string, decision: 'add' | 'deny']
@@ -260,8 +260,8 @@ onUnmounted(() => window.removeEventListener('focus', read))
               surface="anchor"
               :channel-id="anchorChannelId ?? conversationId"
               :message="anchorRow.message"
-              :quote-disabled="quoteDisabled"
-              @quote="emit('quote', $event)"
+              :reply-disabled="replyDisabled"
+              @reply="emit('reply', $event)"
               :agent="agent"
               :agent-id="agentId"
               :agent-avatar="agentAvatar"
@@ -313,8 +313,8 @@ onUnmounted(() => window.removeEventListener('focus', read))
               :thread-disabled="threadDisabled"
               :channel-id="conversationId"
               :message="message"
-              :quote-disabled="quoteDisabled"
-              @quote="emit('quote', $event)"
+              :reply-disabled="replyDisabled"
+              @reply="emit('reply', $event)"
               @start-thread="emit('startThread', $event)"
               @open-thread="emit('openThread', $event)"
               :agent="agent"

@@ -211,6 +211,17 @@ pub async fn switch_channel(app: tauri::AppHandle, channels: State<'_, Arc<super
     Ok(())
 }
 #[tauri::command]
+pub async fn create_text_channel(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, name: String) -> Result<String, String> {
+    let channels = channels.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || channels.create_text_channel(&discard_core::model::ProjectId(project_id), &name)).await.map_err(|e| e.to_string())?;
+    // Creation can persist before runtime selection fails. Refresh every catalog in either case.
+    use tauri::Emitter;
+    let _ = app.emit("discard://conversations", ());
+    // The new channel is open. Show the conversation page.
+    if let Ok(id) = &result { let _ = app.emit("discard://conversation-opened", id.clone()); }
+    result
+}
+#[tauri::command]
 pub async fn open_branch_channel(channels: State<'_, Arc<super::channels::Channels>>, key: String) -> Result<String, String> {
     let channels = channels.inner().clone();
     tauri::async_runtime::spawn_blocking(move || channels.open_branch(&key)).await.map_err(|e| e.to_string())?
@@ -222,7 +233,8 @@ pub fn get_projects(context: State<'_, super::settings::SettingsContext>) -> Res
     store.visible_projects().map_err(|e| e.to_string())?.into_iter().map(|p| {
         let avatar = store.project_avatar(&p.id).map_err(|e| e.to_string())?;
         let main = store.project_main_agent(&p.id).map_err(|e| e.to_string())?;
-        Ok(serde_json::json!({"id":p.id.0,"name":p.name,"path":p.path,"avatar":avatar,"mainAgentId":main.map(|id| id.0)}))
+        let show_archived = store.project_show_archived(&p.id).map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({"id":p.id.0,"name":p.name,"path":p.path,"avatar":avatar,"mainAgentId":main.map(|id| id.0),"showArchived":show_archived}))
     }).collect()
 }
 
@@ -232,6 +244,14 @@ pub fn update_project_profile(app: tauri::AppHandle, core: State<'_, Arc<AppCore
     context.store.lock().unwrap_or_else(|e| e.into_inner())
         .update_project_profile(&id, &name, avatar.as_deref()).map_err(|e| e.to_string())?;
     core.update_project_name(&id.0, name.trim());
+    use tauri::Emitter;
+    let _ = app.emit("discard://projects", ());
+    Ok(())
+}
+#[tauri::command]
+pub fn set_project_show_archived(app: tauri::AppHandle, context: State<'_, super::settings::SettingsContext>, project_id: String, show: bool) -> Result<(), String> {
+    context.store.lock().unwrap_or_else(|e| e.into_inner())
+        .set_project_show_archived(&discard_core::model::ProjectId(project_id), show).map_err(|e| e.to_string())?;
     use tauri::Emitter;
     let _ = app.emit("discard://projects", ());
     Ok(())

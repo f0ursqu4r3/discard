@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getConversations, type ConversationEntry, type ProjectEntry } from '@/bridge/api'
 import { Bot, FileText, FolderGit2, GitBranch, MessagesSquare, Users } from '@lucide/vue'
-import type { MessageDto, SnapshotDto } from '@/bridge/types'
+import type { MessageDto, ProjectChannelDto, SnapshotDto } from '@/bridge/types'
 import type { WorkspacePage } from './types'
 import {
   Dialog,
@@ -18,6 +18,7 @@ import {
 import ProjectAvatar from './ProjectAvatar.vue'
 import ProjectIdentitySettings from './ProjectIdentitySettings.vue'
 import ProjectAlwaysAllowRules from './ProjectAlwaysAllowRules.vue'
+import ProjectChannelListSettings from './ProjectChannelListSettings.vue'
 import MemoryBrowser from '../memory/MemoryBrowser.vue'
 import FriendsList from '../agents/FriendsList.vue'
 import AgentAvatar from '../agents/AgentAvatar.vue'
@@ -35,6 +36,7 @@ import {
 defineOptions({ name: 'WorkspacePageView' })
 const props = defineProps<{
   project?: ProjectEntry
+  projectChannels?: ProjectChannelDto[]
   page: WorkspacePage
   snapshot: SnapshotDto
   messages: MessageDto[]
@@ -85,6 +87,20 @@ onUnmounted(() => {
   stops.forEach((stop) => stop())
 })
 
+// A running general or text channel blocks a main agent change. Both follow the main agent.
+const generalRunning = computed(() => {
+  const followers = props.projectChannels
+    ?.filter(
+      (channel) => (channel.kind === 'general' || channel.kind === 'text') && !channel.archived,
+    )
+    .map((channel) => channel.id)
+  return props.snapshot.channels.some(
+    (channel) =>
+      channel.projectId === props.snapshot.projectId &&
+      channel.running &&
+      (followers ? followers.includes(channel.id) : channel.name === 'general'),
+  )
+})
 const branchCount = computed(() => props.snapshot.branches.filter((row) => !row.detached).length)
 </script>
 <template>
@@ -108,14 +124,13 @@ const branchCount = computed(() => props.snapshot.branches.filter((row) => !row.
         :key="project.id"
         :project="project"
         :busy="snapshot.archiveBusy"
-        :general-running="
-          snapshot.channels.some(
-            (channel) =>
-              channel.projectId === snapshot.projectId &&
-              channel.name === 'general' &&
-              channel.running,
-          )
-        "
+        :general-running="generalRunning"
+        @changed="emit('projectChanged')"
+      />
+      <ProjectChannelListSettings
+        v-if="project"
+        :key="project.id"
+        :project="project"
         @changed="emit('projectChanged')"
       />
       <ProjectAlwaysAllowRules v-if="project" :key="project.id" :project-id="project.id" />

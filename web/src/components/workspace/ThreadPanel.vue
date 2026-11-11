@@ -10,6 +10,7 @@ import BrailleSpinner from '../BrailleSpinner.vue'
 import Composer from '../Composer.vue'
 import ThreadStateMark from '../ThreadStateMark.vue'
 import MessageList from '../MessageList.vue'
+import type { PendingReply } from '../reply'
 import { Alert, AlertDescription } from '../ui/alert'
 import { Button } from '../ui/button'
 import {
@@ -37,16 +38,19 @@ const props = defineProps<{
   /** The parent channel cannot take messages. An open thread reports this itself. */
   composerDisabled?: boolean
   busy?: boolean
-  quoteDisabled?: boolean
+  replyDisabled?: boolean
   draft?: string
   attachments?: AttachmentDto[]
+  /** The reply that waits for the thread composer. */
+  reply?: PendingReply | null
   jumpTo?: { messageId: string; request: number }
 }>()
 const emit = defineEmits<{
   close: []
   send: [text: string, attachments: AttachmentDto[], alsoPost: boolean]
   stop: []
-  quote: [message: MessageDto]
+  cancelReply: []
+  reply: [message: MessageDto]
   'update:draft': [text: string]
   'update:attachments': [attachments: AttachmentDto[]]
 }>()
@@ -203,10 +207,10 @@ defineExpose({ focusComposer: () => composer.value?.focusEnd?.() })
       :agent="thread?.agent ?? parentAgent"
       :agent-avatar="agentAvatar"
       :prompts="thread?.prompts"
-      :quote-disabled="quoteDisabled"
+      :reply-disabled="replyDisabled"
       :thread-disabled="disabled"
       :jump-to="jumpTo"
-      @quote="emit('quote', $event)"
+      @reply="emit('reply', $event)"
     />
     <Alert v-if="thread?.notice" class="mx-4 mb-2 min-w-0 w-auto border-warning text-foreground">
       <AlertDescription class="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]">
@@ -244,7 +248,9 @@ defineExpose({ focusComposer: () => composer.value?.focusEnd?.() })
       @update:draft="emit('update:draft', $event)"
       @update:attachments="emit('update:attachments', $event)"
       @send="(text, files, alsoPost) => emit('send', text, files ?? [], !!alsoPost)"
+      :reply="reply"
       @stop="emit('stop')"
+      @cancel-reply="emit('cancelReply')"
     />
   </section>
 </template>

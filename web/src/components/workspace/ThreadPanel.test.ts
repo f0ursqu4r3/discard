@@ -102,7 +102,7 @@ test('thread messages can post to the channel and show posted ones as done', () 
   expect(top.find('[data-ui-id="thread-chip"]').exists()).toBe(false)
 })
 
-test('the composer sends the also-post choice and quotes go to the thread', async () => {
+test('the composer sends the also-post choice and replies go to the thread', async () => {
   const view = panel()
   const composer = view.getComponent(Composer)
   expect(composer.props('alsoPostLabel')).toBe('#general')
@@ -113,8 +113,8 @@ test('the composer sends the also-post choice and quotes go to the thread', asyn
   await view.get('textarea').setValue('Again')
   await view.get('textarea').trigger('keydown', { key: 'Enter' })
   expect(view.emitted('send')?.[1]).toEqual(['Again', [], true])
-  await view.get('[data-ui-id="message-reply"] [aria-label="Quote message"]').trigger('click')
-  expect(view.emitted('quote')?.[0]?.[0]).toMatchObject({ id: 'reply' })
+  await view.get('[data-ui-id="message-reply"] [aria-label="Reply to message"]').trigger('click')
+  expect(view.emitted('reply')?.[0]?.[0]).toMatchObject({ id: 'reply' })
 })
 
 test('a direct message parent names the conversation in the checkbox', () => {
@@ -352,7 +352,7 @@ test('Post to channel, Follow and Leave keep working in a sub-agent thread', asy
   await post.trigger('click')
   expect(invoke).toHaveBeenCalledWith('post_thread_message', { messageId: 'brief' })
   expect(
-    view.get('[data-ui-id="message-brief"] [aria-label="Quote message"]').attributes('disabled'),
+    view.get('[data-ui-id="message-brief"] [aria-label="Reply to message"]').attributes('disabled'),
   ).toBeUndefined()
   await view.get('[aria-label="Leave thread"]').trigger('click')
   expect(invoke).toHaveBeenCalledWith('leave_thread', { threadId: 'find-callers' })

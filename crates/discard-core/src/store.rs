@@ -206,6 +206,29 @@ pub fn thread_name(text: &str) -> String {
     }
 }
 
+/// Normalize the name of a text channel: lowercase ASCII words joined by single hyphens.
+pub fn normalize_text_channel_name(input: &str) -> std::result::Result<String, String> {
+    let lowered = input.trim().to_lowercase();
+    let mut name = String::new();
+    for word in lowered.split_whitespace() {
+        if !name.is_empty() { name.push('-'); }
+        name.push_str(word);
+    }
+    let mut collapsed = String::new();
+    for c in name.chars() {
+        if c == '-' && collapsed.ends_with('-') { continue; }
+        collapsed.push(c);
+    }
+    let name = collapsed.trim_matches('-').to_owned();
+    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
+        return Err("Use letters, numbers, hyphens, and underscores.".into());
+    }
+    if name.is_empty() || name.len() > 50 {
+        return Err("Enter a channel name of 1 to 50 characters.".into());
+    }
+    Ok(name)
+}
+
 /// Name a sub-agent thread from the task title, or from the start of the brief when the title is empty.
 pub fn sub_agent_thread_name(title: &str, brief: &str) -> String {
     let named = thread_name(title);
@@ -504,6 +527,28 @@ impl Store {
             tx.pragma_update(None, "user_version", 12)?;
             tx.commit()?;
         }
+        if self.schema_version()? < 13 {
+            let tx = self.conn.unchecked_transaction()?;
+            // Rebuild project_channels so the kind CHECK allows text channels. Every column, row, and index stays.
+            tx.execute_batch("ALTER TABLE project_channels RENAME TO project_channels_v12;
+                CREATE TABLE project_channels (
+                    channel_id TEXT PRIMARY KEY REFERENCES channels(id),
+                    project_id TEXT NOT NULL REFERENCES projects(id),
+                    kind TEXT NOT NULL CHECK(kind IN ('general','text','branch','archived_legacy','legacy')),
+                    branch_name TEXT,
+                    archived_into TEXT REFERENCES channels(id),
+                    repository TEXT NOT NULL DEFAULT '');
+                INSERT INTO project_channels(channel_id,project_id,kind,branch_name,archived_into,repository)
+                    SELECT channel_id,project_id,kind,branch_name,archived_into,repository FROM project_channels_v12;
+                DROP TABLE project_channels_v12;
+                DROP INDEX IF EXISTS one_project_general_channel;
+                DROP INDEX IF EXISTS one_project_active_branch;
+                CREATE UNIQUE INDEX one_project_general_channel ON project_channels(project_id) WHERE kind='general';
+                CREATE UNIQUE INDEX one_project_active_branch ON project_channels(project_id,repository,branch_name) WHERE kind='branch' AND branch_name IS NOT NULL;")?;
+            if !has_column("projects", "show_archived")? { tx.execute_batch("ALTER TABLE projects ADD COLUMN show_archived INTEGER NOT NULL DEFAULT 0;")?; }
+            tx.pragma_update(None, "user_version", 13)?;
+            tx.commit()?;
+        }
         self.conn.execute_batch("CREATE TABLE IF NOT EXISTS direct_message_list (agent_id TEXT PRIMARY KEY REFERENCES agents(id));")?;
         Ok(())
     }
@@ -515,50 +560,50 @@ impl Store {
         Ok(())
     }
 
+    /// Point the active general channel and every active text channel of the project at the main agent.
     fn reconcile_general_agent(
         conn: &Connection,
         project: &ProjectId,
         agent: &AgentId,
     ) -> Result<()> {
-        let channel: Option<(String, String, bool)> = conn
-            .query_row(
+        let channels: Vec<(String, String, bool)> = {
+            let mut stmt = conn.prepare(
                 "SELECT pc.channel_id,c.agent_id,a.deleted FROM project_channels pc
                  JOIN channels c ON c.id=pc.channel_id JOIN agents a ON a.id=c.agent_id
-                 WHERE pc.project_id=?1 AND pc.kind='general' AND c.archived=0",
-                params![project.0],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
-        let Some((channel, current_agent, current_agent_deleted)) = channel else {
-            return Ok(());
+                 WHERE pc.project_id=?1 AND pc.kind IN ('general','text') AND c.archived=0 ORDER BY c.ord",
+            )?;
+            stmt.query_map(params![project.0], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<std::result::Result<_, _>>()?
         };
-        if !current_agent_deleted {
+        for (channel, current_agent, current_agent_deleted) in channels {
+            if !current_agent_deleted {
+                conn.execute(
+                    "INSERT OR IGNORE INTO project_agents(project_id,agent_id) VALUES(?1,?2)",
+                    params![project.0, current_agent],
+                )?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO channel_agents(channel_id,agent_id) VALUES(?1,?2)",
+                    params![channel, current_agent],
+                )?;
+            }
             conn.execute(
                 "INSERT OR IGNORE INTO project_agents(project_id,agent_id) VALUES(?1,?2)",
-                params![project.0, current_agent],
+                params![project.0, agent.0],
             )?;
             conn.execute(
                 "INSERT OR IGNORE INTO channel_agents(channel_id,agent_id) VALUES(?1,?2)",
-                params![channel, current_agent],
-            )?;
-        }
-        conn.execute(
-            "INSERT OR IGNORE INTO project_agents(project_id,agent_id) VALUES(?1,?2)",
-            params![project.0, agent.0],
-        )?;
-        conn.execute(
-            "INSERT OR IGNORE INTO channel_agents(channel_id,agent_id) VALUES(?1,?2)",
-            params![channel, agent.0],
-        )?;
-        if current_agent != agent.0 {
-            conn.execute(
-                "UPDATE channels SET agent_id=?2 WHERE id=?1",
                 params![channel, agent.0],
             )?;
-            conn.execute(
-                "INSERT INTO sessions(id,channel_id) VALUES(?1,?2)",
-                params![SessionId::new().0, channel],
-            )?;
+            if current_agent != agent.0 {
+                conn.execute(
+                    "UPDATE channels SET agent_id=?2 WHERE id=?1",
+                    params![channel, agent.0],
+                )?;
+                conn.execute(
+                    "INSERT INTO sessions(id,channel_id) VALUES(?1,?2)",
+                    params![SessionId::new().0, channel],
+                )?;
+            }
         }
         Ok(())
     }
@@ -715,6 +760,58 @@ impl Store {
         Ok(())
     }
 
+    /// Whether the project shows its Archived section in the channel list.
+    pub fn project_show_archived(&self, project: &ProjectId) -> Result<bool> {
+        self.conn.query_row("SELECT show_archived FROM projects WHERE id=?1", params![project.0], |r| r.get::<_, bool>(0))
+            .optional()?.ok_or_else(|| StoreError::NotFound(format!("project {}", project.0)))
+    }
+
+    pub fn set_project_show_archived(&self, project: &ProjectId, show: bool) -> Result<()> {
+        if self.conn.execute("UPDATE projects SET show_archived=?2 WHERE id=?1", params![project.0, show])? == 0 {
+            return Err(StoreError::NotFound(format!("project {}", project.0)));
+        }
+        Ok(())
+    }
+
+    /// True when the channel, or a thread of the channel, has a saved message.
+    pub fn channel_has_messages(&self, channel: &ChannelId) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE channel_id=?1 OR channel_id IN (SELECT id FROM channels WHERE parent_channel_id=?1))",
+            params![channel.0],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Create an active text channel for the project main agent. The channel has no branch and works in the main checkout.
+    pub fn create_project_text_channel(&self, project: &ProjectId, name: &str) -> Result<Channel> {
+        let name = normalize_text_channel_name(name).map_err(StoreError::Invalid)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)", params![project.0], |r| r.get(0))?;
+        if !exists {
+            return Err(StoreError::NotFound(format!("project {}", project.0)));
+        }
+        let main_agent = self.project_main_agent(project)?
+            .ok_or_else(|| StoreError::Invalid("This project has no main agent. Open the project first.".into()))?;
+        self.require_active_agent(&main_agent)?;
+        let taken: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM project_channels pc JOIN channels c ON c.id=pc.channel_id
+             WHERE pc.project_id=?1 AND pc.kind IN ('general','text') AND c.archived=0 AND lower(c.name)=?2)",
+            params![project.0, name],
+            |r| r.get(0),
+        )?;
+        if taken || name == "general" {
+            return Err(StoreError::Invalid("A channel with this name already exists.".into()));
+        }
+        let channel = Channel { id: ChannelId::new(), project_id: Some(project.clone()), name, agent_id: main_agent.clone(), workspace_mode: WorkspaceMode::MainCheckout };
+        self.insert_channel(&channel)?;
+        self.create_session(&SessionId::new(), &channel.id)?;
+        tx.execute("INSERT INTO project_channels(channel_id,project_id,kind) VALUES(?1,?2,'text')", params![channel.id.0, project.0])?;
+        tx.execute("INSERT OR IGNORE INTO channel_agents(channel_id,agent_id) VALUES(?1,?2)", params![channel.id.0, main_agent.0])?;
+        tx.execute("INSERT OR IGNORE INTO project_agents(project_id,agent_id) VALUES(?1,?2)", params![project.0, main_agent.0])?;
+        tx.commit()?;
+        Ok(channel)
+    }
+
     pub fn project_main_agent(&self, project: &ProjectId) -> Result<Option<AgentId>> {
         Ok(self
             .conn
@@ -845,7 +942,7 @@ impl Store {
         let selected_agent: Option<String> = tx.query_row(
             "SELECT c.agent_id FROM channels c LEFT JOIN project_channels pc ON pc.channel_id=c.id
              WHERE c.id=?1 AND c.project_id=?2 AND c.parent_channel_id IS NULL AND lower(trim(c.name))='general'
-             AND (c.archived=0 OR pc.kind='archived_legacy') AND (pc.channel_id IS NULL OR pc.kind!='branch')",
+             AND (c.archived=0 OR pc.kind='archived_legacy') AND (pc.channel_id IS NULL OR pc.kind NOT IN ('branch','text'))",
             params![channel.0, project.0],
             |r| r.get(0),
         ).optional()?;
@@ -2763,7 +2860,7 @@ mod tests {
         let f = fixture();
         f.store.conn.execute_batch("DROP TABLE always_allow_rules; PRAGMA user_version=8;").unwrap();
         f.store.migrate().unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 12);
+        assert_eq!(f.store.schema_version().unwrap(), 13);
         assert!(f.store.always_allow_rules(&f.project.id).unwrap().is_empty());
     }
 
@@ -2776,7 +2873,7 @@ mod tests {
             store.conn.execute_batch("DROP TABLE autorun_responses; PRAGMA user_version=9;").unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 12);
+        assert_eq!(store.schema_version().unwrap(), 13);
         let columns: Vec<String> = store.conn.prepare("PRAGMA table_info(autorun_responses)").unwrap()
             .query_map([], |r| r.get::<_, String>(1)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
         assert_eq!(columns, ["response_id", "channel_id", "agent_id", "provider", "root", "created_at"]);
@@ -2958,7 +3055,7 @@ mod tests {
         let v1 = Store::open(&path).unwrap().schema_version().unwrap();
         let v2 = Store::open(&path).unwrap().schema_version().unwrap();
         assert!(v1 >= 2);
-        assert_eq!(v1, 12);
+        assert_eq!(v1, 13);
         assert_eq!(v1, v2);
     }
 
@@ -3002,7 +3099,7 @@ mod tests {
             conn.execute("INSERT INTO channels (id, project_id, name, agent_id, workspace_mode) VALUES ('c', 'p', 'general', 'a', 'main_checkout')", []).unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 12);
+        assert_eq!(store.schema_version().unwrap(), 13);
         let channels = store.channels_for_project(&ProjectId("p".into())).unwrap();
         assert_eq!(channels.len(), 1);
         assert_eq!(
@@ -3168,11 +3265,11 @@ mod tests {
         let f = fixture(); let turn = Turn::new(f.session.clone()); f.store.insert_turn(&turn).unwrap();
         let a = Approval::new(turn.id, "Bash", json!({})); f.store.save_approval(&a).unwrap();
         f.store.conn.execute_batch("ALTER TABLE approvals DROP COLUMN kind; DROP TABLE agent_commits; DROP TABLE always_allow_rules;").unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 12);
+        assert_eq!(f.store.schema_version().unwrap(), 13);
         f.store.migrate().unwrap();
         assert_eq!(f.store.load_approval(&a.id).unwrap().kind, crate::approval::ApprovalKind::ProviderTool);
         f.store.migrate().unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 12);
+        assert_eq!(f.store.schema_version().unwrap(), 13);
     }
 
     #[test]
@@ -3520,7 +3617,7 @@ mod tests {
             (f.channel, message)
         };
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 12);
+        assert_eq!(store.schema_version().unwrap(), 13);
         assert_eq!(columns(&store, "channels"), fresh_channels, "an upgraded database matches a fresh one");
         assert_eq!(columns(&store, "messages"), fresh_messages);
         assert_eq!(texts(&store.messages_for_channel(&channel.id).unwrap()), ["old"]);
@@ -3528,7 +3625,7 @@ mod tests {
         let thread = store.create_thread(&channel.id, &message, "old", &channel.agent_id).unwrap();
         assert!(store.thread_info(&thread.id).unwrap().unwrap().followed);
         store.migrate().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 12);
+        assert_eq!(store.schema_version().unwrap(), 13);
     }
 
     #[test]
@@ -3549,7 +3646,7 @@ mod tests {
             (f.channel, answer)
         };
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 12);
+        assert_eq!(store.schema_version().unwrap(), 13);
         assert_eq!(columns(&store, "channels"), fresh, "an upgraded database matches a fresh one");
         let question = store.thread_for_anchor(&answer).unwrap().unwrap();
         assert_eq!((question.kind, question.state, question.followed), (ThreadKind::Question, None, true), "old threads are question threads");
@@ -4706,5 +4803,225 @@ mod agent_lifecycle_tests {
         assert_ne!(old.id, current.id);
         assert_eq!(f.store.project_channel_metadata(&old.id).unwrap().unwrap().archived_into, Some(current.id.clone()));
         assert_eq!(f.store.project_channel_metadata(&current.id).unwrap().unwrap().kind, ProjectChannelKind::General);
+    }
+}
+
+#[cfg(test)]
+mod text_channel_tests {
+    use super::*;
+    use crate::capability::ApprovalPolicy;
+
+    struct Fixture {
+        store: Store,
+        project: Project,
+        agent: AgentId,
+    }
+
+    fn config(name: &str) -> AgentConfig {
+        AgentConfig {
+            workspace_write: false, sandbox_autorun: false, delegation: false,
+            reasoning_effort: None,
+            name: name.into(),
+            avatar: None,
+            provider: "claude".into(),
+            model: Some("model".into()),
+            system_prompt: String::new(),
+            policy: ApprovalPolicy::Ask,
+            plugin_write: false,
+        }
+    }
+
+    fn fixture() -> Fixture {
+        let store = Store::open_in_memory().unwrap();
+        let agent = store.create_agent(&config("Main")).unwrap();
+        let project = Project { id: ProjectId::new(), name: "P".into(), path: "/p".into() };
+        store.insert_project(&project).unwrap();
+        store.ensure_project_general_channel(&project.id, &agent).unwrap();
+        Fixture { store, project, agent }
+    }
+
+    fn message(store: &Store, channel: &ChannelId, text: &str) -> MessageId {
+        let message = Message { id: MessageId::new(), channel_id: channel.clone(), role: Role::User, blocks: vec![Block::Markdown { text: text.into() }] };
+        store.insert_message(&message).unwrap();
+        message.id
+    }
+
+    #[test]
+    fn names_normalize_to_lowercase_words_joined_by_hyphens() {
+        for (input, expected) in [("  Release Notes  ", "release-notes"), ("a   b\t c", "a-b-c"), ("a -- b", "a-b"), ("--Plan--", "plan"), ("keep_this-1", "keep_this-1")] {
+            assert_eq!(normalize_text_channel_name(input).unwrap(), expected, "{input:?}");
+        }
+        for input in ["café", "a/b", "#plan", "a.b"] {
+            assert_eq!(normalize_text_channel_name(input).unwrap_err(), "Use letters, numbers, hyphens, and underscores.", "{input:?}");
+        }
+        for input in ["", "   ", "---", &"a".repeat(51)] {
+            assert_eq!(normalize_text_channel_name(input).unwrap_err(), "Enter a channel name of 1 to 50 characters.", "{input:?}");
+        }
+        assert_eq!(normalize_text_channel_name(&"a".repeat(50)).unwrap().len(), 50);
+    }
+
+    #[test]
+    fn a_text_channel_uses_the_main_agent_and_the_main_checkout() {
+        let f = fixture();
+        let channel = f.store.create_project_text_channel(&f.project.id, "Release Notes").unwrap();
+        assert_eq!(channel.name, "release-notes");
+        assert_eq!(channel.agent_id, f.agent);
+        assert_eq!(channel.workspace_mode, WorkspaceMode::MainCheckout);
+        assert_eq!(f.store.load_channel(&channel.id).unwrap(), channel);
+        assert!(f.store.latest_session(&channel.id).unwrap().is_some());
+        assert_eq!(f.store.channel_agents(&channel.id).unwrap(), vec![f.agent.clone()]);
+        let metadata = f.store.project_channel_metadata(&channel.id).unwrap().unwrap();
+        assert_eq!((metadata.kind, metadata.branch, metadata.archived_into), (ProjectChannelKind::Text, None, None));
+        assert!(f.store.channels_for_project(&f.project.id).unwrap().iter().any(|c| c.id == channel.id));
+    }
+
+    #[test]
+    fn a_text_channel_name_is_unique_among_active_general_and_text_channels() {
+        let f = fixture();
+        let first = f.store.create_project_text_channel(&f.project.id, "plans").unwrap();
+        for name in ["plans", "PLANS", " Plans ", "general", "General"] {
+            let error = f.store.create_project_text_channel(&f.project.id, name).unwrap_err();
+            assert!(matches!(&error, StoreError::Invalid(message) if message == "A channel with this name already exists."), "{name}: {error:?}");
+        }
+        assert!(matches!(f.store.create_project_text_channel(&f.project.id, "bad/name"), Err(StoreError::Invalid(message)) if message.starts_with("Use letters")));
+        f.store.archive_channel(&first.id).unwrap();
+        let again = f.store.create_project_text_channel(&f.project.id, "plans").unwrap();
+        assert_ne!(again.id, first.id, "an archived text channel frees its name");
+        let other = Project { id: ProjectId::new(), name: "Q".into(), path: "/q".into() };
+        f.store.insert_project(&other).unwrap();
+        f.store.ensure_project_general_channel(&other.id, &f.agent).unwrap();
+        f.store.create_project_text_channel(&other.id, "plans").unwrap();
+    }
+
+    #[test]
+    fn a_text_channel_needs_a_project_and_a_main_agent() {
+        let f = fixture();
+        assert!(matches!(f.store.create_project_text_channel(&ProjectId::new(), "plans"), Err(StoreError::NotFound(_))));
+        let bare = Project { id: ProjectId::new(), name: "Bare".into(), path: "/bare".into() };
+        f.store.insert_project(&bare).unwrap();
+        assert!(matches!(f.store.create_project_text_channel(&bare.id, "plans"), Err(StoreError::Invalid(message)) if message.contains("no main agent")));
+        assert!(f.store.all_channels_for_project(&bare.id).unwrap().is_empty(), "a failed create leaves nothing behind");
+    }
+
+    #[test]
+    fn a_text_channel_is_never_the_canonical_general_channel() {
+        let f = fixture();
+        let general = f.store.ensure_project_general_channel(&f.project.id, &f.agent).unwrap();
+        let text = f.store.create_project_text_channel(&f.project.id, "plans").unwrap();
+        assert_eq!(f.store.ensure_project_general_channel(&f.project.id, &f.agent).unwrap().id, general.id);
+        assert!(f.store.set_canonical_project_channel(&f.project.id, &text.id).is_err());
+        let metadata = f.store.project_channel_metadata(&text.id).unwrap().unwrap();
+        assert_eq!(metadata.kind, ProjectChannelKind::Text);
+        assert_eq!(f.store.project_channel_metadata(&general.id).unwrap().unwrap().kind, ProjectChannelKind::General);
+        // An archived text channel stays text and does not give way to a new general channel.
+        f.store.archive_channel(&text.id).unwrap();
+        assert_eq!(f.store.ensure_project_general_channel(&f.project.id, &f.agent).unwrap().id, general.id);
+        assert_eq!(f.store.project_channel_metadata(&text.id).unwrap().unwrap().kind, ProjectChannelKind::Text);
+    }
+
+    #[test]
+    fn active_text_channels_follow_the_project_main_agent() {
+        let f = fixture();
+        let general = f.store.ensure_project_general_channel(&f.project.id, &f.agent).unwrap();
+        let active = f.store.create_project_text_channel(&f.project.id, "active").unwrap();
+        let archived = f.store.create_project_text_channel(&f.project.id, "old").unwrap();
+        f.store.archive_channel(&archived.id).unwrap();
+        let next = f.store.create_agent(&config("Next")).unwrap();
+        let (active_session, archived_session) = (f.store.latest_session(&active.id).unwrap(), f.store.latest_session(&archived.id).unwrap());
+        f.store.set_project_main_agent(&f.project.id, &next).unwrap();
+        assert_eq!(f.store.load_channel(&general.id).unwrap().agent_id, next);
+        assert_eq!(f.store.load_channel(&active.id).unwrap().agent_id, next);
+        assert_ne!(f.store.latest_session(&active.id).unwrap(), active_session, "the channel starts a new session");
+        assert_eq!(f.store.channel_agents(&active.id).unwrap(), vec![f.agent.clone(), next.clone()]);
+        assert_eq!(f.store.load_channel(&archived.id).unwrap().agent_id, f.agent, "an archived text channel keeps its agent");
+        assert_eq!(f.store.latest_session(&archived.id).unwrap(), archived_session);
+        f.store.delete_agent(&next, DeleteAgentOptions { delete_conversations: false, delete_private_memory: false }).unwrap();
+        assert_eq!(f.store.project_main_agent(&f.project.id).unwrap(), Some(f.agent.clone()));
+        assert_eq!(f.store.load_channel(&active.id).unwrap().agent_id, f.agent);
+    }
+
+    #[test]
+    fn show_archived_is_off_by_default_and_saved_for_each_project() {
+        let f = fixture();
+        let other = Project { id: ProjectId::new(), name: "Q".into(), path: "/q".into() };
+        f.store.insert_project(&other).unwrap();
+        assert!(!f.store.project_show_archived(&f.project.id).unwrap());
+        f.store.set_project_show_archived(&f.project.id, true).unwrap();
+        assert!(f.store.project_show_archived(&f.project.id).unwrap());
+        assert!(!f.store.project_show_archived(&other.id).unwrap());
+        f.store.set_project_show_archived(&f.project.id, false).unwrap();
+        assert!(!f.store.project_show_archived(&f.project.id).unwrap());
+        assert!(matches!(f.store.set_project_show_archived(&ProjectId::new(), true), Err(StoreError::NotFound(_))));
+        assert!(matches!(f.store.project_show_archived(&ProjectId::new()), Err(StoreError::NotFound(_))));
+    }
+
+    #[test]
+    fn a_channel_has_messages_when_it_or_one_of_its_threads_has_one() {
+        let f = fixture();
+        let channel = f.store.create_project_text_channel(&f.project.id, "plans").unwrap();
+        assert!(!f.store.channel_has_messages(&channel.id).unwrap());
+        let anchor = message(&f.store, &channel.id, "question");
+        let thread = f.store.create_thread(&channel.id, &anchor, "question", &f.agent).unwrap();
+        assert!(f.store.channel_has_messages(&channel.id).unwrap(), "the channel holds the anchor message");
+        let bare = f.store.create_project_text_channel(&f.project.id, "bare").unwrap();
+        assert!(!f.store.channel_has_messages(&bare.id).unwrap());
+        // A thread message counts for the parent even when the parent has no message of its own.
+        f.store.conn.execute("DELETE FROM messages WHERE id=?1", params![anchor.0]).unwrap();
+        assert!(!f.store.channel_has_messages(&channel.id).unwrap());
+        message(&f.store, &thread.id, "reply in thread");
+        assert!(f.store.channel_has_messages(&channel.id).unwrap());
+        assert!(!f.store.channel_has_messages(&bare.id).unwrap());
+    }
+
+    #[test]
+    fn migration_13_adds_text_channels_and_show_archived_to_a_version_12_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v12.db");
+        let (project, general, branch) = {
+            let store = Store::open(&path).unwrap();
+            let agent = store.create_agent(&config("Main")).unwrap();
+            let project = Project { id: ProjectId::new(), name: "P".into(), path: "/p".into() };
+            store.insert_project(&project).unwrap();
+            let general = store.ensure_project_general_channel(&project.id, &agent).unwrap();
+            let branch = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "feature".into(), agent_id: agent, workspace_mode: WorkspaceMode::Worktree };
+            store.create_named_repository_channel(&branch, "/p/sub", Some("feature"), None).unwrap();
+            store.set_project_show_archived(&project.id, true).unwrap();
+            // Put the database back in its version 12 shape.
+            store.conn.execute_batch("ALTER TABLE project_channels RENAME TO project_channels_v13;
+                CREATE TABLE project_channels (
+                    channel_id TEXT PRIMARY KEY REFERENCES channels(id),
+                    project_id TEXT NOT NULL REFERENCES projects(id),
+                    kind TEXT NOT NULL CHECK(kind IN ('general','branch','archived_legacy','legacy')),
+                    branch_name TEXT,
+                    archived_into TEXT REFERENCES channels(id),
+                    repository TEXT NOT NULL DEFAULT '');
+                INSERT INTO project_channels SELECT * FROM project_channels_v13;
+                DROP TABLE project_channels_v13;
+                CREATE UNIQUE INDEX one_project_general_channel ON project_channels(project_id) WHERE kind='general';
+                CREATE UNIQUE INDEX one_project_active_branch ON project_channels(project_id,repository,branch_name) WHERE kind='branch' AND branch_name IS NOT NULL;
+                ALTER TABLE projects DROP COLUMN show_archived;
+                PRAGMA user_version=12;").unwrap();
+            let text = store.conn.execute("INSERT INTO project_channels(channel_id,project_id,kind) VALUES('x',?1,'text')", params![project.id.0]);
+            assert!(text.is_err(), "the version 12 table refuses the text kind");
+            (project, general, branch)
+        };
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 13);
+        assert!(!store.project_show_archived(&project.id).unwrap(), "the new column defaults to off");
+        let general_metadata = store.project_channel_metadata(&general.id).unwrap().unwrap();
+        assert_eq!((general_metadata.kind, general_metadata.project_id.clone()), (ProjectChannelKind::General, project.id.clone()));
+        let branch_metadata = store.project_channel_metadata(&branch.id).unwrap().unwrap();
+        assert_eq!((branch_metadata.kind, branch_metadata.branch.as_deref(), branch_metadata.repository.as_str()), (ProjectChannelKind::Branch, Some("feature"), "/p/sub"));
+        let indexes: Vec<String> = store.conn.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='project_channels' AND name LIKE 'one_project_%' ORDER BY name").unwrap()
+            .query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(indexes, ["one_project_active_branch", "one_project_general_channel"]);
+        let text = store.create_project_text_channel(&project.id, "plans").unwrap();
+        assert_eq!(store.project_channel_metadata(&text.id).unwrap().unwrap().kind, ProjectChannelKind::Text);
+        let other = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "feature-2".into(), agent_id: text.agent_id.clone(), workspace_mode: WorkspaceMode::Worktree };
+        store.insert_channel(&other).unwrap();
+        assert!(store.conn.execute("INSERT INTO project_channels(channel_id,project_id,kind,branch_name,repository) VALUES(?1,?2,'branch','feature','/p/sub')", params![other.id.0, project.id.0]).is_err(), "the branch index still holds");
+        assert!(store.conn.execute("INSERT INTO project_channels(channel_id,project_id,kind) VALUES(?1,?2,'general')", params![other.id.0, project.id.0]).is_err(), "the general index still holds");
+        store.migrate().unwrap();
+        assert_eq!(store.schema_version().unwrap(), 13);
     }
 }

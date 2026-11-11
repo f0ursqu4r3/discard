@@ -12,10 +12,12 @@ import {
 import { mentionQuery, mentionToken } from './mentions'
 import AttachmentCard from './AttachmentCard.vue'
 import type { AttachmentDto } from '../bridge/types'
-import { Send, Square, AtSign, Paperclip, LoaderCircle, ChevronRight } from '@lucide/vue'
+import { Send, Square, AtSign, Paperclip, LoaderCircle, ChevronRight, Reply, X } from '@lucide/vue'
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from './ui/input-group'
 import { Checkbox } from './ui/checkbox'
 import { Label } from './ui/label'
+import { Button } from './ui/button'
+import { messageSourceLink, type PendingReply } from './reply'
 import { maySend, mayStop } from './composer'
 const props = defineProps<{
   archived: boolean
@@ -34,10 +36,13 @@ const props = defineProps<{
   alsoPostLabel?: string
   /** A message can be sent while a turn runs, and Send shows next to Stop. A steer of a sub-agent needs it. */
   sendWhileRunning?: boolean
+  /** The reply that waits for this composer. It shows as a chip above the input. */
+  reply?: PendingReply | null
 }>()
 const emit = defineEmits<{
   send: [text: string, attachments?: AttachmentDto[], alsoPost?: boolean]
   stop: []
+  cancelReply: []
   'update:draft': [text: string]
   'update:attachments': [attachments: AttachmentDto[]]
 }>()
@@ -295,6 +300,10 @@ async function focusEnd() {
   dismissed.value = true
 }
 defineExpose({ focusEnd })
+function cancelReply() {
+  emit('cancelReply')
+  void focusEnd()
+}
 function blur(event: FocusEvent) {
   if (!host.value?.contains(event.relatedTarget as Node | null)) dismissed.value = true
 }
@@ -340,6 +349,12 @@ function keydown(event: KeyboardEvent) {
         return
       }
     }
+  }
+  // The mention list takes Escape first. Without it, Escape cancels the reply.
+  if (event.key === 'Escape' && props.reply) {
+    event.preventDefault()
+    emit('cancelReply')
+    return
   }
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault()
@@ -413,6 +428,33 @@ function keydown(event: KeyboardEvent) {
           Drop files to attach
         </div>
       </Teleport>
+      <div
+        v-if="reply"
+        data-ui-id="reply-chip"
+        class="flex min-w-0 items-center gap-1 rounded-sm bg-muted/50 py-0.5 pr-0.5 pl-2 text-xs text-muted-foreground"
+      >
+        <a
+          :href="messageSourceLink(reply.source)"
+          class="flex min-w-0 flex-1 items-center gap-1 rounded-sm outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
+        >
+          <Reply class="size-3 shrink-0" aria-hidden="true" />
+          <span class="shrink-0">
+            Replying to
+            <strong class="font-medium text-foreground">{{ reply.author }}</strong>
+          </span>
+          <span class="min-w-0 truncate">{{ reply.excerpt }}</span>
+        </a>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label="Cancel reply"
+          title="Cancel reply"
+          @click="cancelReply"
+        >
+          <X aria-hidden="true" />
+        </Button>
+      </div>
       <div v-if="files.length" aria-label="Attachments" class="flex gap-2 overflow-x-auto pb-1">
         <AttachmentCard
           v-for="file in files"

@@ -390,3 +390,19 @@ test('canonical error recovery cannot emit or show an error after switching chan
   expect(wrapper.find('[role="alert"]').exists()).toBe(false)
   expect(wrapper.emitted('canonicalChanged')).toBeUndefined()
 })
+
+test('a text channel shows the project-wide scope and no canonical action', async () => {
+  api.getChannelDetails.mockResolvedValue({
+    ...details('text-id'),
+    channel: { ...details('text-id').channel, name: 'plans', kind: 'text', hasMessages: false },
+  })
+  const wrapper = mount(ProjectChannelDetails, {
+    props: { projectId: 'project', channelId: 'text-id', generalRunning: false },
+  })
+  await flushPromises()
+  const scope = wrapper.findAll('dt').find((entry) => entry.text() === 'scope')
+  expect(scope?.element.parentElement?.textContent).toContain('Project-wide channel')
+  expect(wrapper.text()).toContain('Active channel')
+  expect(wrapper.find('[data-ui-id="select-canonical-channel"]').exists()).toBe(false)
+  wrapper.unmount()
+})

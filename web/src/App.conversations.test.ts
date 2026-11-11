@@ -37,6 +37,7 @@ vi.mock('vue-sonner', () => ({ toast: { error: vi.fn(), success: vi.fn() } }))
 import App from './App.vue'
 import StatusLine from './components/StatusLine.vue'
 import BrailleSpinner from './components/BrailleSpinner.vue'
+import { toast } from 'vue-sonner'
 import { getProjectChannels } from './bridge/api'
 import ChannelHeader from './components/ChannelHeader.vue'
 import AgentHistorySearch from './components/agents/AgentHistorySearch.vue'
@@ -94,7 +95,7 @@ function app() {
   })
   return view
 }
-test('quoting appends to the draft without sending and keeps attachments', async () => {
+test('replying sets a pending reply, leaves the draft alone, and keeps attachments', async () => {
   const source: MessageDto = {
     id: 'source',
     role: 'user',
@@ -109,22 +110,73 @@ test('quoting appends to the draft without sending and keeps attachments', async
     { id: 'file', name: 'note.txt', mediaType: 'text/plain', size: 1, text: 'a' },
   ]
   composer.vm.$emit('update:attachments', attachments)
-  wrapper.getComponent(MessageList).vm.$emit('quote', source)
+  wrapper.getComponent(MessageList).vm.$emit('reply', source)
   await flushPromises()
-  expect(composer.props('draft')).toContain(
-    'Unsent reply\n\n> [Message from You](#discard-message/channel/source)',
-  )
-  expect(composer.props('draft')).toContain('> Original question\n\n')
+  expect(composer.props('draft')).toBe('Unsent reply')
+  expect(composer.props('reply')).toMatchObject({
+    author: 'You',
+    excerpt: 'Original question',
+    source: { channelId: 'channel', messageId: 'source' },
+  })
   expect(composer.props('attachments')).toEqual(attachments)
   expect(mocks.send).not.toHaveBeenCalled()
-  composer.vm.$emit('update:draft', 'Edited quote and reply')
+  composer.vm.$emit('send', 'Unsent reply', attachments)
   await flushPromises()
-  composer.vm.$emit('send', 'Edited quote and reply', attachments)
-  await flushPromises()
-  expect(mocks.send).toHaveBeenCalledWith('channel', 'Edited quote and reply', ['file'])
+  expect(mocks.send).toHaveBeenCalledWith(
+    'channel',
+    '> [Message from You](#discard-message/channel/source)\n>\n> Original question\n\nUnsent reply',
+    ['file'],
+  )
+  // The draft is cleared by comparing the typed text, and the sent reply clears the chip.
+  expect(composer.props('draft')).toBe('')
+  expect(composer.props('reply')).toBeUndefined()
 })
 
-test('a disabled composer rejects quote requests', async () => {
+test('a failed send keeps the pending reply, and Cancel reply clears it', async () => {
+  const source: MessageDto = {
+    id: 'source',
+    role: 'user',
+    continuesGroup: false,
+    blocks: [{ type: 'markdown', text: 'Original question' }],
+  }
+  mocks.store.history = [source]
+  mocks.send.mockRejectedValueOnce(new Error('offline'))
+  const wrapper = app()
+  const composer = wrapper.getComponent(Composer)
+  wrapper.getComponent(MessageList).vm.$emit('reply', source)
+  await flushPromises()
+  composer.vm.$emit('update:draft', 'Answer')
+  composer.vm.$emit('send', 'Answer')
+  await flushPromises()
+  expect(composer.props('reply')).toBeDefined()
+  expect(composer.props('draft')).toBe('Answer')
+  composer.vm.$emit('cancel-reply')
+  await flushPromises()
+  expect(composer.props('reply')).toBeUndefined()
+  composer.vm.$emit('send', 'Answer')
+  await flushPromises()
+  expect(mocks.send).toHaveBeenLastCalledWith('channel', 'Answer', [])
+})
+
+test('a new reply replaces the pending reply of the composer', async () => {
+  const first: MessageDto = {
+    id: 'first',
+    role: 'user',
+    continuesGroup: false,
+    blocks: [{ type: 'markdown', text: 'One' }],
+  }
+  const second = { ...first, id: 'second', blocks: [{ type: 'markdown' as const, text: 'Two' }] }
+  mocks.store.history = [first, second]
+  const wrapper = app()
+  wrapper.getComponent(MessageList).vm.$emit('reply', first)
+  wrapper.getComponent(MessageList).vm.$emit('reply', second)
+  await flushPromises()
+  expect(wrapper.getComponent(Composer).props('reply')).toMatchObject({
+    source: { messageId: 'second' },
+  })
+})
+
+test('a disabled composer rejects reply requests', async () => {
   const source: MessageDto = {
     id: 'source',
     role: 'user',
@@ -134,14 +186,23 @@ test('a disabled composer rejects quote requests', async () => {
   mocks.store.history = [source]
   mocks.store.snapshot = { ...mocks.store.snapshot!, composerDisabled: true }
   const wrapper = app()
-  expect(wrapper.getComponent(MessageList).props('quoteDisabled')).toBe(true)
-  wrapper.getComponent(MessageList).vm.$emit('quote', source)
+  expect(wrapper.getComponent(MessageList).props('replyDisabled')).toBe(true)
+  wrapper.getComponent(MessageList).vm.$emit('reply', source)
   await flushPromises()
+  expect(wrapper.getComponent(Composer).props('reply')).toBeUndefined()
   expect(wrapper.getComponent(Composer).props('draft')).toBeUndefined()
   expect(mocks.send).not.toHaveBeenCalled()
 })
 
-test('a quote source reference opens the original message', async () => {
+test('a reply source reference opens the original message', async () => {
+  mocks.store.history = [
+    {
+      id: 'source',
+      role: 'user',
+      continuesGroup: false,
+      blocks: [{ type: 'markdown', text: 'Original' }],
+    },
+  ]
   const wrapper = app()
   const link = document.createElement('a')
   link.href = '#discard-message/channel/source'
@@ -149,7 +210,19 @@ test('a quote source reference opens the original message', async () => {
   await wrapper.get('a').trigger('click')
   await flushPromises()
   expect(wrapper.getComponent(MessageList).props('jumpTo')).toMatchObject({ messageId: 'source' })
+  expect(toast.error).not.toHaveBeenCalled()
   expect(mocks.send).not.toHaveBeenCalled()
+})
+
+test('a reply source that is gone shows a toast and does not jump', async () => {
+  const wrapper = app()
+  const link = document.createElement('a')
+  link.href = '#discard-message/channel/gone'
+  wrapper.get('[data-ui-id="main-panel"]').element.append(link)
+  await wrapper.get('a').trigger('click')
+  await flushPromises()
+  expect(toast.error).toHaveBeenCalledWith('Original message is not available.')
+  expect(wrapper.getComponent(MessageList).props('jumpTo')).toBeUndefined()
 })
 
 test('a valid DM opens with no project and uses contact navigation', () => {
@@ -213,6 +286,7 @@ test.each([false, true])(
               branch: null,
               archived: false,
               archivedInto: null,
+              hasMessages: false,
             },
           ]
         : [],

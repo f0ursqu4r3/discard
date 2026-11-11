@@ -1,4 +1,4 @@
-import type { BranchRowDto } from '../bridge/types'
+import type { BranchRowDto, ProjectChannelDto } from '../bridge/types'
 import { planned } from './project-menu'
 
 export const channelRowClass =
@@ -46,4 +46,27 @@ export function groupBranchRows(rows: BranchRowDto[]) {
 
 export function treePrefix(isLast: boolean): '├' | '└' {
   return isLast ? '└' : '├'
+}
+
+export function branchIdentity(repository: string | undefined, branch: string) {
+  return JSON.stringify([repository ?? '', branch])
+}
+
+/**
+ * The channels of the Archived section. An active general or text channel never shows here.
+ * A branch channel shows when it is archived, or when its branch is gone from Git and it has messages.
+ */
+export function archivedChannels(
+  channels: ProjectChannelDto[],
+  branches: BranchRowDto[],
+): ProjectChannelDto[] {
+  const inGit = new Set(
+    branches.filter((row) => !row.detached).map((row) => branchIdentity(row.repository, row.label)),
+  )
+  return channels.filter((channel) => {
+    if (channel.archived) return true
+    if (channel.kind === 'legacy' || channel.kind === 'archived_legacy') return true
+    if (channel.kind !== 'branch' || !channel.branch) return false
+    return !inGit.has(branchIdentity(channel.repository, channel.branch)) && channel.hasMessages
+  })
 }

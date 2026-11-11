@@ -92,6 +92,7 @@ test('unread branch indicators belong only to their repository', () => {
     repository: repositories[0]!.id,
     archived: false,
     archivedInto: null,
+    hasMessages: false,
   }
   const list = mount(ChannelList, {
     props: {
@@ -116,7 +117,7 @@ test('unread branch indicators belong only to their repository', () => {
   const sections = list.findAll('[data-ui-id="repository-section"]')
   expect(sections[0]!.findAll('[data-ui-id="channel-unread-pip"]')).toHaveLength(2)
   expect(sections[1]!.findAll('[data-ui-id="channel-unread-pip"]')).toHaveLength(0)
-  expect(list.find('[data-ui-id="saved-channel-navigation"]').exists()).toBe(false)
+  expect(list.find('[data-ui-id="archived-channel-navigation"]').exists()).toBe(false)
   list.unmount()
 })
 
@@ -140,6 +141,7 @@ test('detached worktree unread markers use the saved path and commit, then clear
     branch: null,
     archived: false,
     archivedInto: null,
+    hasMessages: false,
     worktree: { path: '/detached/first', branch: 'abcdef1' },
   }
   const runtime = {
