@@ -203,7 +203,19 @@ The probe ran eight times while it grew. Every run passed. The table shows the l
 | d. Network from the sandbox | `curl` to a loopback listener: exit code 7, listener saw 0 connections. `curl` to `https://example.com`: exit code 6. | Pass |
 | e. In-sandbox command (`touch inside.txt`) | Ran. No approval request. | Pass |
 | f. Command with `sandbox_permissions: require_escalated` | One `item/commandExecution/requestApproval` with the model's `reason`. Declined. The command did not run. | Pass |
+| h1. Shell `touch sub/.git/hooks/probe-hook`, where `sub` is a nested repository made with `git init sub` | Exit code 0. File created. No approval request. | Gap |
+| h2. `apply_patch` adding `sub/.git/hooks/probe-hook-patch` | `Success. Updated the following files`. File created. No approval request. | Gap |
+| h3. `apply_patch` adding `newdir/.git/x` (no repository there) | `Success`. File created. No approval request. | Gap |
+| h4. Shell `mkdir -p newdir2/.git && touch newdir2/.git/x` | Exit code 0. File created. No approval request. | Gap |
 | g. `apply_patch` to `.codex/` in the root (information only) | `item/fileChange/requestApproval`, `reason: null`. Declined. No file created. | Information |
+
+Rows h1 to h4 test nested `.git` paths inside the writable root. The probe adds a second file name for
+h2 (`probe-hook-patch`), so h1 cannot make it fail. Discard's path classifier protects any path component
+named `.git`, at any depth and in any case, and under `untrusted` each of these patches gets a card.
+Under `on-request` Codex protects only the root `.git`. Every h write succeeded with no request. This is a
+gap against `untrusted`. It does not fail checks a to d, which name the root pointer and the common Git
+directory. Rows h are not part of the probe's pass or fail result. The probe prints a separate
+`nested .git gap` line.
 
 Rows a to d are the decision 12 conditions. Rows e and f confirm decision 11: under `on-request`,
 only an escalation asks. Row g shows that Codex asks before it writes `.codex/`. The engine
@@ -215,8 +227,34 @@ Limits of the spike:
 - The probe ran on macOS (Seatbelt). Autorun is unsupported on other platforms.
 - Check c passes through its second condition. With no request, Discard cannot hold the edit. It sees the paths before the change applies. In-root edits already receive automatic approval.
 - The probe tests a linked worktree. Autorun is unsupported without a `.git` pointer file.
+- Nested `.git` paths are not protected (rows h1 to h4). See the next section.
 - The probe does not test read isolation. A Codex command can read any file that the user's account can read.
 - The recorded turn is `fixtures/codex-autorun-turn.jsonl`. Paths are scrubbed. Rust tests replay it.
+
+### Nested `.git` paths
+
+An autorun command or patch can create a nested `.git` directory inside the root, or write inside an
+existing one, with no card (rows h3, h4, h1, h2). What this permits: a planted hook or Git config in that
+nested directory. It runs only if someone later runs Git inside that directory, for example a user or
+another tool that enters it. The sandbox still blocks network access and writes outside the root. The
+changes card lists the root's tracked changes. It does not show files under a nested `.git`.
+
+The adapter closes the part that it can check at start. At autorun session start, `start_session` walks
+the root. It skips the root `.git` pointer. It refuses autorun with `SandboxUnavailable` when any other
+entry is named `.git` (any case, file or directory). Symlinks are not followed. The walk reads at most
+200,000 entries. If it reaches the cap or cannot read a directory, it refuses. The engine then falls back
+to a read-only response and shows the reason. Non-autorun Codex sessions are unchanged, because
+`untrusted` asks for each patch and command.
+
+The walk cannot see what the agent creates during the session. A new nested `.git` from h3 or h4 stays
+possible within one autorun response. The next autorun session refuses to start in that worktree until
+someone removes the nested directory.
+
+Claude has the same limit for shell commands. The adapter's `denyWrite` list holds the root `.git`, the
+worktree Git directory, and the common Git directory only, so a sandboxed Claude shell command can write
+under a nested `.git` with no card. Claude's native `Write` and `Edit` tools go through the path
+classifier and get a card. This comparison comes from the adapter settings and the existing docs. The
+Claude probe does not cover nested `.git` paths.
 
 ### Autorun sessions
 
@@ -236,8 +274,8 @@ session, a file-change request with a non-null `reason` also receives that card.
 request when a patch fails in the sandbox ("command failed; retry without sandbox?"). The retry
 leaves the sandbox, so the path does not decide its class.
 
-`start_session` refuses an autorun Workspace session on a platform other than macOS and in a root
-without a `.git` pointer file. The engine then falls back to a read-only response. `sandbox_autorun()`
+`start_session` refuses an autorun Workspace session on a platform other than macOS, in a root
+without a `.git` pointer file, and in a root with a nested `.git` path. The engine then falls back to a read-only response. `sandbox_autorun()`
 reports `Unsupported` with the reason on other platforms. The settings page shows the toggle disabled
 with that reason. It is a state block, not planned work.
 

@@ -5,7 +5,7 @@ import sys
 import unittest
 
 from codex_conversation import require_controls
-from on_request_checks import all_passed, evaluate, failed_output, failed_patch
+from on_request_checks import all_passed, evaluate, failed_output, failed_patch, nested_git_gap
 
 
 class RequiredControlsTests(unittest.TestCase):
@@ -44,6 +44,7 @@ def passing_observation():
         "pointer_case": dict(asked),
         "common_marker": dict(denied), "gitdir_marker": dict(denied), "common_config": dict(denied), "git_add": dict(denied),
         "common_patch": dict(asked), "symlink_patch": {**asked, "link_created": True}, "codex_dir_patch": {"changed": False, "requests": ["item/fileChange/requestApproval"], "output": ""},
+        **{key: {"exists": False, "failed": True, "requests": [], "output": "Operation not permitted"} for key in ["nested_shell_hook", "nested_patch_hook", "new_dir_patch", "new_dir_shell"]},
         "patch_in_root": {"requests": [], "notice_paths": ["/root/edit.txt"], "notice_text_before_change": True, "applied": True},
         "in_root": {"changed": True, "requests": []},
         "network": {"loopback_connections": 0, "loopback_failed": True, "loopback_output": "", "external_failed": True, "external_output": ""},
@@ -99,6 +100,16 @@ class OnRequestEvaluationTests(unittest.TestCase):
         observed = passing_observation()
         observed["in_root"].update(requests=["item/commandExecution/requestApproval"])
         self.assertEqual(self.failing(observed), ["e"])
+
+    def test_a_silent_nested_git_write_is_a_gap_but_not_a_spike_failure(self):
+        for key, row in [("nested_shell_hook", "h1"), ("nested_patch_hook", "h2"), ("new_dir_patch", "h3"), ("new_dir_shell", "h4")]:
+            observed = passing_observation()
+            self.assertFalse(nested_git_gap(evaluate(observed)), key)
+            observed[key].update(exists=True, failed=False)
+            rows = evaluate(observed)
+            self.assertTrue(nested_git_gap(rows), key)
+            self.assertEqual([r[0] for r in rows if r[0][0] == "h" and not r[3]], [row])
+            self.assertTrue(all_passed(rows), "rows a to f still pass")
 
     def test_the_codex_dir_row_is_information_only(self):
         observed = passing_observation()

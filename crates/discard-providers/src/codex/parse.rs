@@ -313,7 +313,11 @@ mod tests {
         for line in include_str!("../../fixtures/codex-autorun-turn.jsonl").lines() {
             for item in mapper.on_message(&serde_json::from_str(line).unwrap()) {
                 if let Item::Event(e) = item {
-                    if let EventKind::ApprovalRequest { call_id, tool, kind, .. } = &e.kind { approvals.push((call_id.clone(), tool.clone(), *kind)); }
+                    if let EventKind::ApprovalRequest { call_id, tool, kind, paths, .. } = &e.kind {
+                        // File changes are named by their paths, so the test does not depend on item numbering.
+                        let name = if paths.is_empty() { call_id.clone() } else { paths.join(",") };
+                        approvals.push((name, tool.clone(), *kind));
+                    }
                     timeline.apply(&e.kind);
                 }
             }
@@ -337,16 +341,22 @@ mod tests {
         // The one escalation is the only command approval. Every command approval is a full-access card.
         assert_eq!(commands.len(), 1, "{approvals:?}");
         assert_eq!(commands[0].2, ApprovalKind::SandboxEscape);
+        let kind_of = |needle: &str| {
+            let hits: Vec<_> = approvals.iter().filter(|(name, tool, _)| tool == "file_change" && name.contains(needle)).collect();
+            assert_eq!(hits.len(), 1, "{needle}: {approvals:?}");
+            hits[0].2
+        };
         // The sandbox retry ("command failed; retry without sandbox?") is an escape whatever its path is.
-        assert!(approvals.contains(&("onrequest_4".into(), "file_change".into(), ApprovalKind::SandboxEscape)), "{approvals:?}");
+        assert_eq!(kind_of("gitlink/"), ApprovalKind::SandboxEscape);
         // Other file-change requests keep today's classification. The engine reclassifies them by path.
-        for id in ["onrequest_1", "onrequest_2", "onrequest_5", "onrequest_9"] {
-            assert!(approvals.contains(&(id.into(), "file_change".into(), ApprovalKind::ProviderTool)), "{id}: {approvals:?}");
+        for needle in ["linked/.git", "linked/.GIT", "linked/.codex/", "repo/.git/synthetic-patch-marker"] {
+            assert_eq!(kind_of(needle), ApprovalKind::ProviderTool, "{needle}");
         }
-        // Commands and the in-root edit that ran in the sandbox raised no request.
-        let asked: Vec<&str> = approvals.iter().map(|(id, ..)| id.as_str()).collect();
-        for id in ["onrequest_10", "onrequest_11", "onrequest_12", "onrequest_13", "onrequest_14"] {
-            assert!(!asked.contains(&id), "{id} asked: {approvals:?}");
+        // The in-root edit, the commands, and the nested `.git` writes ran in the sandbox with no request.
+        // The nested writes are the gap that the adapter closes by refusing autorun in such a worktree.
+        let asked = |needle: &str| approvals.iter().any(|(name, ..)| name.contains(needle));
+        for needle in ["edit.txt", "inside.txt", "sub/.git", "newdir/.git", "index.lock", "curl"] {
+            assert!(!asked(needle), "{needle} asked: {approvals:?}");
         }
     }
 

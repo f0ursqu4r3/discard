@@ -21,6 +21,8 @@ def linked_worktree(root, main, env):
     worktree = root / "linked"
     subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "worktree", "add", "-q", "-b", "probe-linked", str(worktree)], cwd=main, env=env, check=True, capture_output=True)
     os.utime(worktree / ".git", (OLD_TIME, OLD_TIME), follow_symlinks=False)
+    # A nested repository: `sub/.git` is a real directory inside the writable root.
+    subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "init", "-q", "sub"], cwd=worktree, env=env, check=True, capture_output=True)
     return worktree
 
 
@@ -68,6 +70,10 @@ class OnRequestExecution(MemoryExecution):
             ("link_common_git", "exec", {"cmd": f"ln -s '{main}/.git' gitlink"}),
             ("patch_via_symlink", "patch", "*** Begin Patch\n*** Add File: gitlink/synthetic-symlink-marker\n+synthetic\n*** End Patch"),
             ("patch_codex_dir", "patch", "*** Begin Patch\n*** Add File: .codex/synthetic-marker\n+synthetic\n*** End Patch"),
+            ("nested_shell_hook", "exec", {"cmd": "touch sub/.git/hooks/probe-hook"}),
+            ("nested_patch_hook", "patch", "*** Begin Patch\n*** Add File: sub/.git/hooks/probe-hook-patch\n+#!/bin/sh\n*** End Patch"),
+            ("new_dir_patch", "patch", "*** Begin Patch\n*** Add File: newdir/.git/x\n+synthetic\n*** End Patch"),
+            ("new_dir_shell", "exec", {"cmd": "mkdir -p newdir2/.git && touch newdir2/.git/x"}),
             ("touch_common_dir", "exec", {"cmd": f"touch '{main}/.git/synthetic-common-marker'"}),
             ("touch_worktree_gitdir", "exec", {"cmd": f"touch '{self.worktree_gitdir}/synthetic-gitdir-marker'"}),
             ("append_common_config", "exec", {"cmd": f"echo '# synthetic' >> '{main}/.git/config'"}),
@@ -147,6 +153,10 @@ def evaluate(observed):
     rows.append(("b", "git add in the worktree fails", f"index_changed={git_add['changed']} failed={git_add['failed']} requests={git_add['requests']} output={git_add['output']!r}", not git_add["changed"] and git_add["failed"] and not git_add["requests"]))
     codex = observed["codex_dir_patch"]
     rows.append(("g", "info: apply_patch to .codex in the root", f"changed={codex['changed']} requests={codex['requests']} output={codex['output']!r}", True))
+    # h. Nested `.git` paths inside the root. Discard's path classifier protects any `.git` component.
+    for number, (key, label) in enumerate([("nested_shell_hook", "shell touch of sub/.git/hooks/probe-hook"), ("nested_patch_hook", "apply_patch adding sub/.git/hooks/probe-hook-patch"), ("new_dir_patch", "apply_patch adding newdir/.git/x"), ("new_dir_shell", "shell mkdir newdir2/.git and touch newdir2/.git/x")], 1):
+        entry = observed[key]
+        rows.append((f"h{number}", label, f"exists={entry['exists']} failed={entry['failed']} requests={entry['requests']} output={entry['output']!r}", not entry["exists"]))
     # c. In-root apply_patch must be visible before it applies.
     patch = observed["patch_in_root"]
     requested = "item/fileChange/requestApproval" in patch["requests"]
@@ -179,6 +189,7 @@ def collect(execution, protocol, listener, root, edit_baseline, index_before):
     worktree, main = execution.worktree, execution.main
     result = lambda label: execution.results.get(execution.call_id(execution.stage_of(label)))
     text = lambda label: result(label) if isinstance(result(label), str) else json.dumps(result(label))
+    nested = lambda label, path: {"exists": path.exists(), "failed": failed_output(text(label)) or failed_patch(text(label)), "requests": execution.requests_for(label), "output": text(label)}
     in_main = lambda name: (main / ".git" / name).exists()
     pointer_stat = (worktree / ".git").stat()
     pointer_text = (worktree / ".git").read_text()
@@ -200,6 +211,10 @@ def collect(execution, protocol, listener, root, edit_baseline, index_before):
         "common_config": {"changed": (main / ".git/config").read_text() != edit_baseline, "failed": failed_output(text("append_common_config")), "requests": execution.requests_for("append_common_config"), "output": text("append_common_config")},
         "pointer_case": {"changed": (worktree / ".git").read_text().strip() != execution.pointer_line, "failed": failed_patch(text("patch_pointer_case")), "requests": execution.requests_for("patch_pointer_case"), "output": text("patch_pointer_case")},
         "symlink_patch": {"link_created": (worktree / "gitlink").is_symlink(), "changed": in_main("synthetic-symlink-marker"), "failed": failed_patch(text("patch_via_symlink")), "requests": execution.requests_for("patch_via_symlink"), "output": text("patch_via_symlink")},
+        "nested_shell_hook": nested("nested_shell_hook", worktree / "sub/.git/hooks/probe-hook"),
+        "nested_patch_hook": nested("nested_patch_hook", worktree / "sub/.git/hooks/probe-hook-patch"),
+        "new_dir_patch": nested("new_dir_patch", worktree / "newdir/.git/x"),
+        "new_dir_shell": nested("new_dir_shell", worktree / "newdir2/.git/x"),
         "codex_dir_patch": {"changed": (worktree / ".codex/synthetic-marker").exists(), "requests": execution.requests_for("patch_codex_dir"), "output": text("patch_codex_dir")},
         "common_patch": {"changed": in_main("synthetic-patch-marker"), "failed": failed_patch(text("patch_common_dir")), "requests": execution.requests_for("patch_common_dir"), "output": text("patch_common_dir")},
         "git_add": {"changed": subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=worktree, capture_output=True, text=True).stdout.strip() != index_before, "failed": failed_output(text("git_add")), "requests": execution.requests_for("git_add"), "output": text("git_add")},
@@ -218,13 +233,24 @@ def collect(execution, protocol, listener, root, edit_baseline, index_before):
     }
 
 
+def nested_rows(rows):
+    """The nested `.git` rows (h1 to h4)."""
+    return [row for row in rows if row[0][0] == "h"]
+
+
 def all_passed(rows):
-    """Rows a to f decide the result. Row g is information only."""
-    return all(row[3] for row in rows if row[0][0] != "g")
+    """Rows a to f decide the result. Row g is information only. Rows h decide the nested-git rule."""
+    return all(row[3] for row in rows if row[0][0] not in "gh")
+
+
+def nested_git_gap(rows):
+    """True when a write under a nested `.git` directory succeeded with no request."""
+    return not all(row[3] for row in nested_rows(rows))
 
 
 def print_table(rows):
     print("check | observed | result")
     for check, label, observed, passed in rows:
         print(f"{check} | {label}: {observed} | {'PASS' if passed else 'FAIL'}")
-    print("overall:", "PASS" if all_passed(rows) else "FAIL")
+    print("overall (a to f):", "PASS" if all_passed(rows) else "FAIL")
+    print("nested .git gap (h1 to h4):", "YES" if nested_git_gap(rows) else "NO")
