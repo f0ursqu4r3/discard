@@ -8,6 +8,7 @@ import type { ProjectEntry } from '@/bridge/api'
 import ChannelList from '../ChannelList.vue'
 import UserBar from './UserBar.vue'
 import DirectMessageSidebar from './DirectMessageSidebar.vue'
+import { channelApprovals } from '../threads'
 defineProps<{
   projects?: import('@/bridge/api').ProjectEntry[]
   snapshot: SnapshotDto
@@ -24,6 +25,8 @@ const emit = defineEmits<{
   inspectChannel: [id: string]
   openBranch: [key: string]
   approvals: []
+  selectThread: [threadId: string]
+  leaveThread: [threadId: string]
   projectAction: [action: ProjectMenuAction, project: ProjectEntry]
 }>()
 </script>
@@ -43,7 +46,7 @@ const emit = defineEmits<{
         :project="snapshot.project"
         :unread="snapshot.channels.some((channel) => channel.unread)"
         :pending-approvals="
-          snapshot.channels.reduce((total, channel) => total + channel.pendingApprovals, 0)
+          snapshot.channels.reduce((total, channel) => total + channelApprovals(channel), 0)
         "
         :direct-messages="page === 'direct-messages'"
         @direct-messages="emit('navigate', 'direct-messages')"
@@ -61,8 +64,11 @@ const emit = defineEmits<{
         class="min-w-0 flex-1"
         :channel-id="snapshot.channelId"
         :busy="busy"
+        :open-thread-id="snapshot.openThread?.channelId"
         @select-channel="emit('selectChannel', $event)"
         @action="emit('action', $event)"
+        @select-thread="emit('selectThread', $event)"
+        @leave-thread="emit('leaveThread', $event)"
       />
       <ChannelList
         v-else-if="!compact"
@@ -86,6 +92,7 @@ const emit = defineEmits<{
         :repositories="snapshot.repositories"
         :repositories-loading="snapshot.repositoriesLoading"
         :target="{ type: 'channel', id: snapshot.channelId }"
+        :open-thread-id="snapshot.openThread?.channelId"
         @navigate="emit('navigate', $event)"
         @action="emit('action', $event)"
         @toggle-branch="emit('toggleBranch', $event)"
@@ -93,6 +100,8 @@ const emit = defineEmits<{
         @inspect-channel="emit('inspectChannel', $event)"
         @open-branch="emit('openBranch', $event)"
         @approvals="emit('approvals')"
+        @select-thread="emit('selectThread', $event)"
+        @leave-thread="emit('leaveThread', $event)"
       />
     </div>
     <UserBar

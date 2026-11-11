@@ -78,7 +78,7 @@ pub fn ensure_workspace(store: &Store, project_dir: &Path, provider: &str, role:
                 existing
             } else {
             let agent = AgentConfig {
-                workspace_write: false,
+                workspace_write: false, sandbox_autorun: false, delegation: false,
                 reasoning_effort: None,
                 name: if role == Role::Builder { "Builder".to_string() } else { crate::agent::generated_name() },
                 avatar: None,
@@ -286,7 +286,7 @@ mod tests {
             conn.pragma_update(None, "user_version", 4).unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 9);
+        assert_eq!(store.schema_version().unwrap(), 12);
         let metadata = store.project_channel_metadata(&channel_id).unwrap().unwrap();
         assert_eq!(metadata.kind, crate::model::ProjectChannelKind::Legacy);
         assert_eq!(store.load_channel(&channel_id).unwrap().workspace_mode, mode);

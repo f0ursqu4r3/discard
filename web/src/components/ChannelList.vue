@@ -17,6 +17,8 @@ import {
 import NavigationContextMenu from './NavigationContextMenu.vue'
 import BrailleSpinner from './BrailleSpinner.vue'
 import SidebarWorktree from './SidebarWorktree.vue'
+import ThreadRow from './ThreadRow.vue'
+import { channelApprovals, threadLinks } from './threads'
 import { branchActions, channelRowClass, groupBranchRows } from './branch-navigation'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
@@ -59,6 +61,8 @@ const props = withDefaults(
     target?: ContextTargetDto
     page?: WorkspacePage
     busy?: boolean
+    /** The thread panel shows this thread. */
+    openThreadId?: string | null
   }>(),
   { page: 'conversation', channels: () => [], projectChannels: () => [] },
 )
@@ -70,7 +74,12 @@ const emit = defineEmits<{
   inspectChannel: [id: string]
   openBranch: [key: string]
   approvals: []
+  selectThread: [threadId: string]
+  leaveThread: [threadId: string]
 }>()
+function threadsOf(channelId: string | undefined) {
+  return threadLinks(channelId, props.channels, props.projectChannels)
+}
 const generalChannel = computed(() =>
   props.projectChannels.find((channel) => channel.kind === 'general' && !channel.archived),
 )
@@ -119,8 +128,8 @@ function rowUnread(row: BranchRowDto) {
 function runner(channelId: string | undefined) {
   return props.channels.find((channel) => channel.id === channelId && channel.running)
 }
-function branchRunner(row: BranchRowDto) {
-  const channel = props.projectChannels.find(
+function branchChannel(row: BranchRowDto) {
+  return props.projectChannels.find(
     (channel) =>
       !channel.archived &&
       channel.projectId === props.projectId &&
@@ -132,7 +141,9 @@ function branchRunner(row: BranchRowDto) {
           branchIdentity(channel.repository, channel.branch ?? '') ===
             branchIdentity(row.repository, row.label)),
   )
-  return runner(channel?.id)
+}
+function branchRunner(row: BranchRowDto) {
+  return runner(branchChannel(row)?.id)
 }
 const navigation = [
   { id: 'overview', label: 'Overview', icon: Monitor },
@@ -210,7 +221,7 @@ watch(sections, (value) => {
 })
 const approvals = computed(
   () =>
-    props.channels.reduce((count, channel) => count + channel.pendingApprovals, 0) ||
+    props.channels.reduce((count, channel) => count + channelApprovals(channel), 0) ||
     props.pendingApprovals ||
     0,
 )
@@ -352,6 +363,16 @@ const approvals = computed(
             />
           </button>
         </NavigationContextMenu>
+        <ThreadRow
+          v-for="(link, index) in threadsOf(generalChannel?.id)"
+          :key="link.id"
+          :link="link"
+          :is-last="index === threadsOf(generalChannel?.id).length - 1"
+          :active="link.id === openThreadId && page === 'conversation'"
+          :busy="busy"
+          @select="emit('selectThread', $event)"
+          @leave="emit('leaveThread', $event)"
+        />
 
         <p v-if="repositoriesLoading" role="status" class="mt-5 px-2 text-xs text-muted-foreground">
           Scanning repositories…
@@ -501,6 +522,16 @@ const approvals = computed(
                       />
                     </Button>
                   </NavigationContextMenu>
+                  <ThreadRow
+                    v-for="(link, index) in threadsOf(branchChannel(branch.row)?.id)"
+                    :key="link.id"
+                    :link="link"
+                    :is-last="index === threadsOf(branchChannel(branch.row)?.id).length - 1"
+                    :active="link.id === openThreadId && page === 'conversation'"
+                    :busy="busy"
+                    @select="emit('selectThread', $event)"
+                    @leave="emit('leaveThread', $event)"
+                  />
                   <SidebarWorktree
                     v-for="(worktree, index) in branch.worktrees"
                     :key="worktree.worktree ?? worktree.key"
@@ -548,16 +579,26 @@ const approvals = computed(
                 </button>
               </CollapsibleTrigger>
               <CollapsibleContent>
-                <SidebarWorktree
-                  v-for="row in repository.detached"
-                  :key="row.worktree ?? row.key"
-                  :row="row"
-                  :working-agent-id="branchRunner(row)?.agentId"
-                  :busy="busy || !projectId"
-                  :selected="row.current && page === 'conversation'"
-                  :unread="rowUnread(row)"
-                  @open="emit('openBranch', $event)"
-                />
+                <template v-for="row in repository.detached" :key="row.worktree ?? row.key">
+                  <SidebarWorktree
+                    :row="row"
+                    :working-agent-id="branchRunner(row)?.agentId"
+                    :busy="busy || !projectId"
+                    :selected="row.current && page === 'conversation'"
+                    :unread="rowUnread(row)"
+                    @open="emit('openBranch', $event)"
+                  />
+                  <ThreadRow
+                    v-for="(link, index) in threadsOf(branchChannel(row)?.id)"
+                    :key="link.id"
+                    :link="link"
+                    :is-last="index === threadsOf(branchChannel(row)?.id).length - 1"
+                    :active="link.id === openThreadId && page === 'conversation'"
+                    :busy="busy"
+                    @select="emit('selectThread', $event)"
+                    @leave="emit('leaveThread', $event)"
+                  />
+                </template>
               </CollapsibleContent>
             </Collapsible>
             <!-- <Button
@@ -591,49 +632,59 @@ const approvals = computed(
             </button>
           </CollapsibleTrigger>
           <CollapsibleContent class="flex flex-col gap-0.5">
-            <NavigationContextMenu
-              v-for="channel in savedChannels"
-              :key="channel.id"
-              kind="channel"
-              :name="channel.branch ?? channel.name"
-              :id="channel.id"
-              :busy="busy"
-              @open="emit('selectChannel', channel.id)"
-            >
-              <Button
-                variant="ghost"
-                :data-ui-id="`saved-channel-${channel.id}`"
-                :class="{
-                  'nav-active-edge bg-sidebar-accent':
-                    channel.id === channelId && page === 'conversation',
-                }"
-                :disabled="busy"
-                class="flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-xs text-muted-foreground outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"
-                @click="emit('selectChannel', channel.id)"
+            <template v-for="channel in savedChannels" :key="channel.id">
+              <NavigationContextMenu
+                kind="channel"
+                :name="channel.branch ?? channel.name"
+                :id="channel.id"
+                :busy="busy"
+                @open="emit('selectChannel', channel.id)"
               >
-                <Hash class="size-4 shrink-0" />
-                <span class="min-w-0 flex-1 truncate font-mono text-[0.92em]">
-                  {{ channel.branch ?? channel.name }}
-                </span>
-                <BrailleSpinner
-                  v-if="runner(channel.id)"
-                  :agent-id="runner(channel.id)?.agentId"
-                  class="shrink-0"
-                />
-                <span
-                  v-if="unreadChannelIds.has(channel.id)"
-                  data-ui-id="channel-unread-pip"
-                  role="img"
-                  aria-label="Unread messages"
-                  class="size-2 shrink-0 rounded-full bg-sidebar-foreground"
-                />
-                <span class="shrink-0">
-                  {{
-                    channel.archived ? 'History' : channel.kind === 'legacy' ? 'Saved' : 'Channel'
-                  }}
-                </span>
-              </Button>
-            </NavigationContextMenu>
+                <Button
+                  variant="ghost"
+                  :data-ui-id="`saved-channel-${channel.id}`"
+                  :class="{
+                    'nav-active-edge bg-sidebar-accent':
+                      channel.id === channelId && page === 'conversation',
+                  }"
+                  :disabled="busy"
+                  class="flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-xs text-muted-foreground outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"
+                  @click="emit('selectChannel', channel.id)"
+                >
+                  <Hash class="size-4 shrink-0" />
+                  <span class="min-w-0 flex-1 truncate font-mono text-[0.92em]">
+                    {{ channel.branch ?? channel.name }}
+                  </span>
+                  <BrailleSpinner
+                    v-if="runner(channel.id)"
+                    :agent-id="runner(channel.id)?.agentId"
+                    class="shrink-0"
+                  />
+                  <span
+                    v-if="unreadChannelIds.has(channel.id)"
+                    data-ui-id="channel-unread-pip"
+                    role="img"
+                    aria-label="Unread messages"
+                    class="size-2 shrink-0 rounded-full bg-sidebar-foreground"
+                  />
+                  <span class="shrink-0">
+                    {{
+                      channel.archived ? 'History' : channel.kind === 'legacy' ? 'Saved' : 'Channel'
+                    }}
+                  </span>
+                </Button>
+              </NavigationContextMenu>
+              <ThreadRow
+                v-for="(link, index) in threadsOf(channel.id)"
+                :key="link.id"
+                :link="link"
+                :is-last="index === threadsOf(channel.id).length - 1"
+                :active="link.id === openThreadId && page === 'conversation'"
+                :busy="busy"
+                @select="emit('selectThread', $event)"
+                @leave="emit('leaveThread', $event)"
+              />
+            </template>
           </CollapsibleContent>
         </Collapsible>
         <Collapsible

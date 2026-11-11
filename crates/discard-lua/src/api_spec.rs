@@ -83,7 +83,7 @@ pub const NAMESPACES: &[ApiNamespace] = &[
 
 pub const CONSTANTS: &[(&str, &str, &str)] = &[("api_version", "string", "The plugin API version this Discard implements.")];
 
-pub const SLOT_STATE_DOC: &str = "`state` for the built-in slots: `{ project: string, channel: string, pending_approvals: number, turn_running: boolean, agent: { id: string, name: string, provider: string, status: \"idle\" | \"working\" | \"awaiting_approval\" | \"offline\" } }`. `state.agent.id` is the active conversation agent's stored ID. Pass this string to `agent` on `row`, `column`, or `avatar` to use that agent's identity.";
+pub const SLOT_STATE_DOC: &str = "`state` for the built-in slots: `{ project: string, channel: string, pending_approvals: number, turn_running: boolean, autorun: boolean, agent: { id: string, name: string, provider: string, status: \"idle\" | \"working\" | \"awaiting_approval\" | \"offline\" }, agents: { id: string, name: string, provider: string, status: string }[] }`. `state.agent` is the agent that owns the running turn, or the conversation's saved agent when no turn runs. `state.agent.id` is that agent's stored ID. `state.agents` lists every agent in the conversation: the saved agent first, then the other agents in order of their first reply. Only the agent that owns the running turn has a status other than \"idle\". `state.autorun` is true while the running response runs shell commands without approval. Pass an agent's ID to `agent` on `row`, `column`, or `avatar` to use that agent's identity.";
 
 const TEXT_COLOR_DOC: &str = "Text color from the element color tokens. `agent` uses the nearest agent container's readable identity text color (`--agent-text`), or `primary` outside one.";
 
@@ -430,7 +430,7 @@ mod tests {
         let snap = Snapshot::from_files([("plugin.toml".to_string(), toml.into_bytes()), ("init.lua".to_string(), lua.into_bytes())].into());
         let (h, info) = PluginHandle::spawn(snap, PluginLimits::default()).expect("the guide's example must load");
         let slot = info.slots.first().expect("the example registers a slot").clone();
-        let state = serde_json::json!({"project": "p", "channel": "c", "pending_approvals": 0, "turn_running": false, "agent": {"name": "A", "provider": "claude", "status": "idle"}});
+        let state = serde_json::json!({"project": "p", "channel": "c", "pending_approvals": 0, "turn_running": false, "agent": {"name": "A", "provider": "claude", "status": "idle"}, "agents": [{"id": "a", "name": "A", "provider": "claude", "status": "idle"}]});
         h.render(&slot, &state).expect("the guide's example must render");
     }
 

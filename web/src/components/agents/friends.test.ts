@@ -16,6 +16,9 @@ const base: AgentEntry = {
   policy: 'deny',
   pluginWrite: false,
   workspaceWrite: false,
+  sandboxAutorun: false,
+  sandboxAutorunUnavailable: null,
+  sandboxAutorunPlanned: false,
   archived: false,
 }
 let rows: AgentEntry[], changed: () => void

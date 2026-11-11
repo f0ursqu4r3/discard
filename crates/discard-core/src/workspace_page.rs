@@ -75,7 +75,7 @@ mod tests {
             .insert_agent(
                 &agent,
                 &AgentConfig {
-                    workspace_write: false,
+                    workspace_write: false, sandbox_autorun: false, delegation: false,
                     reasoning_effort: None,
                     name: "agent".into(),
                     avatar: None,

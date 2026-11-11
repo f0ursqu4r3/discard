@@ -10,8 +10,8 @@ if [ "${FAKE_CLAUDE_HANG_SETUP:-}" = "${1:-}" ]; then
 fi
 
 case "${1:-}" in
-  --version) echo "2.1.318 (Fake Claude)"; exit 0 ;;
-  --help) echo "${FAKE_CLAUDE_HELP:---tools --allowedTools --strict-mcp-config --restricted --disable-slash-commands --system-prompt-snapshot --settings}"; exit 0 ;;
+  --version) echo "${FAKE_CLAUDE_VERSION:-2.1.318 (Fake Claude)}"; exit "${FAKE_CLAUDE_VERSION_EXIT:-0}" ;;
+  --help) echo "${FAKE_CLAUDE_HELP:---tools --allowedTools --strict-mcp-config --restricted --disable-slash-commands --system-prompt-snapshot --settings --setting-sources --input-format --output-format --verbose --include-partial-messages --permission-mode --permission-prompts --permission-prompt-tool --effort --model --append-system-prompt --resume --mcp-config}"; exit 0 ;;
   auth) echo "{\"loggedIn\":${FAKE_CLAUDE_LOGGED_IN:-true},\"email\":\"never-read@example.invalid\"}"; exit 0 ;;
 esac
 

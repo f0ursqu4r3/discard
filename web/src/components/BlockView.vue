@@ -76,6 +76,7 @@ const approval = computed(() => {
       :input="block.input"
       :output="block.output"
       :is-error="block.is_error"
+      :sandboxed="block.sandboxed"
       :running="running"
     />
     <ApprovalCard :channel-id="channelId" v-else-if="approval" :prompt="approval" />

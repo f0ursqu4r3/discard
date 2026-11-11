@@ -7,3 +7,5 @@ pub mod fake;
 mod attachments;
 mod conversation;
 mod models;
+mod text;
+mod version;

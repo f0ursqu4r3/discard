@@ -69,13 +69,15 @@ See `docs/provider-codex.md`. The Codex matrix was verified against a live `code
 
 ## Conversation sessions
 
-`SessionMode::Conversation` requires Claude Code 2.1.318 and the documented conversation controls. It uses a fresh, empty Discard-owned working directory and rejects native resume handles. Discard supplies the selected model and refreshed system instructions for a new transcript replay.
+`SessionMode::Conversation` and Workspace use Claude Code 2.1.318 as the tested version. A newer CLI may run only after all required isolation controls pass verification. Older versions stay blocked with an update message. An unreadable version also stays blocked. It uses a fresh, empty Discard-owned working directory and rejects native resume handles. Discard supplies the selected model and refreshed system instructions for a new transcript replay.
 
 The adapter passes `--tools ""`, `--strict-mcp-config`, `--disable-slash-commands`, `--restricted` and `--system-prompt-snapshot off`. It accepts only the scoped Discard memory MCP configuration. It forces `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` in both process environment and explicit session settings. It disables hooks and removes inherited explicit plugin directories. Authentication uses the existing CLI login; Discard does not use `--bare`, copy credentials or change user settings.
 
 Conversation sessions pass `--allowedTools` with the exact scoped Discard tool names: six memory tools, two worktree tools, and three project-file tools. The server further limits the listed tools by conversation scope. This lets private saves, reads, shared proposals, and scoped project inspection run even when the session has no permission prompt. It also avoids duplicate host prompts in HostPrompts mode. Built-in tools remain absent. Discard's memory service still controls scope access and shared-write approval; a shared save remains a pending proposal. Coding sessions receive no new tool grant.
 
-The adapter checks the CLI version and required help controls before sending instructions. It rejects detected local managed settings that conflict with memory, hooks or plugin restrictions. Managed policy remains authoritative. Claude can receive remote or MDM policy that the CLI does not expose through an effective-settings API. Discard cannot independently verify that opaque policy, and does not claim administrator or operating-system isolation.
+The adapter checks the CLI version and every `--flag` emitted for the session against `claude --help`, with the fixed isolation-control list as a minimum, before sending instructions. A missing flag stops setup and the error names the flag, running version, and tested version. It rejects detected local managed settings that conflict with memory, hooks or plugin restrictions. Managed policy remains authoritative. Claude can receive remote or MDM policy that the CLI does not expose through an effective-settings API. Discard cannot independently verify that opaque policy, and does not claim administrator or operating-system isolation.
+
+After a newer CLI starts, Discard adds a conversation marker with the running and tested versions. Each distinct notice appears at most once per engine instance. Notice storage does not block the turn. A newer CLI can change the behavior of a control without removing it; these checks cannot detect every such change.
 
 The opt-in synthetic probe at `crates/discard-providers/tests/probes/claude_conversation.py` checks the actual model-facing tools and executes a synthetic private save, read and shared proposal against local test endpoints. It verifies tool-call receipt, result delivery and a pending shared proposal with no shared write. The tested version exposed only the six Discard memory tools. The probe uses a temporary configuration directory and a synthetic API key. Process-fixture tests cover flags, environment overrides, fresh instructions and cleanup.
 
@@ -109,6 +111,9 @@ Workspace uses the Conversation isolation controls and a fresh replay, with the 
 as cwd. It enables only Read, Glob, Grep, Edit, Write and Bash, plus the scoped Discard tools
 and worktree_commit. Native resume is refused. Hooks, plugin directories, automatic memory,
 and instruction discovery remain off. `GIT_OPTIONAL_LOCKS=0` allows read-only Git commands.
+Every Workspace session passes `--setting-sources ""`. The agent can write
+`<root>/.claude/settings.json` and `settings.local.json`, so Claude must not load them. Only the
+`--settings` value configures the sandbox. The adapter's help check covers this flag.
 
 The profile requires macOS, sandbox-exec, HostPrompts, the pinned version, and the required
 help controls. It rejects conflicting local managed sandbox settings. It keeps `--restricted`,
@@ -122,6 +127,75 @@ unsandboxed requests use SandboxEscape cards. Neither plugins nor automatic edit
 approve these cards.
 
 Supplemental synthetic review probes found that native `Write` can change a linked worktree's `.git` pointer after approval even with `--restricted` and `sandbox.filesystem.denyWrite`. Those sandbox restrictions protect shell writes. Discard therefore treats native edits to Git metadata, its aliases, outside paths, and unknown targets as user-only full-access requests before storing approvals.
+
+### Sandbox autorun
+
+With `SessionSpec.sandbox_autorun`, a Workspace session also sets
+`sandbox.autoAllowBashIfSandboxed: true`, `sandbox.filesystem.denyRead`, and
+`permissions.deny` `Read(//absolute/path/**)` rules. The paths come from
+`crates/discard-core/src/sandbox_reads.rs`: credential stores in the home directory,
+the Claude and Codex config directories, and every Discard file outside the session
+root. The sandbox covers Bash only, so the `Read` rules protect the native tools.
+The rules escape `*`, `?`, `[`, `]`, `{` and `}` with a backslash. The sandbox paths stay literal.
+The home directory and relocated directories are canonicalized first. Dotfiles setups often
+symlink credential paths, such as `~/.ssh -> ~/dotfiles/ssh`. Discard denies the link and its real
+target. It also walks each credential directory (4 levels, 2000 entries, no directory symlinks
+followed) and denies the real target of every symlink that points outside that directory.
+Dangling symlinks are skipped. Discard never denies a target that equals or contains the session root. A relative
+`CLAUDE_CONFIG_DIR` or `CODEX_HOME` is ignored, so the default directory stays denied.
+
+Claude saves large tool outputs under `<Claude config>/projects/<encoded cwd>/` and reads them
+back with `Read`. The Claude config directory is `CLAUDE_CONFIG_DIR` or `~/.claude`. The adapter
+denies every entry of that directory except `projects/<encoded session root>`. Claude encodes
+the cwd by replacing each character that is not an ASCII letter or digit with `-`. Claude
+shortens names longer than 200 characters with a hash. Discard does not match those, so the
+whole `projects` directory stays denied for such a root.
+
+Autorun sessions also set `GIT_TERMINAL_PROMPT=0`, `GIT_CONFIG_COUNT=1`,
+`GIT_CONFIG_KEY_0=credential.helper` and `GIT_CONFIG_VALUE_0=` (empty). Git then reads no
+credential helper, such as the macOS Keychain helper, and never prompts.
+Autorun sessions also add `Bash(security:*)` to `permissions.deny` and remove the GitHub
+token variables from the child environment. Both are partial Keychain mitigations. The
+settings `env` never sets those variables.
+The session still needs the Discard data directory. Without it, `start_session`
+returns `SandboxUnavailable`. Local managed settings that set `autoAllowBashIfSandboxed`
+still fail the managed-settings check.
+
+Live probe results. Run:
+`cargo test -p discard-providers --test claude_live -- --ignored autorun --nocapture`.
+The probe uses the real subscription, model `haiku`, one turn, and a linked worktree in
+a temporary directory. The fake credential file is `<temporary home>/.ssh/probe_credential`. The temporary home
+is named `home[1]` to check glob escaping. The CLI child keeps the real `HOME` so that login
+works. The adapter builds its denial list from the temporary home. The temporary home's
+`.claude` is a link to the CLI's real config directory, so the walk runs on the real directory.
+The probe reads only entry names there. Before the turn, the probe writes
+`<root>/.claude/settings.local.json` with `sandbox.network.allowedDomains: ["example.com"]`.
+Set `DISCARD_CLAUDE_BIN` to choose another executable.
+
+Tested Claude Code 2.1.321. The adapter's tested version is 2.1.318. The newer version
+passes the version gate with a notice.
+
+| Question | Observed value |
+| --- | --- |
+| Writing command | `touch inside.txt` ran and created the file. No `can_use_tool` request. |
+| Git directory write | `touch <common git dir>/probe-marker` failed with Operation not permitted. No marker. A linked worktree's `.git` is a file, so the probe uses the common directory. |
+| Shell read of a denied file | `cat '<temporary home>/.ssh/probe_credential'` failed with Operation not permitted. The path contains `[1]`. |
+| Native read of a denied file | `Read` returned "File is in a directory that is denied by your permission settings." No approval request. The escaped `home\[1\]` rule matched. |
+| Native Grep | `Grep` with path `<temporary home>` returned "... is outside <root>; --restricted confines the file tools to the working directory." `--restricted` refuses it before the deny rules. |
+| Native Glob | `Glob` with path `<temporary home>/.ssh` returned "Permission to read <temporary home>/.ssh has been denied." No file names. |
+| Network | `curl -m 3 https://example.com` sent `SandboxNetworkAccess` with `input.host=example.com`, although `<root>/.claude/settings.local.json` allowed the domain. The probe denied it. |
+| Keychain (before the deny rule) | `security find-generic-password -s DISCARD_PROBE_NONEXISTENT` printed "The specified item could not be found in the keychain." and `exit=44`. The sandbox does not block Keychain queries. |
+| Keychain (with `Bash(security:*)` denied) | `security find-generic-password -s DISCARD_PROBE_NONEXISTENT; echo exit=$?` returned an error: "Permission to use Bash with command ... has been denied." The command did not run. The deny rule is enforced although sandboxed Bash is auto-allowed. No approval request. |
+| Large output | `seq 1 200000` saved its output to `~/.claude/projects/-private-var-folders-...-discard-worktrees-probe/<session>/tool-results/<id>.txt`. `Read` with offset 199995 returned lines 199995 to 199997. |
+| Nonexistent denial paths | Accepted. The temporary home had no `.aws`, `.gnupg`, and so on. The session started. |
+| Secret leakage | The secret text appeared in no event. |
+
+Not probed live: reads of files outside the denied list. The sandbox does not limit those reads.
+The Keychain probe queried only a nonexistent item. Claude's sandbox always allows the
+Keychain service. Discard denies `Bash(security:*)` and removes `GH_TOKEN`, `GITHUB_TOKEN`,
+`GH_ENTERPRISE_TOKEN`, and `GITHUB_ENTERPRISE_TOKEN` from the Claude process. A script can
+still call the Keychain directly, for example through another tool or language runtime.
+macOS may show its own access prompt for a protected item.
 
 ### Slice B spike results
 
@@ -158,3 +232,34 @@ Discard saves simple command-prefix rules and exact network-host rules per agent
 and project. The user chooses the prefix cut. Rules approve one provider request
 at a time and record their rule ID in the audit. Project settings support revocation.
 Compound shell syntax and sandbox escapes cannot use these rules.
+
+## Text generation
+
+Personality generation uses a separate non-interactive request in an empty temporary
+working directory. It sends the draft model and optional effort, replaces the system
+prompt with `--system-prompt`, writes the description on stdin, and reads the JSON
+result. It uses `--tools ""`, strict empty MCP configuration, no session persistence,
+no slash commands, no user/project/local settings sources, and `--restricted`.
+Hooks and automatic memory are off. The memory and instruction-discovery environment
+controls are set to `1`; inherited plugin directories are removed. Detected conflicting
+local managed settings stop the request. The process group is killed when the request
+completes, its future is dropped, or the 120-second timeout expires. The editor’s
+Cancel button discards the result. The backend request can continue until completion
+or timeout. Generation does not log prompts or results.
+
+
+## Custom API address reachability
+
+Before any Claude session or text-generation CLI starts, Discard checks an explicit
+`ANTHROPIC_BASE_URL`. A provider environment override takes priority over the process
+environment. An explicit removal counts as unset. For a URL with a host and a port,
+Discard opens a TCP connection with a two-second timeout. The default port is 443
+for HTTPS and 80 for HTTP. It sends no data. An unset or unparseable address skips
+the check.
+
+If the connection fails, setup stops and names the address. The error includes only
+the scheme, host, and port; it excludes user information, paths, and queries. Start
+that service or remove the variable, then retry. Discard does not change the address
+or environment. This check does not cover proxy variables or settings-file values.
+A reachable address can still fail later; the text-generation timeout message remains
+as a fallback. Claude text generation has no CLI version gate.

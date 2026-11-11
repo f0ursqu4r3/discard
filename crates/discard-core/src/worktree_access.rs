@@ -72,7 +72,11 @@ pub(crate) fn git_bounded(directory: &Path, args: &[&str], limit: usize, timeout
     let (error, _) = err.join().map_err(|_| "Could not read Git error.")?.map_err(|_| "Could not read Git error.")?;
     let status = status?;
     if !status.success() && !(args.contains(&"--no-index") && status.code() == Some(1)) { return Err(format!("Git refused the operation: {}", String::from_utf8_lossy(&error).trim())); }
-    Ok((String::from_utf8_lossy(&output).into_owned(), truncated))
+    // A byte limit can split the final UTF-8 character. Omit that partial character.
+    let end = if truncated {
+        std::str::from_utf8(&output).err().filter(|error| error.error_len().is_none()).map_or(output.len(), |error| error.valid_up_to())
+    } else { output.len() };
+    Ok((String::from_utf8_lossy(&output[..end]).into_owned(), truncated))
 }
 
 impl WorktreeAccess {
@@ -235,7 +239,7 @@ mod tests {
         git(&repo, &["worktree", "add", "--detach", path.to_str().unwrap()]).unwrap();
         git(&path, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "unique commit"]).unwrap();
         let store = Store::open_in_memory().unwrap();
-        let agent = store.create_agent(&AgentConfig { workspace_write: false, name: "Agent".into(), provider: "fake".into(), model: Some("test".into()), avatar: None, reasoning_effort: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, name: "Agent".into(), provider: "fake".into(), model: Some("test".into()), avatar: None, reasoning_effort: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         let project = store.import_project_folder(&repo).unwrap();
         let channel = Channel { id: ChannelId::new(), project_id: Some(project.id), name: "detached".into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::Worktree };
         store.create_named_repository_channel(&channel, "", None, Some(&WorktreeRecord { channel_id: channel.id.clone(), path: path.to_string_lossy().into(), branch: "detached".into(), base_commit: String::new(), repo: repo.to_string_lossy().into(), owned: false })).unwrap();

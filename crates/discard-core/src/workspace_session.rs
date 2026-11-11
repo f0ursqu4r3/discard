@@ -1,6 +1,6 @@
 //! Per-response workspace grants and repository instructions.
 
-use crate::{agent::AgentConfig, capability::ApprovalPolicy, model::{ChannelId, ProjectChannelKind}, store::Store, worktree_access::git};
+use crate::{agent::AgentConfig, capability::ApprovalPolicy, model::{ChannelId, ProjectChannelKind}, provider::SandboxAutorun, store::Store, worktree_access::git};
 use std::{io::Read, path::{Path, PathBuf}};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9,6 +9,8 @@ pub struct WorkspaceGrant { pub main_checkout: bool, pub root: PathBuf, pub chan
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadOnlyReason {
     NotProjectChannel, NoWorktree, WorktreeMissing, MainCheckout, AgentNotOptedIn, PolicyDenyAll, WorktreeUnverified(String), SandboxUnavailable(String),
+    /// Threads never write, whatever the parent channel allows.
+    Thread,
 }
 impl ReadOnlyReason {
     pub fn note(&self) -> String {
@@ -21,13 +23,34 @@ impl ReadOnlyReason {
             Self::PolicyDenyAll => "this agent's policy denies tool use".into(),
             Self::WorktreeUnverified(detail) => format!("Discard could not verify the worktree ({detail})"),
             Self::SandboxUnavailable(detail) => format!("the provider sandbox is unavailable ({detail})"),
+            Self::Thread => "threads are read-only".into(),
         };
         format!("File edits are unavailable in this response: {reason}.")
     }
 }
 
+/// Whether sandbox autorun applies to one write response.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionProfile { Coding, ReadOnly { reason: Option<ReadOnlyReason> }, Workspace { root: PathBuf } }
+pub enum AutorunState {
+    /// The agent did not opt in.
+    Off,
+    On,
+    /// The agent opted in, but this response cannot use autorun. The text is the reason.
+    Unavailable(String),
+}
+
+/// Decide autorun for a verified grant. Only linked and detached worktrees qualify.
+pub fn autorun_state(agent_opted_in: bool, grant: &WorkspaceGrant, provider: SandboxAutorun) -> AutorunState {
+    if !agent_opted_in { return AutorunState::Off; }
+    if grant.main_checkout { return AutorunState::Unavailable("main-checkout writes ask for each command".into()); }
+    match provider {
+        SandboxAutorun::Supported => AutorunState::On,
+        SandboxAutorun::Unsupported(reason) => AutorunState::Unavailable(reason),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionProfile { Coding, ReadOnly { reason: Option<ReadOnlyReason> }, Workspace { root: PathBuf, autorun: AutorunState } }
 impl Default for SessionProfile { fn default() -> Self { Self::ReadOnly { reason: None } } }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,8 +95,13 @@ pub fn verify_binding(binding: WorkspaceBinding, main_checkout_granted: bool) ->
     Ok(WorkspaceGrant { main_checkout, root, channel: record.channel_id, branch })
 }
 
-pub fn workspace_prompt(grant: &WorkspaceGrant) -> String {
-    let mut prompt = format!("Workspace writes: Your writable directory is {}. File edits inside this directory are approved automatically. Shell commands ask for approval. Commit through worktree_commit. Do not push or merge unless the user asks. The OS sandbox blocks writes outside this directory, Git metadata writes, and network access unless the user approves a separate request. Put results in your reply. The changes card carries the file and commit details.", grant.root.display());
+pub fn workspace_prompt(grant: &WorkspaceGrant, autorun: &AutorunState) -> String {
+    let shell = match autorun {
+        AutorunState::On => "Shell commands inside this directory run without asking. Network access and writes outside it still need approval. Run the project's checks yourself before you report the work done.",
+        AutorunState::Off | AutorunState::Unavailable(_) => "Shell commands ask for approval.",
+    };
+    let mut prompt = format!("Workspace writes: Your writable directory is {}. File edits inside this directory are approved automatically. {shell} Commit through worktree_commit. Do not push or merge unless the user asks. The OS sandbox blocks writes outside this directory, Git metadata writes, and network access unless the user approves a separate request. Put results in your reply. The changes card carries the file and commit details.", grant.root.display());
+    if let AutorunState::Unavailable(reason) = autorun { prompt.push_str(&format!(" Autorun is off for this response: {reason}.")); }
     if grant.main_checkout { prompt.push_str(" You are writing in the main checkout for this response only. The user may also be editing these files."); }
     if grant.branch.is_none() { prompt.push_str(" This worktree has a detached HEAD. You can edit files, but commits are unavailable until it has a branch."); }
     prompt
@@ -133,6 +161,40 @@ mod tests {
     use super::*;
     use crate::{agent::AgentConfig, capability::ApprovalPolicy, model::{Channel, ChannelId, WorkspaceMode}, store::{Store, WorktreeRecord}, worktree_access::git};
     use std::path::PathBuf;
+
+    fn grant(main_checkout: bool) -> WorkspaceGrant { WorkspaceGrant { main_checkout, root: PathBuf::from("/work/tree"), channel: ChannelId::new(), branch: Some("feature".into()) } }
+    #[test]
+    fn autorun_is_on_for_an_opted_in_linked_worktree() {
+        assert_eq!(autorun_state(true, &grant(false), SandboxAutorun::Supported), AutorunState::On);
+    }
+    #[test]
+    fn main_checkout_grant_disables_autorun() {
+        assert_eq!(autorun_state(true, &grant(true), SandboxAutorun::Supported), AutorunState::Unavailable("main-checkout writes ask for each command".into()));
+    }
+    #[test]
+    fn unsupported_provider_reports_its_reason() {
+        assert_eq!(autorun_state(true, &grant(false), SandboxAutorun::Unsupported("x".into())), AutorunState::Unavailable("x".into()));
+    }
+    #[test]
+    fn agent_without_autorun_is_off() {
+        assert_eq!(autorun_state(false, &grant(false), SandboxAutorun::Supported), AutorunState::Off);
+        assert_eq!(autorun_state(false, &grant(true), SandboxAutorun::Unsupported("x".into())), AutorunState::Off);
+    }
+    #[test]
+    fn autorun_prompt_says_commands_run_without_asking() {
+        let p = workspace_prompt(&grant(false), &AutorunState::On);
+        assert!(p.contains("Shell commands inside this directory run without asking."));
+        assert!(p.contains("Run the project's checks yourself before you report the work done."));
+        assert!(!p.contains("Shell commands ask for approval."));
+        assert!(!p.contains("Autorun is off"));
+    }
+    #[test]
+    fn prompt_keeps_approval_text_when_autorun_is_off_or_unavailable() {
+        assert!(workspace_prompt(&grant(false), &AutorunState::Off).contains("Shell commands ask for approval."));
+        let p = workspace_prompt(&grant(false), &AutorunState::Unavailable("why".into()));
+        assert!(p.contains("Shell commands ask for approval."));
+        assert_eq!(p.matches("Autorun is off for this response: why.").count(), 1);
+    }
 
     fn eligibility(store: &Store, channel: &ChannelId, agent: &AgentConfig) -> Result<WorkspaceGrant, ReadOnlyReason> {
         super::eligibility(store, channel, agent).and_then(|binding| verify_binding(binding, false))

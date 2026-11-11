@@ -129,6 +129,90 @@ pub struct Channel {
     pub workspace_mode: WorkspaceMode,
 }
 
+/// Why a thread exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadKind {
+    Question,
+    /// A read-only research run that an agent started with the `delegate` tool. It has a `ThreadState`.
+    SubAgent,
+}
+
+impl ThreadKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Question => "question",
+            Self::SubAgent => "sub_agent",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "question" => Some(Self::Question),
+            "sub_agent" => Some(Self::SubAgent),
+            _ => None,
+        }
+    }
+}
+
+/// Where a sub-agent thread is in its run. `Running` is the only state that changes; the others are final.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadState {
+    Running,
+    Done,
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
+impl ThreadState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "running" => Some(Self::Running),
+            "done" => Some(Self::Done),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            "timed_out" => Some(Self::TimedOut),
+            _ => None,
+        }
+    }
+}
+
+/// The thread columns of a channel row. A normal channel has none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadInfo {
+    pub channel_id: ChannelId,
+    pub parent_channel_id: ChannelId,
+    /// The message the thread hangs under. A sub-agent thread has none while its parent turn runs.
+    pub anchor_message_id: Option<MessageId>,
+    pub kind: ThreadKind,
+    /// Whether the thread shows in the channel bar.
+    pub followed: bool,
+    pub name: String,
+    /// The run state of a sub-agent thread. `None` for a question thread.
+    pub state: Option<ThreadState>,
+    /// The thread's agent: the sub-agent of a sub-agent thread, the default responder of a question thread.
+    pub agent_id: AgentId,
+    pub agent_name: String,
+}
+
+/// Where a reference row in a parent channel points: the thread message it shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostedSource {
+    pub source_message_id: MessageId,
+    pub thread_channel_id: ChannelId,
+    pub thread_name: String,
+}
+
 /// A message is a list of typed blocks. Plugins may add block types later.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -152,6 +236,9 @@ pub enum Block {
         output: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
+        /// `Some(true)` when a shell call ran under sandbox autorun without an approval card.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sandboxed: Option<bool>,
     },
     /// Rendered by Rust. Not overridable by plugins.
     Approval {

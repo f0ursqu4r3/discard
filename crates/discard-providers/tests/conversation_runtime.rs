@@ -27,6 +27,10 @@ struct Rig {
     task: tokio::task::JoinHandle<()>,
     _dir: tempfile::TempDir,
 }
+/// Count of 4000-byte messages that overflow the default budget `batches` times over.
+fn messages_over_budget(batches: usize) -> usize {
+    batches * discard_core::conversation_context::input_budget(None) / 4000 + 2
+}
 impl Rig {
     async fn new(script: Vec<Step>) -> Self {
         let provider = Arc::new(FakeProvider::new(script).with_resume_handle("must-not-resume"));
@@ -51,7 +55,7 @@ impl Rig {
         let store = Store::open(&dir.path().join("store.db")).unwrap();
         let agent = store
             .create_agent(&AgentConfig {
-                workspace_write: false,
+                workspace_write: false, sandbox_autorun: false, delegation: false,
                 reasoning_effort: None,
                 name: "A".into(),
                 avatar: None,
@@ -75,7 +79,7 @@ impl Rig {
         let engine = Engine {
         main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
-        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel), autorun: discard_core::workspace_session::AutorunState::Off,
             reasoning_effort: None,
             mode: SessionMode::Conversation,
             providers: vec![provider.clone()],
@@ -285,7 +289,7 @@ async fn worktree_facts_reach_each_reply_without_entering_history_or_direct_chat
     let engine = Engine {
         main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
-        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel), autorun: discard_core::workspace_session::AutorunState::Off,
         reasoning_effort: None, mode: SessionMode::Conversation, providers: vec![provider.clone()],
         store: rig.store.clone(), agent_id: rig.agent.clone(), project_id: channel.project_id.clone(),
         memory: Some(rig.runtime.clone()), plugin_write: false, workspace_mode: WorkspaceMode::Worktree,
@@ -341,7 +345,7 @@ async fn general_project_context_reaches_followups_without_polluting_history() {
     let engine = Engine {
         main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
-        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel), autorun: discard_core::workspace_session::AutorunState::Off,
         reasoning_effort: None, mode: SessionMode::Conversation, providers: vec![provider.clone()],
         store: rig.store.clone(), agent_id: rig.agent.clone(), project_id: channel.project_id.clone(),
         memory: Some(rig.runtime.clone()), plugin_write: false, workspace_mode: WorkspaceMode::MainCheckout,
@@ -494,7 +498,7 @@ async fn active_response_keeps_configuration_snapshot_and_next_response_sees_edi
 #[tokio::test]
 async fn summary_is_semantic_reusable_and_does_not_delete_original_messages() {
     let mut rig = Rig::new(vec![Step::text("A semantic summary."), Step::idle()]).await;
-    for i in 0..10 {
+    for i in 0..messages_over_budget(1) {
         rig.store
             .lock()
             .unwrap()
@@ -568,9 +572,58 @@ async fn summary_is_semantic_reusable_and_does_not_delete_original_messages() {
 }
 
 #[tokio::test]
+async fn a_thread_saves_its_own_summary_over_the_parent_prefix_and_excludes_later_parent_messages() {
+    let mut rig = Rig::new(vec![Step::text("A semantic summary."), Step::idle()]).await;
+    let say = |channel: &ChannelId, role: Role, text: String| {
+        let message = Message { id: MessageId::new(), channel_id: channel.clone(), role, blocks: vec![Block::Markdown { text }] };
+        rig.store.lock().unwrap().insert_message(&message).unwrap();
+        message.id
+    };
+    let mut older = Vec::new();
+    for i in 0..messages_over_budget(1) { older.push(say(&rig.channel, Role::User, format!("older {i} {}", "x".repeat(4000)))); }
+    let anchor = say(&rig.channel, Role::Agent, "the anchor".into());
+    say(&rig.channel, Role::User, "LATER PARENT MESSAGE".into());
+    let thread = rig.store.lock().unwrap().create_thread(&rig.channel, &anchor, "t", &rig.agent).unwrap();
+    rig.task.abort();
+    let _ = (&mut rig.task).await;
+    let provider = Arc::new(FakeProvider::new(vec![Step::text("A semantic summary."), Step::idle()]));
+    let probe = provider.probe.clone();
+    let session = rig.store.lock().unwrap().latest_session(&thread.id).unwrap().unwrap();
+    let engine = Engine {
+        main_checkout_grants: Arc::default(), workspace_locks: Arc::default(),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel), autorun: discard_core::workspace_session::AutorunState::Off,
+        reasoning_effort: None, mode: SessionMode::Coding, providers: vec![provider.clone()], store: rig.store.clone(), agent_id: rig.agent.clone(), project_id: None,
+        memory: Some(rig.runtime.clone()), plugin_write: false, workspace_mode: WorkspaceMode::MainCheckout, workspace: None, observer: None,
+        channel_name: thread.name.clone(), provider, channel_id: thread.id.clone(), session_id: session, cwd: rig._dir.path().into(), model: None, system_prompt: None, policy: ApprovalPolicy::Ask,
+    };
+    let (commands, rx) = mpsc::unbounded_channel();
+    let (tx, updates) = mpsc::unbounded_channel();
+    rig.commands = commands;
+    rig.updates = updates;
+    rig.task = tokio::spawn(engine.run(rx, tx));
+    rig.commands.send(Command::Send("side question".into())).unwrap();
+    let updates = rig.done().await;
+    assert!(updates.iter().any(|u| matches!(u, Update::Notice(s) if s.contains("summary"))));
+    let (thread_state, parent_state) = {
+        let store = rig.store.lock().unwrap();
+        (store.conversation_context(&thread.id).unwrap(), store.conversation_context(&rig.channel).unwrap())
+    };
+    assert_eq!(thread_state.summary.as_deref(), Some("A semantic summary."));
+    let through = thread_state.through.expect("a saved boundary").0;
+    let source = through.split(":part:").next().unwrap().to_owned();
+    assert!(older.iter().any(|id| id.0 == source), "the boundary sits inside the parent prefix, not after the anchor");
+    assert_eq!(parent_state, Default::default(), "the parent's own summary state is untouched");
+    let sent = probe.sent.lock().unwrap().last().unwrap().clone();
+    assert!(sent.contains("side question") && sent.contains("A semantic summary."));
+    assert!(!sent.contains("LATER PARENT MESSAGE"));
+    assert_eq!(rig.store.lock().unwrap().messages_for_channel(&rig.channel).unwrap().len(), older.len() + 2, "no original message is removed");
+    rig.close().await;
+}
+
+#[tokio::test]
 async fn summary_cancellation_revokes_tokens_and_keeps_boundary_unmodified() {
     let mut rig = Rig::new(vec![Step::Hang]).await;
-    for _ in 0..10 {
+    for _ in 0..messages_over_budget(1) {
         rig.store
             .lock()
             .unwrap()
@@ -620,7 +673,7 @@ async fn summary_cancellation_revokes_tokens_and_keeps_boundary_unmodified() {
 #[tokio::test]
 async fn oversized_current_request_is_an_actionable_error_without_provider_call() {
     let mut rig = Rig::new(vec![Step::idle()]).await;
-    rig.commands.send(Command::Send("x".repeat(30000))).unwrap();
+    rig.commands.send(Command::Send("x".repeat(discard_core::conversation_context::input_budget(None)))).unwrap();
     let updates = rig.done().await;
     assert!(
         updates
@@ -824,7 +877,7 @@ async fn provider_switch_preserves_conversation_and_records_visible_marker() {
     let engine = Engine {
         main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
-        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel), autorun: discard_core::workspace_session::AutorunState::Off,
         reasoning_effort: None,
         mode: SessionMode::Conversation,
         providers: vec![other.clone()],
@@ -1027,7 +1080,7 @@ async fn later_summary_batch_failure_or_cancel_keeps_original_boundary_and_clean
             .unwrap()
             .set_conversation_context(&rig.channel, &old)
             .unwrap();
-        for _ in 0..15 {
+        for _ in 0..messages_over_budget(2) {
             rig.store
                 .lock()
                 .unwrap()
@@ -1240,7 +1293,7 @@ async fn explicit_mention_routes_one_reply_and_persists_its_author() {
     let engine = Engine {
         main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
-        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel), autorun: discard_core::workspace_session::AutorunState::Off,
         reasoning_effort: None, mode: SessionMode::Conversation, providers: vec![provider.clone()],
         store: rig.store.clone(), agent_id: rig.agent.clone(), project_id: channel.project_id.clone(),
         memory: Some(rig.runtime.clone()), plugin_write: false, workspace_mode: WorkspaceMode::MainCheckout,
@@ -1321,5 +1374,34 @@ async fn invalid_mentions_fail_before_saving_or_calling_a_provider() {
     }
     assert!(rig.probe.specs.lock().unwrap().is_empty());
     assert!(rig.store.lock().unwrap().messages_for_channel(&rig.channel).unwrap().is_empty());
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn provider_notice_is_saved_once_across_two_turns() {
+    let notice = "Codex 0.167.0 is newer than the tested version 0.166.0. Discard verified the isolation controls before this response.";
+    let provider = Arc::new(FakeProvider::new(vec![Step::text("answer"), Step::idle()]).with_notice(notice));
+    let probe = provider.probe.clone();
+    let mut rig = Rig::with_provider(provider, probe).await;
+    let mut markers = Vec::new();
+    for text in ["first turn", "second turn"] {
+        rig.commands.send(Command::Send(text.into())).unwrap();
+        let updates = rig.done().await;
+        assert!(updates.iter().any(|u| matches!(u, Update::TurnFinished(discard_core::driver::TurnOutcome::Completed))));
+        markers.extend(updates.into_iter().filter_map(|u| match u { Update::ConversationMarker(m) => Some(m), _ => None }));
+    }
+    // Marker storage runs independently of the turn. Wait only in the test.
+    if markers.is_empty() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(update) = rig.updates.recv().await {
+                if let Update::ConversationMarker(message) = update { markers.push(message); break; }
+            }
+        }).await.unwrap();
+    }
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].role, Role::System);
+    assert_eq!(markers[0].blocks, vec![Block::Markdown { text: notice.into() }]);
+    let messages = rig.store.lock().unwrap().messages_for_channel(&rig.channel).unwrap();
+    assert_eq!(messages.iter().filter(|m| m.role == Role::System && m.blocks == markers[0].blocks).count(), 1);
     rig.close().await;
 }

@@ -15,6 +15,7 @@ pub mod model;
 pub mod store;
 pub mod driver;
 pub mod provider;
+pub mod personality;
 pub mod redact;
 pub mod logging;
 pub mod timeline;
@@ -47,6 +48,7 @@ pub mod project_context;
 pub mod worktree_access;
 
 pub mod workspace_session;
+pub mod sandbox_reads;
 pub mod workspace_commit;
 pub mod workspace_lock;
 pub mod workspace_changes;
@@ -54,6 +56,9 @@ pub mod workspace_changes;
 pub mod always_allow;
 
 pub mod write_requests;
+
+pub mod delegation;
+pub mod agent_requests;
 
 pub mod workspace_grants;
 

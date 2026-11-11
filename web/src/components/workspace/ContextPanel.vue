@@ -8,11 +8,13 @@ import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
 import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from '../ui/empty'
 import AgentSummary from '../agents/AgentSummary.vue'
+import AutorunIndicator from './AutorunIndicator.vue'
 import MemberList from '../MemberList.vue'
 import MemoryBrowser from '../memory/MemoryBrowser.vue'
 import PluginElement from '@/plugin/PluginElement.vue'
 import ProjectChannelDetails from './ProjectChannelDetails.vue'
 import { channelBranch } from './channel-branch'
+import { selectedChannelApprovals } from '../threads'
 const props = defineProps<{
   snapshot: SnapshotDto
   projectChannels?: ProjectChannelDto[]
@@ -33,6 +35,7 @@ watch(
     tab.value = 'context'
   },
 )
+const approvals = computed(() => selectedChannelApprovals(props.snapshot))
 const branch = computed(() => channelBranch(props.snapshot, props.projectChannels))
 const member = computed(() =>
   props.snapshot.turnRunning && props.snapshot.responder
@@ -73,6 +76,7 @@ const generalRunning = computed(() => {
         :agent-id="snapshot.agentId"
         :name="snapshot.agent"
         :status="snapshot.agentStatus"
+        :autorun="snapshot.autorun"
         @profile="emit('action', `view_agent_profile:${$event}`)"
       />
       <div v-else class="flex flex-col gap-3">
@@ -116,8 +120,9 @@ const generalRunning = computed(() => {
               <div class="flex items-baseline font-mono text-xs">
                 <dt class="text-muted-foreground">status</dt>
                 <span aria-hidden="true" class="kv-leader" />
-                <dd class="text-right">
-                  {{ snapshot.turnRunning ? 'Running' : 'Idle' }}
+                <dd class="flex flex-wrap items-center justify-end gap-x-2 gap-y-1 text-right">
+                  <span>{{ snapshot.turnRunning ? 'Running' : 'Idle' }}</span>
+                  <AutorunIndicator :autorun="snapshot.autorun" />
                 </dd>
               </div>
             </dl>
@@ -160,17 +165,12 @@ const generalRunning = computed(() => {
           <CardContent class="flex flex-col gap-3 text-xs text-muted-foreground">
             <p>
               {{
-                snapshot.pendingApprovals
-                  ? `${snapshot.pendingApprovals} pending approval${snapshot.pendingApprovals === 1 ? '' : 's'}`
+                approvals
+                  ? `${approvals} pending approval${approvals === 1 ? '' : 's'}`
                   : 'No pending approvals'
               }}
             </p>
-            <Button
-              v-if="snapshot.pendingApprovals"
-              variant="outline"
-              size="sm"
-              @click="emit('approvals')"
-            >
+            <Button v-if="approvals" variant="outline" size="sm" @click="emit('approvals')">
               View approvals
             </Button>
             <Button

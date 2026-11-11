@@ -24,7 +24,7 @@ if args[:1] == ["--version"] and os.environ.get("FAKE_CODEX_HANG_SETUP"):
 
 if args[:1] == ["--version"]:
     print(os.environ.get("FAKE_CODEX_VERSION", "codex-cli 0.166.0"))
-    sys.exit(0)
+    sys.exit(int(os.environ.get("FAKE_CODEX_VERSION_EXIT", "0")))
 if args[:2] == ["login", "status"]:
     if os.environ.get("FAKE_CODEX_LOGGED_IN", "true") == "true":
         print("Logged in using ChatGPT")

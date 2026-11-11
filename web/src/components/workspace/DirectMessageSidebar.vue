@@ -6,10 +6,13 @@ defineProps<{
   channels?: ChannelDto[]
   channelId?: string
   busy?: boolean
+  openThreadId?: string | null
 }>()
 const emit = defineEmits<{
   selectChannel: [id: string]
   action: [id: string]
+  selectThread: [threadId: string]
+  leaveThread: [threadId: string]
 }>()
 </script>
 
@@ -27,8 +30,11 @@ const emit = defineEmits<{
         :project-id="null"
         :channel-id="channelId"
         :busy="busy"
+        :open-thread-id="openThreadId"
         @select="emit('selectChannel', $event)"
         @action="emit('action', $event)"
+        @select-thread="emit('selectThread', $event)"
+        @leave-thread="emit('leaveThread', $event)"
       />
     </div>
   </nav>

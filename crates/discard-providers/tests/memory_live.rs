@@ -32,7 +32,7 @@ async fn turn(commands: &mpsc::UnboundedSender<Command>, updates: &mut mpsc::Unb
             }
             Update::TurnFinished(outcome) => return (outcome, reply, kinds),
             Update::Error(m) | Update::ResponseSaveFailed(m) | Update::SetupNeeded(m) => panic!("engine problem: {m}"),
-            Update::SessionProfile(_) | Update::Responding(_) | Update::ApprovalState { .. } | Update::Notice(_) | Update::ResponseCompleted(_) | Update::ConversationMarker(_) | Update::MemoryChanges { .. } => {}
+            Update::SessionProfile(_) | Update::Responding(_) | Update::ApprovalState { .. } | Update::Notice(_) | Update::ResponseCompleted(_) | Update::ConversationMarker(_) | Update::MemoryChanges { .. } | Update::MessagePosted { .. } | Update::UserMessageSaved(_) | Update::ThreadFollowed | Update::ThreadsAnchored(_) | Update::SubAgentFinished { .. } => {}
         }
     }
 }
@@ -58,7 +58,7 @@ async fn save_and_recall(provider: Arc<dyn Provider>, model: Option<&str>) {
     let project = Project { id: ProjectId::new(), name: "p".into(), path: project_dir.to_string_lossy().into() };
     db.insert_project(&project).unwrap();
     let agent_id = AgentId::new();
-    db.insert_agent(&agent_id, &AgentConfig { workspace_write: false, reasoning_effort: None, name: "Scout".into(), avatar: None, provider: "any".into(), model: model.map(str::to_string), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+    db.insert_agent(&agent_id, &AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Scout".into(), avatar: None, provider: "any".into(), model: model.map(str::to_string), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
     let channel = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "c".into(), agent_id: agent_id.clone(), workspace_mode: WorkspaceMode::MainCheckout };
     db.insert_channel(&channel).unwrap();
     let session = SessionId::new();
@@ -71,7 +71,7 @@ async fn save_and_recall(provider: Arc<dyn Provider>, model: Option<&str>) {
     let engine = Engine {
         main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
-        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel), autorun: discard_core::workspace_session::AutorunState::Off,
         reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::new(Mutex::new(db)),
@@ -120,4 +120,72 @@ async fn save_and_recall(provider: Arc<dyn Provider>, model: Option<&str>) {
     assert_eq!(outcome, TurnOutcome::Completed);
     assert!(reply.to_lowercase().contains("oolong"), "reply was: {reply:?}\n{kinds:#?}");
     runtime.shutdown().await;
+}
+
+/// Conversation mode must start on the installed CLI, including one newer than the tested version.
+#[tokio::test]
+#[ignore = "uses the real claude CLI and the logged-in subscription"]
+async fn real_claude_conversation_starts_on_the_installed_cli_version() {
+    let provider: Arc<dyn Provider> = Arc::new(ClaudeProvider::new("claude"));
+    let model = Some("claude-haiku-5-5");
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("proj");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let db = Store::open_in_memory().unwrap();
+    let project = Project { id: ProjectId::new(), name: "p".into(), path: project_dir.to_string_lossy().into() };
+    db.insert_project(&project).unwrap();
+    let agent_id = AgentId::new();
+    db.insert_agent(&agent_id, &AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Scout".into(), avatar: None, provider: "claude".into(), model: model.map(str::to_string), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+    let channel = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "c".into(), agent_id: agent_id.clone(), workspace_mode: WorkspaceMode::MainCheckout };
+    db.insert_channel(&channel).unwrap();
+    let session = SessionId::new();
+    db.create_session(&session, &channel.id).unwrap();
+
+    let memory_store = Arc::new(MemoryStore::open(&dir.path().join("memory"), &dir.path().join("index.db")).unwrap());
+    let runtime = MemoryRuntime::start(Arc::clone(&memory_store), &dir.path().join("run")).await.unwrap();
+    let memory: Arc<dyn MemoryService> = runtime.clone();
+
+    let engine = Engine {
+        main_checkout_grants: Arc::default(),
+        workspace_locks: Arc::default(),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel), autorun: discard_core::workspace_session::AutorunState::Off,
+        reasoning_effort: None,
+        mode: discard_core::provider::SessionMode::Conversation, providers: vec![provider.clone()],
+        store: Arc::new(Mutex::new(db)),
+        agent_id: agent_id.clone(),
+        project_id: Some(project.id.clone()),
+        memory: Some(memory),
+        plugin_write: false,
+        workspace_mode: discard_core::model::WorkspaceMode::MainCheckout,
+        workspace: None,
+        observer: None,
+        channel_name: "c".into(),
+        provider,
+        channel_id: channel.id.clone(),
+        session_id: session,
+        cwd: project_dir,
+        model: model.map(str::to_string),
+        system_prompt: None,
+        policy: ApprovalPolicy::Ask,
+    };
+    let (commands, commands_rx) = mpsc::unbounded_channel();
+    let (updates_tx, mut updates) = mpsc::unbounded_channel();
+    tokio::spawn(engine.run(commands_rx, updates_tx));
+    commands.send(Command::Send("Reply with the single word ready.".into())).unwrap();
+    let (mut reply, mut markers) = (String::new(), Vec::new());
+    let outcome = loop {
+        match tokio::time::timeout(Duration::from_secs(120), updates.recv()).await.expect("an update within 120s").expect("engine alive") {
+            Update::Event(e) => if let EventKind::TextDelta { text } = &e.kind { reply.push_str(text); },
+            Update::ConversationMarker(message) => markers.push(format!("{message:?}")),
+            Update::TurnFinished(outcome) => break outcome,
+            Update::Error(m) | Update::ResponseSaveFailed(m) | Update::SetupNeeded(m) => panic!("engine problem: {m}"),
+            _ => {}
+        }
+    };
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert!(reply.to_lowercase().contains("ready"), "{reply}");
+    println!("reply: {reply}\nmarkers: {markers:#?}");
+    drop(memory_store);
+    drop(runtime);
 }

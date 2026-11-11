@@ -15,6 +15,9 @@ const agent = {
   policy: 'deny',
   pluginWrite: false,
   workspaceWrite: false,
+  sandboxAutorun: false,
+  sandboxAutorunUnavailable: null,
+  sandboxAutorunPlanned: false,
   archived: false,
 }
 const claude = { id: 'claude-model', name: 'Claude model', description: '' }

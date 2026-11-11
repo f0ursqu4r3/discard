@@ -37,7 +37,7 @@ impl Harness {
             .insert_agent(
                 &agent,
                 &AgentConfig {
-                    workspace_write: false,
+                    workspace_write: false, sandbox_autorun: false, delegation: false,
                     reasoning_effort: None,
                     name: "A".into(),
                     avatar: None,
@@ -88,6 +88,7 @@ where
         enforcement: EnforcementMode::HostPrompts,
         resume_handle: None,
         mcp_config: None,
+        sandbox_autorun: false,
     };
     drive_with(h, p, spec, "hello", ui).await
 }

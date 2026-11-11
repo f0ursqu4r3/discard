@@ -6,7 +6,9 @@ mod plugin_events;
 use discard_app::plugin_memory;
 mod relaunch;
 
+use discard_core::agent_requests::AgentRequests;
 use discard_core::bootstrap::{Role, WorkspaceChoice};
+use discard_core::delegation::{DelegationServices, DelegatorSlot};
 use discard_core::engine::Engine;
 use discard_core::logging;
 use discard_core::store::Store;
@@ -43,9 +45,9 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// The provider implementation for an agent's `provider` name.
-fn provider_for(name: &str) -> Result<Arc<dyn Provider>, String> {
+fn provider_for(name: &str, data_dir: &Path) -> Result<Arc<dyn Provider>, String> {
     match name {
-        "claude" => Ok(Arc::new(ClaudeProvider::new("claude"))),
+        "claude" => Ok(Arc::new(ClaudeProvider::new("claude").with_discard_home(data_dir))),
         "codex" => Ok(Arc::new(CodexProvider::new("codex"))),
         other => Err(format!("unknown provider `{other}`")),
     }
@@ -131,7 +133,7 @@ fn run_app(
     let mut provider_checks = Vec::new();
     let mut providers = Vec::new();
     for id in discard_core::bootstrap::PROVIDERS {
-        let provider = provider_for(id)?;
+        let provider = provider_for(id, data_dir)?;
         let setup = Arc::new(Mutex::new(None));
         providers.push(ProviderInfo { provider: provider.clone(), id: (*id).into(), matrix: provider.capabilities().clone(), setup: setup.clone() });
         provider_checks.push(((*id).to_string(), provider, setup));
@@ -182,12 +184,16 @@ fn run_app(
     let git_workspace = Arc::new(GitWorkspace::new(&data_dir.join("worktrees"), Arc::clone(&store)));
     let main_checkout_grants = Arc::new(discard_core::workspace_grants::MainCheckoutGrants::default());
     let write_requests = Arc::new(discard_core::write_requests::WriteRequests::default());
-    let memory = runtime.block_on(MemoryRuntime::start_with_write_services(
+    // `delegate` needs the app's channels, which exist only after the window code runs. The slot starts empty and
+    // `desktop::run` installs the app's `Delegator` in it.
+    let delegation = DelegationServices { store: Arc::clone(&store), requests: Arc::new(AgentRequests::default()), delegator: Arc::new(DelegatorSlot::default()) };
+    let memory = runtime.block_on(MemoryRuntime::start_with_delegation(
         Arc::clone(&memory_store),
         &data_dir.join("run"),
         Some(Arc::clone(&plugins)),
         Some(worktree_access.clone()),
         Some((write_requests.clone(), git_workspace.clone())),
+        Some(delegation.clone()),
     ))?;
 
     let launcher: desktop::channels::Launcher = {
@@ -195,6 +201,7 @@ fn run_app(
         let main_checkout_grants = main_checkout_grants.clone();
         let manager = manager.clone(); let handle = runtime.handle().clone();
         let conversation_dir = data_dir.join("conversations");
+        let data_dir = data_dir.to_path_buf();
         let session_mode = if options.builder { discard_core::provider::SessionMode::Coding } else { discard_core::provider::SessionMode::Conversation };
         Arc::new(move |channel| {
             let project = channel.project_id.as_ref().map(|id| {
@@ -218,15 +225,15 @@ fn run_app(
                 let (_, updates) = mpsc::unbounded_channel();
                 return Ok((CoreInit { state: UiState::new(channel.id.clone(), history).with_authors(authors), commands, project: project.as_ref().map(|p| p.name.clone()).unwrap_or_default(), channel: channel.name.clone(), agent: agent.name, provider: agent.provider }, updates));
             }
-            let provider = provider_for(&agent.provider)?;
+            let provider = provider_for(&agent.provider, &data_dir)?;
             let (commands_tx, commands_rx) = mpsc::unbounded_channel();
             let (updates_tx, updates_rx) = mpsc::unbounded_channel();
             let engine = Engine {
         main_checkout_grants: main_checkout_grants.clone(),
         workspace_locks: workspace_locks.clone(),
-        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel), autorun: discard_core::workspace_session::AutorunState::Off,
         reasoning_effort: agent.reasoning_effort.clone(),
-        mode: session_mode, providers: discard_core::bootstrap::PROVIDERS.iter().filter_map(|id| provider_for(id).ok()).collect(),
+        mode: session_mode, providers: discard_core::bootstrap::PROVIDERS.iter().filter_map(|id| provider_for(id, &data_dir).ok()).collect(),
                 store: store.clone(), agent_id: channel.agent_id.clone(), project_id: channel.project_id.clone(),
                 memory: Some(memory.clone()), plugin_write: agent.plugin_write,
                 workspace_mode: channel.workspace_mode, workspace: Some(git_workspace.clone()),
@@ -254,6 +261,7 @@ fn run_app(
     desktop::run(init, updates_rx, runtime.handle().clone(), settings, plugins, data_dir.to_path_buf(), desktop::DesktopConfig { startup_channel, sidebar_project, load_report, workspace: git_workspace, store, relaunch, providers, recheck, memory: memory_store, worktree_access, launcher, on_ready,
         write_requests,
         main_checkout_grants,
+        delegation,
     })?;
     Ok(())
 }

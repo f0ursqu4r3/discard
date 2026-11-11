@@ -14,6 +14,9 @@ import AttachmentCard from './AttachmentCard.vue'
 import type { AttachmentDto } from '../bridge/types'
 import { Send, Square, AtSign, Paperclip, LoaderCircle, ChevronRight } from '@lucide/vue'
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from './ui/input-group'
+import { Badge } from './ui/badge'
+import { Checkbox } from './ui/checkbox'
+import { Label } from './ui/label'
 import { maySend, mayStop } from './composer'
 const props = defineProps<{
   archived: boolean
@@ -26,16 +29,27 @@ const props = defineProps<{
   draft?: string
   attachments?: AttachmentDto[]
   dropTarget?: HTMLElement | null
+  /** Replaces the placeholder and the accessible name of the input. */
+  placeholder?: string
+  /** Shows the "Also post to" checkbox. The thread composer sets it to the parent channel name. */
+  alsoPostLabel?: string
+  /** The composer is off because its feature is planned. Shows a `Soon` label with this text in place of the archived note. */
+  soon?: string
 }>()
 const emit = defineEmits<{
-  send: [text: string, attachments?: AttachmentDto[]]
+  send: [text: string, attachments?: AttachmentDto[], alsoPost?: boolean]
   stop: []
   'update:draft': [text: string]
   'update:attachments': [attachments: AttachmentDto[]]
 }>()
-const placeholder = computed(() =>
-  props.directMessage ? `Message ${props.agent || 'agent'}` : `Message #${props.channel}`,
+const placeholder = computed(
+  () =>
+    props.placeholder ??
+    (props.directMessage ? `Message ${props.agent || 'agent'}` : `Message #${props.channel}`),
 )
+// The box applies to one message. It clears on every send.
+const alsoPost = ref(false)
+const alsoPostId = useId()
 const localAttachments = ref<AttachmentDto[]>([])
 const importing = ref(false)
 const attachmentError = ref('')
@@ -291,7 +305,10 @@ function send() {
     !maySend(props.archived || props.busy || importing.value, text.value, files.value.length)
   )
     return
-  if (files.value.length) emit('send', text.value.trim(), [...files.value])
+  if (props.alsoPostLabel !== undefined) {
+    emit('send', text.value.trim(), [...files.value], alsoPost.value)
+    alsoPost.value = false
+  } else if (files.value.length) emit('send', text.value.trim(), [...files.value])
   else emit('send', text.value.trim())
   if (props.attachments === undefined) files.value = []
   if (props.draft === undefined) text.value = ''
@@ -484,7 +501,29 @@ function keydown(event: KeyboardEvent) {
         </InputGroupAddon>
       </div>
     </InputGroup>
-    <p v-if="archived && !directMessage" class="mt-2 text-xs text-muted-foreground">
+    <div v-if="alsoPostLabel !== undefined" class="mt-2 flex items-center gap-2 px-1">
+      <Checkbox
+        :id="alsoPostId"
+        v-model="alsoPost"
+        data-ui-id="composer-also-post"
+        :disabled="archived || busy"
+      />
+      <Label :for="alsoPostId" class="text-xs font-normal text-muted-foreground">
+        Also post to {{ alsoPostLabel }}
+      </Label>
+    </div>
+    <p
+      v-if="soon"
+      data-ui-id="composer-soon"
+      class="mt-2 flex items-center gap-2 px-1 text-xs text-muted-foreground"
+    >
+      <Badge variant="secondary">Soon</Badge>
+      {{ soon }}
+    </p>
+    <p
+      v-else-if="archived && !directMessage && alsoPostLabel === undefined"
+      class="mt-2 text-xs text-muted-foreground"
+    >
       Channel archived
     </p>
   </section>

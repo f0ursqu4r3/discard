@@ -13,6 +13,129 @@ pub struct ChannelDto {
     pub agent_id: String, pub project_id: Option<String>,
     pub id: String, pub name: String, pub agent: String, pub provider: String,
     pub workspace_mode: String, pub running: bool, pub unread: bool, pub pending_approvals: usize,
+    /// Approvals that wait in the threads of this channel, followed or not. `pending_approvals` counts the channel only.
+    pub thread_pending_approvals: usize,
+    /// Followed threads of this channel, oldest first, with live state.
+    pub threads: Vec<ThreadLinkDto>,
+}
+
+/// A followed thread in the channel bar, indented under its parent channel.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadLinkDto {
+    pub id: String,
+    pub parent_channel_id: String,
+    pub name: String,
+    /// An agent message after the thread's own read marker.
+    pub unread: bool,
+    pub running: bool,
+    pub pending_approvals: usize,
+    /// `question` or `sub_agent`.
+    pub kind: String,
+    /// `running`, `done`, `failed`, `cancelled` or `timed_out` for a sub-agent thread. Null for a question thread.
+    pub state: Option<String>,
+}
+
+/// A thread that has an approval waiting, followed or not. The Approvals page lists these.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadApprovalDto {
+    pub thread_id: String,
+    pub parent_channel_id: String,
+    pub name: String,
+    pub kind: String,
+    pub agent_name: String,
+    pub pending_approvals: usize,
+}
+
+/// The newest user or agent message of a thread.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadLastMessageDto {
+    pub role: String,
+    /// The agent that wrote it. Null for a user message.
+    pub author_name: Option<String>,
+    /// Plain text on one line, cut at 80 characters. Empty when the message has no text.
+    pub preview: String,
+}
+
+/// The chip under an anchor message.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadChipDto {
+    pub channel_id: String,
+    pub name: String,
+    /// User and agent messages in the thread.
+    pub message_count: usize,
+    pub last_message: Option<ThreadLastMessageDto>,
+    pub followed: bool,
+    pub unread: bool,
+    /// `question` or `sub_agent`.
+    pub kind: String,
+    /// `running`, `done`, `failed`, `cancelled` or `timed_out` for a sub-agent thread. Null for a question thread.
+    pub state: Option<String>,
+    /// The thread's agent: the sub-agent of a sub-agent thread, the default responder of a question thread.
+    pub agent_name: String,
+    /// Approvals that wait in the thread.
+    pub pending_approvals: usize,
+}
+
+/// Where a reference row in a parent channel comes from.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PostedFromDto {
+    pub source_message_id: String,
+    pub thread_channel_id: String,
+    pub thread_name: String,
+}
+
+/// The thread panel: one open thread beside the selected channel. The transcript comes from
+/// `get_thread_history` and the `discard://thread-history` event; `history_rev` says which revision to hold.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenThreadDto {
+    pub channel_id: String,
+    pub parent_channel_id: String,
+    pub name: String,
+    pub followed: bool,
+    /// `question` or `sub_agent`.
+    pub kind: String,
+    /// The run state of a sub-agent thread. Null for a question thread.
+    pub state: Option<String>,
+    /// The thread's agent name (the sub-agent of a sub-agent thread).
+    pub agent_name: String,
+    /// Null for a sub-agent thread whose parent turn still runs.
+    pub anchor_message_id: Option<String>,
+    pub history_rev: u64,
+    pub agent_id: String,
+    pub agent: String,
+    pub provider: String,
+    pub responder: Option<discard_core::model::MessageAuthor>,
+    pub agent_status: String,
+    pub turn_running: bool,
+    pub notice: Option<String>,
+    pub live_blocks: Vec<BlockDto>,
+    pub prompts: Vec<PromptDto>,
+    pub pending_approvals: usize,
+    pub unread: bool,
+    pub composer_disabled: bool,
+    /// Why the composer is off: `steering_soon` in a sub-agent thread (planned: steering and follow-up turns),
+    /// `read_only` when the thread, its agent or its channel is archived or unavailable. Null when it is on.
+    pub composer_disabled_reason: Option<String>,
+    /// Says that threads are read-only. Always present.
+    pub read_only_note: String,
+}
+
+/// The transcript of the open thread.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadHistoryDto {
+    pub channel_id: String,
+    pub parent_channel_id: String,
+    pub rev: u64,
+    /// The message the thread starts from. Null when the parent transcript no longer holds it.
+    pub anchor: Option<MessageDto>,
+    pub messages: Vec<MessageDto>,
 }
 
 #[derive(Serialize, Clone, PartialEq, Debug)]
@@ -36,6 +159,8 @@ pub struct ProjectChannelDto {
     pub branch: Option<String>,
     pub archived: bool,
     pub archived_into: Option<String>,
+    /// Followed threads of this channel, from storage.
+    pub threads: Vec<ThreadLinkDto>,
 }
 
 #[derive(Serialize, Clone, PartialEq, Debug)]
@@ -87,6 +212,14 @@ pub struct MessageDto {
     /// Creation time in Unix milliseconds, recovered from the persisted UUIDv7 ID.
     pub created_at: Option<u64>,
     pub author: Option<discard_core::model::MessageAuthor>,
+    /// The question thread that starts from this message, if any.
+    pub thread: Option<ThreadChipDto>,
+    /// The sub-agent threads of this response, in task order. Empty on any other message.
+    pub sub_agent_threads: Vec<ThreadChipDto>,
+    /// Set on a reference row: the thread message it shows.
+    pub posted_from: Option<PostedFromDto>,
+    /// Set on a thread message that is also posted to the parent channel.
+    pub posted_to_channel: bool,
 }
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -171,6 +304,25 @@ pub struct BannersDto {
     pub archive: Option<ArchiveNoticeDto>,
     pub safe_mode: bool,
 }
+/// Sandbox autorun for the running write response. Absent when the agent did not opt in.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AutorunDto {
+    /// `on` or `unavailable`.
+    pub state: String,
+    pub reason: Option<String>,
+}
+impl AutorunDto {
+    /// `None` when the session is not a write session or the agent did not opt in.
+    pub fn from_profile(profile: &discard_core::ui_state::SessionProfile) -> Option<Self> {
+        use discard_core::ui_state::{AutorunState, SessionProfile};
+        match profile {
+            SessionProfile::Workspace { autorun: AutorunState::On, .. } => Some(Self { state: "on".into(), reason: None }),
+            SessionProfile::Workspace { autorun: AutorunState::Unavailable(reason), .. } => Some(Self { state: "unavailable".into(), reason: Some(reason.clone()) }),
+            _ => None,
+        }
+    }
+}
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotDto {
@@ -191,6 +343,7 @@ pub struct SnapshotDto {
     pub responder: Option<discard_core::model::MessageAuthor>,
     pub agent_status: String,
     pub turn_running: bool,
+    pub autorun: Option<AutorunDto>,
     pub notice: Option<String>,
     pub live_blocks: Vec<BlockDto>,
     pub prompts: Vec<PromptDto>,
@@ -205,6 +358,12 @@ pub struct SnapshotDto {
     pub repositories: Vec<RepositoryDto>,
     pub repositories_loading: bool,
     pub channels: Vec<ChannelDto>,
+    /// The sub-agent threads of the running turn of the selected channel, in task order. They have no anchor yet.
+    /// When the turn ends they move to `MessageDto.subAgentThreads` of the saved response.
+    pub live_sub_agent_threads: Vec<ThreadChipDto>,
+    /// Threads with an approval waiting, followed or not, in the loaded channels.
+    pub thread_approvals: Vec<ThreadApprovalDto>,
+    pub open_thread: Option<OpenThreadDto>,
     pub slots: BTreeMap<String, SlotDto>,
     pub banners: BannersDto,
     pub theme: ThemeDto,
@@ -236,6 +395,10 @@ pub fn history_dto_with_authors(
             blocks: message.blocks.clone(),
             continues_group: continues_group(previous, message.role) && previous_author == author_id,
             author,
+            thread: None,
+            sub_agent_threads: Vec::new(),
+            posted_from: None,
+            posted_to_channel: false,
         };
         previous = Some(message.role);
         previous_author = author_id;
@@ -263,6 +426,7 @@ fn sample_snapshot() -> SnapshotDto {
         responder: None,
         agent_status: "working".into(),
         turn_running: true,
+        autorun: None,
         notice: None,
         live_blocks: vec![Block::Markdown {
             text: "Hello".into(),
@@ -282,6 +446,9 @@ fn sample_snapshot() -> SnapshotDto {
         repositories: vec![],
         repositories_loading: false,
         channels: vec![],
+        live_sub_agent_threads: vec![],
+        thread_approvals: vec![],
+        open_thread: None,
         slots: BTreeMap::new(),
         banners: BannersDto {
             review_count: 0,
@@ -371,6 +538,95 @@ mod tests {
         assert_eq!(serde_json::to_value(block).unwrap()["type"], "markdown");
     }
 
+    fn golden(name: &str, actual: String) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/src/bridge/fixtures").join(name);
+        if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            std::fs::write(&path, &actual).unwrap();
+        }
+        assert_eq!(actual, std::fs::read_to_string(path).unwrap());
+    }
+
+    #[test]
+    fn thread_payloads_match_golden_file() {
+        let message = |id: &str, role: &str, text: &str| MessageDto {
+            id: id.into(), role: role.into(), blocks: vec![Block::Markdown { text: text.into() }], continues_group: false, created_at: None,
+            author: None, thread: None, sub_agent_threads: vec![], posted_from: None, posted_to_channel: false,
+        };
+        let mut anchor = message("answer", "agent", "A thread is a side conversation.");
+        anchor.thread = Some(ThreadChipDto {
+            channel_id: "thread".into(), name: "Why a thread?".into(), message_count: 2,
+            last_message: Some(ThreadLastMessageDto { role: "agent".into(), author_name: Some("Agent".into()), preview: "It keeps the channel clean.".into() }),
+            followed: true, unread: true, kind: "question".into(), state: None, agent_name: "Agent".into(), pending_approvals: 0,
+        });
+        let mut reference = message("reference", "agent", "It keeps the channel clean.");
+        reference.posted_from = Some(PostedFromDto { source_message_id: "reply".into(), thread_channel_id: "thread".into(), thread_name: "Why a thread?".into() });
+        let mut posted = message("reply", "agent", "It keeps the channel clean.");
+        posted.posted_to_channel = true;
+        let mut snapshot = sample_snapshot();
+        snapshot.channels = vec![ChannelDto {
+            agent_id: "agent".into(), project_id: Some("project".into()), id: "channel".into(), name: "general".into(), agent: "Agent".into(), provider: "example".into(),
+            workspace_mode: "main_checkout".into(), running: false, unread: false, pending_approvals: 0, thread_pending_approvals: 0,
+            threads: vec![ThreadLinkDto { id: "thread".into(), parent_channel_id: "channel".into(), name: "Why a thread?".into(), unread: true, running: false, pending_approvals: 0, kind: "question".into(), state: None }],
+        }];
+        snapshot.open_thread = Some(OpenThreadDto {
+            channel_id: "thread".into(), parent_channel_id: "channel".into(), name: "Why a thread?".into(), followed: true, kind: "question".into(), state: None, agent_name: "Agent".into(), anchor_message_id: Some("answer".into()), history_rev: 4,
+            agent_id: "agent".into(), agent: "Agent".into(), provider: "example".into(), responder: None, agent_status: "idle".into(), turn_running: false, notice: None,
+            live_blocks: vec![], prompts: vec![], pending_approvals: 0, unread: true, composer_disabled: false, composer_disabled_reason: None,
+            read_only_note: discard_core::workspace_session::ReadOnlyReason::Thread.note(),
+        });
+        let value = serde_json::json!({
+            "snapshot": snapshot,
+            "history": HistoryDto { channel_id: "channel".into(), rev: 2, messages: vec![anchor.clone(), reference] },
+            "threadHistory": ThreadHistoryDto { channel_id: "thread".into(), parent_channel_id: "channel".into(), rev: 4, anchor: Some(anchor), messages: vec![message("ask", "user", "Why a thread?"), posted] },
+        });
+        golden("thread.json", serde_json::to_string_pretty(&value).unwrap() + "\n");
+    }
+
+    #[test]
+    fn sub_agent_payloads_match_golden_file() {
+        let message = |id: &str, role: &str, text: &str| MessageDto {
+            id: id.into(), role: role.into(), blocks: vec![Block::Markdown { text: text.into() }], continues_group: false, created_at: None,
+            author: None, thread: None, sub_agent_threads: vec![], posted_from: None, posted_to_channel: false,
+        };
+        let chip = |id: &str, name: &str, state: &str, preview: &str, count: usize| ThreadChipDto {
+            channel_id: id.into(), name: name.into(), message_count: count,
+            last_message: (count > 1).then(|| ThreadLastMessageDto { role: "agent".into(), author_name: Some("Reviewer".into()), preview: preview.into() }),
+            followed: false, unread: count > 1, kind: "sub_agent".into(), state: Some(state.into()), agent_name: "Reviewer".into(), pending_approvals: 0,
+        };
+        let link = |id: &str, name: &str, state: &str, pending: usize| ThreadLinkDto {
+            id: id.into(), parent_channel_id: "channel".into(), name: name.into(), unread: false, running: state == "running", pending_approvals: pending, kind: "sub_agent".into(), state: Some(state.into()),
+        };
+        // Two sub-agent threads run now. They have no anchor: the snapshot carries their chips.
+        let mut snapshot = sample_snapshot();
+        snapshot.live_sub_agent_threads = vec![chip("find-callers", "Find callers", "running", "", 1), chip("read-docs", "Read the docs", "done", "The docs say two things.", 2)];
+        snapshot.channels = vec![ChannelDto {
+            agent_id: "agent".into(), project_id: Some("project".into()), id: "channel".into(), name: "general".into(), agent: "Agent".into(), provider: "example".into(),
+            workspace_mode: "main_checkout".into(), running: true, unread: false, pending_approvals: 0, thread_pending_approvals: 1,
+            threads: vec![link("find-callers", "Find callers", "running", 1)],
+        }];
+        snapshot.thread_approvals = vec![ThreadApprovalDto { thread_id: "find-callers".into(), parent_channel_id: "channel".into(), name: "Find callers".into(), kind: "sub_agent".into(), agent_name: "Reviewer".into(), pending_approvals: 1 }];
+        snapshot.open_thread = Some(OpenThreadDto {
+            channel_id: "find-callers".into(), parent_channel_id: "channel".into(), name: "Find callers".into(), followed: true, kind: "sub_agent".into(), state: Some("running".into()), agent_name: "Reviewer".into(),
+            anchor_message_id: None, history_rev: 3, agent_id: "reviewer".into(), agent: "Reviewer".into(), provider: "example".into(), responder: None, agent_status: "awaiting_approval".into(), turn_running: true, notice: None,
+            live_blocks: vec![], prompts: vec![], pending_approvals: 1, unread: false, composer_disabled: true, composer_disabled_reason: Some("steering_soon".into()),
+            read_only_note: discard_core::workspace_session::ReadOnlyReason::Thread.note(),
+        });
+        // After the turn the chips hang under the saved response, in task order.
+        let mut response = message("response", "agent", "Both are done.");
+        response.sub_agent_threads = vec![chip("find-callers", "Find callers", "done", "Callers: a, b.", 2), chip("read-docs", "Read the docs", "failed", "", 1)];
+        let request = AgentRequestDto {
+            id: "request".into(), channel_id: "channel".into(), requesting_agent_id: "agent".into(), requesting_agent_name: "Agent".into(), agent_id: "reviewer".into(), agent_name: "Reviewer".into(),
+            provider: "example".into(), model: Some("model".into()), reason: "It reads code well.".into(), state: "pending".into(), result: None, created_at: 1_700_000_000_000,
+        };
+        let value = serde_json::json!({
+            "snapshot": snapshot,
+            "history": HistoryDto { channel_id: "channel".into(), rev: 5, messages: vec![message("ask", "user", "Research this."), response] },
+            "threadHistory": ThreadHistoryDto { channel_id: "find-callers".into(), parent_channel_id: "channel".into(), rev: 3, anchor: None, messages: vec![message("brief", "user", "Find the callers of foo.")] },
+            "agentRequests": vec![request],
+        });
+        golden("subagent.json", serde_json::to_string_pretty(&value).unwrap() + "\n");
+    }
+
     #[test]
     fn sample_snapshot_matches_golden_file() {
         let snapshot = sample_snapshot();
@@ -426,6 +682,37 @@ impl MenuEntryDto {
             MenuEntry::Plugin { plugin, index, label } => Some(Self::Plugin { plugin, index, label }),
             MenuEntry::Separator => Some(Self::Separator),
             _ => None,
+        }
+    }
+}
+
+/// A request from an agent to add another agent to the project. The user decides on a card in the parent channel.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRequestDto {
+    pub id: String,
+    pub channel_id: String,
+    pub requesting_agent_id: String,
+    pub requesting_agent_name: String,
+    /// The agent to add.
+    pub agent_id: String,
+    pub agent_name: String,
+    pub provider: String,
+    pub model: Option<String>,
+    /// What the requesting agent wrote. At most 500 characters.
+    pub reason: String,
+    /// `pending`, `added`, `denied`, `failed` or `expired`.
+    pub state: String,
+    pub result: Option<String>,
+    /// Unix milliseconds.
+    pub created_at: u64,
+}
+impl From<discard_core::agent_requests::AgentAddRequest> for AgentRequestDto {
+    fn from(request: discard_core::agent_requests::AgentAddRequest) -> Self {
+        Self {
+            id: request.id, channel_id: request.channel_id, requesting_agent_id: request.requesting_agent_id, requesting_agent_name: request.requesting_agent_name,
+            agent_id: request.agent_id, agent_name: request.agent_name, provider: request.provider, model: request.model, reason: request.reason,
+            state: request.state, result: request.result, created_at: request.created_at,
         }
     }
 }

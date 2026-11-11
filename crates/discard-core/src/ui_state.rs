@@ -1,6 +1,6 @@
 //! UI protocol and the state the views render. Pure logic: no GUI, no I/O.
 
-pub use crate::workspace_session::SessionProfile;
+pub use crate::workspace_session::{AutorunState, SessionProfile};
 
 use crate::approval::{ApprovalState, Decision};
 use crate::driver::TurnOutcome;
@@ -39,7 +39,17 @@ pub fn new_divider_anchor(messages: &[Message], last_read: Option<&str>, anchor:
 pub enum Command {
     Send(String),
     Continue { agent: crate::model::AgentId, note: String },
+    /// Like `Continue`, after the user declined a request of the agent: the turn text says the user declined.
+    ContinueDeclined { agent: crate::model::AgentId, note: String },
+    /// The brief of a sub-agent: the first and only request in a new sub-agent thread. The engine saves it as a user
+    /// message that `author` (the delegating agent) wrote, and the thread's agent answers it. The text is never
+    /// searched for `@mentions`, and the thread is not followed. Any other command that carries text is refused in a
+    /// sub-agent thread, and so is a second brief.
+    SendBrief { text: String, author: crate::model::MessageAuthor },
     SendAttachments { text: String, attachments: Vec<crate::attachments::Attachment> },
+    /// A user message in a thread channel. With `also_post`, the saved message also shows in the parent channel.
+    /// `Send` and `SendAttachments` never post.
+    SendInThread { text: String, attachments: Vec<crate::attachments::Attachment>, also_post: bool },
     Decide { approval_id: ApprovalId, decision: Decision, rule_cut: Option<usize> },
     Cancel,
 }
@@ -62,6 +72,23 @@ pub enum Update {
     /// The live reply remains available for copying; no saved response ID exists.
     ResponseSaveFailed(String),
     MemoryChanges { response: MessageId, changes: Vec<crate::memory_items::MemoryChange> },
+    /// A thread message now also shows in the parent channel. `reference` is the parent's row, with the
+    /// source message's role and blocks. The thread's own UI state has nothing to change.
+    MessagePosted { reference: Message, source: crate::model::PostedSource },
+    /// The engine saved the user message that `UiState::user_sent` showed. The saved ID replaces the local one,
+    /// so the message can anchor a thread or be posted from one.
+    UserMessageSaved(MessageId),
+    /// The engine followed the thread of this channel: it got a pending approval, or an agent message in it wrote
+    /// `@you`. The thread's `followed` flag is now true in storage. Read the thread again to update lists.
+    ThreadFollowed,
+    /// The parent turn ended and these sub-agent threads now have their anchor (the saved response, or the user
+    /// message that started the turn). Sent on the parent channel after `ResponseCompleted`. Read the threads again.
+    ThreadsAnchored(Vec<crate::model::ThreadInfo>),
+    /// The brief turn of a sub-agent thread ended. Sent on the thread's channel just before `TurnFinished`. `state`
+    /// is the thread's final state in storage (the first final state wins, so a timeout that the delegator set
+    /// before it stopped the turn stays `TimedOut`). `text` is `delegation::final_text` of the thread's last agent
+    /// message, empty when it saved none. An error of the turn arrives before this as `Update::Error`.
+    SubAgentFinished { state: crate::model::ThreadState, text: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,16 +102,22 @@ pub struct UiState {
     turn_running: bool,
     response_save_failed: bool,
     notice: Option<String>,
+    /// The local ID of the latest user message the engine has not reported as saved.
+    unsaved_user: Option<MessageId>,
 }
 
 impl UiState {
     pub fn new(channel_id: ChannelId, history: Vec<Message>) -> Self {
-        Self { session_profile: SessionProfile::default(), channel_id, history, authors: Default::default(), responder: None, live: Timeline::new(), turn_running: false, response_save_failed: false, notice: None }
+        Self { session_profile: SessionProfile::default(), channel_id, history, authors: Default::default(), responder: None, live: Timeline::new(), turn_running: false, response_save_failed: false, notice: None, unsaved_user: None }
     }
 
     pub fn with_authors(mut self, authors: std::collections::HashMap<MessageId, crate::model::MessageAuthor>) -> Self { self.authors = authors; self }
     pub fn authors(&self) -> &std::collections::HashMap<MessageId, crate::model::MessageAuthor> { &self.authors }
+    /// Record the author of a message that was added through `Update::ConversationMarker`.
+    pub fn set_author(&mut self, message: MessageId, author: crate::model::MessageAuthor) { self.authors.insert(message, author); }
     pub fn responder(&self) -> Option<&crate::model::MessageAuthor> { self.responder.as_ref() }
+    /// The local ID of the latest user message that `Update::UserMessageSaved` has not replaced yet.
+    pub fn unsaved_user(&self) -> Option<&MessageId> { self.unsaved_user.as_ref() }
 
     /// The user pressed send.
     pub fn channel_id(&self) -> &ChannelId { &self.channel_id }
@@ -99,8 +132,10 @@ impl UiState {
         self.user_sent_with_attachments(text, &[]);
     }
     pub fn user_sent_with_attachments(&mut self, text: &str, attachments: &[crate::attachments::Attachment]) {
+        let id = MessageId::new();
+        self.unsaved_user = Some(id.clone());
         self.history.push(Message {
-            id: MessageId::new(),
+            id,
             channel_id: self.channel_id.clone(),
             role: Role::User,
             blocks: crate::attachments::blocks(text, attachments),
@@ -122,7 +157,14 @@ impl UiState {
                 self.live = Timeline::new(); self.history.push(message);
             },
             Update::ConversationMarker(message) => self.history.push(message),
-            Update::MemoryChanges { .. } => {},
+            Update::MemoryChanges { .. } | Update::MessagePosted { .. } | Update::ThreadFollowed | Update::ThreadsAnchored(_) | Update::SubAgentFinished { .. } => {},
+            Update::UserMessageSaved(saved) => {
+                if let Some(local) = self.unsaved_user.take() {
+                    // An author set on the local message (a sub-agent brief) follows the saved ID.
+                    if let Some(author) = self.authors.remove(&local) { self.authors.insert(saved.clone(), author); }
+                    if let Some(message) = self.history.iter_mut().rev().find(|m| m.id == local) { message.id = saved; }
+                }
+            }
             Update::Event(event) => self.live.apply(&event.kind),
             Update::ApprovalState { approval_id, state } => self.live.mark_approval(&approval_id, state),
             Update::TurnFinished(_) => self.finish_turn(),
@@ -199,13 +241,50 @@ impl UiState {
             AgentStatus::AwaitingApproval => "awaiting_approval",
             AgentStatus::Offline => "offline",
         };
+        // The responder can differ from the saved channel agent. Name the agent that owns the running turn.
+        let (id, name, provider) = match self.responder.as_ref().filter(|_| self.turn_running) {
+            Some(author) => (author.agent_id.0.as_str(), author.name.as_str(), author.provider.as_str()),
+            None => (labels.agent_id.as_str(), labels.agent_name.as_str(), labels.provider.as_str()),
+        };
+        let autorun = self.turn_running && matches!(self.session_profile, SessionProfile::Workspace { autorun: AutorunState::On, .. });
         serde_json::json!({
             "project": labels.project,
             "channel": labels.channel,
             "pending_approvals": self.pending_approvals(),
             "turn_running": self.turn_running,
-            "agent": { "id": labels.agent_id, "name": labels.agent_name, "provider": labels.provider, "status": status },
+            "autorun": autorun,
+            "agent": { "id": id, "name": name, "provider": provider, "status": status },
+            "agents": self.slot_agents(labels, id, status),
         })
+    }
+
+    /// Every agent in the conversation: the saved agent first, then the other agents in order of first reply.
+    /// Only the agent that owns the running turn has a status other than "idle".
+    fn slot_agents(&self, labels: &SlotLabels, owner_id: &str, owner_status: &str) -> Vec<serde_json::Value> {
+        // (id, name, provider), in first-appearance order. A later reply updates the name and provider.
+        let mut entries: Vec<(&str, &str, &str)> = vec![(labels.agent_id.as_str(), labels.agent_name.as_str(), labels.provider.as_str())];
+        for message in &self.history {
+            let Some(author) = self.authors.get(&message.id) else { continue };
+            let id = author.agent_id.0.as_str();
+            match entries.iter_mut().find(|entry| entry.0 == id) {
+                Some(_) if id == labels.agent_id => {}
+                Some(entry) => *entry = (id, author.name.as_str(), author.provider.as_str()),
+                None => entries.push((id, author.name.as_str(), author.provider.as_str())),
+            }
+        }
+        if let Some(author) = self.responder.as_ref().filter(|_| self.turn_running) {
+            let id = author.agent_id.0.as_str();
+            if !entries.iter().any(|entry| entry.0 == id) {
+                entries.push((id, author.name.as_str(), author.provider.as_str()));
+            }
+        }
+        entries
+            .into_iter()
+            .map(|(id, name, provider)| {
+                let status = if self.turn_running && id == owner_id { owner_status } else { "idle" };
+                serde_json::json!({ "id": id, "name": name, "provider": provider, "status": status })
+            })
+            .collect()
     }
 }
 
@@ -292,6 +371,38 @@ mod tests {
         assert_eq!(s.history().len(), 1);
         assert_eq!(s.history()[0].role, Role::User);
         assert_eq!(s.history()[0].blocks, vec![Block::Markdown { text: "hi".into() }]);
+    }
+
+    #[test]
+    fn the_saved_id_replaces_the_local_id_of_the_user_message() {
+        let mut s = state();
+        s.user_sent("hi");
+        let local = s.history()[0].id.clone();
+        assert_eq!(s.unsaved_user(), Some(&local));
+        let saved = MessageId::new();
+        s.apply(Update::UserMessageSaved(saved.clone()));
+        assert_eq!(s.history()[0].id, saved);
+        assert_eq!(s.unsaved_user(), None);
+        // A second report has nothing left to replace.
+        s.apply(Update::UserMessageSaved(MessageId::new()));
+        assert_eq!(s.history()[0].id, saved);
+    }
+
+    #[test]
+    fn the_author_of_a_local_message_follows_its_saved_id() {
+        let mut s = state();
+        s.user_sent("brief");
+        let local = s.history()[0].id.clone();
+        let author = discard_core_author();
+        s.set_author(local.clone(), author.clone());
+        let saved = MessageId::new();
+        s.apply(Update::UserMessageSaved(saved.clone()));
+        assert_eq!(s.authors().get(&saved), Some(&author));
+        assert!(!s.authors().contains_key(&local));
+    }
+
+    fn discard_core_author() -> crate::model::MessageAuthor {
+        crate::model::MessageAuthor { agent_id: crate::model::AgentId("a".into()), name: "Main".into(), provider: "fake".into(), avatar: None }
     }
 
     #[test]
@@ -392,8 +503,9 @@ mod tests {
             s.slot_state(&labels),
             serde_json::json!({
                 "project": "demo", "channel": "general", "pending_approvals": 0,
-                "turn_running": false,
+                "turn_running": false, "autorun": false,
                 "agent": { "id": "agent-claude", "name": "Claude", "provider": "claude", "status": "idle" },
+                "agents": [{ "id": "agent-claude", "name": "Claude", "provider": "claude", "status": "idle" }],
             })
         );
         s.user_sent("hi");
@@ -407,6 +519,105 @@ mod tests {
         assert_eq!(v["pending_approvals"], 1);
         assert_eq!(v["agent"]["status"], "awaiting_approval");
         assert_eq!(v["turn_running"], true);
+    }
+
+    #[test]
+    fn slot_state_reports_autorun_while_running() {
+        let mut s = state();
+        let labels = SlotLabels { project: "demo".into(), channel: "general".into(), agent_id: "a".into(), agent_name: "A".into(), provider: "claude".into() };
+        s.apply(Update::SessionProfile(SessionProfile::Workspace { root: "/w".into(), autorun: AutorunState::On }));
+        assert_eq!(s.slot_state(&labels)["autorun"], false);
+        s.user_sent("hi");
+        assert_eq!(s.slot_state(&labels)["autorun"], true);
+        s.apply(Update::TurnFinished(TurnOutcome::Completed));
+        assert_eq!(s.slot_state(&labels)["autorun"], false);
+        s.apply(Update::SessionProfile(SessionProfile::Workspace { root: "/w".into(), autorun: AutorunState::Unavailable("r".into()) }));
+        s.user_sent("again");
+        assert_eq!(s.slot_state(&labels)["autorun"], false);
+    }
+
+    #[test]
+    fn slot_state_names_the_responder_while_a_turn_runs() {
+        let mut s = state();
+        let labels = SlotLabels { project: "demo".into(), channel: "general".into(), agent_id: "agent-jordan".into(), agent_name: "Jordan".into(), provider: "codex".into() };
+        s.user_sent("hi");
+        s.apply(Update::Responding(crate::model::MessageAuthor { agent_id: crate::model::AgentId("agent-casey".into()), name: "Casey".into(), provider: "claude".into(), avatar: None }));
+        assert_eq!(s.slot_state(&labels)["agent"], serde_json::json!({ "id": "agent-casey", "name": "Casey", "provider": "claude", "status": "working" }));
+    }
+
+    fn author(id: &str, name: &str, provider: &str) -> crate::model::MessageAuthor {
+        crate::model::MessageAuthor { agent_id: crate::model::AgentId(id.into()), name: name.into(), provider: provider.into(), avatar: None }
+    }
+
+    fn reply(s: &mut UiState, id: &str, by: crate::model::MessageAuthor) {
+        s.apply(Update::Responding(by));
+        let message = Message { id: MessageId(id.into()), channel_id: s.channel_id().clone(), role: Role::Agent, blocks: vec![] };
+        s.apply(Update::ResponseCompleted(message));
+    }
+
+    fn jordan_labels() -> SlotLabels {
+        SlotLabels { project: "demo".into(), channel: "general".into(), agent_id: "agent-jordan".into(), agent_name: "Jordan".into(), provider: "codex".into() }
+    }
+
+    #[test]
+    fn slot_state_lists_every_agent_once_with_the_saved_agent_first() {
+        let mut s = state();
+        reply(&mut s, "m1", author("agent-casey", "Casey", "claude"));
+        reply(&mut s, "m2", author("agent-jordan", "Jordan Old Name", "claude"));
+        reply(&mut s, "m3", author("agent-riley", "Riley", "codex"));
+        reply(&mut s, "m4", author("agent-casey", "Casey B", "codex"));
+        assert_eq!(
+            s.slot_state(&jordan_labels())["agents"],
+            serde_json::json!([
+                { "id": "agent-jordan", "name": "Jordan", "provider": "codex", "status": "idle" },
+                { "id": "agent-casey", "name": "Casey B", "provider": "codex", "status": "idle" },
+                { "id": "agent-riley", "name": "Riley", "provider": "codex", "status": "idle" },
+            ])
+        );
+    }
+
+    #[test]
+    fn slot_state_marks_only_the_responder_as_working_while_a_turn_runs() {
+        let mut s = state();
+        reply(&mut s, "m1", author("agent-jordan", "Jordan", "codex"));
+        reply(&mut s, "m2", author("agent-casey", "Casey", "claude"));
+        s.user_sent("again");
+        s.apply(Update::Responding(author("agent-casey", "Casey", "claude")));
+        let v = s.slot_state(&jordan_labels());
+        assert_eq!(
+            v["agents"],
+            serde_json::json!([
+                { "id": "agent-jordan", "name": "Jordan", "provider": "codex", "status": "idle" },
+                { "id": "agent-casey", "name": "Casey", "provider": "claude", "status": "working" },
+            ])
+        );
+        assert_eq!(v["agent"]["id"], "agent-casey");
+    }
+
+    #[test]
+    fn slot_state_marks_the_saved_agent_as_working_before_a_responder_is_known() {
+        let mut s = state();
+        s.user_sent("hi");
+        assert_eq!(
+            s.slot_state(&jordan_labels())["agents"],
+            serde_json::json!([{ "id": "agent-jordan", "name": "Jordan", "provider": "codex", "status": "working" }])
+        );
+    }
+
+    #[test]
+    fn slot_state_appends_a_responder_that_has_not_replied_yet() {
+        let mut s = state();
+        reply(&mut s, "m1", author("agent-riley", "Riley", "codex"));
+        s.user_sent("hi");
+        s.apply(Update::Responding(author("agent-casey", "Casey", "claude")));
+        assert_eq!(
+            s.slot_state(&jordan_labels())["agents"],
+            serde_json::json!([
+                { "id": "agent-jordan", "name": "Jordan", "provider": "codex", "status": "idle" },
+                { "id": "agent-riley", "name": "Riley", "provider": "codex", "status": "idle" },
+                { "id": "agent-casey", "name": "Casey", "provider": "claude", "status": "working" },
+            ])
+        );
     }
 
     #[test]

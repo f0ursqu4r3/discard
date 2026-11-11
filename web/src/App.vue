@@ -14,6 +14,11 @@ import {
   toggleBranch,
   sendMessage,
   cancelTurn,
+  startThread,
+  openThread,
+  closeThread,
+  selectThread,
+  leaveThread,
   runAction,
   switchChannel,
   openBranchChannel,
@@ -30,7 +35,7 @@ import {
   type HistoryMatch,
 } from './bridge/api'
 import { appendQuote, quoteMessage, parseMessageSource } from './components/quote'
-import type { MessageDto, ProjectChannelDto } from './bridge/types'
+import type { AttachmentDto, MessageDto, ProjectChannelDto } from './bridge/types'
 import ChannelList from './components/ChannelList.vue'
 import ChannelHeader from './components/ChannelHeader.vue'
 import MessageList from './components/MessageList.vue'
@@ -46,6 +51,7 @@ import { useAgentIdentity } from './components/agents/useAgentIdentity'
 import { agentIdentity } from './components/agents/agent-icon'
 import { activeTheme } from './bridge/theme'
 import { thinkingLine } from './components/messages'
+import { selectedChannelApprovals } from './components/threads'
 import { navigationWidth, panelWidths, savePanelWidths } from './components/layout'
 import PluginElement from './plugin/PluginElement.vue'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from './components/ui/resizable'
@@ -58,6 +64,7 @@ import { Toaster } from './components/ui/sonner'
 import NavigationPanel from './components/workspace/NavigationPanel.vue'
 import DirectMessageSidebar from './components/workspace/DirectMessageSidebar.vue'
 import ContextPanel from './components/workspace/ContextPanel.vue'
+import ThreadPanel from './components/workspace/ThreadPanel.vue'
 import WorkspacePageView from './components/workspace/WorkspacePage.vue'
 import BrandMark from './components/workspace/BrandMark.vue'
 import UiInspector from './components/workspace/UiInspector.vue'
@@ -217,6 +224,10 @@ const historyQuery = ref(''),
 const searchAgent = ref<{ id: string; name: string } | null>(null)
 const messageJump = ref<{ channelId: string; messageId: string; request: number } | null>(null)
 let jumpRequest = 0
+/** A thread panel that has no thread yet: the anchor and a composer. The first send creates the thread. */
+const draftThread = ref<{ parentChannelId: string; anchor: MessageDto } | null>(null)
+const threadPanel = ref<InstanceType<typeof ThreadPanel> | null>(null)
+const threadJump = ref<{ messageId: string; request: number } | null>(null)
 
 const navigationPage = computed<WorkspacePage>(() =>
   page.value === 'conversation' && !store.snapshot?.activeProjectId
@@ -263,6 +274,45 @@ const showContextPanel = computed(
     !!store.snapshot?.channelId &&
     !!store.snapshot?.memberListVisible,
 )
+// The thread panel takes the right panel slot and the right sheet while it is open.
+const threadActive = computed(() => !!draftThread.value || !!store.snapshot?.openThread)
+const threadVisible = computed(
+  () => page.value === 'conversation' && !!store.snapshot?.channelId && threadActive.value,
+)
+const showThreadPanel = computed(() => isWide.value && threadVisible.value)
+const threadSheetOpen = computed(() => !isWide.value && threadVisible.value)
+const showRightPanel = computed(() => showContextPanel.value || showThreadPanel.value)
+// Draft text and attachments of the thread composer, kept apart from the channel composer.
+const threadKey = computed(() =>
+  draftThread.value
+    ? `thread-draft:${draftThread.value.anchor.id}`
+    : (store.snapshot?.openThread?.channelId ?? ''),
+)
+const openThreadView = computed(() => (draftThread.value ? null : store.snapshot?.openThread))
+const threadParentName = computed(() =>
+  store.snapshot?.activeProjectId ? store.snapshot.channel : (store.snapshot?.agent ?? ''),
+)
+const threadPanelProps = computed(() => {
+  const snapshot = store.snapshot
+  const open = openThreadView.value ?? null
+  return {
+    thread: open,
+    history: store.threadHistory ?? null,
+    draftAnchor: draftThread.value?.anchor,
+    parentChannelId:
+      draftThread.value?.parentChannelId ?? open?.parentChannelId ?? snapshot?.channelId ?? '',
+    parentName: threadParentName.value,
+    directMessage: !snapshot?.activeProjectId,
+    projectId: snapshot?.activeProjectId,
+    agentAvatar: open ? (agentAvatars.value[open.agentId] ?? null) : null,
+    composerDisabled: threadStartDisabled.value,
+    busy: switching.value || sending.value,
+    quoteDisabled: threadQuoteDisabled.value,
+    draft: drafts[threadKey.value],
+    attachments: attachmentDrafts[threadKey.value] ?? [],
+    jumpTo: threadJump.value ?? undefined,
+  }
+})
 const archivedLegacy = computed(
   () =>
     projectChannels.value.find((channel) => channel.id === store.snapshot?.channelId)?.kind ===
@@ -476,6 +526,7 @@ async function projectAction(id: ProjectMenuAction, project: ProjectEntry) {
 async function searchHistory(query: string) {
   const snapshot = store.snapshot
   if (!snapshot?.agentId || snapshot.activeProjectId || !query.trim()) return
+  await closeThreadPanel()
   searchAgent.value = { id: snapshot.agentId, name: snapshot.agent }
   historyQuery.value = query.trim()
   historyRevision.value++
@@ -509,6 +560,11 @@ async function selectHistoryMatch(match: Pick<HistoryMatch, 'channelId' | 'messa
 }
 async function toggleMembers() {
   profileRequest.value++
+  if (threadActive.value) {
+    // The thread panel holds the slot. Closing it restores the context panel when that was shown.
+    await closeThreadPanel()
+    if (isWide.value && store.snapshot?.memberListVisible && sidebarMode.value === 'profile') return
+  }
   if (sidebarMode.value === 'search' && (showContextPanel.value || contextOpen.value)) {
     sidebarMode.value = 'profile'
     return
@@ -530,11 +586,12 @@ async function savePanels() {
   if (
     !snapshot ||
     isCompact.value ||
-    !savePanelWidths(showContextPanel.value, currentLayout.value.length)
+    !savePanelWidths(showRightPanel.value, currentLayout.value.length)
   )
     return
+  // The thread panel has its own size. Only the context panel size is saved.
   const [channel, member] = panelWidths(
-    currentLayout.value,
+    showThreadPanel.value ? currentLayout.value.slice(0, 2) : currentLayout.value,
     railWidth.value,
     snapshot.panels.memberList,
   )
@@ -572,6 +629,11 @@ function openMessageSource(event: MouseEvent) {
   const source = parseMessageSource(anchor?.getAttribute('href') ?? '')
   if (!source) return
   event.preventDefault()
+  if (source.channelId === store.snapshot?.openThread?.channelId) {
+    // A quote of a thread message stays in the thread panel.
+    threadJump.value = { messageId: source.messageId, request: ++jumpRequest }
+    return
+  }
   conversationTab.value = 'conversation'
   void selectHistoryMatch(source)
 }
@@ -593,6 +655,130 @@ async function send(text: string, attachments: import('./bridge/types').Attachme
   } finally {
     sending.value = false
   }
+}
+const threadStartDisabled = computed(
+  () => !store.snapshot?.channelId || store.snapshot.composerDisabled || store.snapshot.archived,
+)
+const threadQuoteDisabled = computed(() => {
+  const open = openThreadView.value
+  // A sub-agent thread has no composer to take a quote. Its quote goes to the channel composer.
+  if (open?.kind === 'sub_agent') return quoteDisabled.value
+  return (
+    !threadActive.value ||
+    (open ? open.composerDisabled : threadStartDisabled.value) ||
+    switching.value ||
+    sending.value
+  )
+})
+function startThreadDraft(message: MessageDto) {
+  const snapshot = store.snapshot
+  if (!snapshot || threadStartDisabled.value || message.thread || message.postedFrom) return
+  draftThread.value = { parentChannelId: snapshot.channelId, anchor: message }
+  // One thread panel at a time: the open thread closes while the draft shows.
+  if (snapshot.openThread) void closeThreadPanel(true)
+}
+async function openThreadById(id: string) {
+  draftThread.value = null
+  try {
+    await openThread(id)
+    await store.refresh()
+  } catch (error) {
+    toast.error('Could not open thread', { description: String(error) })
+  }
+}
+async function closeThreadPanel(keepDraft = false) {
+  if (!keepDraft && draftThread.value) {
+    delete drafts[threadKey.value]
+    delete attachmentDrafts[threadKey.value]
+    draftThread.value = null
+  }
+  if (!store.snapshot?.openThread) return
+  try {
+    await closeThread()
+    await store.refresh()
+  } catch (error) {
+    toast.error('Could not close thread', { description: String(error) })
+  }
+}
+async function openThreadFromBar(id: string) {
+  if (switching.value) return
+  switching.value = true
+  draftThread.value = null
+  try {
+    await selectThread(id)
+    await store.refresh()
+    await refreshProjectChannels(store.snapshot?.projectId || null)
+    navigate('conversation')
+  } catch (error) {
+    toast.error('Could not open thread', { description: String(error) })
+  } finally {
+    switching.value = false
+  }
+}
+async function leaveThreadFromBar(id: string) {
+  try {
+    await leaveThread(id)
+    await store.refresh()
+    await refreshProjectChannels(store.snapshot?.projectId || null)
+  } catch (error) {
+    toast.error('Could not leave thread', { description: String(error) })
+  }
+}
+async function sendThread(text: string, attachments: AttachmentDto[], alsoPost: boolean) {
+  if (switching.value || sending.value) return
+  const draft = draftThread.value
+  const open = draft ? null : store.snapshot?.openThread
+  const key = threadKey.value
+  if (!draft && !open) return
+  sending.value = true
+  try {
+    const ids = attachments.map((file) => file.id)
+    if (draft) {
+      // No thread exists before this call. It creates the thread and opens it.
+      await startThread(draft.parentChannelId, draft.anchor.id, text, ids, alsoPost)
+      await store.refresh()
+      if (draftThread.value === draft) draftThread.value = null
+    } else if (open) await sendMessage(open.channelId, text, ids, alsoPost)
+    if (drafts[key]?.trim() === text) drafts[key] = ''
+    const sentIds = new Set(attachments.map((file) => file.id))
+    attachmentDrafts[key] = (attachmentDrafts[key] ?? []).filter((file) => !sentIds.has(file.id))
+  } catch (error) {
+    toast.error('Message was not sent', { description: String(error) })
+  } finally {
+    sending.value = false
+  }
+}
+async function stopThread() {
+  const open = store.snapshot?.openThread
+  if (!open) return
+  try {
+    await cancelTurn(open.channelId)
+  } catch {
+    toast.error('Could not stop the agent')
+  }
+}
+function quoteInThread(message: MessageDto) {
+  const snapshot = store.snapshot
+  if (!snapshot || threadQuoteDisabled.value) return
+  const open = openThreadView.value
+  const history = store.threadHistory
+  const anchor = draftThread.value?.anchor ?? history?.anchor
+  // The anchor lives in the parent channel; every other thread message lives in the thread.
+  const [source, channelId] =
+    anchor?.id === message.id
+      ? [anchor, draftThread.value?.parentChannelId ?? history?.parentChannelId]
+      : [history?.messages.find((item) => item.id === message.id), open?.channelId]
+  if (!source || !channelId) return
+  const quoted = quoteMessage(source, channelId, open?.agent ?? snapshot.agent)
+  if (!quoted) return
+  if (open?.kind === 'sub_agent') {
+    drafts[snapshot.channelId] = appendQuote(drafts[snapshot.channelId] ?? '', quoted)
+    void composer.value?.focusEnd?.()
+    return
+  }
+  const key = threadKey.value
+  drafts[key] = appendQuote(drafts[key] ?? '', quoted)
+  void threadPanel.value?.focusComposer?.()
 }
 async function copyUnsavedReply() {
   const text =
@@ -624,6 +810,21 @@ async function retry() {
     .filter(Boolean)
     .join('\n\n')
   if (text) await send(text)
+}
+/** The agent request that a decision is working on. The card disables its buttons meanwhile. */
+const decidingRequest = ref<string | null>(null)
+async function decideAgentRequest(requestId: string, decision: 'add' | 'deny') {
+  if (decidingRequest.value || switching.value) return
+  decidingRequest.value = requestId
+  try {
+    await store.decideAgentRequest(requestId, decision)
+    // A decision can continue the requesting agent. Load the snapshot again.
+    await store.refresh()
+  } catch (error) {
+    toast.error('Could not decide request', { description: String(error) })
+  } finally {
+    decidingRequest.value = null
+  }
 }
 async function stop() {
   if (store.snapshot)
@@ -689,16 +890,31 @@ async function openBranch(key: string) {
   }
 }
 async function showApprovals() {
-  const channels = store.snapshot?.channels ?? []
+  const snapshot = store.snapshot
+  const channels = snapshot?.channels ?? []
+  const threads = snapshot?.threadApprovals ?? []
+  // The selected channel and its threads come first. Then the other channels, then the other threads.
   const channel =
-    channels.find(
-      (channel) => channel.id === store.snapshot?.channelId && channel.pendingApprovals,
-    ) ?? channels.find((channel) => channel.pendingApprovals)
-  if (!channel) {
+    channels.find((entry) => entry.id === snapshot?.channelId && entry.pendingApprovals) ??
+    undefined
+  const ownThread = threads.find((entry) => entry.parentChannelId === snapshot?.channelId)
+  const otherChannel = channels.find((entry) => entry.pendingApprovals)
+  const anyThread = threads[0]
+  const target: { channelId: string } | { threadId: string } | null = channel
+    ? { channelId: channel.id }
+    : ownThread
+      ? { threadId: ownThread.threadId }
+      : otherChannel
+        ? { channelId: otherChannel.id }
+        : anyThread
+          ? { threadId: anyThread.threadId }
+          : null
+  if (!target) {
     toast.info('No pending approvals')
     return
   }
-  await selectChannel(channel.id)
+  if ('threadId' in target) await openThreadFromBar(target.threadId)
+  else await selectChannel(target.channelId)
   await nextTick()
   document
     .querySelector<HTMLElement>('[data-ui-id="approval-card"]')
@@ -710,8 +926,17 @@ watch([isWide, isCompact], () => {
   currentLayout.value = []
 })
 watch(
+  () => store.snapshot?.openThread?.channelId,
+  (id) => {
+    threadJump.value = null
+    // An opened thread replaces the draft.
+    if (id) draftThread.value = null
+  },
+)
+watch(
   () => store.snapshot?.channelId,
   () => {
+    draftThread.value = null
     conversationTab.value = 'conversation'
     messageJump.value = null
     if (searchAgent.value?.id !== store.snapshot?.agentId || store.snapshot?.activeProjectId)
@@ -777,6 +1002,8 @@ watch(
         @inspect-channel="inspectChannel"
         @open-branch="openBranch"
         @approvals="showApprovals"
+        @select-thread="openThreadFromBar"
+        @leave-thread="leaveThreadFromBar"
       />
       <ResizablePanelGroup
         direction="horizontal"
@@ -805,6 +1032,8 @@ watch(
               @inspect-channel="inspectChannel"
               @open-branch="openBranch"
               @approvals="showApprovals"
+              @select-thread="openThreadFromBar"
+              @leave-thread="leaveThreadFromBar"
             />
           </ResizablePanel>
           <ResizableHandle
@@ -842,7 +1071,9 @@ watch(
                 page === 'conversation' && store.snapshot.agentId ? store.snapshot.agent : undefined
               "
               @search="searchHistory"
-              :member-list-visible="(showContextPanel || contextOpen) && sidebarMode === 'profile'"
+              :member-list-visible="
+                (showContextPanel || contextOpen) && sidebarMode === 'profile' && !threadActive
+              "
               @toggle-members="toggleMembers"
               @toggle-navigation="navigationOpen = true"
             >
@@ -899,7 +1130,14 @@ watch(
                 :key="store.snapshot.channelId"
                 :messages="store.history"
                 :quote-disabled="quoteDisabled"
+                :thread-disabled="threadStartDisabled"
                 @quote="quote"
+                @start-thread="startThreadDraft"
+                @open-thread="openThreadById"
+                @decide-agent-request="decideAgentRequest"
+                :live-sub-agent-threads="store.snapshot.liveSubAgentThreads ?? []"
+                :agent-requests="store.agentRequests"
+                :agent-request-busy="decidingRequest"
                 :live="store.snapshot.liveBlocks"
                 :live-author="store.snapshot.responder"
                 :running="store.snapshot.turnRunning"
@@ -1103,24 +1341,40 @@ watch(
             </template>
           </section>
         </ResizablePanel>
-        <template v-if="showContextPanel">
+        <template v-if="showRightPanel">
           <ResizableHandle
-            data-ui-id="context-resizer"
-            aria-label="Resize context"
+            :data-ui-id="showThreadPanel ? 'thread-resizer' : 'context-resizer'"
+            :aria-label="showThreadPanel ? 'Resize thread' : 'Resize context'"
             with-handle
             @dragging="resizeFinished"
             @keyup="savePanels"
           />
+          <!-- The thread panel and the context panel have separate size ranges. -->
           <ResizablePanel
+            :key="showThreadPanel ? 'thread' : 'context'"
             :order="3"
-            :default-size="Math.max(240, store.snapshot.panels.memberList)"
+            :default-size="showThreadPanel ? 420 : Math.max(240, store.snapshot.panels.memberList)"
             size-unit="px"
-            :min-size="240"
-            :max-size="400"
+            :min-size="showThreadPanel ? 360 : 240"
+            :max-size="showThreadPanel ? 640 : 400"
           >
             <div class="h-full overflow-hidden rounded-xl border border-border/60">
+              <div v-if="showThreadPanel" class="h-full" @click="openMessageSource">
+                <ThreadPanel
+                  :parent-agent-id="store.snapshot?.agentId"
+                  :parent-agent="store.snapshot?.agent"
+                  ref="threadPanel"
+                  v-bind="threadPanelProps"
+                  @update:draft="drafts[threadKey] = $event"
+                  @update:attachments="attachmentDrafts[threadKey] = $event"
+                  @close="closeThreadPanel()"
+                  @send="sendThread"
+                  @stop="stopThread"
+                  @quote="quoteInThread"
+                />
+              </div>
               <AgentHistorySearch
-                v-if="sidebarMode === 'search' && searchAgent"
+                v-else-if="sidebarMode === 'search' && searchAgent"
                 :agent-id="searchAgent.id"
                 :agent-name="searchAgent.name"
                 :query="historyQuery"
@@ -1160,8 +1414,11 @@ watch(
             class="min-h-0 flex-1"
             :channel-id="store.snapshot.channelId"
             :busy="switching"
+            :open-thread-id="store.snapshot.openThread?.channelId"
             @select-channel="selectChannel"
             @action="action"
+            @select-thread="openThreadFromBar"
+            @leave-thread="leaveThreadFromBar"
           />
           <ChannelList
             v-else
@@ -1186,6 +1443,9 @@ watch(
             :unread="store.snapshot.unread"
             :pending-approvals="store.snapshot.pendingApprovals"
             :target="{ type: 'channel', id: store.snapshot.channelId }"
+            :open-thread-id="store.snapshot.openThread?.channelId"
+            @select-thread="openThreadFromBar"
+            @leave-thread="leaveThreadFromBar"
             @navigate="navigateFromSidebar"
             @action="action"
             @toggle-branch="toggleBranch"
@@ -1197,7 +1457,32 @@ watch(
           />
         </SheetContent>
       </Sheet>
-      <Sheet v-model:open="contextOpen">
+      <Sheet :open="threadSheetOpen" @update:open="(open) => !open && closeThreadPanel()">
+        <SheetContent
+          side="right"
+          class="gap-0 data-[side=right]:sm:max-w-md"
+          :show-close-button="false"
+        >
+          <SheetTitle class="sr-only">Thread</SheetTitle>
+          <SheetDescription class="sr-only">A side conversation about one message</SheetDescription>
+          <div class="min-h-0 flex-1" @click="openMessageSource">
+            <ThreadPanel
+              :parent-agent-id="store.snapshot?.agentId"
+              :parent-agent="store.snapshot?.agent"
+              v-if="threadSheetOpen"
+              ref="threadPanel"
+              v-bind="threadPanelProps"
+              @update:draft="drafts[threadKey] = $event"
+              @update:attachments="attachmentDrafts[threadKey] = $event"
+              @close="closeThreadPanel()"
+              @send="sendThread"
+              @stop="stopThread"
+              @quote="quoteInThread"
+            />
+          </div>
+        </SheetContent>
+      </Sheet>
+      <Sheet :open="contextOpen && !threadActive" @update:open="contextOpen = $event">
         <SheetContent side="right" class="gap-0" :show-close-button="false">
           <SheetTitle class="sr-only">Workspace context</SheetTitle>
           <SheetDescription class="sr-only">Channel context, members, and reviews</SheetDescription>
@@ -1246,7 +1531,7 @@ watch(
       :project="store.snapshot.project"
       :branch="statusBranch"
       :working-agents="workingAgents"
-      :pending-approvals="store.snapshot.pendingApprovals"
+      :pending-approvals="selectedChannelApprovals(store.snapshot)"
     />
     <AddAgentDialog
       v-model:open="addAgentOpen"

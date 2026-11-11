@@ -52,3 +52,28 @@ test('only a live running row animates a pending tool call', async () => {
   expect(view.find('[aria-label="Running"]').exists()).toBe(false)
   expect(view.find('[aria-label="Awaiting result"]').exists()).toBe(true)
 })
+
+test('labels sandboxed tool calls', () => {
+  const view = mount(BlockView, {
+    props: {
+      channelId: 'channel',
+      block: {
+        type: 'tool_call',
+        call_id: 's',
+        name: 'Bash',
+        input: {},
+        output: 'ok',
+        sandboxed: true,
+      },
+    },
+  })
+  views.push(view)
+  expect(view.text()).toContain('Ran in sandbox')
+})
+test('does not label tool calls that were not sandboxed', () => {
+  const view = mount(ToolCallBlock, {
+    props: { name: 'Bash', input: {}, output: 'ok', sandboxed: false },
+  })
+  views.push(view)
+  expect(view.text()).not.toContain('Ran in sandbox')
+})

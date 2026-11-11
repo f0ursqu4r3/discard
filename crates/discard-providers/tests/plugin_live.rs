@@ -36,7 +36,7 @@ async fn build_plugin(provider: Arc<dyn Provider>, model: Option<&str>) {
     let project = Project { id: ProjectId::new(), name: "p".into(), path: project_dir.to_string_lossy().into() };
     db.insert_project(&project).unwrap();
     let agent_id = AgentId::new();
-    db.insert_agent(&agent_id, &AgentConfig { workspace_write: false, reasoning_effort: None, name: "Builder".into(), avatar: None, provider: "any".into(), model: model.map(str::to_string), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: true }).unwrap();
+    db.insert_agent(&agent_id, &AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Builder".into(), avatar: None, provider: "any".into(), model: model.map(str::to_string), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: true }).unwrap();
     let channel = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "builder".into(), agent_id: agent_id.clone(), workspace_mode: WorkspaceMode::MainCheckout };
     db.insert_channel(&channel).unwrap();
     let session = SessionId::new();
@@ -52,7 +52,7 @@ async fn build_plugin(provider: Arc<dyn Provider>, model: Option<&str>) {
     let engine = Engine {
         main_checkout_grants: Arc::default(),
         workspace_locks: Arc::default(),
-        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel),
+        write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel), autorun: discard_core::workspace_session::AutorunState::Off,
         reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding, providers: vec![],
         store: Arc::new(Mutex::new(db)),
@@ -88,7 +88,7 @@ async fn build_plugin(provider: Arc<dyn Provider>, model: Option<&str>) {
             }
             Update::TurnFinished(outcome) => break outcome,
             Update::Error(m) | Update::ResponseSaveFailed(m) | Update::SetupNeeded(m) => panic!("engine problem: {m}"),
-            Update::SessionProfile(_) | Update::Responding(_) | Update::ApprovalState { .. } | Update::Notice(_) | Update::ResponseCompleted(_) | Update::ConversationMarker(_) | Update::MemoryChanges { .. } => {}
+            Update::SessionProfile(_) | Update::Responding(_) | Update::ApprovalState { .. } | Update::Notice(_) | Update::ResponseCompleted(_) | Update::ConversationMarker(_) | Update::MemoryChanges { .. } | Update::MessagePosted { .. } | Update::UserMessageSaved(_) | Update::ThreadFollowed | Update::ThreadsAnchored(_) | Update::SubAgentFinished { .. } => {}
         }
     };
     assert_eq!(outcome, TurnOutcome::Completed, "tools used: {tools:?}");

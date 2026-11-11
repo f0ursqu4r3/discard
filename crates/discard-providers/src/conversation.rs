@@ -6,7 +6,28 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const WORKSPACE_TOOLS: &[&str] = &["worktree_commit"];
 
-pub(crate) const MEMORY_TOOLS: &[&str] = &["memory_search", "memory_list", "memory_read", "memory_save", "memory_edit", "memory_forget", "worktree_inspect", "worktree_request_removal", "worktree_request_creation", "main_checkout_request_write", "project_list_files", "project_read_file", "project_search"];
+pub(crate) const MEMORY_TOOLS: &[&str] = &["memory_search", "memory_list", "memory_read", "memory_save", "memory_edit", "memory_forget", "worktree_inspect", "worktree_request_removal", "worktree_request_creation", "main_checkout_request_write", "project_list_files", "project_read_file", "project_search", "project_git_branches", "project_git_log", "project_git_compare"];
+
+/// Discard's delegation tools. A session may call them only when its MCP config carries the delegation timeout.
+pub(crate) const DELEGATION_TOOLS: &[&str] = &["delegate", "agents_list", "agent_request_add"];
+
+/// True when the Discard server entry has a positive `timeout`. Discard writes that per-server tool-call timeout
+/// (in milliseconds, from `discard_core::delegation::provider_tool_timeout`) exactly when the session may delegate,
+/// because a `delegate` call blocks for minutes. The adapters read it as the condition for the delegation tools.
+pub(crate) fn delegation_enabled(doc: &Value) -> bool {
+    doc["mcpServers"]["discard-memory"].get("timeout").and_then(Value::as_u64).is_some_and(|ms| ms > 0)
+}
+
+/// The tool names a conversation session may call on the Discard server: memory and project tools, the commit tool
+/// in a Workspace session, and the delegation tools when the session's MCP config enables them. A config that cannot
+/// be read adds nothing.
+pub(crate) fn conversation_tools(spec: &SessionSpec) -> Vec<&'static str> {
+    let mut tools: Vec<&'static str> = MEMORY_TOOLS.to_vec();
+    if spec.mode == discard_core::provider::SessionMode::Workspace { tools.extend(WORKSPACE_TOOLS); }
+    let delegates = spec.mcp_config.as_ref().and_then(|path| std::fs::read(path).ok()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()).is_some_and(|doc| delegation_enabled(&doc));
+    if delegates { tools.extend(DELEGATION_TOOLS); }
+    tools
+}
 
 pub(crate) fn setup(message: impl Into<String>) -> ProviderError {
     ProviderError::Setup(format!("conversation mode: {}", message.into()))
@@ -68,10 +89,10 @@ pub(crate) fn read_memory_config(spec: &SessionSpec) -> Result<Value, ProviderEr
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CatalogTools { None, Workspace }
 
-pub(crate) fn sanitize_catalog(cache: Value, selected: &str, tools: CatalogTools) -> Result<(Value, Option<u64>), ProviderError> {
-    if cache.get("client_version").and_then(Value::as_str) != Some("0.166.0") {
+pub(crate) fn sanitize_catalog(cache: Value, selected: &str, tools: CatalogTools, running: &str) -> Result<(Value, Option<u64>), ProviderError> {
+    if cache.get("client_version").and_then(Value::as_str) != Some(running) {
         let actual = cache.get("client_version").and_then(Value::as_str).unwrap_or("unknown");
-        return Err(setup(format!("The Codex model cache was written by version {actual}, but Discard requires 0.166.0. Refresh the model list with Codex 0.166.0, then retry.")));
+        return Err(setup(format!("The Codex model cache was written by version {actual}, but the running Codex version is {running}. Refresh the model list with Codex {running}, then retry.")));
     }
     let mut models = cache
         .get("models")
@@ -102,12 +123,12 @@ pub(crate) fn sanitize_catalog(cache: Value, selected: &str, tools: CatalogTools
     Ok((json!({"models":models}), window))
 }
 
-pub(crate) fn load_catalog(home: &Path, selected: &str, tools: CatalogTools) -> Result<(Value, Option<u64>), ProviderError> {
+pub(crate) fn load_catalog(home: &Path, selected: &str, tools: CatalogTools, running: &str) -> Result<(Value, Option<u64>), ProviderError> {
     let bytes = std::fs::read(home.join("models_cache.json")).map_err(|e| {
         setup(format!("could not read Codex model cache: {e}. Open Codex once and refresh its model list, then retry with the same model"))
     })?;
     let doc = serde_json::from_slice(&bytes).map_err(|e| setup(format!("invalid Codex model cache: {e}")))?;
-    sanitize_catalog(doc, selected, tools)
+    sanitize_catalog(doc, selected, tools, running)
 }
 
 pub(crate) fn codex_controls(effective: &Value, tools: CatalogTools) -> Result<Value, ProviderError> {
@@ -273,7 +294,7 @@ mod tests {
 
     #[test]
     fn workspace_catalog_keeps_shell_and_patch() {
-        let (out, _) = sanitize_catalog(catalog(), "chosen", CatalogTools::Workspace).unwrap();
+        let (out, _) = sanitize_catalog(catalog(), "chosen", CatalogTools::Workspace, crate::version::CODEX_TESTED).unwrap();
         assert_eq!(out["models"][0]["shell_type"], "local");
         assert_eq!(out["models"][0]["apply_patch_tool_type"], "freeform");
         assert_eq!(out["models"][0]["experimental_supported_tools"], json!([]));
@@ -290,7 +311,7 @@ mod tests {
     }
 
     fn catalog() -> serde_json::Value {
-        json!({"client_version":"0.166.0", "identity":{"secret":"must-not-copy"}, "models":[{
+        json!({"client_version":crate::version::CODEX_TESTED, "identity":{"secret":"must-not-copy"}, "models":[{
             "slug":"chosen", "display_name":"Chosen", "context_window":123456,
             "apply_patch_tool_type":"freeform", "shell_type":"local", "unrelated":{"preserve":true}
         }]})
@@ -298,7 +319,7 @@ mod tests {
 
     #[test]
     fn catalog_preserves_complete_records_and_exact_model() {
-        let (out, window) = sanitize_catalog(catalog(), "chosen", CatalogTools::None).unwrap();
+        let (out, window) = sanitize_catalog(catalog(), "chosen", CatalogTools::None, crate::version::CODEX_TESTED).unwrap();
         assert_eq!(window, Some(123456));
         assert_eq!(out["models"][0]["slug"], "chosen");
         assert_eq!(out["models"][0]["unrelated"], json!({"preserve":true}));
@@ -310,14 +331,24 @@ mod tests {
 
     #[test]
     fn missing_exact_model_and_incompatible_catalog_fail() {
-        assert!(sanitize_catalog(catalog(), "other", CatalogTools::None).is_err());
-        assert!(sanitize_catalog(json!({"models":[]}), "chosen", CatalogTools::None).is_err());
-        assert!(sanitize_catalog(json!({"models":[{}]}), "chosen", CatalogTools::None).is_err());
+        assert!(sanitize_catalog(catalog(), "other", CatalogTools::None, crate::version::CODEX_TESTED).is_err());
+        assert!(sanitize_catalog(json!({"models":[]}), "chosen", CatalogTools::None, crate::version::CODEX_TESTED).is_err());
+        assert!(sanitize_catalog(json!({"models":[{}]}), "chosen", CatalogTools::None, crate::version::CODEX_TESTED).is_err());
         let mut old = catalog();
         old["client_version"] = json!("0.1.0");
-        let error = sanitize_catalog(old, "chosen", CatalogTools::None).unwrap_err().to_string();
+        let error = sanitize_catalog(old, "chosen", CatalogTools::None, crate::version::CODEX_TESTED).unwrap_err().to_string();
         assert!(error.contains("written by version 0.1.0"));
-        assert!(error.contains("Refresh the model list with Codex 0.166.0, then retry."));
+        assert!(error.contains(&format!("Refresh the model list with Codex {}, then retry.", crate::version::CODEX_TESTED)));
+    }
+
+    #[test]
+    fn catalog_version_must_match_running_cli_in_both_directions() {
+        let mut newer = catalog();
+        newer["client_version"] = json!("0.167.0");
+        assert!(sanitize_catalog(newer.clone(), "chosen", CatalogTools::None, "0.167.0").is_ok());
+        assert!(sanitize_catalog(newer, "chosen", CatalogTools::None, crate::version::CODEX_TESTED).is_err());
+        let error = sanitize_catalog(catalog(), "chosen", CatalogTools::Workspace, "0.167.0").unwrap_err().to_string();
+        assert!(error.contains("running Codex version is 0.167.0"));
     }
 
     #[test]
@@ -382,6 +413,30 @@ mod tests {
     fn cli_overrides_use_literal_top_level_keys_and_safe_inline_server_names() {
         let args = config_args(&json!({"features":{"shell_tool":false},"mcp_servers":{"a.b":{"enabled":false}}}));
         assert_eq!(args, vec!["-c", "features={\"shell_tool\" = false}", "-c", "mcp_servers={\"a.b\" = {\"enabled\" = false}}"]);
+    }
+
+    fn session_with_config(mode: discard_core::provider::SessionMode, doc: Option<Value>) -> (SessionSpec, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = doc.map(|doc| { let path = dir.path().join("session.json"); std::fs::write(&path, doc.to_string()).unwrap(); path });
+        let spec = SessionSpec { reasoning_effort: None, mode, cwd: dir.path().to_path_buf(), model: None, system_prompt: None, enforcement: discard_core::capability::EnforcementMode::HostPrompts, resume_handle: None, mcp_config: path, sandbox_autorun: false };
+        (spec, dir)
+    }
+
+    #[test]
+    fn the_delegation_tools_are_allowed_only_when_the_config_carries_the_delegation_timeout() {
+        use discard_core::provider::SessionMode::{Conversation, Workspace};
+        let entry = |timeout: Option<u64>| { let mut e = json!({"type":"http","url":"http://127.0.0.1:1/mcp","headers":{"Authorization":"Bearer t"}}); if let Some(ms) = timeout { e["timeout"] = json!(ms); } json!({"mcpServers":{"discard-memory":e}}) };
+        assert!(delegation_enabled(&entry(Some(660_000))));
+        for off in [entry(None), entry(Some(0)), json!({"mcpServers":{}}), json!({}), json!({"mcpServers":{"discard-memory":{"timeout":"660"}}})] { assert!(!delegation_enabled(&off), "{off}"); }
+        let names = |mode, doc| { let (spec, _dir) = session_with_config(mode, doc); conversation_tools(&spec) };
+        let plain = names(Conversation, Some(entry(None)));
+        assert_eq!(plain, MEMORY_TOOLS, "no timeout, no delegation tools");
+        assert_eq!(names(Conversation, None), MEMORY_TOOLS, "an unreadable config adds nothing");
+        let delegating = names(Conversation, Some(entry(Some(660_000))));
+        assert_eq!(&delegating[..MEMORY_TOOLS.len()], MEMORY_TOOLS);
+        assert_eq!(&delegating[MEMORY_TOOLS.len()..], DELEGATION_TOOLS);
+        let workspace = names(Workspace, Some(entry(Some(660_000))));
+        assert_eq!(workspace[MEMORY_TOOLS.len()..], ["worktree_commit", "delegate", "agents_list", "agent_request_add"]);
     }
 
     #[test]

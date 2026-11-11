@@ -1,6 +1,7 @@
 //! Real project channels. Git and storage work run off the webview thread.
-use discard_core::model::AgentId;
+use discard_core::model::{AgentId, MessageId};
 use super::core::{AppCore, CoreInit};
+use super::threads::ThreadRecord;
 use discard_core::{model::{Channel, ChannelId, ProjectId, WorkspaceMode}, store::{Store, WorktreeRecord}, ui_state::Update, worktree::{list_branch_tree, WorktreeManager}};
 use std::{path::PathBuf, sync::{Arc, Mutex}};
 use tokio::{runtime::Handle, sync::mpsc::UnboundedReceiver};
@@ -56,17 +57,23 @@ impl Channels {
     fn refresh_channel_access(&self, channel: &Channel) -> Result<(), String> {
         let (archived, unavailable) = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-            (store.channel_archived(&channel.id).map_err(|e| e.to_string())?, store.agent_archived(&channel.agent_id).unwrap_or(true))
+            // A thread is archived with its parent channel.
+            let owner = store.thread_info(&channel.id).map_err(|e| e.to_string())?.map_or_else(|| channel.id.clone(), |thread| thread.parent_channel_id);
+            (store.channel_archived(&owner).map_err(|e| e.to_string())?, store.agent_archived(&channel.agent_id).unwrap_or(true))
         };
         self.core.channel_read_only(&channel.id.0, archived || unavailable, archived);
         Ok(())
     }
     fn start_mode(&self, channel: &Channel, restart: bool) -> Result<(), String> {
         let (init, mut updates) = (self.launch)(channel)?;
+        let thread = self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(&channel.id).map_err(|e| e.to_string())?;
         if restart { if !self.core.restart_closed_channel(init, channel)? { return Ok(()); } }
+        else if let Some(thread) = &thread { self.core.add_thread(init, channel, thread); }
         else { self.core.add_channel(init, channel); }
         self.refresh_channel_access(channel)?;
+        if thread.is_none() && !restart { self.refresh_threads(&channel.id)?; }
         let core = self.core.clone();
+        let store = self.store.clone();
         let id = channel.id.0.clone();
         let generation = core.channel_runtime_generation(&id).ok_or("Conversation unavailable")?;
         self.runtime.spawn(async move {
@@ -77,12 +84,145 @@ impl Channels {
                     tokio::task::spawn_blocking(move || core.refresh_branches(generation));
                 }
             }
+            // The engine of a sub-agent thread ended without a final state: the task fails.
+            if core.sub_agents().is_running(&id) { sub_agent_stream_closed(&core, &store, &id); }
         });
         Ok(())
     }
+    /// Select a channel. A thread opens beside its parent channel, which becomes the selected channel.
     pub fn select(&self, id: &str) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let thread = self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(&ChannelId(id.to_owned())).map_err(|e| e.to_string())?;
+        if let Some(thread) = thread { return self.select_thread_inner(&thread); }
         self.select_inner(id)
+    }
+    fn select_thread_inner(&self, thread: &discard_core::model::ThreadInfo) -> Result<(), String> {
+        if self.core.active_channel_id() != thread.parent_channel_id.0 { self.select_inner(&thread.parent_channel_id.0)?; }
+        self.open_thread_inner(&thread.channel_id)
+    }
+    /// Select the parent channel of a thread and open the thread beside it. Returns the parent channel ID.
+    pub fn select_thread(&self, thread: &ChannelId) -> Result<String, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let info = self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(thread).map_err(|e| e.to_string())?.ok_or("This thread is unavailable.")?;
+        self.select_thread_inner(&info)?;
+        Ok(info.parent_channel_id.0)
+    }
+    /// Show a thread of the selected channel beside it, loading its session first.
+    pub fn open_thread(&self, thread: &ChannelId) -> Result<(), String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        self.open_thread_inner(thread)
+    }
+    fn open_thread_inner(&self, thread: &ChannelId) -> Result<(), String> {
+        self.load_thread(thread)?;
+        self.core.open_thread(&thread.0)
+    }
+    /// Start or restart the session of a thread when it has none that works.
+    fn load_thread(&self, thread: &ChannelId) -> Result<(), String> {
+        let channel = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            if store.thread_info(thread).map_err(|e| e.to_string())?.is_none() { return Err("This thread is unavailable.".into()); }
+            store.load_channel(thread).map_err(|e| e.to_string())?
+        };
+        if !self.core.has_channel(&thread.0) { self.start_mode(&channel, false) }
+        else if self.core.channel_session_closed(&thread.0) { self.start_mode(&channel, true) }
+        else { Ok(()) }
+    }
+    /// Start the engine of a new sub-agent thread and send its brief. The thread loads as a parked thread: it does
+    /// not open in the panel, it does not become followed, and its parent need not be the selected channel. It
+    /// stays loaded when the run ends, so the user can open it later. It never takes another message.
+    pub(crate) fn start_sub_agent_thread(&self, thread: &Channel, brief: String, author: discard_core::model::MessageAuthor) -> Result<(), String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        // The caller is a worker thread. The launcher spawns the engine on the runtime.
+        let _runtime = self.runtime.enter();
+        self.start_mode(thread, false)?;
+        self.core.send_brief(&thread.id.0, brief, author)
+    }
+    /// End a sub-agent thread whose task could not start: it is `Failed` in storage, and the thread shows why. The
+    /// parked runtime and its engine go, so a failed start leaves nothing running.
+    pub(crate) fn fail_sub_agent_thread(&self, thread: &ChannelId, error: &str) {
+        let _ = self.store.lock().unwrap_or_else(|e| e.into_inner()).finish_sub_agent_thread(thread, discard_core::model::ThreadState::Failed);
+        if self.core.has_channel(&thread.0) {
+            self.core.apply_channel(&thread.0, Update::Error(error.to_owned()));
+            self.core.apply_channel(&thread.0, Update::SubAgentFinished { state: discard_core::model::ThreadState::Failed, text: String::new() });
+            self.core.drop_thread_runtime(&thread.0);
+        }
+    }
+    /// Read the threads and reference rows of a channel from storage into the app state.
+    pub fn refresh_threads(&self, channel: &ChannelId) -> Result<(), String> {
+        let (records, posted) = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            if store.thread_info(channel).map_err(|e| e.to_string())?.is_some() { return Ok(()); }
+            // A sub-agent thread has no anchor while its parent turn runs. With no turn running, a thread that is
+            // still unanchored lost its parent turn (a crash): hang it under the user message it came from.
+            if !self.core.channel_running(&channel.0) { store.anchor_sub_agent_threads(channel, None).map_err(|e| e.to_string())?; }
+            let mut records = Vec::new();
+            for info in store.threads_for_channel(channel).map_err(|e| e.to_string())? {
+                let messages = store.messages_for_channel(&info.channel_id).map_err(|e| e.to_string())?;
+                let authors = store.message_authors(&info.channel_id).map_err(|e| e.to_string())?;
+                records.push(ThreadRecord::build(&info, &messages, &authors));
+            }
+            (records, store.posted_sources(channel).map_err(|e| e.to_string())?)
+        };
+        self.core.set_channel_threads(&channel.0, records);
+        if self.core.has_channel(&channel.0) { self.core.set_posted(&channel.0, posted); }
+        Ok(())
+    }
+    /// The followed threads of one channel, for the channel bar.
+    pub fn thread_links(&self, channel: &ChannelId) -> Result<Vec<super::dto::ThreadLinkDto>, String> {
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        super::threads::stored_links(&store, channel, |id| self.core.last_read(id))
+    }
+    /// Start a thread on a saved message of the selected channel. The thread row, its session and its first
+    /// message come together: a failure before the message is queued leaves no thread behind. The new thread opens
+    /// beside the channel. Returns the thread channel ID.
+    pub fn start_thread(&self, parent: &str, anchor: &str, text: String, attachments: Vec<discard_core::attachments::Attachment>, also_post: bool) -> Result<String, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        if text.trim().is_empty() && attachments.is_empty() { return Err("Enter a message to start the thread.".into()); }
+        if self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(&ChannelId(parent.to_owned())).map_err(|e| e.to_string())?.is_some_and(|thread| thread.kind == discard_core::model::ThreadKind::SubAgent) {
+            return Err("A sub-agent thread cannot start another thread.".into());
+        }
+        self.core.can_start_thread(parent)?;
+        let (parent_id, anchor_id) = (ChannelId(parent.to_owned()), MessageId(anchor.to_owned()));
+        let (thread, recipient) = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            let parent_channel = store.load_channel(&parent_id).map_err(|e| e.to_string())?;
+            let default = discard_core::mentions::anchor_agent(&store, &parent_channel, &anchor_id)?;
+            let recipient = discard_core::mentions::resolve(&store, &parent_id, &text)?.unwrap_or_else(|| default.clone());
+            if store.agent_archived(&recipient).map_err(|e| e.to_string())? { return Err("This agent is archived. Restore it before sending a message.".into()); }
+            let config = store.load_agent(&recipient).map_err(|e| e.to_string())?;
+            let recipient = discard_core::model::MessageAuthor { agent_id: recipient, name: config.name, provider: config.provider, avatar: config.avatar };
+            (store.create_thread(&parent_id, &anchor_id, &discard_core::store::thread_name(&text), &default).map_err(|e| e.to_string())?, recipient)
+        };
+        let sent = self.start_mode(&thread, false).and_then(|()| self.core.send_in_thread(&thread.id.0, text, attachments, also_post, Some(recipient)));
+        if let Err(error) = sent {
+            self.core.remove_thread(&thread.id.0);
+            let _ = self.store.lock().unwrap_or_else(|e| e.into_inner()).discard_empty_thread(&thread.id);
+            return Err(error);
+        }
+        self.core.open_thread(&thread.id.0)?;
+        Ok(thread.id.0)
+    }
+    /// Show a thread message in the thread's parent channel. Posting again changes nothing. Returns the ID of the
+    /// parent's reference row.
+    pub fn post_thread_message(&self, message: &str) -> Result<String, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let (reference, source) = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            let (reference, _) = store.post_thread_message(&MessageId(message.to_owned())).map_err(|e| e.to_string())?;
+            let source = store.posted_sources(&reference.channel_id).map_err(|e| e.to_string())?.remove(&reference.id).ok_or("The posted message is unavailable.")?;
+            (reference, source)
+        };
+        self.load_thread(&source.thread_channel_id)?;
+        let id = reference.id.0.clone();
+        self.core.message_posted(&source.thread_channel_id.0.clone(), reference, source);
+        Ok(id)
+    }
+    /// Follow or leave a thread. A followed thread shows in the channel bar.
+    pub fn set_thread_followed(&self, thread: &ChannelId, followed: bool) -> Result<(), String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        self.store.lock().unwrap_or_else(|e| e.into_inner()).set_thread_followed(thread, followed).map_err(|e| e.to_string())?;
+        self.core.set_thread_followed(&thread.0, followed);
+        Ok(())
     }
     fn project_channel(&self, project: &ProjectId, channel: &ChannelId, allow_archived: bool) -> Result<(Channel, discard_core::model::ProjectChannelMetadata, bool), String> {
         let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -110,12 +250,14 @@ impl Channels {
                 .ok_or("Project channel metadata is unavailable")?;
             let worktree = store.worktree_for(&channel.id).map_err(|e| e.to_string())?
                 .map(|record| super::dto::ChannelWorktreeDto { path: record.path, branch: record.branch });
+            let threads = super::threads::stored_links(&store, &channel.id, |id| self.core.last_read(id))?;
             Ok(super::dto::ProjectChannelDto {
                 worktree,
                 id: channel.id.0, project_id: project.0.clone(), name: channel.name,
                 agent_id: channel.agent_id.0, workspace_mode: channel.workspace_mode.as_str().into(),
                 kind: match metadata.kind { discard_core::model::ProjectChannelKind::General => "general", discard_core::model::ProjectChannelKind::Branch => "branch", discard_core::model::ProjectChannelKind::ArchivedLegacy => "archived_legacy", discard_core::model::ProjectChannelKind::Legacy => "legacy" }.into(),
                 repository: metadata.repository, branch: metadata.branch, archived, archived_into: metadata.archived_into.map(|id| id.0),
+                threads,
             })
         }).collect()
     }
@@ -222,6 +364,7 @@ impl Channels {
             Some(super::dto::ChannelMemberDto { id: agent.0.clone(), name: config.name, provider: config.provider, archived: store.agent_archived(&agent).unwrap_or(true) })
         }).collect();
         let main_agent_id = store.project_main_agent(project).map_err(|e| e.to_string())?.map(|id| id.0);
+        let threads = super::threads::stored_links(&store, &channel.id, |id| self.core.last_read(id))?;
         Ok(super::dto::ChannelDetailsDto {
             channel: super::dto::ProjectChannelDto {
                 worktree: store.worktree_for(&channel.id).map_err(|e| e.to_string())?
@@ -230,6 +373,7 @@ impl Channels {
                 agent_id: channel.agent_id.0, workspace_mode: channel.workspace_mode.as_str().into(),
                 kind: match metadata.kind { discard_core::model::ProjectChannelKind::General => "general", discard_core::model::ProjectChannelKind::Branch => "branch", discard_core::model::ProjectChannelKind::ArchivedLegacy => "archived_legacy", discard_core::model::ProjectChannelKind::Legacy => "legacy" }.into(),
                 repository: metadata.repository, branch: metadata.branch, archived, archived_into: metadata.archived_into.map(|id| id.0),
+                threads,
             },
             topic: super::dto::ChannelTopicDto { channel_id: topic.channel_id.0, text: topic.text, version: topic.version },
             topic_history, members, main_agent_id,
@@ -284,6 +428,7 @@ impl Channels {
         if project_change { self.core.switch_channel_for_project(id)?; } else { self.core.switch_channel(id)?; }
         if let Some(project) = project { self.core.configure_branch_source(self.store.clone(), channel.id.clone(), channel.workspace_mode, project.path.into()); }
         else { self.core.clear_branch_source(); }
+        self.refresh_threads(&channel.id)?;
         self.core.clear_slots();
         self.core.refresh_branches(self.core.request_branch_refresh());
         if channel.project_id.is_none() {
@@ -304,7 +449,16 @@ impl Channels {
     }
     pub fn reload_project(&self, id: &ProjectId) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        let channels: Vec<_> = self.store.lock().unwrap_or_else(|e| e.into_inner()).all_conversations().map_err(|e| e.to_string())?.into_iter().filter(|c| c.project_id.as_ref() == Some(id) && self.core.has_channel(&c.id.0)).collect();
+        let channels: Vec<_> = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            let conversations: Vec<_> = store.all_conversations().map_err(|e| e.to_string())?.into_iter().filter(|c| c.project_id.as_ref() == Some(id)).collect();
+            // Threads are not conversations, but their sessions end with the project's transports too.
+            let mut threads = Vec::new();
+            for conversation in &conversations {
+                for thread in store.threads_for_channel(&conversation.id).map_err(|e| e.to_string())? { threads.push(store.load_channel(&thread.channel_id).map_err(|e| e.to_string())?); }
+            }
+            conversations.into_iter().chain(threads).filter(|c| self.core.has_channel(&c.id.0)).collect()
+        };
         self.core.invalidate_project_channels(id)?;
         for channel in channels { self.start_mode(&channel, true)?; }
         if self.core.active_context().1.as_ref() == Some(id) {
@@ -482,6 +636,32 @@ impl Channels {
         Ok(request)
     }
 
+    /// Decide a request to add an agent to the project. Adding makes the agent a project member and continues the
+    /// requesting agent in the channel; denying continues it with the note that the user declined. The channel must
+    /// be the selected channel and idle, as for a write request, so a decision never saves without its follow-up.
+    /// The transcript gets a note of the result.
+    pub fn decide_agent_request(&self, requests: &discard_core::agent_requests::AgentRequests, channel: &str, id: &str, approve: bool) -> Result<discard_core::agent_requests::AgentAddRequest, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        self.core.can_continue_in(channel)?;
+        let channel_id = ChannelId(channel.into());
+        let decision = requests.decide(&self.store.lock().unwrap_or_else(|e| e.into_inner()), &channel_id, id, approve)?;
+        let message = discard_core::model::Message {
+            id: discard_core::model::MessageId::new(), channel_id,
+            role: discard_core::model::Role::System,
+            blocks: vec![discard_core::model::Block::Markdown { text: decision.request.result.clone().unwrap_or_else(|| decision.request.state.clone()) }],
+        };
+        // The note is a courtesy to the reader. A storage error must not leave the agent without its follow-up.
+        match self.store.lock().unwrap_or_else(|e| e.into_inner()).insert_message(&message) {
+            Ok(()) => { self.core.apply_channel(channel, Update::ConversationMarker(message)); }
+            Err(error) => tracing::warn!(%error, "could not save the note of an agent request"),
+        }
+        if let Some(follow_up) = decision.follow_up {
+            if follow_up.declined { self.core.continue_declined_in(channel, follow_up.agent, follow_up.note)?; }
+            else { self.core.continue_in(channel, follow_up.agent, follow_up.note)?; }
+        }
+        Ok(decision.request)
+    }
+
     pub fn continue_after_approval(&self, channel: &str, agent: AgentId, note: String) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         self.core.continue_in(channel, agent, note)
@@ -491,7 +671,16 @@ impl Channels {
         self.send_with_attachments(channel, text, Vec::new())
     }
     pub fn send_with_attachments(&self, channel: &str, text: String, attachments: Vec<discard_core::attachments::Attachment>) -> Result<(), String> {
+        self.send_with_options(channel, text, attachments, false)
+    }
+    /// Send a user message. In a thread, `also_post` also posts it to the parent channel. Anywhere else it is an error.
+    pub fn send_with_options(&self, channel: &str, text: String, attachments: Vec<discard_core::attachments::Attachment>, also_post: bool) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let thread_info = self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(&ChannelId(channel.into())).map_err(|e| e.to_string())?;
+        // TODO: steering a sub-agent and follow-up turns. Until then a sub-agent thread takes only its brief.
+        if thread_info.as_ref().is_some_and(|thread| thread.kind == discard_core::model::ThreadKind::SubAgent) { return Err("A sub-agent thread takes no messages yet.".into()); }
+        let thread = thread_info.is_some();
+        if also_post && !thread { return Err("Only a message in a thread can be posted to a channel.".into()); }
         let recipient = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
             let id = discard_core::mentions::recipient(&store, &ChannelId(channel.into()), &text)?;
@@ -499,6 +688,10 @@ impl Channels {
             let config = store.load_agent(&id).map_err(|e| e.to_string())?;
             Some(discard_core::model::MessageAuthor { agent_id: id, name: config.name, provider: config.provider, avatar: config.avatar })
         };
+        if thread {
+            self.load_thread(&ChannelId(channel.into()))?;
+            return self.core.send_in_thread(channel, text, attachments, also_post, recipient);
+        }
         self.core.send_to_agent_with_attachments(Some(channel), text, recipient, attachments)
     }
 
@@ -556,6 +749,17 @@ impl Channels {
     }
 }
 
+/// The engine of a running sub-agent thread ended without a final state: the task fails.
+fn sub_agent_stream_closed(core: &AppCore, store: &Arc<Mutex<Store>>, thread: &str) {
+    use discard_core::model::ThreadState;
+    let error = "The sub-agent session ended before it finished.";
+    let _ = store.lock().unwrap_or_else(|e| e.into_inner()).finish_sub_agent_thread(&ChannelId(thread.to_owned()), ThreadState::Failed);
+    core.apply_channel(thread, Update::Error(error.into()));
+    core.apply_channel(thread, Update::SubAgentFinished { state: ThreadState::Failed, text: String::new() });
+    // The updates reach the registry only while the runtime is loaded. The task ends here in any case.
+    core.sub_agents().end(thread, ThreadState::Failed, "");
+}
+
 pub fn validate_name(name: &str) -> Result<String, String> {
     let name = name.trim().trim_start_matches('#').trim().to_lowercase();
     if name.is_empty() || name.chars().count() > 64 { return Err("Use a channel name with 1–64 characters.".into()); }
@@ -570,7 +774,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn configured_agent(store: &Store) -> AgentId {
-        store.create_agent(&AgentConfig { workspace_write: false, reasoning_effort: None, name: "Project agent".into(), provider: "codex".into(), model: Some("model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap()
+        store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Project agent".into(), provider: "codex".into(), model: Some("model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap()
     }
 
     fn launcher() -> Launcher {
@@ -900,7 +1104,7 @@ mod tests {
         let project = Project { id: ProjectId::new(), name: "Project".into(), path: dir.path().to_string_lossy().into_owned() };
         store.insert_project(&project).unwrap();
         let agent = AgentId::new();
-        store.insert_agent(&agent, &AgentConfig { workspace_write: false, reasoning_effort: None, name: "Builder".into(), provider: "codex".into(), model: Some("agent-model".into()), avatar: None, system_prompt: "Review changes".into(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        store.insert_agent(&agent, &AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Builder".into(), provider: "codex".into(), model: Some("agent-model".into()), avatar: None, system_prompt: "Review changes".into(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         let first = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "general".into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::MainCheckout };
         store.create_named_channel(&first, None, None).unwrap();
         let store = Arc::new(Mutex::new(store));
@@ -937,7 +1141,7 @@ mod tests {
         let project = Project { id: ProjectId::new(), name: "p".into(), path: dir.path().to_string_lossy().into_owned() };
         let agent = AgentId::new();
         store.insert_project(&project).unwrap();
-        store.insert_agent(&agent, &AgentConfig { workspace_write: false, reasoning_effort: None, name: "Builder".into(), provider: "codex".into(), model: None, avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        store.insert_agent(&agent, &AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Builder".into(), provider: "codex".into(), model: None, avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         store.set_project_main_agent(&project.id, &agent).unwrap();
         let first = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "old".into(), agent_id: agent, workspace_mode: WorkspaceMode::Worktree };
         let manager = WorktreeManager::new(dir.path());
@@ -948,7 +1152,7 @@ mod tests {
         let core = core(&first, dir.path());
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
         service.activate_project(&project.id).unwrap();
-        let direct_agent = store.lock().unwrap().create_agent(&AgentConfig { workspace_write: false, reasoning_effort: None, name: "Direct".into(), provider: "codex".into(), model: Some("direct-model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        let direct_agent = store.lock().unwrap().create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Direct".into(), provider: "codex".into(), model: Some("direct-model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         service.open_agent(&direct_agent).unwrap();
         git(&["checkout", "-b", "new"]);
         let new = service.open_branch("new").unwrap();
@@ -1023,7 +1227,7 @@ mod tests {
 
         assert_eq!(service.activate_project(&project_id).unwrap(), general_id.0);
         let unrelated = store.lock().unwrap().create_agent(&AgentConfig {
-            workspace_write: false,
+            workspace_write: false, sandbox_autorun: false, delegation: false,
             reasoning_effort: None,
             name: "Direct agent".into(),
             provider: "codex".into(),
@@ -1210,7 +1414,7 @@ mod tests {
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let project = store.lock().unwrap().import_project_folder(dir.path()).unwrap();
         let old_agent = configured_agent(&store.lock().unwrap());
-        let new_agent = store.lock().unwrap().create_agent(&AgentConfig { workspace_write: false, reasoning_effort: None, name: "New main".into(), provider: "claude".into(), model: Some("new-model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        let new_agent = store.lock().unwrap().create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "New main".into(), provider: "claude".into(), model: Some("new-model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         store.lock().unwrap().set_project_main_agent(&project.id, &old_agent).unwrap();
         let general = store.lock().unwrap().ensure_project_general_channel(&project.id, &old_agent).unwrap();
         let retry_receivers = Arc::new(Mutex::new(Vec::new()));
@@ -1259,8 +1463,8 @@ mod tests {
             let first = store.import_project_folder(first_dir.path()).unwrap();
             let second = store.import_project_folder(second_dir.path()).unwrap();
             let old = configured_agent(&store);
-            let first_replacement = store.create_agent(&AgentConfig { workspace_write: false, reasoning_effort: None, name: "Replacement one".into(), provider: "codex".into(), model: Some("one".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
-            let second_replacement = store.create_agent(&AgentConfig { workspace_write: false, reasoning_effort: None, name: "Replacement two".into(), provider: "codex".into(), model: Some("two".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+            let first_replacement = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Replacement one".into(), provider: "codex".into(), model: Some("one".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+            let second_replacement = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Replacement two".into(), provider: "codex".into(), model: Some("two".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
             store.set_project_main_agent(&first.id, &old).unwrap();
             store.set_project_main_agent(&second.id, &old).unwrap();
             let first_general = store.ensure_project_general_channel(&first.id, &old).unwrap();

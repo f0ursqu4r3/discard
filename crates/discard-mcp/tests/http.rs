@@ -36,6 +36,7 @@ fn identity(agent: &str) -> Identity {
         surface: Surface::Memory,
         scopes: [ScopeKindOrd::Agent, ScopeKindOrd::Project].into(),
         can_write: true,
+        delegation: false,
     }
 }
 

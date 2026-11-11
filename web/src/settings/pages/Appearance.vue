@@ -8,6 +8,11 @@ import AppearancePreview from '../AppearancePreview.vue'
 import { defaultAppearance, type AppearancePreferences } from '@/bridge/appearance'
 import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
+import KeyValue from '../ui/KeyValue.vue'
+import SettingsNotice from '../ui/SettingsNotice.vue'
+import SettingsRow from '../ui/SettingsRow.vue'
+import SettingsCard from '../ui/SettingsCard.vue'
+import PathText from '../ui/PathText.vue'
 import {
   Select,
   SelectContent,
@@ -70,204 +75,232 @@ onMounted(async () => {
 onUnmounted(() => stop?.())
 </script>
 <template>
-  <div v-if="value" class="space-y-5">
-    <div
-      v-if="value.problems?.length"
-      data-protected="true"
-      class="rounded-md border border-[var(--protected-border)] bg-[var(--protected-bg)] p-2 text-[var(--protected-fg)]"
-    >
+  <div v-if="value" class="space-y-4">
+    <SettingsNotice v-if="value.problems?.length">
       <strong>Problems with the theme</strong>
       <p v-for="problem in value.problems" :key="problem">{{ problem }}</p>
-    </div>
-    <p
-      v-if="error"
-      role="alert"
-      data-protected="true"
-      class="rounded-md border border-[var(--protected-border)] bg-[var(--protected-bg)] p-2 text-[var(--protected-fg)]"
-    >
-      {{ error }}
-    </p>
-    <section class="space-y-4" aria-label="Layout and messages">
-      <h2 class="font-semibold">Layout and messages</h2>
-      <div class="flex items-center justify-between gap-4">
-        <div>
-          <label for="mini-project-rail" class="font-medium">Mini project rail</label>
-          <p id="mini-project-rail-help" class="text-sm text-muted-foreground">
-            Use a 48 px rail with smaller icons at the default scale.
-          </p>
-        </div>
-        <Switch
-          id="mini-project-rail"
-          aria-describedby="mini-project-rail-help"
-          :model-value="value.miniProjectRail"
-          :disabled="saving"
-          @update:model-value="patch({ miniProjectRail: $event })"
-        />
-      </div>
-      <div class="flex items-center justify-between gap-4">
-        <div>
-          <label for="message-density" class="font-medium">Message density</label>
-          <p id="message-density-help" class="text-sm text-muted-foreground">
-            Compact reduces spacing and keeps the same text size.
-          </p>
-        </div>
-        <Select
-          :model-value="value.messageDensity"
-          :disabled="saving"
-          @update:model-value="patch({ messageDensity: String($event) })"
+    </SettingsNotice>
+    <SettingsNotice v-if="error" as="p" role="alert">{{ error }}</SettingsNotice>
+    <SettingsCard title="Theme">
+      <div>
+        <SettingsRow
+          label="Source"
+          :help="
+            value.themeSource === 'default'
+              ? 'Catppuccin, light or dark with your system'
+              : value.themeSource === 'ghostty'
+                ? 'Use the theme in your Ghostty config'
+                : 'Pick the themes below'
+          "
         >
-          <SelectTrigger id="message-density" aria-describedby="message-density-help" class="w-40">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="comfortable">Comfortable</SelectItem>
-            <SelectItem value="compact">Compact</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-      <div class="flex items-center justify-between gap-4">
-        <div>
-          <label for="show-message-avatars" class="font-medium">Show message avatars</label>
-          <p id="show-message-avatars-help" class="text-sm text-muted-foreground">
-            Hide avatars to give messages more room. Author names stay visible.
-          </p>
-        </div>
-        <Switch
-          id="show-message-avatars"
-          aria-describedby="show-message-avatars-help"
-          :model-value="value.showMessageAvatars"
-          :disabled="saving"
-          @update:model-value="patch({ showMessageAvatars: $event })"
-        />
-      </div>
-      <AppearancePreview :preferences="value" />
-      <p class="text-sm text-muted-foreground">
-        Changes apply to all conversations and are saved automatically.
-      </p>
-    </section>
-    <section class="space-y-2">
-      <h2 class="font-semibold">Theme source</h2>
-      <div class="flex gap-2">
-        <Button
-          v-for="source in ['default', 'ghostty', 'custom']"
-          :key="source"
-          :variant="value.themeSource === source ? 'default' : 'outline'"
-          class="capitalize"
-          @click="patch({ themeSource: source })"
-        >
-          {{ source }}
-        </Button>
-      </div>
-      <p class="text-sm text-muted-foreground">
-        {{
-          value.themeSource === 'default'
-            ? 'Catppuccin, light or dark with your system'
-            : value.themeSource === 'ghostty'
-              ? 'Use the theme in your Ghostty config'
-              : 'Pick the themes below'
-        }}
-      </p>
-    </section>
-    <section v-if="value.themeSource === 'custom'" class="space-y-2">
-      <div class="flex items-center gap-3">
-        <span class="font-semibold">Use one theme for both</span>
-        <Switch
-          aria-label="Use one theme for both"
-          :model-value="value.single"
-          @update:model-value="choose($event ? 'single' : 'pair')"
-        />
-      </div>
-      <div class="flex gap-3">
-        <div
-          v-for="kind in value.single ? ['light'] : ['light', 'dark']"
-          :key="kind"
-          class="space-y-1"
-        >
-          <p>{{ value.single ? 'Theme' : kind === 'light' ? 'Light theme' : 'Dark theme' }}</p>
-          <Select
-            @update:open="themeSearch = ''"
-            :model-value="kind === 'light' ? value.light : value.dark"
-            @update:model-value="choose(kind, String($event))"
+          <div class="flex gap-1.5">
+            <Button
+              v-for="source in ['default', 'ghostty', 'custom']"
+              :key="source"
+              size="sm"
+              :variant="value.themeSource === source ? 'default' : 'outline'"
+              class="capitalize"
+              @click="patch({ themeSource: source })"
+            >
+              {{ source }}
+            </Button>
+          </div>
+        </SettingsRow>
+        <template v-if="value.themeSource === 'custom'">
+          <SettingsRow
+            label="Use one theme for both"
+            label-for="use-one-theme"
+            :help="
+              value.single
+                ? 'The same theme in light and dark'
+                : 'Discard switches with your system\'s light and dark setting'
+            "
           >
-            <SelectTrigger class="w-60"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <Input
-                v-model="themeSearch"
-                aria-label="Search themes"
-                placeholder="Search themes"
-                @keydown.stop
-              />
-              <SelectGroup v-for="origin in ['Yours', 'Ghostty', 'Bundled']" :key="origin">
-                <SelectLabel>{{ origin }}</SelectLabel>
-                <SelectItem
-                  v-for="item in value.themes?.filter(
-                    (t) =>
-                      t[1] === origin && t[0].toLowerCase().includes(themeSearch.toLowerCase()),
-                  )"
-                  :key="item[0]"
-                  :value="item[0]"
-                >
-                  {{ item[0] }}
-                </SelectItem>
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-        </div>
+            <Switch
+              id="use-one-theme"
+              aria-label="Use one theme for both"
+              :model-value="value.single"
+              @update:model-value="choose($event ? 'single' : 'pair')"
+            />
+          </SettingsRow>
+          <div class="grid gap-3 pt-3" :class="value.single ? 'grid-cols-1' : 'grid-cols-2'">
+            <div v-for="kind in value.single ? ['light'] : ['light', 'dark']" :key="kind">
+              <label :for="`theme-${kind}`" class="mb-1.5 block font-medium">
+                {{ value.single ? 'Theme' : kind === 'light' ? 'Light theme' : 'Dark theme' }}
+              </label>
+              <Select
+                @update:open="themeSearch = ''"
+                :model-value="kind === 'light' ? value.light : value.dark"
+                @update:model-value="choose(kind, String($event))"
+              >
+                <SelectTrigger :id="`theme-${kind}`" class="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <Input
+                    v-model="themeSearch"
+                    aria-label="Search themes"
+                    placeholder="Search themes"
+                    @keydown.stop
+                  />
+                  <SelectGroup v-for="origin in ['Yours', 'Ghostty', 'Bundled']" :key="origin">
+                    <SelectLabel>{{ origin }}</SelectLabel>
+                    <SelectItem
+                      v-for="item in value.themes?.filter(
+                        (t) =>
+                          t[1] === origin && t[0].toLowerCase().includes(themeSearch.toLowerCase()),
+                      )"
+                      :key="item[0]"
+                      :value="item[0]"
+                    >
+                      {{ item[0] }}
+                    </SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+        </template>
       </div>
-      <p class="text-sm text-muted-foreground">
-        {{
-          value.single
-            ? 'The same theme in light and dark'
-            : "Discard switches with your system's light and dark setting"
-        }}
-      </p>
-    </section>
-    <section class="space-y-2">
-      <div class="flex items-center gap-3">
-        <strong>{{ value.activeName }}</strong>
-        <span class="text-sm text-muted-foreground">{{ value.origin }}</span>
-        <Button variant="outline" @click="run('settings_copy_theme', { name: value.activeName })">
-          Edit a copy
-        </Button>
-      </div>
-      <p class="text-sm text-muted-foreground">Active theme file: {{ value.file }}</p>
-      <p class="text-sm text-muted-foreground">Ghostty config: {{ value.config }}</p>
-      <strong>Swatches</strong>
-      <div class="flex flex-wrap gap-2">
-        <div
-          v-for="(swatch, index) in value.swatches"
-          :key="swatch[0]"
-          class="flex items-center gap-1"
-        >
+      <div class="mt-3 space-y-3 border-t border-dashed border-border pt-3">
+        <div class="flex items-center gap-2">
+          <span class="font-semibold">{{ value.activeName }}</span>
           <span
-            class="size-6 rounded-sm border border-border bg-[var(--swatch-color)]"
-            :style="{ '--swatch-color': swatch[1] }"
-            :title="swatch[0]"
-          />
-          <span v-if="index >= 16" class="text-sm text-muted-foreground">{{ swatch[0] }}</span>
+            v-if="value.origin"
+            class="rounded-sm border border-border px-1.5 font-mono text-[10.5px] text-muted-foreground"
+          >
+            {{ value.origin }}
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            class="ml-auto"
+            @click="run('settings_copy_theme', { name: value.activeName })"
+          >
+            Edit a copy
+          </Button>
         </div>
+        <div class="space-y-2">
+          <div
+            class="grid grid-cols-8 overflow-hidden rounded-md border border-border"
+            role="group"
+            aria-label="Palette"
+          >
+            <span
+              v-for="swatch in (value.swatches ?? []).slice(0, 16)"
+              :key="swatch[0]"
+              class="h-6 bg-[var(--swatch-color)]"
+              :style="{ '--swatch-color': swatch[1] }"
+              :title="swatch[0]"
+            />
+          </div>
+          <div v-if="(value.swatches ?? []).length > 16" class="flex flex-wrap gap-x-3 gap-y-1.5">
+            <span
+              v-for="swatch in (value.swatches ?? []).slice(16)"
+              :key="swatch[0]"
+              class="inline-flex items-center gap-1.5 font-mono text-xs text-muted-foreground"
+              :title="swatch[0]"
+            >
+              <span
+                class="size-3 rounded-sm border border-border bg-[var(--swatch-color)]"
+                :style="{ '--swatch-color': swatch[1] }"
+              />
+              {{ swatch[0] }}
+            </span>
+          </div>
+        </div>
+        <dl class="flex flex-col gap-1.5">
+          <KeyValue label="theme file"><PathText :path="value.file" /></KeyValue>
+          <KeyValue label="ghostty config"><PathText :path="value.config" /></KeyValue>
+        </dl>
       </div>
-    </section>
-    <section class="space-y-1">
-      <div class="flex items-center gap-3">
-        <span class="font-semibold">Ignore plugin themes</span>
+    </SettingsCard>
+    <SettingsCard title="Layout and messages" aria-label="Layout and messages" flush>
+      <AppearancePreview :preferences="value" />
+      <div class="px-3 pt-2 pb-3">
+        <div>
+          <SettingsRow
+            label="Mini project rail"
+            label-for="mini-project-rail"
+            help-id="mini-project-rail-help"
+            help="Use a 48 px rail with smaller icons at the default scale."
+          >
+            <Switch
+              id="mini-project-rail"
+              aria-describedby="mini-project-rail-help"
+              :model-value="value.miniProjectRail"
+              :disabled="saving"
+              @update:model-value="patch({ miniProjectRail: $event })"
+            />
+          </SettingsRow>
+          <SettingsRow
+            label="Message density"
+            label-for="message-density"
+            help-id="message-density-help"
+            help="Compact reduces spacing and keeps the same text size."
+          >
+            <Select
+              :model-value="value.messageDensity"
+              :disabled="saving"
+              @update:model-value="patch({ messageDensity: String($event) })"
+            >
+              <SelectTrigger
+                id="message-density"
+                aria-describedby="message-density-help"
+                class="w-40"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="comfortable">Comfortable</SelectItem>
+                <SelectItem value="compact">Compact</SelectItem>
+              </SelectContent>
+            </Select>
+          </SettingsRow>
+          <SettingsRow
+            label="Show message avatars"
+            label-for="show-message-avatars"
+            help-id="show-message-avatars-help"
+            help="Hide avatars to give messages more room. Author names stay visible."
+          >
+            <Switch
+              id="show-message-avatars"
+              aria-describedby="show-message-avatars-help"
+              :model-value="value.showMessageAvatars"
+              :disabled="saving"
+              @update:model-value="patch({ showMessageAvatars: $event })"
+            />
+          </SettingsRow>
+        </div>
+        <p class="pt-2 text-sm text-muted-foreground">
+          Changes apply to all conversations and are saved automatically.
+        </p>
+      </div>
+    </SettingsCard>
+    <SettingsCard title="Plugin themes">
+      <SettingsRow
+        label="Ignore plugin themes"
+        label-for="ignore-plugin-themes"
+        help="Keep the theme colors above, whatever plugins ask for"
+      >
         <Switch
+          id="ignore-plugin-themes"
           aria-label="Ignore plugin themes"
           :model-value="value.ignorePluginThemes"
           @update:model-value="patch({ ignorePluginThemes: $event })"
         />
+      </SettingsRow>
+      <div class="pt-3">
+        <p v-if="value.ignorePluginThemes" class="text-sm text-muted-foreground">
+          Plugin themes are off
+        </p>
+        <p v-else-if="!value.overrides?.length" class="text-sm text-muted-foreground">
+          No plugin changes the theme
+        </p>
+        <dl v-else class="flex flex-col gap-1.5">
+          <KeyValue v-for="item in value.overrides" :key="item[0]" :label="item[0]">
+            {{ item[1] }}
+          </KeyValue>
+        </dl>
       </div>
-      <p class="text-sm text-muted-foreground">
-        Keep the theme colors above, whatever plugins ask for
-      </p>
-    </section>
-    <section>
-      <strong>Plugin overrides</strong>
-      <p v-if="value.ignorePluginThemes">Plugin themes are off</p>
-      <p v-else-if="!value.overrides?.length">No plugin changes the theme</p>
-      <p v-for="item in value.ignorePluginThemes ? [] : value.overrides" :key="item[0]">
-        {{ item[0] }} from {{ item[1] }}
-      </p>
-    </section>
+    </SettingsCard>
   </div>
 </template>

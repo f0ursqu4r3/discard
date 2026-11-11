@@ -1,0 +1,255 @@
+{
+  "history": {
+    "channelId": "channel",
+    "messages": [
+      {
+        "author": null,
+        "blocks": [
+          {
+            "text": "A thread is a side conversation.",
+            "type": "markdown"
+          }
+        ],
+        "continuesGroup": false,
+        "createdAt": null,
+        "id": "answer",
+        "postedFrom": null,
+        "postedToChannel": false,
+        "role": "agent",
+        "subAgentThreads": [],
+        "thread": {
+          "agentName": "Agent",
+          "channelId": "thread",
+          "followed": true,
+          "kind": "question",
+          "lastMessage": {
+            "authorName": "Agent",
+            "preview": "It keeps the channel clean.",
+            "role": "agent"
+          },
+          "messageCount": 2,
+          "name": "Why a thread?",
+          "pendingApprovals": 0,
+          "state": null,
+          "unread": true
+        }
+      },
+      {
+        "author": null,
+        "blocks": [
+          {
+            "text": "It keeps the channel clean.",
+            "type": "markdown"
+          }
+        ],
+        "continuesGroup": false,
+        "createdAt": null,
+        "id": "reference",
+        "postedFrom": {
+          "sourceMessageId": "reply",
+          "threadChannelId": "thread",
+          "threadName": "Why a thread?"
+        },
+        "postedToChannel": false,
+        "role": "agent",
+        "subAgentThreads": [],
+        "thread": null
+      }
+    ],
+    "rev": 2
+  },
+  "snapshot": {
+    "activeProjectId": "project",
+    "agent": "Agent",
+    "agentId": "agent",
+    "agentStatus": "working",
+    "archiveBusy": false,
+    "archived": false,
+    "autorun": null,
+    "banners": {
+      "archive": null,
+      "confirm": null,
+      "problemLines": [],
+      "reviewCount": 0,
+      "reviewNames": [],
+      "safeMode": false
+    },
+    "branches": [],
+    "channel": "general",
+    "channelId": "channel",
+    "channels": [
+      {
+        "agent": "Agent",
+        "agentId": "agent",
+        "id": "channel",
+        "name": "general",
+        "pendingApprovals": 0,
+        "projectId": "project",
+        "provider": "example",
+        "running": false,
+        "threadPendingApprovals": 0,
+        "threads": [
+          {
+            "id": "thread",
+            "kind": "question",
+            "name": "Why a thread?",
+            "parentChannelId": "channel",
+            "pendingApprovals": 0,
+            "running": false,
+            "state": null,
+            "unread": true
+          }
+        ],
+        "unread": false,
+        "workspaceMode": "main_checkout"
+      }
+    ],
+    "composerDisabled": false,
+    "historyRev": 0,
+    "liveBlocks": [
+      {
+        "text": "Hello",
+        "type": "markdown"
+      }
+    ],
+    "liveSubAgentThreads": [],
+    "memberListVisible": true,
+    "memoryRev": 0,
+    "newAnchorId": null,
+    "notice": null,
+    "openThread": {
+      "agent": "Agent",
+      "agentId": "agent",
+      "agentName": "Agent",
+      "agentStatus": "idle",
+      "anchorMessageId": "answer",
+      "channelId": "thread",
+      "composerDisabled": false,
+      "composerDisabledReason": null,
+      "followed": true,
+      "historyRev": 4,
+      "kind": "question",
+      "liveBlocks": [],
+      "name": "Why a thread?",
+      "notice": null,
+      "parentChannelId": "channel",
+      "pendingApprovals": 0,
+      "prompts": [],
+      "provider": "example",
+      "readOnlyNote": "File edits are unavailable in this response: threads are read-only.",
+      "responder": null,
+      "state": null,
+      "turnRunning": false,
+      "unread": true
+    },
+    "panels": {
+      "channelList": 240.0,
+      "memberList": 200.0
+    },
+    "pendingApprovals": 0,
+    "project": "Example",
+    "projectDisplayPath": "/project",
+    "projectId": "project",
+    "projectPath": "/project",
+    "prompts": [],
+    "provider": "example",
+    "repositories": [],
+    "repositoriesLoading": false,
+    "responder": null,
+    "rev": 1,
+    "slots": {},
+    "theme": {
+      "diffColors": {
+        "added": "#ffffff",
+        "inlineAdded": "#ffffff",
+        "inlineRemoved": "#ffffff",
+        "removed": "#ffffff"
+      },
+      "fontScale": 1.0,
+      "mode": "dark",
+      "monoFont": null,
+      "protectedBg": "#000000",
+      "protectedBorder": "#ffffff",
+      "protectedFg": "#ffffff",
+      "radius": null,
+      "spacingScale": 1.0,
+      "tokens": {}
+    },
+    "threadApprovals": [],
+    "turnRunning": true,
+    "unread": false
+  },
+  "threadHistory": {
+    "anchor": {
+      "author": null,
+      "blocks": [
+        {
+          "text": "A thread is a side conversation.",
+          "type": "markdown"
+        }
+      ],
+      "continuesGroup": false,
+      "createdAt": null,
+      "id": "answer",
+      "postedFrom": null,
+      "postedToChannel": false,
+      "role": "agent",
+      "subAgentThreads": [],
+      "thread": {
+        "agentName": "Agent",
+        "channelId": "thread",
+        "followed": true,
+        "kind": "question",
+        "lastMessage": {
+          "authorName": "Agent",
+          "preview": "It keeps the channel clean.",
+          "role": "agent"
+        },
+        "messageCount": 2,
+        "name": "Why a thread?",
+        "pendingApprovals": 0,
+        "state": null,
+        "unread": true
+      }
+    },
+    "channelId": "thread",
+    "messages": [
+      {
+        "author": null,
+        "blocks": [
+          {
+            "text": "Why a thread?",
+            "type": "markdown"
+          }
+        ],
+        "continuesGroup": false,
+        "createdAt": null,
+        "id": "ask",
+        "postedFrom": null,
+        "postedToChannel": false,
+        "role": "user",
+        "subAgentThreads": [],
+        "thread": null
+      },
+      {
+        "author": null,
+        "blocks": [
+          {
+            "text": "It keeps the channel clean.",
+            "type": "markdown"
+          }
+        ],
+        "continuesGroup": false,
+        "createdAt": null,
+        "id": "reply",
+        "postedFrom": null,
+        "postedToChannel": true,
+        "role": "agent",
+        "subAgentThreads": [],
+        "thread": null
+      }
+    ],
+    "parentChannelId": "channel",
+    "rev": 4
+  }
+}

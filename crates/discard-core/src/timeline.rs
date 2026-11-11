@@ -31,6 +31,10 @@ pub struct Timeline {
     status: AgentStatus,
     /// True while the last block is streaming text that the next delta should extend.
     text_open: bool,
+    /// True when shell calls in this response run under sandbox autorun.
+    autorun: bool,
+    /// Calls that raised an approval card. Autorun does not apply to them.
+    approved_calls: Vec<String>,
 }
 
 impl Default for Timeline {
@@ -56,7 +60,12 @@ pub fn summarize_input(_tool: &str, input: &serde_json::Value) -> String {
 
 impl Timeline {
     pub fn new() -> Self {
-        Self { blocks: Vec::new(), prompts: Vec::new(), status: AgentStatus::Idle, text_open: false }
+        Self { blocks: Vec::new(), prompts: Vec::new(), status: AgentStatus::Idle, text_open: false, autorun: false, approved_calls: Vec::new() }
+    }
+
+    /// Mark shell calls without an approval card as sandboxed. Call after the session starts.
+    pub fn set_autorun(&mut self, on: bool) {
+        self.autorun = on;
     }
 
     pub fn apply(&mut self, kind: &EventKind) {
@@ -79,20 +88,35 @@ impl Timeline {
                     input: input.clone(),
                     output: None,
                     is_error: None,
+                    sandboxed: None,
                 });
             }
             EventKind::ToolCallResult { call_id, output, is_error } => {
                 for block in &mut self.blocks {
-                    if let Block::ToolCall { call_id: id, output: slot, is_error: flag, .. } = block
+                    if let Block::ToolCall { call_id: id, name, output: slot, is_error: flag, sandboxed, .. } = block
                         && id == call_id
                     {
                         *slot = Some(output.clone());
                         *flag = Some(*is_error);
+                        if self.autorun && matches!(name.as_str(), "Bash" | "command") && !self.approved_calls.contains(call_id) {
+                            *sandboxed = Some(true);
+                        }
                     }
                 }
             }
-            EventKind::ApprovalRequest { approval_id, tool, input, kind, .. } => {
+            EventKind::ApprovalRequest { approval_id, call_id, tool, input, kind, .. } => {
                 self.text_open = false;
+                self.approved_calls.push(call_id.clone());
+                if *kind == crate::approval::ApprovalKind::NetworkDomain {
+                    // A network request may carry its own call id. It belongs to an open shell call.
+                    for block in &self.blocks {
+                        if let Block::ToolCall { call_id: id, name, output: None, .. } = block
+                            && matches!(name.as_str(), "Bash" | "command")
+                        {
+                            self.approved_calls.push(id.clone());
+                        }
+                    }
+                }
                 let summary = summarize_input(tool, input);
                 self.blocks.push(Block::Approval {
                     kind: *kind,
@@ -163,10 +187,12 @@ mod tests {
         EventKind::TextDelta { text: t.into() }
     }
 
-    fn approval(id: &ApprovalId) -> EventKind {
+    fn approval(id: &ApprovalId) -> EventKind { approval_for("c1", id) }
+
+    fn approval_for(call_id: &str, id: &ApprovalId) -> EventKind {
         EventKind::ApprovalRequest { kind: Default::default(), paths: vec![],
             approval_id: id.clone(),
-            call_id: "c1".into(),
+            call_id: call_id.into(),
             tool: "Bash".into(),
             input: json!({"command": "touch x"}),
         }
@@ -244,6 +270,73 @@ mod tests {
             r#"{"type":"tool_call","call_id":"c","name":"n","input":null,"output":"x"}"#,
         ).unwrap();
         assert!(matches!(block, Block::ToolCall { is_error: None, .. }));
+    }
+
+    fn started(call_id: &str, name: &str) -> EventKind {
+        EventKind::ToolCallStart { call_id: call_id.into(), name: name.into(), input: json!({"command": "ls"}) }
+    }
+
+    fn finished(call_id: &str) -> EventKind {
+        EventKind::ToolCallResult { call_id: call_id.into(), output: "ok".into(), is_error: false }
+    }
+
+    #[test]
+    fn autorun_marks_shell_calls_without_an_approval() {
+        let mut t = Timeline::new();
+        t.set_autorun(true);
+        t.apply(&started("c1", "Bash"));
+        t.apply(&finished("c1"));
+        t.apply(&started("c2", "Bash"));
+        t.apply(&approval_for("c2", &ApprovalId::new()));
+        t.apply(&finished("c2"));
+        t.apply(&started("c3", "command"));
+        t.apply(&finished("c3"));
+        assert!(matches!(&t.blocks()[0], Block::ToolCall { sandboxed: Some(true), .. }));
+        assert!(matches!(&t.blocks()[1], Block::ToolCall { sandboxed: None, .. }));
+        assert!(matches!(&t.blocks()[3], Block::ToolCall { sandboxed: Some(true), .. }));
+        assert_eq!(serde_json::to_value(&t.blocks()[0]).unwrap()["sandboxed"], true);
+        assert!(serde_json::to_value(&t.blocks()[1]).unwrap().get("sandboxed").is_none());
+    }
+
+    #[test]
+    fn a_network_approval_unmarks_the_open_shell_call() {
+        // Claude's SandboxNetworkAccess request carries its own tool_use_id, not the shell call's.
+        let mut t = Timeline::new();
+        t.set_autorun(true);
+        t.apply(&started("c1", "Bash"));
+        t.apply(&finished("c1"));
+        t.apply(&started("c2", "Bash"));
+        t.apply(&EventKind::ApprovalRequest {
+            kind: crate::approval::ApprovalKind::NetworkDomain,
+            paths: vec![],
+            approval_id: ApprovalId::new(),
+            call_id: "unrelated-network-id".into(),
+            tool: "SandboxNetworkAccess".into(),
+            input: json!({"host": "example.com"}),
+        });
+        t.apply(&finished("c2"));
+        t.apply(&started("c3", "Bash"));
+        t.apply(&finished("c3"));
+        assert!(matches!(&t.blocks()[0], Block::ToolCall { sandboxed: Some(true), .. }), "a finished call keeps its mark");
+        assert!(matches!(&t.blocks()[1], Block::ToolCall { sandboxed: None, .. }), "the open call asked for network access");
+        assert!(matches!(&t.blocks()[3], Block::ToolCall { sandboxed: Some(true), .. }), "a later call is marked again");
+    }
+
+    #[test]
+    fn calls_are_not_marked_when_autorun_is_off() {
+        let mut t = Timeline::new();
+        t.apply(&started("c1", "Bash"));
+        t.apply(&finished("c1"));
+        assert!(matches!(&t.blocks()[0], Block::ToolCall { sandboxed: None, .. }));
+    }
+
+    #[test]
+    fn edits_are_not_marked_sandboxed() {
+        let mut t = Timeline::new();
+        t.set_autorun(true);
+        t.apply(&started("c1", "Edit"));
+        t.apply(&finished("c1"));
+        assert!(matches!(&t.blocks()[0], Block::ToolCall { sandboxed: None, .. }));
     }
 
     #[test]

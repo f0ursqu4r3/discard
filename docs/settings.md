@@ -203,15 +203,82 @@ times; the bridge exposes them as Unix milliseconds. The UI uses the device's ti
 for timestamps and date dividers, including daylight saving time. Messages without a valid saved time
 leave the timestamp blank.
 
-Saved messages show Copy, Quote, and a disabled **Start thread — Soon** action on hover or keyboard focus.
+Saved messages show Copy, Quote, and a thread action on hover or keyboard focus.
 The icon toolbar aligns with the message's top-right corner. Tooltips appear after 500 ms.
 Quote appends editable Markdown and a link to the source message to the current draft. It preserves
 existing draft text and attachments, focuses the composer, and does not send. Source links open the
 original conversation and highlight the message. Quote is also available in the message context menu.
 It is disabled when the composer is unavailable or the message has no text.
-The message context menu also shows the disabled thread action. Planned threads are for clarifying
-questions. They will inherit channel history through the source message, including that message.
-Thread questions and replies will stay separate from the main channel. Thread creation is not implemented.
+
+A thread is a side conversation about one message. The thread action is **Start thread** on a message
+with no thread. It opens the thread panel with the message and an empty composer. No thread exists
+until the first send, and closing the panel discards the draft. A message that has a thread shows
+**Open thread** instead, and a chip under it. The chip shows the thread name, the message count, the
+last message, and an unread mark. Select the chip to open the thread. A **Follow** button on the
+chip follows a thread that is not followed. Both actions are also in the message context menu. A
+message that still streams has no thread action. The action is disabled when the channel is read only.
+
+The thread panel takes the place of the context panel and closes back to it. It is 360 to 640 px wide.
+On narrow screens it shows in the right sheet. Only one thread is open at a time. The header shows
+the thread name and its channel, **Follow** or **Leave**, and a close button. The anchor message shows
+at the top, then the thread messages. They use the same rows as the channel, so live replies, approvals,
+and tool calls work the same way. Approvals and Stop act on the thread. A note says that threads
+are read-only. The composer has the same attachments and mentions as the channel composer. A
+quote of a thread message goes to the thread composer. The thread is marked read when its panel
+shows the newest message.
+
+The thread composer has an **Also post to #channel** box. It is off by default and applies to one
+message. Every thread message, including an agent reply, has **Post to channel** in its hover
+toolbar and context menu. A posted message shows in the channel as a row with a **from thread** link
+that opens the thread. A posted message shows **Posted to channel** in the thread.
+
+**Leave** removes a followed thread from the channel bar. The chip stays. Replying in a thread or
+choosing **Follow** follows it again. A followed thread shows indented under its channel in the
+channel bar and under its conversation in the direct message list. It shows unread, running, and
+pending approval marks. Select it to open its channel with the thread panel. The thread row menu has
+**Leave thread**. Thread activity does not mark the parent channel unread.
+
+The **Threads** list in the channel header, **Rename thread**, **Delete thread**, and **Remove from
+channel** on a posted row are planned. They show disabled with **Soon**. The design is in
+[Threads — design](superpowers/specs/2026-11-10-threads-design.md).
+
+A **sub-agent thread** is a read-only research run. An agent starts it with the `delegate` tool.
+You cannot start one. Each task of one `delegate` call makes one thread. During the run, the chips
+show under the live message. After the turn, they show under the saved response, in task order,
+below the question thread chip if there is one. A chip shows the title, the sub-agent's name, and
+the state: **Running** (with the spinner), **Done**, **Failed**, **Cancelled**, or **Timed out**.
+A chip also shows an unread mark, a **Follow** button, and the number of pending approvals. Select
+a chip to open the thread, also while it runs. A sub-agent thread is not followed at creation. It
+shows in the channel bar only after you follow it or a follow trigger fires. Its row has its own
+icon, and it shows running, unread, and pending approval marks. A failed, cancelled, or timed out
+thread keeps a mark in the row.
+
+The sub-agent thread panel header shows the title, the sub-agent's name, and the state. While the
+parent turn runs, the thread has no anchor, so no anchor message shows. After the turn, the anchor
+is the saved response. The first message is the brief. It shows the parent agent as its author, not
+**You**. The transcript is live while the sub-agent runs. **Stop** in the thread stops that
+sub-agent only. The parent agent gets "cancelled" for that task and continues. **Post to channel**,
+Copy, Quote, **Follow**, and **Leave** work. A quote from a sub-agent thread goes to the channel
+composer. The composer is disabled and labelled **Soon**, because steering a sub-agent and
+follow-up turns are planned. There is no **Also post** box. A sub-agent thread cannot start
+another thread.
+
+The **Delegation** switch is in the agent's tool permissions. It is off by default. When it is on,
+the agent can start read-only sub-agents in threads in Conversation and Workspace responses. Turning
+it on goes through the same confirmation as the other permission changes.
+
+An agent that wants a sub-agent that is not a project member asks with `agent_request_add`. The
+channel then shows an **Add an agent to this project?** card. It names the requesting agent and the
+requested agent with its provider and model. The reason shows as a quote in plain text: it is the
+agent's own words. **Add to project** makes the agent a project member with no end date and
+continues the requesting agent. **Deny** continues the requesting agent with the note that you
+declined. Both buttons are off while a response runs. A decided or failed request keeps its card
+with the result. Restarting Discard cancels pending requests. Direct messages show no card.
+
+Approvals that wait in a thread, followed or not, count with the channel approvals in the navigation
+and in the status line. **Approvals** in the navigation goes to the first approval that waits: the selected
+channel, then its threads, then the other channels, then the other threads. A thread opens in its
+channel with the thread panel.
 
 - **Theme source.** Default, Ghostty, or Custom. A line under the buttons says what each one does.
 - **Themes.** Shown only for Custom. Pick a light theme and a dark theme from searchable lists. Discard switches
@@ -231,6 +298,8 @@ Each provider card shows setup status, the install or login command when needed,
 Missing capabilities show as "No". **Re-check** runs the setup check again. Discard does not read or store credentials.
 
 ### Agent profiles (main window)
+
+In the profile editor, **Generate** turns a short description into Personality text using the provider, model, and reasoning level currently selected in the form. **Undo** restores the previous text; nothing is saved until you choose **Save profile**.
 
 Direct Messages reopens the last viewed DM. This choice stays saved across restarts. If no saved DM is available, it opens Agents. Choose **Agents** to find an agent or choose **Add agent**. The add dialog asks for a generated editable name, connected provider, model, and reasoning level. Provider and Model use Select menus. Changing the provider clears the model and loads its available models from the installed CLI. Choose a model before adding the agent. Loading failures offer Retry models. Claude aliases use the resolved model ID when available. Select an agent to open its direct chat. The direct-message header profile button toggles a short profile sidebar. Project pages hide this button, and project navigation omits the agent and conversation list. Choose **View full profile**, then **Edit profile** to change identity, agent icon and color, model, personality, or tool permissions. The icon picker opens in a Popover and searches every icon in the installed Lucide library. Agent color has presets and a custom color control. Color is independent of the icon: choosing a color keeps initials when no icon is selected. The saved appearance appears in the agent list, direct-message navigation, profiles, member cards, and chat messages. Existing image avatars remain visible until replaced. The profile editor also uses Select menus for Provider, Model ID, and Reasoning level. Both agent forms load supported reasoning levels from the selected model’s CLI metadata. Provider default leaves reasoning to the provider. Changing the model or provider resets reasoning to Provider default. The saved level applies to the next response. If model metadata is unavailable, the profile editor keeps the saved level and lets you restore Provider default. It keeps the saved model available if the provider no longer lists it. Changing providers requires a new model selection. Agents do not have a Settings page. **Agents** in the navigation lists all agents. Choose **DM** to open the chat and add the agent to the Direct Messages list. Creating an agent alone does not add it to that list. The list stays saved across restarts. Each response receives the agent's current name together with its personality and memory. A name change applies to the next response; it does not rewrite saved messages. DMs show the agent name, a short-profile toggle, and a compact history search field. Project channel labels and conversation tabs do not appear in DMs. The DM composer stays at the bottom without a footer.
 

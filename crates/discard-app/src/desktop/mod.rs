@@ -2,15 +2,17 @@ pub mod commands;
 pub mod attachments;
 pub mod channels;
 pub mod core;
+pub mod delegation;
 pub mod dto;
 pub mod pump;
+pub mod threads;
 
 use core::{AppCore, CoreInit};
 use discard_core::ghostty::{live::LiveTheme, spec::Appearance};
 use discard_core::settings::SettingsStore;
 use discard_core::ui_state::Update;
 use discard_lua::PluginService;
-use dto::{HistoryDto, SnapshotDto};
+use dto::{HistoryDto, SnapshotDto, ThreadHistoryDto};
 use pump::Emit;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -47,6 +49,12 @@ impl Emit for WebEmit {
     fn history(&self, value: &HistoryDto) {
         let _ = self.app.emit("discard://history", value);
     }
+    fn thread_history(&self, value: &ThreadHistoryDto) {
+        let _ = self.app.emit("discard://thread-history", value);
+    }
+    fn conversations(&self) {
+        let _ = self.app.emit("discard://conversations", ());
+    }
 }
 /// Startup data for the main desktop window.
 pub struct DesktopConfig {
@@ -64,6 +72,8 @@ pub struct DesktopConfig {
     pub main_checkout_grants: Arc<discard_core::workspace_grants::MainCheckoutGrants>,
     pub write_requests: Arc<discard_core::write_requests::WriteRequests>,
     pub worktree_access: Arc<discard_core::worktree_access::WorktreeAccess>,
+    /// The services the MCP server uses for `delegate`. `run` installs the app's `Delegator` in its slot.
+    pub delegation: discard_core::delegation::DelegationServices,
 }
 pub fn run(
     init: CoreInit,
@@ -87,6 +97,8 @@ pub fn run(
     }
     (config.on_ready)(&core);
     let channels = Arc::new(channels::Channels::new(core.clone(), config.store.clone(), runtime.clone(), config.launcher));
+    config.delegation.delegator.install(Arc::new(delegation::AppDelegator::new(Arc::downgrade(&channels))));
+    if let Some(channel) = &config.startup_channel && let Err(error) = channels.refresh_threads(&channel.id) { core.notice(format!("Could not load threads: {error}")); }
     if config.startup_channel.is_none()
         && let Err(error) = channels.restore() { core.notice(format!("Could not restore conversation: {error}")); }
     core.refresh_branches(core.request_branch_refresh());
@@ -116,6 +128,7 @@ pub fn run(
         .manage(channels)
         .manage(config.worktree_access)
         .manage(config.write_requests)
+        .manage(config.delegation.requests.clone())
         .manage(config.main_checkout_grants)
         .manage(config.workspace)
         .manage(actions.clone())
@@ -233,6 +246,7 @@ pub fn run(
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_write_requests, commands::decide_write_request,
+            commands::get_agent_requests, commands::decide_agent_request,
             commands::get_always_allow_rules, commands::revoke_always_allow_rule,
             commands::get_snapshot, commands::choose_project_folder, commands::get_projects, commands::update_project_profile, commands::select_project, commands::remove_project,
             commands::get_project_channels, commands::get_project_members, commands::get_channel_details, commands::update_channel_topic, commands::set_project_main_agent,
@@ -241,6 +255,8 @@ pub fn run(
             commands::create_channel, commands::switch_channel, commands::open_branch_channel,
             commands::get_history,
             commands::send_message,
+            commands::get_thread_history, commands::start_thread, commands::open_thread, commands::close_thread, commands::select_thread,
+            commands::post_thread_message, commands::follow_thread, commands::leave_thread,
             attachments::choose_attachments,
             attachments::import_attachments,
             attachments::attachment_preview,
@@ -271,6 +287,7 @@ pub fn run(
             settings::providers::settings_provider_models,
             settings::agents::settings_agent_get,
             settings::agents::settings_agent_review,
+            settings::agents::settings_agent_generate_personality,
             settings::agents::settings_agent_save,
             settings::agents::settings_agent_defaults, settings::agents::settings_agent_create, settings::agents::settings_agent_archive, settings::agents::settings_agent_delete,
             settings::memory::memory_fresh_conversation, settings::memory::memory_get, settings::memory::memory_create, settings::memory::memory_mutate, settings::memory::memory_resolve, settings::memory::memory_resume, settings::memory::memory_reconcile, settings::memory::memory_reveal_item,

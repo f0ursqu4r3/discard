@@ -7,15 +7,55 @@ import type {
   HistoryDto,
   ProjectChannelDto,
   SnapshotDto,
+  ThreadHistoryDto,
+  ThreadLinkDto,
 } from './types'
 export const getSnapshot = () => invoke<SnapshotDto>('get_snapshot')
 export const getHistory = () => invoke<HistoryDto>('get_history')
-export const sendMessage = (channelId: string, text: string, attachmentIds: string[] = []) =>
+/** Send a message. In a thread, `alsoPost` also posts it to the parent channel. Outside a thread it is an error. */
+export const sendMessage = (
+  channelId: string,
+  text: string,
+  attachmentIds: string[] = [],
+  alsoPost = false,
+) =>
   invoke<void>('send_message', {
     channelId,
     text,
     ...(attachmentIds.length ? { attachmentIds } : {}),
+    ...(alsoPost ? { alsoPost } : {}),
   })
+/** The open thread's transcript, or null when no thread is open. */
+export const getThreadHistory = () => invoke<ThreadHistoryDto | null>('get_thread_history')
+/**
+ * Start a thread on a saved message of the selected channel, send its first message and open it.
+ * No thread exists before this call. Returns the thread channel ID. Rejects when the anchor
+ * already has a thread, is not a user or agent message, or is a thread or posted message.
+ */
+export const startThread = (
+  parentChannelId: string,
+  anchorMessageId: string,
+  text: string,
+  attachmentIds: string[] = [],
+  alsoPost = false,
+) =>
+  invoke<string>('start_thread', {
+    parentChannelId,
+    anchorMessageId,
+    text,
+    ...(attachmentIds.length ? { attachmentIds } : {}),
+    ...(alsoPost ? { alsoPost } : {}),
+  })
+/** Show a thread of the selected channel beside it. */
+export const openThread = (threadId: string) => invoke<void>('open_thread', { threadId })
+export const closeThread = () => invoke<void>('close_thread')
+/** Select the parent channel of a followed thread and open the thread. Returns the parent channel ID. */
+export const selectThread = (threadId: string) => invoke<string>('select_thread', { threadId })
+/** Post a thread message (any role) to the parent channel. Idempotent. Returns the reference row ID. */
+export const postThreadMessage = (messageId: string) =>
+  invoke<string>('post_thread_message', { messageId })
+export const followThread = (threadId: string) => invoke<void>('follow_thread', { threadId })
+export const leaveThread = (threadId: string) => invoke<void>('leave_thread', { threadId })
 export const chooseAttachments = () => invoke<AttachmentDto[]>('choose_attachments')
 export async function importAttachmentFiles(files: File[]): Promise<AttachmentDto[]> {
   if (files.length > 8) throw new Error('Attach up to 8 files per message.')
@@ -135,6 +175,16 @@ export interface AgentEntry {
   policy: string
   pluginWrite: boolean
   workspaceWrite: boolean
+  sandboxAutorun: boolean
+  /**
+   * The agent may start read-only sub-agents with the `delegate` tool in Conversation and Workspace responses.
+   * Off by default; the app always sends it. Turning it on goes through the policy-loosening confirmation (`settings_agent_review`
+   * lists it as "Delegation"). A new agent cannot start with it on.
+   */
+  delegation?: boolean
+  sandboxAutorunUnavailable: string | null
+  /** True when the provider does not support autorun yet. False for a missing provider. */
+  sandboxAutorunPlanned: boolean
   archived: boolean
 }
 export interface ConversationEntry {
@@ -152,6 +202,8 @@ export interface ConversationEntry {
   archived: boolean
   agentArchived: boolean
   deleted: boolean
+  /** Followed threads of this conversation, from storage. */
+  threads?: ThreadLinkDto[]
 }
 export const getAgents = () => invoke<AgentEntry[]>('settings_agent_get')
 export const getConversations = () => invoke<ConversationEntry[]>('get_conversations')
@@ -216,3 +268,35 @@ export const getWriteRequests = (channelId: string) =>
   invoke<WriteRequest[]>('get_write_requests', { channelId })
 export const decideWriteRequest = (channelId: string, requestId: string, approve: boolean) =>
   invoke<WriteRequest>('decide_write_request', { channelId, requestId, approve })
+
+/** A request from an agent to add another agent to the project. Requests are not stored: none survives a restart. */
+export interface AgentRequest {
+  id: string
+  channelId: string
+  requestingAgentId: string
+  requestingAgentName: string
+  /** The agent to add. */
+  agentId: string
+  agentName: string
+  provider: string
+  model: string | null
+  /** What the requesting agent wrote. At most 500 characters. */
+  reason: string
+  state: 'pending' | 'added' | 'denied' | 'failed' | 'expired'
+  result: string | null
+  /** Unix milliseconds. */
+  createdAt: number
+}
+/** The requests of a channel, oldest first, decided or not. */
+export const getAgentRequests = (channelId: string) =>
+  invoke<AgentRequest[]>('get_agent_requests', { channelId })
+/**
+ * Decide a request. `add` makes the agent a project member and continues the requesting agent; `deny` continues it
+ * with the note that the user declined. The channel must be the selected channel and idle. Refreshes
+ * `discard://channel-details` and `discard://conversations`.
+ */
+export const decideAgentRequest = (
+  channelId: string,
+  requestId: string,
+  decision: 'add' | 'deny',
+) => invoke<AgentRequest>('decide_agent_request', { channelId, requestId, decision })

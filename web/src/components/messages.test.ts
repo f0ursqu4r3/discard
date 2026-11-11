@@ -437,3 +437,32 @@ test('authorless messages use the channel agent ID for the name and avatar', () 
   )
   view.unmount()
 })
+
+test('groupBlocks preserves singleton calls, boundaries, and original indexes', async () => {
+  const { groupBlocks } = await import('./messages')
+  const call = { type: 'tool_call' as const, call_id: 'c', name: 'test', input: {}, output: null }
+  const markdown = { type: 'markdown' as const, text: 'Between' }
+  const approval = { type: 'approval' as const, approval_id: 'a', tool: 'test', summary: 'Approve' }
+  expect(groupBlocks([])).toEqual([])
+  expect(groupBlocks([call])).toEqual([{ kind: 'block', block: call, index: 0 }])
+  expect(groupBlocks([call, call, markdown, call, approval, call, call, call])).toEqual([
+    {
+      kind: 'tools',
+      items: [
+        { block: call, index: 0 },
+        { block: call, index: 1 },
+      ],
+    },
+    { kind: 'block', block: markdown, index: 2 },
+    { kind: 'block', block: call, index: 3 },
+    { kind: 'block', block: approval, index: 4 },
+    {
+      kind: 'tools',
+      items: [
+        { block: call, index: 5 },
+        { block: call, index: 6 },
+        { block: call, index: 7 },
+      ],
+    },
+  ])
+})

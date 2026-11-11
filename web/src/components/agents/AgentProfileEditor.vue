@@ -8,7 +8,8 @@ import {
   SelectGroup,
   SelectItem,
 } from '@/components/ui/select'
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { Sparkles } from '@lucide/vue'
 import { invoke } from '@tauri-apps/api/core'
 import { getAgents, type AgentEntry } from '@/bridge/api'
 import {
@@ -27,6 +28,7 @@ import ReasoningSelect from './ReasoningSelect.vue'
 import type { ProviderModel } from '@/bridge/api'
 import { Textarea } from '@/components/ui/textarea'
 import { Switch } from '@/components/ui/switch'
+import { Badge } from '@/components/ui/badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 const props = defineProps<{ agent: AgentEntry }>()
 const emit = defineEmits<{
@@ -52,7 +54,68 @@ const deleteConversations = ref(false),
   deletePrivateMemory = ref(false)
 let generation = 0,
   modelGeneration = 0,
+  personalityGeneration = 0,
   disposed = false
+const personalityOpen = ref(false),
+  personalityDescription = ref(''),
+  personalityRunning = ref(false),
+  personalityError = ref(''),
+  previousPersonality = ref<string | null>(null)
+const personalityField = ref<HTMLElement | null>(null)
+async function openPersonality() {
+  personalityOpen.value = true
+  personalityError.value = ''
+  await nextTick()
+  personalityField.value?.querySelector<HTMLInputElement>('#agent-personality-description')?.focus()
+}
+function cancelPersonality() {
+  personalityGeneration++
+  personalityRunning.value = false
+  personalityOpen.value = false
+  personalityError.value = ''
+}
+async function generatePersonality() {
+  if (
+    busy.value ||
+    personalityRunning.value ||
+    !validModel.value ||
+    !personalityDescription.value.trim()
+  )
+    return
+  const current = ++personalityGeneration
+  const { provider, model, reasoningEffort, name, systemPrompt } = draft.value
+  personalityRunning.value = true
+  personalityError.value = ''
+  try {
+    const result = await invoke<string>('settings_agent_generate_personality', {
+      provider,
+      model,
+      reasoningEffort,
+      name,
+      description: personalityDescription.value,
+      current: systemPrompt,
+    })
+    if (disposed || current !== personalityGeneration) return
+    previousPersonality.value = systemPrompt
+    draft.value.systemPrompt = result
+    personalityOpen.value = false
+    personalityDescription.value = ''
+    personalityRunning.value = false
+    await nextTick()
+    if (!disposed && current === personalityGeneration) {
+      personalityField.value?.querySelector<HTMLTextAreaElement>('#agent-prompt')?.focus()
+    }
+  } catch (cause) {
+    if (!disposed && current === personalityGeneration) personalityError.value = String(cause)
+  } finally {
+    if (!disposed && current === personalityGeneration) personalityRunning.value = false
+  }
+}
+function undoPersonality() {
+  if (previousPersonality.value === null) return
+  draft.value.systemPrompt = previousPersonality.value
+  previousPersonality.value = null
+}
 type Model = ProviderModel
 const models = ref<Model[]>([]),
   modelsLoading = ref(false),
@@ -78,6 +141,9 @@ watch(
   () => [draft.value.provider, draft.value.model],
   () => {
     draft.value.reasoningEffort = null
+    personalityGeneration++
+    personalityRunning.value = false
+    personalityError.value = ''
   },
   { flush: 'sync' },
 )
@@ -105,16 +171,31 @@ watch(
   { immediate: true, flush: 'sync' },
 )
 watch(busy, (value) => emit('busy', value), { flush: 'sync' })
+const autorunUnavailable = computed(() => props.agent.sandboxAutorunUnavailable ?? null)
+const autorunPlanned = computed(
+  () => !!autorunUnavailable.value && props.agent.sandboxAutorunPlanned,
+)
+const autorunOn = computed(
+  () => draft.value.workspaceWrite && !autorunUnavailable.value && !!draft.value.sandboxAutorun,
+)
+const enablesAutorun = computed(
+  () => autorunOn.value && !(props.agent.workspaceWrite && props.agent.sandboxAutorun),
+)
+// While file edits are off, the backend clears autorun on save. Do not send the stale value.
+function draftPayload() {
+  const { sandboxAutorun, ...rest } = draft.value
+  return draft.value.workspaceWrite ? { ...rest, sandboxAutorun } : rest
+}
 watch(
   draft,
-  async (value) => {
+  async () => {
     const current = ++generation
     review.value = null
     confirm.value = false
     try {
       const result = await invoke<Review>('settings_agent_review', {
         id: props.agent.id,
-        draft: { ...value },
+        draft: draftPayload(),
       })
       if (!disposed && current === generation) review.value = result
     } catch (cause) {
@@ -134,6 +215,7 @@ onUnmounted(() => {
   disposed = true
   generation++
   modelGeneration++
+  personalityGeneration++
   emit('busy', false)
 })
 async function currentAgent() {
@@ -156,7 +238,7 @@ async function save(confirmed = false) {
   try {
     await invoke('settings_agent_save', {
       id: props.agent.id,
-      draft: { ...draft.value },
+      draft: draftPayload(),
       confirmed,
     })
     await currentAgent()
@@ -278,12 +360,70 @@ async function remove() {
       />
       <Field>
         <FieldLabel for="agent-prompt">Personality (optional)</FieldLabel>
-        <Textarea
-          id="agent-prompt"
-          v-model="draft.systemPrompt"
-          :disabled="busy"
-          placeholder="How should this agent communicate and work?"
-        />
+        <div ref="personalityField" class="flex flex-col gap-2">
+          <Textarea
+            id="agent-prompt"
+            v-model="draft.systemPrompt"
+            :disabled="busy || personalityRunning"
+            @update:model-value="previousPersonality = null"
+            placeholder="How should this agent communicate and work?"
+          />
+          <div class="flex gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              :disabled="busy || personalityRunning || !validModel"
+              @click="openPersonality"
+            >
+              <Sparkles aria-hidden="true" />
+              Generate
+            </Button>
+            <Button
+              v-if="previousPersonality !== null"
+              type="button"
+              variant="ghost"
+              size="sm"
+              :disabled="busy || personalityRunning"
+              @click="undoPersonality"
+            >
+              Undo
+            </Button>
+          </div>
+          <FieldDescription v-if="!validModel">
+            Choose a model to generate a personality.
+          </FieldDescription>
+          <div v-if="personalityOpen" class="flex flex-col gap-2">
+            <FieldLabel for="agent-personality-description" class="sr-only">
+              Describe the personality
+            </FieldLabel>
+            <div class="flex flex-wrap gap-2">
+              <Input
+                id="agent-personality-description"
+                v-model="personalityDescription"
+                class="min-w-48 flex-1"
+                placeholder="For example: terse senior reviewer who asks before large changes"
+                maxlength="2000"
+                @keydown.enter.stop.prevent="generatePersonality"
+                @keydown.esc.stop.prevent="cancelPersonality"
+              />
+              <Button
+                type="button"
+                :disabled="
+                  busy || !validModel || !personalityDescription.trim() || personalityRunning
+                "
+                :aria-busy="personalityRunning"
+                @click="generatePersonality"
+              >
+                {{ personalityRunning ? 'Generating…' : 'Generate' }}
+              </Button>
+              <Button type="button" variant="ghost" @click="cancelPersonality">Cancel</Button>
+            </div>
+          </div>
+          <p v-if="personalityError" role="alert" class="text-sm text-destructive">
+            {{ personalityError }}
+          </p>
+        </div>
       </Field>
     </FieldGroup>
     <details>
@@ -326,6 +466,44 @@ async function remove() {
         </Field>
         <Field orientation="horizontal">
           <FieldContent>
+            <FieldLabel for="agent-sandbox-autorun">
+              Run sandboxed commands without asking
+              <!-- TODO: Enable when the provider passes the autorun sandbox check. A missing provider is a state block, not planned work. -->
+              <Badge v-if="autorunPlanned" variant="secondary">Soon</Badge>
+            </FieldLabel>
+            <FieldDescription id="agent-sandbox-autorun-description">
+              Shell commands in the worktree run without approval. The sandbox blocks writes outside
+              the worktree and network access. It does not block reads. It cannot block Keychain
+              access.
+              <span v-if="autorunUnavailable" class="block">{{ autorunUnavailable }}</span>
+              <span v-else-if="!draft.workspaceWrite" class="block">Turn on file edits first.</span>
+            </FieldDescription>
+          </FieldContent>
+          <Switch
+            id="agent-sandbox-autorun"
+            :model-value="autorunOn"
+            :disabled="busy || !draft.workspaceWrite || !!autorunUnavailable"
+            aria-describedby="agent-sandbox-autorun-description"
+            @update:model-value="draft.sandboxAutorun = $event === true"
+          />
+        </Field>
+        <Field orientation="horizontal">
+          <FieldContent>
+            <FieldLabel for="agent-delegation">Delegation</FieldLabel>
+            <FieldDescription id="agent-delegation-description">
+              This agent can start read-only sub-agents in threads.
+            </FieldDescription>
+          </FieldContent>
+          <Switch
+            id="agent-delegation"
+            :model-value="!!draft.delegation"
+            :disabled="busy"
+            aria-describedby="agent-delegation-description"
+            @update:model-value="draft.delegation = $event === true"
+          />
+        </Field>
+        <Field orientation="horizontal">
+          <FieldContent>
             <FieldLabel for="agent-plugin-write">Allow plugin writes</FieldLabel>
             <FieldDescription id="agent-plugin-write-description">
               Works only in a builder session. Start Discard with
@@ -351,6 +529,10 @@ async function remove() {
     <Alert v-if="confirm" data-protected="true">
       <AlertDescription class="flex flex-col items-start gap-3">
         <p>This lets the agent do more without asking.</p>
+        <p v-if="enablesAutorun">
+          Autorun commands can read your macOS Keychain. Discard cannot block this. Do not turn on
+          autorun if your Keychain holds tokens this agent must not see.
+        </p>
         <Button type="button" variant="destructive" :disabled="busy" @click="save(true)">
           Confirm and save
         </Button>

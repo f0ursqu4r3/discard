@@ -16,6 +16,9 @@ const original = {
   policy: 'deny',
   pluginWrite: false,
   workspaceWrite: false,
+  sandboxAutorun: false,
+  sandboxAutorunUnavailable: null as string | null,
+  sandboxAutorunPlanned: false,
   archived: false,
 }
 const rows = { agents: [structuredClone(original)] }
@@ -225,5 +228,148 @@ test('permission expansion still requires confirmation in the profile', async ()
     expect.objectContaining({ id: 'a', confirmed: true }),
   )
   expect(view.emitted('saved')).toHaveLength(1)
+  view.unmount()
+})
+
+const keychainWarning =
+  'Autorun commands can read your macOS Keychain. Discard cannot block this. Do not turn on autorun if your Keychain holds tokens this agent must not see.'
+test('the autorun switch says it cannot block Keychain access', async () => {
+  const view = await editor()
+  const toggle = view.get('#agent-sandbox-autorun')
+  const description = view.get(`#${toggle.attributes('aria-describedby')}`)
+  expect(description.text()).toContain('It cannot block Keychain access.')
+  view.unmount()
+})
+test('confirming autorun shows the Keychain warning', async () => {
+  const agent = { ...original, workspaceWrite: true, sandboxAutorun: false }
+  const view = mount(AgentProfileEditor, { props: { agent } })
+  await flushPromises()
+  await view.get('#agent-sandbox-autorun').trigger('click')
+  await flushPromises()
+  vi.mocked(invoke).mockRejectedValueOnce('Confirmation is required')
+  await view.get('form').trigger('submit')
+  await flushPromises()
+  expect(view.get('[data-protected="true"]').text()).toContain(keychainWarning)
+  view.unmount()
+})
+test('confirming another loosening does not show the Keychain warning', async () => {
+  const view = await editor()
+  await view.get('#agent-workspace-write').trigger('click')
+  await flushPromises()
+  vi.mocked(invoke).mockRejectedValueOnce('Confirmation is required')
+  await view.get('form').trigger('submit')
+  await flushPromises()
+  const alert = view.get('[data-protected="true"]')
+  expect(alert.text()).toContain('This lets the agent do more without asking.')
+  expect(view.text()).not.toContain(keychainWarning)
+  view.unmount()
+})
+test('disables autorun until file edits are on', async () => {
+  const view = await editor()
+  const autorun = view.get('#agent-sandbox-autorun')
+  expect(autorun.attributes('disabled')).toBeDefined()
+  expect(view.text()).toContain('Turn on file edits first.')
+  await view.get('#agent-workspace-write').trigger('click')
+  await flushPromises()
+  expect(view.get('#agent-sandbox-autorun').attributes('disabled')).toBeUndefined()
+  expect(view.text()).not.toContain('Turn on file edits first.')
+})
+test('shows autorun off and sends no autorun value while file edits are off', async () => {
+  const agent = { ...original, workspaceWrite: false, sandboxAutorun: true }
+  const view = mount(AgentProfileEditor, { props: { agent } })
+  await flushPromises()
+  expect(view.get('#agent-sandbox-autorun').attributes('aria-checked')).toBe('false')
+  const review = vi.mocked(invoke).mock.calls.filter(([name]) => name === 'settings_agent_review')
+  for (const [, args] of review)
+    expect((args as { draft: Record<string, unknown> }).draft).not.toHaveProperty('sandboxAutorun')
+  view.unmount()
+})
+test('sends the autorun choice once file edits are on', async () => {
+  const agent = { ...original, workspaceWrite: true, sandboxAutorun: true }
+  const view = mount(AgentProfileEditor, { props: { agent } })
+  await flushPromises()
+  expect(view.get('#agent-sandbox-autorun').attributes('aria-checked')).toBe('true')
+  expect(invoke).toHaveBeenCalledWith(
+    'settings_agent_review',
+    expect.objectContaining({ draft: expect.objectContaining({ sandboxAutorun: true }) }),
+  )
+  view.unmount()
+})
+test('labels autorun Soon for providers without support', async () => {
+  const agent = {
+    ...original,
+    workspaceWrite: true,
+    sandboxAutorunUnavailable: 'No sandbox.',
+    sandboxAutorunPlanned: true,
+  }
+  const view = mount(AgentProfileEditor, { props: { agent } })
+  await flushPromises()
+  expect(view.get('#agent-sandbox-autorun').attributes('disabled')).toBeDefined()
+  expect(view.text()).toContain('Soon')
+  expect(view.text()).toContain('No sandbox.')
+  view.unmount()
+})
+test('does not label autorun Soon when the provider is missing', async () => {
+  const agent = {
+    ...original,
+    workspaceWrite: true,
+    sandboxAutorunUnavailable: 'This provider is not available.',
+    sandboxAutorunPlanned: false,
+  }
+  const view = mount(AgentProfileEditor, { props: { agent } })
+  await flushPromises()
+  expect(view.get('#agent-sandbox-autorun').attributes('disabled')).toBeDefined()
+  expect(view.text()).toContain('This provider is not available.')
+  expect(view.text()).not.toContain('Soon')
+  view.unmount()
+})
+
+test('the Delegation switch is off by default and explains itself', async () => {
+  const view = await editor()
+  const toggle = view.get('#agent-delegation')
+  expect(toggle.attributes('aria-checked')).toBe('false')
+  expect(view.get('label[for="agent-delegation"]').text()).toBe('Delegation')
+  expect(view.get(`#${toggle.attributes('aria-describedby')}`).text()).toBe(
+    'This agent can start read-only sub-agents in threads.',
+  )
+  view.unmount()
+})
+
+test('turning Delegation on goes through review and confirmation like other permissions', async () => {
+  const view = await editor()
+  await view.get('#agent-delegation').trigger('click')
+  await flushPromises()
+  expect(invoke).toHaveBeenLastCalledWith(
+    'settings_agent_review',
+    expect.objectContaining({ id: 'a', draft: expect.objectContaining({ delegation: true }) }),
+  )
+  vi.mocked(invoke).mockRejectedValueOnce('Confirmation is required')
+  await view.get('form').trigger('submit')
+  await flushPromises()
+  expect(view.emitted('saved')).toBeUndefined()
+  const alert = view.get('[data-protected="true"]')
+  expect(alert.text()).toContain('This lets the agent do more without asking.')
+  expect(view.text()).not.toContain(keychainWarning)
+  await view
+    .findAll('button')
+    .find((b) => b.text() === 'Confirm and save')!
+    .trigger('click')
+  await flushPromises()
+  expect(invoke).toHaveBeenCalledWith(
+    'settings_agent_save',
+    expect.objectContaining({
+      id: 'a',
+      confirmed: true,
+      draft: expect.objectContaining({ delegation: true }),
+    }),
+  )
+  expect(view.emitted('saved')).toHaveLength(1)
+  view.unmount()
+})
+
+test('an agent with Delegation on shows the switch on', async () => {
+  const view = mount(AgentProfileEditor, { props: { agent: { ...original, delegation: true } } })
+  await flushPromises()
+  expect(view.get('#agent-delegation').attributes('aria-checked')).toBe('true')
   view.unmount()
 })

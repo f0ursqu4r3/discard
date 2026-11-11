@@ -16,6 +16,7 @@
   "responder": null,
   "agentStatus": "working",
   "turnRunning": true,
+  "autorun": null,
   "notice": null,
   "liveBlocks": [
     {
@@ -38,6 +39,9 @@
   "repositories": [],
   "repositoriesLoading": false,
   "channels": [],
+  "liveSubAgentThreads": [],
+  "threadApprovals": [],
+  "openThread": null,
   "slots": {},
   "banners": {
     "reviewCount": 0,

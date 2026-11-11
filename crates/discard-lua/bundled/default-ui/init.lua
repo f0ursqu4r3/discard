@@ -30,15 +30,15 @@ discard.slot("channel_header", function(state)
   return children
 end)
 
-discard.slot("member_list", function(state)
-  local agent = state.agent
+-- One row per agent. `agent` sits on the row so `color = "agent"` resolves to that agent's identity.
+local function agent_row(agent)
   local status = agent.status
   local avatar = { "avatar", name = agent.name, agent = agent.id }
   if status ~= "working" then
     avatar.status = STATUS_COLOR[status] or "border"
   end
   local row = {
-    "row", gap = 12, align = "center",
+    "row", gap = 12, align = "center", agent = agent.id,
     avatar,
     {
       "column", grow = true,
@@ -52,10 +52,21 @@ discard.slot("member_list", function(state)
   if status == "working" then
     row[#row + 1] = { "spinner" }
   end
+  return row
+end
+
+discard.slot("member_list", function(state)
+  local agents = state.agents
+  if agents == nil or #agents == 0 then
+    agents = { state.agent }
+  end
   -- The app draws the card frame around this slot, so the slot draws only its content.
-  return {
-    "column", gap = 16, agent = agent.id,
+  local column = {
+    "column", gap = 16,
     { "text", "Agents", variant = "label" },
-    row,
   }
+  for _, agent in ipairs(agents) do
+    column[#column + 1] = agent_row(agent)
+  end
+  return column
 end)

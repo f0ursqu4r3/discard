@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use discard_core::approval::Decision;
 use discard_core::capability::{Capabilities, CapabilityMatrix};
 use discard_core::event::{AgentStatus, ApprovalId, EventKind, RawEvent};
-use discard_core::provider::{Provider, ProviderError, ProviderSession, SessionSpec, SetupStatus};
+use discard_core::provider::{Provider, ProviderError, ProviderSession, SandboxAutorun, SessionSpec, SetupStatus, TextRequest};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,6 +39,7 @@ impl Step {
 /// What the fake observed. Tests assert on this.
 #[derive(Debug, Default, Clone)]
 pub struct Probe {
+    pub text_requests: Arc<Mutex<Vec<TextRequest>>>,
     /// Every session spec the provider was started with.
     pub specs: Arc<Mutex<Vec<SessionSpec>>>,
     /// The resume handle each started session was given.
@@ -50,12 +51,15 @@ pub struct Probe {
 }
 
 pub struct FakeProvider {
+    generated_text: Option<Result<String, String>>,
     main_checkout_writes: bool,
     workspace_error: Option<String>,
+    sandbox_autorun: Option<SandboxAutorun>,
     matrix: CapabilityMatrix,
     script: Vec<Step>,
     setup: SetupStatus,
     resume_handle: Option<String>,
+    notice: Option<String>,
     pub probe: Probe,
 }
 
@@ -66,8 +70,10 @@ impl FakeProvider {
 
     pub fn with_capabilities(script: Vec<Step>, interactive_approvals: bool) -> Self {
         Self {
+            generated_text: None,
             main_checkout_writes: false,
             workspace_error: None,
+            sandbox_autorun: None,
             matrix: CapabilityMatrix {
                 provider: "fake".into(),
                 matrix_version: 1,
@@ -84,11 +90,22 @@ impl FakeProvider {
             script,
             setup: SetupStatus::Ready,
             resume_handle: None,
+            notice: None,
             probe: Probe::default(),
         }
     }
 
+    pub fn with_notice(mut self, notice: impl Into<String>) -> Self { self.notice = Some(notice.into()); self }
+
+    /// What `sandbox_autorun()` reports. Without this, the fake keeps the trait default (unsupported).
+    pub fn with_sandbox_autorun(mut self, answer: SandboxAutorun) -> Self { self.sandbox_autorun = Some(answer); self }
+
     pub fn with_workspace_error(mut self, error: &str) -> Self { self.workspace_error = Some(error.into()); self }
+
+    pub fn with_generated_text(mut self, result: Result<String, String>) -> Self {
+        self.generated_text = Some(result);
+        self
+    }
 
     pub fn with_main_checkout_writes(mut self, supported: bool) -> Self { self.main_checkout_writes = supported; self }
 
@@ -114,6 +131,9 @@ impl FakeProvider {
 #[async_trait]
 impl Provider for FakeProvider {
     fn supports_main_checkout_writes(&self) -> bool { self.main_checkout_writes }
+    fn sandbox_autorun(&self) -> SandboxAutorun {
+        self.sandbox_autorun.clone().unwrap_or_else(|| SandboxAutorun::Unsupported("this provider has not been verified for autorun".into()))
+    }
     fn id(&self) -> &str {
         "fake"
     }
@@ -122,6 +142,13 @@ impl Provider for FakeProvider {
     }
     async fn check_setup(&self) -> SetupStatus {
         self.setup.clone()
+    }
+    async fn generate_text(&self, request: TextRequest) -> Result<String, ProviderError> {
+        self.probe.text_requests.lock().expect("probe lock").push(request);
+        match &self.generated_text {
+            Some(result) => result.clone().map_err(ProviderError::Protocol),
+            None => Err(ProviderError::Setup("This provider cannot generate text.".into())),
+        }
     }
     async fn start_session(&self, spec: SessionSpec) -> Result<Box<dyn ProviderSession>, ProviderError> {
         self.matrix.supports(spec.enforcement)?;
@@ -137,6 +164,7 @@ impl Provider for FakeProvider {
             decisions_rx,
             waiting_for: None,
             resume_handle: self.resume_handle.clone(),
+            notice: self.notice.clone(),
         }))
     }
 }
@@ -149,10 +177,12 @@ pub struct FakeSession {
     decisions_rx: mpsc::UnboundedReceiver<(ApprovalId, Decision)>,
     waiting_for: Option<ApprovalId>,
     resume_handle: Option<String>,
+    notice: Option<String>,
 }
 
 #[async_trait]
 impl ProviderSession for FakeSession {
+    fn notice(&self) -> Option<String> { self.notice.clone() }
     fn resume_handle(&self) -> Option<String> {
         self.resume_handle.clone()
     }
@@ -230,6 +260,7 @@ mod tests {
             enforcement,
             resume_handle: None,
             mcp_config: None,
+            sandbox_autorun: false,
         }
     }
 
@@ -312,5 +343,23 @@ mod tests {
         let mut s = p.start_session(spec(EnforcementMode::HostPrompts)).await.unwrap();
         s.cancel().await.unwrap();
         assert!(p.probe.cancelled.load(Ordering::SeqCst));
+    }
+}
+
+#[cfg(test)]
+mod text_tests {
+    use super::*;
+    use discard_core::provider::TextRequest;
+
+    #[tokio::test]
+    async fn generated_text_records_requests_without_starting_sessions() {
+        let request = TextRequest { model: "draft-model".into(), reasoning_effort: Some("high".into()), instructions: "style".into(), prompt: "description".into() };
+        let provider = FakeProvider::new(vec![]).with_generated_text(Ok("generated".into()));
+        assert_eq!(provider.generate_text(request.clone()).await.unwrap(), "generated");
+        assert_eq!(*provider.probe.text_requests.lock().unwrap(), std::slice::from_ref(&request));
+        assert!(provider.probe.specs.lock().unwrap().is_empty());
+        let failed = FakeProvider::new(vec![]).with_generated_text(Err("failed".into()));
+        assert!(matches!(failed.generate_text(request.clone()).await, Err(ProviderError::Protocol(message)) if message == "failed"));
+        assert!(matches!(FakeProvider::new(vec![]).generate_text(request).await, Err(ProviderError::Setup(message)) if message == "This provider cannot generate text."));
     }
 }

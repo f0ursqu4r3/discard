@@ -53,6 +53,8 @@ host for one agent in one project. Project settings list rules and allow revocat
 Compound shell syntax and full-access requests never match rules. Codex command
 approvals retain the full-access fallback.
 
+Sandbox autorun is implemented for Claude and confirmed by a live probe on Claude Code 2.1.321. Codex stays unsupported until its spike. See [worktree writes](worktrees.md#agent-workspace-writes-slices-a-and-b).
+
 Slice C remains planned: conversation moves, new-branch targets, and branch
 creation for detached worktrees. Native provider resume per agent is also planned.
 This does not implement multi-agent task orchestration.

@@ -1,12 +1,13 @@
 //! Process management and the JSON-RPC client for `codex app-server`.
 
 use discard_core::process::spawn_tokio;
+use crate::version::{self, CODEX_TESTED};
 use crate::codex::parse::{Item, Mapper, PendingRequest, approval_response};
 use async_trait::async_trait;
 use discard_core::approval::Decision;
 use discard_core::capability::{CapabilityMatrix, EnforcementMode};
 use discard_core::event::{ApprovalId, EventKind, RawEvent};
-use discard_core::provider::{Provider, ProviderError, ProviderSession, SessionMode, SessionSpec, SetupStatus};
+use discard_core::provider::{Provider, ProviderError, ProviderSession, SandboxAutorun, SessionMode, SessionSpec, SetupStatus};
 use discard_core::redact::redact;
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
@@ -30,6 +31,7 @@ const TERM_GRACE: Duration = Duration::from_secs(2);
 
 pub struct CodexProvider {
     executable: PathBuf,
+    running_version: Mutex<Option<String>>,
     matrix: CapabilityMatrix,
     env: Vec<(OsString, OsString)>,
 }
@@ -41,7 +43,7 @@ impl CodexProvider {
     }
 
     pub fn with_matrix(executable: impl Into<PathBuf>, matrix: CapabilityMatrix) -> Self {
-        Self { executable: executable.into(), matrix, env: Vec::new() }
+        Self { executable: executable.into(), matrix, env: Vec::new(), running_version: Mutex::new(None) }
     }
 
     /// Extra environment for the child process (used by tests).
@@ -50,7 +52,7 @@ impl CodexProvider {
         self
     }
 
-    fn command(&self) -> Command {
+    pub(super) fn command(&self) -> Command {
         let mut cmd = Command::new(&self.executable);
         cmd.envs(self.env.iter().cloned());
         cmd
@@ -58,7 +60,19 @@ impl CodexProvider {
 }
 
 impl CodexProvider {
-    fn codex_home(&self) -> Result<PathBuf, ProviderError> {
+    pub(super) async fn read_version(&self) -> Result<String, ProviderError> {
+        *self.running_version.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        let child = spawn_tokio(self.command().arg("--version").kill_on_drop(true).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()));
+        let output = tokio::time::timeout(SETUP_TIMEOUT, async { child?.wait_with_output().await })
+            .await.map_err(|_| crate::conversation::setup("Codex version could not be read: version check timed out"))?
+            .map_err(|_| crate::conversation::setup("Codex version could not be read"))?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let running = version::require(if output.status.success() { &text } else { "" }, "Codex", CODEX_TESTED)?;
+        *self.running_version.lock().unwrap_or_else(|p| p.into_inner()) = Some(running.clone());
+        Ok(running)
+    }
+
+    pub(super) fn codex_home(&self) -> Result<PathBuf, ProviderError> {
         let value = |key: &str| self.env.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.clone()).or_else(|| std::env::var_os(key));
         let home = value("CODEX_HOME")
             .filter(|v| !v.is_empty())
@@ -71,9 +85,9 @@ impl CodexProvider {
         Ok(home)
     }
 
-    async fn conversation_catalog(&self, home: &Path, model: &str, tools: crate::conversation::CatalogTools) -> Result<(Value, Option<u64>), ProviderError> {
+    pub(super) async fn conversation_catalog(&self, home: &Path, model: &str, tools: crate::conversation::CatalogTools, running: &str) -> Result<(Value, Option<u64>), ProviderError> {
         use crate::conversation::{load_catalog, setup};
-        if let Ok(catalog) = load_catalog(home, model, tools) {
+        if let Ok(catalog) = load_catalog(home, model, tools, running) {
             return Ok(catalog);
         }
         // A model-list probe starts no thread and sends no user message. Let the
@@ -83,7 +97,7 @@ impl CodexProvider {
         command.env("CODEX_HOME", home);
         crate::models::codex(command).await
             .map_err(|error| setup(format!("Automatic Codex model refresh failed: {error}")))?;
-        load_catalog(home, model, tools)
+        load_catalog(home, model, tools, running)
             .map_err(|error| setup(format!("Codex model cache is still unavailable after one automatic refresh: {error}")))
     }
 
@@ -165,6 +179,11 @@ fn mcp_thread_config(path: &Path) -> Result<Value, ProviderError> {
     for (name, server) in servers {
         let url = server.get("url").and_then(Value::as_str).ok_or_else(|| setup(format!("MCP server `{name}` has no url")))?;
         let mut entry = json!({"url": url});
+        // Claude's per-server `timeout` (milliseconds) is Codex's `tool_timeout_sec` (seconds, rounded up). Without it
+        // Codex gives a tool call 60 seconds, which ends a `delegate` call early.
+        if let Some(ms) = server.get("timeout").and_then(Value::as_u64).filter(|ms| *ms > 0) {
+            entry["tool_timeout_sec"] = json!(ms.div_ceil(1000));
+        }
         if let Some(headers) = server.get("headers").filter(|h| h.is_object()) {
             entry["http_headers"] = headers.clone();
         }
@@ -175,6 +194,11 @@ fn mcp_thread_config(path: &Path) -> Result<Value, ProviderError> {
 
 #[async_trait]
 impl Provider for CodexProvider {
+    // TODO: Run the Codex on-request sandbox spike (spec decision 12) and support autorun if it passes.
+    fn sandbox_autorun(&self) -> SandboxAutorun {
+        SandboxAutorun::Unsupported("Codex autorun needs a sandbox check first.".into())
+    }
+
     fn id(&self) -> &str {
         "codex"
     }
@@ -189,11 +213,21 @@ impl Provider for CodexProvider {
         crate::models::codex(self.command()).await
     }
 
+    async fn generate_text(&self, request: discard_core::provider::TextRequest) -> Result<String, ProviderError> {
+        super::text::generate(self, request).await
+    }
+
     async fn check_setup(&self) -> SetupStatus {
-        let version = spawn_tokio(self.command().arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true));
-        match tokio::time::timeout(SETUP_TIMEOUT, async { version?.wait().await }).await {
-            Ok(Ok(_)) => {}
+        let version = spawn_tokio(self.command().arg("--version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true));
+        match tokio::time::timeout(SETUP_TIMEOUT, async { version?.wait_with_output().await }).await {
+            Ok(Ok(output)) => {
+                let text = String::from_utf8_lossy(&output.stdout);
+                *self.running_version.lock().unwrap_or_else(|p| p.into_inner()) = if output.status.success() {
+                    version::require(&text, "Codex", CODEX_TESTED).ok()
+                } else { None };
+            }
             _ => {
+                *self.running_version.lock().unwrap_or_else(|p| p.into_inner()) = None;
                 return SetupStatus::NotInstalled { install_hint: "Install the Codex CLI and make sure `codex` is on your PATH.".into() };
             }
         }
@@ -211,11 +245,15 @@ impl Provider for CodexProvider {
     }
 
     fn model_context_window(&self, model: &str) -> Option<u64> {
-        crate::conversation::load_catalog(&self.codex_home().ok()?, model, crate::conversation::CatalogTools::None).ok()?.1
+        let running = self.running_version.lock().unwrap_or_else(|p| p.into_inner()).clone()?;
+        crate::conversation::load_catalog(&self.codex_home().ok()?, model, crate::conversation::CatalogTools::None, &running).ok()?.1
     }
 
     async fn start_session(&self, mut spec: SessionSpec) -> Result<Box<dyn ProviderSession>, ProviderError> {
         let workspace = spec.mode == SessionMode::Workspace;
+        if workspace && spec.sandbox_autorun {
+            return Err(ProviderError::SandboxUnavailable("Codex does not support autorun".into()));
+        }
         if workspace && spec.cwd.join(".git").is_dir() {
             return Err(ProviderError::SandboxUnavailable("Codex cannot protect Git metadata in the main checkout".into()));
         }
@@ -224,6 +262,7 @@ impl Provider for CodexProvider {
         }
         // Fail closed before any process starts.
         self.matrix.supports(spec.enforcement)?;
+        let mut running_version = None;
         let mut files = None;
         let mut startup_args = Vec::new();
         let mut expected_controls = None;
@@ -234,31 +273,26 @@ impl Provider for CodexProvider {
                 return Err(setup("Codex conversation sessions require a fresh replay, not a native resume"));
             }
             let model = spec.model.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| setup("select an exact Codex model"))?;
-            let version = spawn_tokio(self.command().arg("--version").kill_on_drop(true).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()));
-            let version = tokio::time::timeout(SETUP_TIMEOUT, async { version?.wait_with_output().await })
-                .await
-                .map_err(|_| setup("Codex version check timed out"))?
-                .map_err(|e| setup(e.to_string()))?;
-            if !version.status.success() || String::from_utf8_lossy(&version.stdout).trim() != "codex-cli 0.166.0" {
-                return Err(setup("Codex 0.166.0 is required for the verified conversation controls"));
-            }
+            let running = self.read_version().await?;
+            let verification_error = |e| version::verification_error(e, "Codex", &running, CODEX_TESTED);
             let owned = ConversationFiles::new()?;
             if !workspace { spec.cwd = owned.cwd.clone(); }
             let tools = if workspace { CatalogTools::Workspace } else { CatalogTools::None };
-            let (catalog, _) = self.conversation_catalog(&self.codex_home()?, model, tools).await?;
+            let (catalog, _) = self.conversation_catalog(&self.codex_home()?, model, tools, &running).await?;
             let catalog_path = owned.root.path().join("models.json");
             std::fs::write(&catalog_path, catalog.to_string()).map_err(|e| setup(e.to_string()))?;
             startup_args.extend(["-c".into(), format!("model_catalog_json={}", json!(catalog_path))]);
             // A config-only app-server starts no thread, model request, or external MCP client.
-            let initial = codex_controls(&json!({}), tools)?;
+            let initial = codex_controls(&json!({}), tools).map_err(verification_error)?;
             let mut probe_args = startup_args.clone();
             probe_args.extend(config_args(&initial));
-            let effective = self.read_effective_config(&spec.cwd, &probe_args).await?;
-            let mut controls = codex_controls(&effective, tools)?;
+            let effective = self.read_effective_config(&spec.cwd, &probe_args).await.map_err(verification_error)?;
+            let mut controls = codex_controls(&effective, tools).map_err(verification_error)?;
             controls["model_catalog_json"] = json!(catalog_path);
             startup_args.extend(config_args(&controls));
             expected_controls = Some(controls);
             files = Some(owned);
+            running_version = Some(running);
         }
         let (method, mut params) = thread_params(&spec);
         if let Some(path) = &spec.mcp_config {
@@ -276,7 +310,7 @@ impl Provider for CodexProvider {
                 // mode would require a CLI prompt that never policy cannot answer.
                 params["config"]["mcp_servers"]["discard-memory"]["default_tools_approval_mode"] = json!("approve");
                 params["config"]["mcp_servers"]["discard-memory"]["omit_tools_from"] = json!(["deferred", "code_mode"]);
-                params["config"]["mcp_servers"]["discard-memory"]["enabled_tools"] = json!(crate::conversation::MEMORY_TOOLS.iter().chain(if workspace { crate::conversation::WORKSPACE_TOOLS } else { &[] }).collect::<Vec<_>>());
+                params["config"]["mcp_servers"]["discard-memory"]["enabled_tools"] = json!(crate::conversation::conversation_tools(&spec));
             }
         }
 
@@ -326,13 +360,17 @@ impl Provider for CodexProvider {
                 if let Some(pgid) = pgid {
                     let _ = killpg(Pid::from_raw(pgid), Signal::SIGKILL);
                 }
-                return Err(match failure {
+                let error = match failure {
                     Failure::Controls(message) if workspace => ProviderError::SandboxUnavailable(redact(&message)),
                     Failure::Controls(message) => ProviderError::Protocol(redact(&message)),
                     Failure::Rejected(message) if method == "thread/resume" => ProviderError::ResumeRejected(redact(&message)),
                     Failure::Rejected(message) => ProviderError::Protocol(redact(&message)),
                     Failure::Closed => ProviderError::Protocol(format!("codex exited before the handshake finished: {detail}")),
                     Failure::Timeout => ProviderError::Protocol("codex did not answer the handshake in time".into()),
+                };
+                return Err(match running_version.as_deref() {
+                    Some(running) => version::verification_error(error, "Codex", running, CODEX_TESTED),
+                    None => error,
                 });
             }
         };
@@ -381,11 +419,12 @@ impl Provider for CodexProvider {
             });
         }
 
-        Ok(Box::new(CodexSession { child, pgid, stdin, events, shared, thread_id, reasoning_effort: spec.reasoning_effort, next_id: 10, _conversation_files: files }) as Box<dyn ProviderSession>)
+        let notice = running_version.as_deref().and_then(|running| version::notice("Codex", running, CODEX_TESTED));
+        Ok(Box::new(CodexSession { notice, child, pgid, stdin, events, shared, thread_id, reasoning_effort: spec.reasoning_effort, next_id: 10, _conversation_files: files }) as Box<dyn ProviderSession>)
     }
 }
 
-enum Failure {
+pub(super) enum Failure {
     Controls(String),
     /// The server answered with a JSON-RPC error.
     Rejected(String),
@@ -439,7 +478,7 @@ async fn response_for(lines: &mut tokio::io::Lines<BufReader<ChildStdout>>, id: 
     tokio::time::timeout(HANDSHAKE_TIMEOUT, read).await.unwrap_or(Err(Failure::Timeout))
 }
 
-async fn send_raw(stdin: &mut ChildStdin, value: &Value) -> Result<(), Failure> {
+pub(super) async fn send_raw(stdin: &mut ChildStdin, value: &Value) -> Result<(), Failure> {
     let mut line = value.to_string();
     line.push('\n');
     stdin.write_all(line.as_bytes()).await.map_err(|_| Failure::Closed)?;
@@ -490,6 +529,7 @@ struct Shared {
 }
 
 struct CodexSession {
+    notice: Option<String>,
     child: Child,
     pgid: Option<i32>,
     stdin: Arc<tokio::sync::Mutex<Option<ChildStdin>>>,
@@ -518,6 +558,7 @@ impl Drop for CodexSession {
 
 #[async_trait]
 impl ProviderSession for CodexSession {
+    fn notice(&self) -> Option<String> { self.notice.clone() }
     fn resume_handle(&self) -> Option<String> {
         Some(self.thread_id.clone())
     }
@@ -580,7 +621,22 @@ mod tests {
             enforcement,
             resume_handle: None,
             mcp_config: None,
+            sandbox_autorun: false,
         }
+    }
+
+    #[test]
+    fn codex_reports_autorun_unsupported() {
+        assert!(matches!(CodexProvider::new("unused").sandbox_autorun(), SandboxAutorun::Unsupported(_)));
+    }
+
+    #[tokio::test]
+    async fn codex_refuses_to_start_an_autorun_session() {
+        let mut s = spec(EnforcementMode::HostPrompts);
+        s.mode = SessionMode::Workspace;
+        s.sandbox_autorun = true;
+        let error = CodexProvider::new("unused").start_session(s).await.err().unwrap();
+        assert!(matches!(&error, ProviderError::SandboxUnavailable(m) if m == "Codex does not support autorun"), "{error:?}");
     }
 
     #[tokio::test]
@@ -647,6 +703,21 @@ mod tests {
         assert_eq!(p["approvalPolicy"], "never");
         assert_eq!(p["sandbox"], "read-only");
         assert_eq!(p["model"], "exact-model");
+    }
+
+    #[test]
+    fn the_discard_server_timeout_becomes_the_codex_tool_timeout_in_seconds() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |entry: Value| { let path = dir.path().join("c.json"); std::fs::write(&path, json!({"mcpServers":{"discard-memory":entry}}).to_string()).unwrap(); path };
+        let base = json!({"type":"http","url":"http://127.0.0.1:9/mcp","headers":{"Authorization":"Bearer t"}});
+        let none = mcp_thread_config(&write(base.clone())).unwrap();
+        assert!(none["mcp_servers"]["discard-memory"].get("tool_timeout_sec").is_none(), "Codex keeps its 60 second default without a timeout");
+        let mut with = base.clone(); with["timeout"] = json!(660_000);
+        let config = mcp_thread_config(&write(with)).unwrap();
+        assert_eq!(config["mcp_servers"]["discard-memory"]["tool_timeout_sec"], 660);
+        assert_eq!(config["mcp_servers"]["discard-memory"]["http_headers"]["Authorization"], "Bearer t");
+        let mut odd = base; odd["timeout"] = json!(1500);
+        assert_eq!(mcp_thread_config(&write(odd)).unwrap()["mcp_servers"]["discard-memory"]["tool_timeout_sec"], 2, "rounded up");
     }
 
     #[test]

@@ -78,9 +78,13 @@ its own agent and session.
 
 ## Conversation sessions
 
-`SessionMode::Conversation` uses a fresh, empty Discard-owned working directory. It starts a new ephemeral thread for each replay. It rejects native resume handles. The selected model must have an exact slug in the installed Codex 0.166.0 model cache. Discard resolves that cache from the provider's `CODEX_HOME`, or `HOME/.codex`. If the cache is missing, open Codex and refresh its model list before retrying. Discard does not change the user's cache, configuration, or authentication.
+`SessionMode::Conversation` uses a fresh, empty Discard-owned working directory. It starts a new ephemeral thread for each replay. It rejects native resume handles. The selected model must have an exact slug in a model cache whose `client_version` equals the running CLI version. Discard resolves that cache from the provider's `CODEX_HOME`, or `HOME/.codex`. If the cache is missing, incompatible, or written by another CLI version, Discard asks Codex to refresh its model list once, then validates the cache again. This bounded recovery starts no thread and sends no user prompt. Discard does not edit configuration or authentication; Codex may refresh its own cache.
 
 Discard copies complete model records into a temporary startup catalog. It changes only tool capability fields: patch, shell, experimental tools, delegation, node REPL and tool mode. The model slug and context-window metadata stay intact. `allowProviderModelFallback` is false. `Provider::model_context_window` returns the exact model's published limit when available.
+
+Codex 0.166.0 is the tested version for Conversation, Workspace, and text generation. A newer CLI may run only after all required isolation controls pass verification. Older versions stay blocked with an update message. An unreadable version also stays blocked. Verification failures on a newer CLI name both versions.
+
+After a newer CLI starts a session, Discard adds a conversation marker with the running and tested versions. Each distinct notice appears at most once per engine instance. Notice storage does not block the turn. A newer CLI can change the behavior of a control without removing it; these checks cannot detect every such change.
 
 Before sending memory instructions, Discard reads effective configuration without starting a thread. It then disables every inherited named MCP server at startup and checks the final effective controls. It disables plugins, apps, native web, image generation, shell, code mode, delegation, skills, automatic memory, history-note tools, hooks and discovery. An inherited server named `discard-memory` produces an error because its settings could merge into the scoped server. A missing or overridden required control produces an error before prompt delivery.
 
@@ -99,7 +103,7 @@ Normal app conversations replay the current conversation transcript with refresh
 Tested codex-cli 0.166.0 against a synthetic local Responses endpoint with a temporary home.
 Command for every row: `python3 crates/discard-providers/tests/probes/codex_workspace.py`.
 The available model cache was written by 0.167.0. The probe uses only its model metadata;
-it does not copy credentials or change the source cache. Production still requires a 0.166.0 cache.
+it does not copy credentials or change the source cache. Production requires a cache that matches the running CLI version.
 
 | Question | Observed value | Probe command |
 | --- | --- | --- |
@@ -127,7 +131,7 @@ permits read-only Git inspection. System temporary directories remain writable.
 
 The adapter checks effective controls before prompt delivery. Missing controls, mismatches,
 invalid directories and non-host approval modes return SandboxUnavailable for read-only
-fallback. The model cache and running CLI remain pinned to 0.166.0. Workspace uses the same bounded model-list cache recovery as Conversation mode. A stale cache refresh keeps the selected model’s shell and patch capabilities. Ordinary setup, spawn, and protocol failures retain their error type; only failed Workspace controls trigger read-only fallback.
+fallback. The model cache must match the running CLI version. The tested-version rule above applies. Workspace uses the same bounded model-list cache recovery as Conversation mode. A stale cache refresh keeps the selected model’s shell and patch capabilities. Ordinary setup, spawn, and protocol failures retain their error type; only failed Workspace controls trigger read-only fallback.
 
 All Workspace command approvals use the full-access SandboxEscape card because the spike
 found no reliable escalation marker. File-change paths come from preceding item notifications;
@@ -166,3 +170,19 @@ behavior stays unchanged.
 The marker result remains `none`. Every Workspace command approval therefore
 remains SandboxEscape. Its card says "Always allow is unavailable for Codex write
 sessions." Discard's durable rule system does not approve these requests.
+
+## Text generation
+
+Personality generation uses a separate app-server request and an empty temporary
+working directory. It starts an ephemeral thread with the draft model, developer
+instructions, `approvalPolicy: "never"`, `sandbox: "read-only"`, and
+`allowProviderModelFallback: false`. The turn uses the draft reasoning effort.
+No memory MCP server is added. The verified Codex controls and a sanitized
+model catalog remove native tools, plugins, apps, skills, hooks, project instructions,
+and automatic memory. Effective configuration checks disable all inherited MCP
+servers before the thread starts. A cache matching the running CLI version is required. The same bounded model-list refresh applies when that cache is unavailable or incompatible.
+Approval and tool requests are declined. Only the final answer is returned at turn
+completion. The process group is killed when the request completes, its future is
+dropped, or the 120-second timeout expires. The editor’s Cancel button discards the
+result. The backend request can continue until completion or timeout. Generation
+does not log prompts or results.

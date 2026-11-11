@@ -1,9 +1,10 @@
 //! Explicit recipients in new user messages. History, topics and model output never call this parser.
 use crate::{model::{AgentId, ChannelId}, store::Store};
 
-pub fn names(text: &str) -> Vec<String> {
-    let pattern = regex::Regex::new(r#"(?:^|[\s(])@(?:"([^"]+)"|([\p{L}\p{N}_-]+))"#).unwrap();
-    let mut found = Vec::new();
+/// The lines of `text` that can hold a mention, with inline code and escaped `@` signs masked. Lines in fenced
+/// or indented code and in quotes are left out.
+fn plain_lines(text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
     let mut fence: Option<(char, usize)> = None;
     for line in text.lines() {
         if line.starts_with("    ") || line.starts_with('\t') { continue; }
@@ -32,6 +33,15 @@ pub fn names(text: &str) -> Vec<String> {
                 plain.push('x');
             } else { plain.push(if ticks == 0 { c } else { 'x' }); }
         }
+        lines.push(plain);
+    }
+    lines
+}
+
+pub fn names(text: &str) -> Vec<String> {
+    let pattern = regex::Regex::new(r#"(?:^|[\s(])@(?:"([^"]+)"|([\p{L}\p{N}_-]+))"#).unwrap();
+    let mut found = Vec::new();
+    for plain in plain_lines(text) {
         for captures in pattern.captures_iter(&plain) {
             let name = captures.get(1).or_else(|| captures.get(2)).unwrap().as_str().to_owned();
             if !found.iter().any(|candidate: &String| candidate.to_lowercase() == name.to_lowercase()) { found.push(name); }
@@ -40,10 +50,33 @@ pub fn names(text: &str) -> Vec<String> {
     found
 }
 
+/// True when `text` writes `@you` in plain text, outside code and quotes, in any letter case. An agent writes it
+/// to call the user into a thread. It uses the masking rules of `names`, and `@your` or `mail@you.com` do not count.
+pub fn addresses_user(text: &str) -> bool {
+    let pattern = regex::Regex::new(r"(?i)(?:^|[\s(])@you(?:[^\p{L}\p{N}_-]|$)").unwrap();
+    plain_lines(text).iter().any(|plain| pattern.is_match(plain))
+}
+
 /// Resolve the current project default at send time; saved channel identity is a legacy fallback.
+/// A question thread answers as the author of its anchor message when that agent is active. Otherwise it uses the
+/// default of its parent channel. A sub-agent thread answers as its own agent.
 pub fn default_agent(store: &Store, channel: &crate::model::Channel) -> Result<AgentId, String> {
+    if let Some(thread) = store.thread_info(&channel.id).map_err(|e| e.to_string())? {
+        // A sub-agent thread answers as its own agent, whoever wrote the brief.
+        let Some(anchor) = thread.anchor_message_id.filter(|_| thread.kind == crate::model::ThreadKind::Question) else { return Ok(channel.agent_id.clone()) };
+        let parent = store.load_channel(&thread.parent_channel_id).map_err(|e| e.to_string())?;
+        return anchor_agent(store, &parent, &anchor);
+    }
     let main = channel.project_id.as_ref().map(|project| store.project_main_agent(project)).transpose().map_err(|e| e.to_string())?.flatten();
     Ok(main.unwrap_or_else(|| channel.agent_id.clone()))
+}
+
+/// The default responder of a thread on `anchor` in `parent`: the anchor's author when that agent is active,
+/// otherwise the default of the parent channel. Use this before the thread row exists.
+pub fn anchor_agent(store: &Store, parent: &crate::model::Channel, anchor: &crate::model::MessageId) -> Result<AgentId, String> {
+    let author = store.message_author(anchor).map_err(|e| e.to_string())?;
+    if let Some(author) = author.filter(|a| store.agent_archived(&a.agent_id).is_ok_and(|archived| !archived)) { return Ok(author.agent_id); }
+    default_agent(store, parent)
 }
 
 pub fn recipient(store: &Store, channel: &ChannelId, text: &str) -> Result<AgentId, String> {
@@ -72,11 +105,62 @@ pub fn resolve(store: &Store, channel: &ChannelId, text: &str) -> Result<Option<
 mod tests {
     use super::*;
     #[test]
+    fn at_you_counts_only_in_plain_text_in_any_letter_case() {
+        for text in ["@you", "Hey @you, look", "(@YOU)", "see @You.", "line one\n@you at the start", "ask @you?"] {
+            assert!(addresses_user(text), "{text:?}");
+        }
+        for text in ["", "you", "@your turn", "@you_tube", "@you-two", "mail@you.com", "`@you`", "> @you", "```\n@you\n```", "    @you", "\\@you", "@\"you\" quoted name", "@youtube"] {
+            assert!(!addresses_user(text), "{text:?}");
+        }
+        assert!(addresses_user("`code` then @you"), "text after inline code counts");
+        assert!(!names("@you").is_empty(), "the mention parser still sees the name");
+    }
+
+    #[test]
     fn mentions_are_explicit_and_skip_quoted_code_and_email() {
         assert_eq!(names("@Jordan what do you think?"), vec!["Jordan"]);
         assert_eq!(names("Ask @\"Jordan Lee\" then @\"Jordan Lee\""), vec!["Jordan Lee"]);
         assert!(names("mail@Jordan.com\n> @Jordan\n`@Jordan`\n```sh\n@Jordan\n```\n    @Jordan\n\\@Jordan").is_empty());
         assert_eq!(names("`@Ignored` ask @Jordan"), vec!["Jordan"]);
         assert_eq!(names("    ```\n@Jordan"), vec!["Jordan"]);
+    }
+    fn agent(store: &Store, name: &str) -> AgentId {
+        let id = AgentId::new();
+        store.insert_agent(&id, &crate::agent::AgentConfig {
+            workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: name.into(), avatar: None, provider: "fake".into(),
+            model: Some("m".into()), system_prompt: String::new(), policy: crate::capability::ApprovalPolicy::Ask, plugin_write: false,
+        }).unwrap();
+        id
+    }
+
+    fn said(store: &Store, channel: &ChannelId, role: crate::model::Role, author: Option<&AgentId>) -> crate::model::MessageId {
+        let message = crate::model::Message { id: crate::model::MessageId::new(), channel_id: channel.clone(), role, blocks: vec![crate::model::Block::Markdown { text: "x".into() }] };
+        match author {
+            Some(agent) => store.insert_authored_message(&message, &crate::model::MessageAuthor { agent_id: agent.clone(), name: "n".into(), provider: "fake".into(), avatar: None }).unwrap(),
+            None => store.insert_message(&message).unwrap(),
+        }
+        message.id
+    }
+
+    #[test]
+    fn a_thread_answers_as_the_anchor_author_or_else_as_the_parent_default() {
+        let store = Store::open_in_memory().unwrap();
+        let project = crate::model::Project { id: crate::model::ProjectId::new(), name: "p".into(), path: "/p".into() };
+        store.insert_project(&project).unwrap();
+        let (main, other) = (agent(&store, "Main"), agent(&store, "Other"));
+        store.set_project_main_agent(&project.id, &main).unwrap();
+        let parent = store.create_conversation(&other, Some(&project.id), "work").unwrap();
+        let by_other = said(&store, &parent.id, crate::model::Role::Agent, Some(&other));
+        let by_user = said(&store, &parent.id, crate::model::Role::User, None);
+        let on_agent = store.create_thread(&parent.id, &by_other, "a", &other).unwrap();
+        let on_user = store.create_thread(&parent.id, &by_user, "u", &main).unwrap();
+        assert_eq!(default_agent(&store, &parent).unwrap(), main, "the parent still uses the project main agent");
+        assert_eq!(default_agent(&store, &on_agent).unwrap(), other, "the anchor author answers in the thread");
+        assert_eq!(default_agent(&store, &on_user).unwrap(), main, "a user anchor uses the main agent");
+        assert_eq!(recipient(&store, &on_agent.id, "and then?").unwrap(), other);
+        assert_eq!(recipient(&store, &on_agent.id, "@Main and then?").unwrap(), main, "a mention overrides for one response");
+        assert_eq!(recipient(&store, &on_agent.id, "and again?").unwrap(), other);
+        store.set_agent_archived(&other, true).unwrap();
+        assert_eq!(default_agent(&store, &on_agent).unwrap(), main, "an archived anchor author falls back to the parent default");
     }
 }

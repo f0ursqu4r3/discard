@@ -29,13 +29,13 @@ const messages: MessageDto[] = [
 </script>
 
 <template>
-  <figure class="space-y-2" aria-label="Appearance preview">
-    <figcaption class="text-sm text-muted-foreground">
+  <figure aria-label="Appearance preview">
+    <figcaption class="px-3 pb-1.5 font-mono text-xs text-muted-foreground">
       Live preview · Sample conversation
     </figcaption>
     <div
       inert
-      class="pointer-events-none flex overflow-hidden rounded-xl border border-border bg-background"
+      class="pointer-events-none flex overflow-hidden border-y border-border bg-background"
       data-testid="appearance-preview"
     >
       <ServerRail project="Sample project" :unread="true" :pending-approvals="1" />

@@ -12,6 +12,7 @@ import type { ProjectMenuAction } from './project-menu'
 import type { ProjectEntry } from '../bridge/api'
 import type { ChannelDto } from '../bridge/types'
 import ProjectAvatar from './workspace/ProjectAvatar.vue'
+import { channelApprovals } from './threads'
 import { cn } from '@/lib/utils'
 const props = withDefaults(
   defineProps<{
@@ -39,7 +40,7 @@ const projectUnread = (id: string) =>
   (id === (props.projectId ?? '') && props.unread)
 const projectApprovals = (id: string) =>
   props.channels?.reduce(
-    (total, channel) => total + (channel.projectId === id ? channel.pendingApprovals : 0),
+    (total, channel) => total + (channel.projectId === id ? channelApprovals(channel) : 0),
     0,
   ) ?? (id === (props.projectId ?? '') ? props.pendingApprovals : 0)
 const directUnread = computed(

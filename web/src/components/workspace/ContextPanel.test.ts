@@ -50,3 +50,31 @@ test('the working member identifies the active responder', () => {
   })
   view.unmount()
 })
+
+test('shows Autorun beside the agent status', () => {
+  const snapshot: SnapshotDto = {
+    ...(fixture as SnapshotDto),
+    activeProjectId: null,
+    autorun: { state: 'on', reason: null },
+  }
+  const view = mount(ContextPanel, { props: { snapshot } })
+  expect(view.text()).toContain('Autorun')
+  expect(view.text()).not.toContain('Autorun off')
+  view.unmount()
+})
+test('shows why autorun is off', () => {
+  const snapshot: SnapshotDto = {
+    ...(fixture as SnapshotDto),
+    activeProjectId: null,
+    autorun: { state: 'unavailable', reason: 'r' },
+  }
+  const view = mount(ContextPanel, { props: { snapshot } })
+  expect(view.text()).toContain('Autorun off: r')
+  view.unmount()
+})
+test('shows no autorun text when autorun is not configured', () => {
+  const snapshot: SnapshotDto = { ...(fixture as SnapshotDto), activeProjectId: null }
+  const view = mount(ContextPanel, { props: { snapshot } })
+  expect(view.text()).not.toContain('Autorun')
+  view.unmount()
+})
