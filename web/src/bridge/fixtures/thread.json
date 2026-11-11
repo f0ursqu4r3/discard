@@ -77,6 +77,24 @@
     "branches": [],
     "channel": "general",
     "channelId": "channel",
+    "channelThreads": [
+      {
+        "agentName": "Agent",
+        "channelId": "thread",
+        "followed": true,
+        "kind": "question",
+        "lastMessage": {
+          "authorName": "Agent",
+          "preview": "It keeps the channel clean.",
+          "role": "agent"
+        },
+        "messageCount": 2,
+        "name": "Why a thread?",
+        "pendingApprovals": 0,
+        "state": null,
+        "unread": true
+      }
+    ],
     "channels": [
       {
         "agent": "Agent",

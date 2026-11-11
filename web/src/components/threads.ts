@@ -75,3 +75,25 @@ export function selectedChannelApprovals(
   const channel = snapshot.channels.find((entry) => entry.id === snapshot.channelId)
   return (snapshot.pendingApprovals ?? 0) + (channel?.threadPendingApprovals ?? 0)
 }
+
+/** Longest thread name, in characters. The app checks the same limit. */
+export const THREAD_NAME_MAX = 80
+
+/**
+ * The name that the app saves for a thread: line breaks become spaces and the ends are trimmed. Returns null when
+ * the length is not 1 to `THREAD_NAME_MAX` characters. The app checks the final name.
+ */
+export function normalizeThreadName(input: string): string | null {
+  const name = input.replace(/\r\n|[\r\n\u2028\u2029]/g, ' ').trim()
+  const length = [...name].length
+  return length >= 1 && length <= THREAD_NAME_MAX ? name : null
+}
+
+/**
+ * Whether an agent message follows a reference row in its channel. The agent has then already read the row.
+ * Another reference row does not count: its author wrote it in a thread.
+ */
+export function agentFollows(messages: MessageDto[], referenceId: string): boolean {
+  const index = messages.findIndex((message) => message.id === referenceId)
+  return index >= 0 && messages.slice(index + 1).some((m) => m.role === 'agent' && !m.postedFrom)
+}

@@ -28,7 +28,8 @@ import { serverInitials } from './layout'
 import { groupBlocks, messageTime } from './messages'
 import { messageReply, messageSourceLink } from './reply'
 import { threadAction } from './threads'
-import { referenceMenuPlanned, threadActions } from './thread-menu'
+import { threadActionLabels } from './thread-menu'
+import { requestAction } from './thread-actions'
 const props = defineProps<{
   channelId: string
   message: MessageDto
@@ -126,7 +127,18 @@ const postItem = computed(() =>
     : undefined,
 )
 const reference = computed(() => (surface.value === 'channel' ? props.message.postedFrom : null))
-const plannedEntries = computed(() => (reference.value ? referenceMenuPlanned : undefined))
+const removeAction = computed(() =>
+  reference.value ? { label: threadActionLabels.removeFromChannel } : undefined,
+)
+function removeFromChannel() {
+  const source = reference.value
+  if (!source) return
+  requestAction({
+    kind: 'remove-from-channel',
+    messageId: props.message.id,
+    threadName: source.threadName,
+  })
+}
 function openThread() {
   const item = threadItem.value
   if (!item || item.disabled) return
@@ -156,10 +168,11 @@ async function copy() {
     :reply-enabled="!!target?.hasText && !replyDisabled"
     :thread-action="threadItem"
     :post-action="postItem"
-    :planned-entries="plannedEntries"
+    :remove-action="removeAction"
     @reply="reply"
     @thread="openThread"
     @post="post"
+    @remove="removeFromChannel"
   >
     <Marker
       v-if="systemNote"
@@ -370,25 +383,17 @@ async function copy() {
           </Tooltip>
           <Tooltip v-if="reference">
             <TooltipTrigger as-child>
-              <span
-                class="inline-flex"
-                tabindex="0"
-                :aria-label="`${threadActions.removeFromChannel.label} — Soon`"
-                aria-disabled="true"
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                class="transition-colors"
+                :aria-label="threadActionLabels.removeFromChannel"
+                @click="removeFromChannel"
               >
-                <!-- TODO: Remove the reference row from the channel, with rules for a parent agent that already read it. -->
-                <Button
-                  disabled
-                  variant="ghost"
-                  size="icon-xs"
-                  class="transition-colors"
-                  :aria-label="`${threadActions.removeFromChannel.label} — Soon`"
-                >
-                  <Trash aria-hidden="true" />
-                </Button>
-              </span>
+                <Trash aria-hidden="true" />
+              </Button>
             </TooltipTrigger>
-            <TooltipContent>{{ threadActions.removeFromChannel.label }} · Soon</TooltipContent>
+            <TooltipContent>{{ threadActionLabels.removeFromChannel }}</TooltipContent>
           </Tooltip>
         </div>
       </TooltipProvider>

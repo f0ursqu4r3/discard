@@ -103,6 +103,36 @@
     "branches": [],
     "channel": "general",
     "channelId": "channel",
+    "channelThreads": [
+      {
+        "agentName": "Reviewer",
+        "channelId": "read-docs",
+        "followed": false,
+        "kind": "sub_agent",
+        "lastMessage": {
+          "authorName": "Reviewer",
+          "preview": "The docs say two things.",
+          "role": "agent"
+        },
+        "messageCount": 2,
+        "name": "Read the docs",
+        "pendingApprovals": 0,
+        "state": "done",
+        "unread": true
+      },
+      {
+        "agentName": "Reviewer",
+        "channelId": "find-callers",
+        "followed": false,
+        "kind": "sub_agent",
+        "lastMessage": null,
+        "messageCount": 1,
+        "name": "Find callers",
+        "pendingApprovals": 0,
+        "state": "running",
+        "unread": false
+      }
+    ],
     "channels": [
       {
         "agent": "Agent",

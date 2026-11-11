@@ -5,7 +5,8 @@ import { AtSign, BellOff, BellPlus, Bot, Ellipsis, Hash, MessagesSquare, X } fro
 import type { AttachmentDto, MessageDto, OpenThreadDto, ThreadHistoryDto } from '@/bridge/types'
 import { followThread, leaveThread } from '@/bridge/api'
 import { thinkingLine } from '../messages'
-import { threadMenuPlanned } from '../thread-menu'
+import { threadActionLabels, threadDeleteBlock } from '../thread-menu'
+import { requestAction } from '../thread-actions'
 import BrailleSpinner from '../BrailleSpinner.vue'
 import Composer from '../Composer.vue'
 import ThreadStateMark from '../ThreadStateMark.vue'
@@ -80,6 +81,16 @@ const typing = computed(() =>
   thinkingLine(!!props.thread?.turnRunning, [
     props.thread?.responder?.name ?? props.thread?.agent ?? '',
   ]),
+)
+// A running turn or task, or a pending approval, blocks a delete for now. This is a state, not a planned action.
+const deleteBlock = computed(() =>
+  props.thread
+    ? threadDeleteBlock({
+        running: props.thread.turnRunning,
+        state: props.thread.state,
+        pendingApprovals: props.thread.pendingApprovals,
+      })
+    : null,
 )
 async function change(follow: boolean) {
   if (!props.thread) return
@@ -166,9 +177,33 @@ defineExpose({ focusComposer: () => composer.value?.focusEnd?.() })
             <TooltipContent>Thread menu</TooltipContent>
           </Tooltip>
           <DropdownMenuContent align="end" data-ui-id="thread-menu" class="w-48">
-            <DropdownMenuItem v-for="entry in threadMenuPlanned" :key="entry.label" disabled>
-              {{ entry.label }}
-              <span class="ml-auto text-xs text-muted-foreground">Soon</span>
+            <DropdownMenuItem
+              @select="
+                thread &&
+                requestAction({
+                  kind: 'rename-thread',
+                  threadId: thread.channelId,
+                  name: thread.name,
+                })
+              "
+            >
+              {{ threadActionLabels.rename }}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              variant="destructive"
+              :disabled="!!deleteBlock"
+              :title="deleteBlock ?? undefined"
+              @select="
+                thread &&
+                !deleteBlock &&
+                requestAction({
+                  kind: 'delete-thread',
+                  threadId: thread.channelId,
+                  name: thread.name,
+                })
+              "
+            >
+              {{ threadActionLabels.remove }}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

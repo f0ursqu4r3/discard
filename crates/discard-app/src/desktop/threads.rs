@@ -62,6 +62,10 @@ impl ThreadRecord {
     /// User and agent messages in the thread.
     pub fn count(&self) -> usize { self.rows.len() }
 
+    /// Sort key for the latest activity: the ID of the newest user or agent message, or the thread's own ID while it
+    /// has none. IDs are time-ordered, so a larger key is newer.
+    pub fn activity(&self) -> &str { self.rows.last().map_or(self.id.as_str(), |message| message.id.0.as_str()) }
+
     /// A question thread with no message is not shown anywhere. A sub-agent thread shows from its start, so the
     /// parent shows its chip while the brief is still being saved.
     pub fn visible(&self) -> bool { self.kind == ThreadKind::SubAgent || self.count() > 0 }

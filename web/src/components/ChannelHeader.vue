@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { PanelRight, PanelLeft, Hash, AtSign, UserRound, Search, MessagesSquare } from '@lucide/vue'
+import { PanelRight, PanelLeft, Hash, AtSign, UserRound, Search } from '@lucide/vue'
 import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from './ui/input-group'
 import { Button } from './ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
-import { threadActions } from './thread-menu'
+import type { ThreadChipDto } from '../bridge/types'
+import ThreadsPopover from './ThreadsPopover.vue'
 const props = withDefaults(
   defineProps<{
     channel: string
@@ -16,10 +17,17 @@ const props = withDefaults(
     agentName?: string
     agentId?: string
     sidebarAvailable?: boolean
+    /** Every thread of the channel, followed or not, latest activity first. */
+    threads?: ThreadChipDto[]
   }>(),
-  { sidebarAvailable: true, conversation: true },
+  { sidebarAvailable: true, conversation: true, threads: () => [] },
 )
-const emit = defineEmits<{ toggleMembers: []; toggleNavigation: []; search: [query: string] }>()
+const emit = defineEmits<{
+  toggleMembers: []
+  toggleNavigation: []
+  search: [query: string]
+  openThread: [threadId: string]
+}>()
 const query = ref('')
 watch(
   () => props.agentId || props.agentName,
@@ -79,29 +87,7 @@ function search() {
       </slot>
     </div>
     <div class="flex items-center px-2">
-      <TooltipProvider v-if="conversation" :delay-duration="500" :skip-delay-duration="0">
-        <Tooltip>
-          <TooltipTrigger as-child>
-            <span
-              class="inline-flex"
-              tabindex="0"
-              aria-disabled="true"
-              :aria-label="`${threadActions.list.label} — Soon`"
-            >
-              <!-- TODO: List all threads of the channel, including threads that are not followed. -->
-              <Button
-                disabled
-                variant="ghost"
-                size="icon-sm"
-                :aria-label="`${threadActions.list.label} — Soon`"
-              >
-                <MessagesSquare aria-hidden="true" />
-              </Button>
-            </span>
-          </TooltipTrigger>
-          <TooltipContent>{{ threadActions.list.label }} · Soon</TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
+      <ThreadsPopover v-if="conversation" :threads="threads" @open="emit('openThread', $event)" />
       <TooltipProvider v-if="sidebarAvailable !== false">
         <Tooltip>
           <TooltipTrigger as-child>

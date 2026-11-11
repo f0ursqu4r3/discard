@@ -257,6 +257,7 @@ pub fn run(
             commands::send_message,
             commands::get_thread_history, commands::start_thread, commands::open_thread, commands::close_thread, commands::select_thread,
             commands::post_thread_message, commands::follow_thread, commands::leave_thread,
+            commands::rename_thread, commands::thread_posted_count, commands::delete_thread, commands::remove_posted_message, commands::rename_text_channel,
             attachments::choose_attachments,
             attachments::import_attachments,
             attachments::attachment_preview,

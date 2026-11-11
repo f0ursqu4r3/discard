@@ -15,6 +15,7 @@ import {
   Plus,
 } from '@lucide/vue'
 import NavigationContextMenu from './NavigationContextMenu.vue'
+import { requestAction } from './thread-actions'
 import BrailleSpinner from './BrailleSpinner.vue'
 import SidebarWorktree from './SidebarWorktree.vue'
 import ThreadRow from './ThreadRow.vue'
@@ -361,6 +362,16 @@ const approvals = computed(
                 :id="row.channel?.id"
                 :renamable="!row.general"
                 :busy="busy"
+                @rename="
+                  row.channel &&
+                  projectId &&
+                  requestAction({
+                    kind: 'rename-channel',
+                    projectId,
+                    channelId: row.channel.id,
+                    name: row.channel.name,
+                  })
+                "
                 @open="
                   row.channel
                     ? emit('selectChannel', row.channel.id)

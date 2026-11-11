@@ -6,6 +6,7 @@ import ChannelList from './ChannelList.vue'
 import ThreadRow from './ThreadRow.vue'
 import AgentsNavigation from './workspace/AgentsNavigation.vue'
 import { ContextMenuItem } from './ui/context-menu'
+import { clearAction, pendingAction } from './thread-actions'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
@@ -14,6 +15,7 @@ afterEach(() => {
   views.splice(0).forEach((view) => view.unmount())
   document.body.innerHTML = ''
   localStorage.clear()
+  clearAction()
 })
 const link = (id: string, patch: Partial<ThreadLinkDto> = {}): ThreadLinkDto => ({
   id,
@@ -55,7 +57,7 @@ test('a quiet thread row has no state marks and the open thread is highlighted',
   expect(view.get('button').classes()).toContain('nav-active-edge')
 })
 
-test('the context menu leaves the thread and lists Rename and Delete as planned items', async () => {
+test('the context menu leaves the thread and offers Rename and Delete with no Soon label', async () => {
   const view = track(mount(ThreadRow, { attachTo: document.body, props: { link: link('t') } }))
   await view.get('button').trigger('contextmenu', { button: 2, clientX: 20, clientY: 20 })
   await flushPromises()
@@ -63,18 +65,47 @@ test('the context menu leaves the thread and lists Rename and Delete as planned 
   expect(items.map((item) => item.text().replace(/\s+/g, ' '))).toEqual([
     'Open thread',
     'Leave thread',
-    'Rename thread Soon',
-    'Delete thread Soon',
+    'Rename thread',
+    'Delete thread',
   ])
-  for (const item of items.slice(2)) {
-    expect(item.attributes('aria-disabled')).toBe('true')
-    item.vm.$emit('select')
-  }
+  expect(items.map((item) => item.attributes('aria-disabled'))).toEqual([
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+  ])
+  items[2]!.vm.$emit('select')
+  expect(pendingAction.value).toEqual({ kind: 'rename-thread', threadId: 't', name: 'Thread t' })
+  items[3]!.vm.$emit('select')
+  expect(pendingAction.value).toEqual({ kind: 'delete-thread', threadId: 't', name: 'Thread t' })
   expect(view.emitted('leave')).toBeUndefined()
   items[1]!.vm.$emit('select')
   expect(view.emitted('leave')).toEqual([['t']])
   items[0]!.vm.$emit('select')
   expect(view.emitted('select')).toEqual([['t']])
+})
+
+test('Delete thread is disabled, without Soon, while a turn runs, a task runs or an approval waits', async () => {
+  for (const [change, reason] of [
+    [{ running: true }, 'A turn runs in this thread.'],
+    [{ kind: 'sub_agent', state: 'running' }, 'A sub-agent task runs in this thread.'],
+    [{ pendingApprovals: 1 }, 'An approval waits in this thread.'],
+  ] as const) {
+    const view = mount(ThreadRow, {
+      attachTo: document.body,
+      props: { link: link('t', change) },
+    })
+    await view.get('button').trigger('contextmenu', { button: 2, clientX: 20, clientY: 20 })
+    await flushPromises()
+    const remove = view.findAllComponents(ContextMenuItem).at(-1)!
+    expect(remove.text()).toBe('Delete thread')
+    expect(remove.attributes('aria-disabled')).toBe('true')
+    expect(remove.attributes('title')).toBe(reason)
+    remove.vm.$emit('select')
+    expect(pendingAction.value).toBeNull()
+    view.unmount()
+    document.body.innerHTML = ''
+  }
 })
 
 test('the keyboard opens the thread row menu', async () => {

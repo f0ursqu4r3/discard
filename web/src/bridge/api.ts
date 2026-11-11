@@ -56,6 +56,24 @@ export const postThreadMessage = (messageId: string) =>
   invoke<string>('post_thread_message', { messageId })
 export const followThread = (threadId: string) => invoke<void>('follow_thread', { threadId })
 export const leaveThread = (threadId: string) => invoke<void>('leave_thread', { threadId })
+/**
+ * Give a thread a new name. Returns the stored name. The app trims it, turns line breaks into spaces and
+ * rejects a name of 0 or more than 80 characters.
+ */
+export const renameThread = (threadId: string, name: string) =>
+  invoke<string>('rename_thread', { threadId, name })
+/** How many messages of a thread were posted to its channel. A delete keeps these in the channel. */
+export const threadPostedCount = (threadId: string) =>
+  invoke<number>('thread_posted_count', { threadId })
+/**
+ * Delete a thread with its messages. A message that was posted to the channel stays there as a normal
+ * message. Returns how many stayed. Rejects while a turn runs in the thread, while its sub-agent task
+ * runs and while an approval waits.
+ */
+export const deleteThread = (threadId: string) => invoke<number>('delete_thread', { threadId })
+/** Remove a posted reference row from its channel. The message stays in its thread. `messageId` is the row ID. */
+export const removePostedMessage = (messageId: string) =>
+  invoke<void>('remove_posted_message', { messageId })
 export const chooseAttachments = () => invoke<AttachmentDto[]>('choose_attachments')
 export async function importAttachmentFiles(files: File[]): Promise<AttachmentDto[]> {
   if (files.length > 8) throw new Error('Attach up to 8 files per message.')
@@ -114,6 +132,9 @@ export const switchChannel = (channelId: string) => invoke<void>('switch_channel
 export const openBranchChannel = (key: string) => invoke<string>('open_branch_channel', { key })
 export const createTextChannel = (projectId: string, name: string) =>
   invoke<string>('create_text_channel', { projectId, name })
+/** Rename a text channel with the checks of channel creation. Returns the stored name. */
+export const renameTextChannel = (projectId: string, channelId: string, name: string) =>
+  invoke<string>('rename_text_channel', { projectId, channelId, name })
 export const getProjectChannels = (projectId: string) =>
   invoke<ProjectChannelDto[]>('get_project_channels', { projectId })
 export const getProjectMembers = (projectId: string) =>

@@ -2,8 +2,6 @@
 import { computed, ref } from 'vue'
 import type { ContextTargetDto, MenuEntryDto } from '../bridge/types'
 import { contextMenu, pluginMenuAction, runAction } from '../bridge/api'
-import type { PlannedMenuEntry } from './project-menu'
-import ProjectMenuItems from './ProjectMenuItems.vue'
 import {
   ContextMenu,
   ContextMenuContent,
@@ -18,9 +16,10 @@ const props = defineProps<{
   threadAction?: { label: string; disabled: boolean }
   /** The "Post to channel" item of a thread message. `posted` shows the done state. */
   postAction?: { posted: boolean; disabled: boolean }
-  plannedEntries?: PlannedMenuEntry[]
+  /** The "Remove from channel" item of a posted reference row. Left out on any other message. */
+  removeAction?: { label: string }
 }>()
-const emit = defineEmits<{ reply: []; thread: []; post: [] }>()
+const emit = defineEmits<{ reply: []; thread: []; post: []; remove: [] }>()
 // Message text, code, diffs, and tool calls can be selected. Other targets keep the default.
 const selectable = computed(() =>
   ['message', 'code_block', 'diff_block', 'tool_call'].includes(props.target?.type ?? ''),
@@ -90,10 +89,13 @@ async function select(entry: MenuEntryDto) {
       >
         {{ postAction.posted ? 'Posted to channel' : 'Post to channel' }}
       </ContextMenuItem>
-      <ProjectMenuItems
-        v-if="target.type === 'message' && plannedEntries?.length"
-        :entries="plannedEntries"
-      />
+      <ContextMenuItem
+        v-if="target.type === 'message' && removeAction"
+        variant="destructive"
+        @select="emit('remove')"
+      >
+        {{ removeAction.label }}
+      </ContextMenuItem>
     </ContextMenuContent>
   </ContextMenu>
   <slot v-else />

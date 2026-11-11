@@ -606,3 +606,141 @@ fn a_thread_of_an_archived_channel_is_read_only() {
     assert!(r.core.snapshot().open_thread.unwrap().composer_disabled);
     assert_eq!(r.core.send_in_thread("thread", "hi".into(), vec![], false, None).unwrap_err(), "This thread cannot send a message right now.");
 }
+
+fn idle(w: &World) -> impl FnMut() -> bool + '_ {
+    || !w.core.snapshot().open_thread.is_some_and(|t| t.turn_running)
+}
+
+#[tokio::test]
+async fn the_threads_list_holds_every_thread_latest_activity_first() {
+    let w = world(false).await;
+    assert!(w.core.snapshot().channel_threads.is_empty(), "no thread, no list");
+    let first = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
+    until("the first reply", || w.core.thread_history_snapshot().is_some_and(|h| h.messages.len() == 2) && idle(&w)()).await;
+    let second = w.channels.start_thread(&w.parent.id.0, &w.question.0, "second".into(), vec![], false).unwrap();
+    until("the second reply", || w.core.thread_history_snapshot().is_some_and(|h| h.messages.len() == 2) && idle(&w)()).await;
+    let ids = |w: &World| w.core.snapshot().channel_threads.iter().map(|c| c.channel_id.clone()).collect::<Vec<_>>();
+    assert_eq!(ids(&w), [second.clone(), first.clone()], "the newest thread is first");
+    // A thread that is not followed is still listed, and activity in an older thread moves it up.
+    w.channels.set_thread_followed(&ChannelId(first.clone()), false).unwrap();
+    w.channels.send_with_options(&first, "again".into(), vec![], false).unwrap();
+    until("the reply in the first thread", || w.core.snapshot().channel_threads.iter().find(|c| c.channel_id == first).is_some_and(|c| c.message_count == 4)).await;
+    assert_eq!(ids(&w), [first.clone(), second.clone()]);
+    let listed = w.core.snapshot().channel_threads;
+    assert_eq!((listed[0].followed, listed[0].kind.as_str(), listed[0].name.as_str()), (true, "question", "first"), "a message follows the thread again");
+    w.channels.set_thread_followed(&ChannelId(second.clone()), false).unwrap();
+    assert!(!w.core.snapshot().channel_threads.iter().find(|c| c.channel_id == second).unwrap().followed);
+    // A thread of another channel is not listed.
+    let other = w.store.lock().unwrap().create_conversation(&w.agent, None, "other").unwrap();
+    w.channels.select(&other.id.0).unwrap();
+    assert!(w.core.snapshot().channel_threads.is_empty());
+    w.channels.select(&w.parent.id.0).unwrap();
+    assert_eq!(ids(&w).len(), 2);
+}
+
+#[tokio::test]
+async fn renaming_a_thread_updates_the_record_the_chip_the_panel_and_the_posted_label() {
+    let w = world(false).await;
+    let thread = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
+    until("the reply", || w.core.thread_history_snapshot().is_some_and(|h| h.messages.len() == 2) && idle(&w)()).await;
+    let reply = w.core.thread_history_snapshot().unwrap().messages[1].id.clone();
+    w.channels.post_thread_message(&reply).unwrap();
+    let revision = w.core.history_snapshot().rev;
+    assert_eq!(w.channels.rename_thread(&ChannelId(thread.clone()), "  Latency\nplan  ").unwrap(), "Latency plan");
+    assert!(w.core.history_snapshot().rev > revision, "the parent sends its transcript again");
+    let history = w.core.history();
+    assert_eq!(history.iter().find(|m| m.id == w.answer.0).unwrap().thread.as_ref().unwrap().name, "Latency plan", "the chip");
+    assert_eq!(history.last().unwrap().posted_from.as_ref().unwrap().thread_name, "Latency plan", "the posted row");
+    assert_eq!(w.core.snapshot().open_thread.unwrap().name, "Latency plan", "the panel header");
+    assert_eq!(w.core.snapshot().channel_threads[0].name, "Latency plan", "the threads list");
+    assert_eq!(w.core.snapshot().channels[0].threads[0].name, "Latency plan", "the channel bar");
+    assert_eq!(w.store.lock().unwrap().thread_info(&ChannelId(thread.clone())).unwrap().unwrap().name, "Latency plan");
+    assert_eq!(w.channels.rename_thread(&ChannelId(thread.clone()), "").unwrap_err(), "Enter a thread name of 1 to 80 characters.");
+    assert!(w.channels.rename_thread(&ChannelId(thread.clone()), &"a".repeat(81)).is_err());
+    assert!(w.channels.rename_thread(&w.parent.id, "x").is_err(), "a channel is not a thread");
+    assert_eq!(w.core.snapshot().open_thread.unwrap().name, "Latency plan", "a refused name changes nothing");
+}
+
+#[tokio::test]
+async fn deleting_a_thread_keeps_posted_messages_closes_the_panel_and_drops_the_marker() {
+    let w = world(false).await;
+    let thread = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
+    assert!(w.channels.delete_thread(&ChannelId(thread.clone())).unwrap_err().contains("turn runs"), "the first turn still runs");
+    until("the reply", || w.core.thread_history_snapshot().is_some_and(|h| h.messages.len() == 2) && idle(&w)()).await;
+    let messages = w.core.thread_history_snapshot().unwrap().messages;
+    let reference = w.channels.post_thread_message(&messages[1].id).unwrap();
+    w.core.mark_read_in(Some(&thread), &messages[1].id).unwrap();
+    assert!(w.core.last_read(&thread).is_some());
+    assert!(w.core.history().iter().any(|m| m.thread.is_some()), "the anchor has a chip");
+    assert_eq!(w.channels.thread_posted_count(&ChannelId(thread.clone())).unwrap(), 1, "the dialog says how many stay");
+    let kept = w.channels.delete_thread(&ChannelId(thread.clone())).unwrap();
+    assert_eq!(kept, 1, "one posted message stays in the channel");
+    assert!(w.core.snapshot().open_thread.is_none(), "the panel closes");
+    assert!(w.core.thread_history_snapshot().is_none());
+    assert!(w.core.snapshot().channel_threads.is_empty() && w.core.snapshot().channels[0].threads.is_empty());
+    assert!(w.core.last_read(&thread).is_none(), "the read marker goes");
+    assert!(!w.core.has_channel(&thread), "the session is closed");
+    let history = w.core.history();
+    assert!(history.iter().all(|m| m.thread.is_none()), "the chip under the anchor is gone");
+    let stayed = history.iter().find(|m| m.id == reference).expect("the posted message stays");
+    assert!(stayed.posted_from.is_none(), "it has no thread link");
+    assert_eq!((stayed.role.as_str(), stayed.author.as_ref().map(|a| a.name.as_str())), ("agent", Some("Quinn")));
+    assert!(matches!(&stayed.blocks[..], [Block::Markdown { text }] if text == "the answer"));
+    assert_eq!(history.len(), 3);
+    let store = w.store.lock().unwrap();
+    assert!(store.thread_info(&ChannelId(thread.clone())).unwrap().is_none());
+    assert!(store.posted_sources(&w.parent.id).unwrap().is_empty());
+    assert_eq!(store.messages_for_channel(&w.parent.id).unwrap().len(), 3);
+    drop(store);
+    assert!(w.channels.delete_thread(&ChannelId(thread)).is_err(), "it is gone");
+    // The anchor can start a new thread.
+    w.channels.start_thread(&w.parent.id.0, &w.answer.0, "again".into(), vec![], false).unwrap();
+}
+
+#[tokio::test]
+async fn a_thread_with_a_pending_approval_or_a_running_sub_agent_task_cannot_be_deleted() {
+    let w = world(false).await;
+    let thread = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
+    until("the reply", || w.core.thread_history_snapshot().is_some_and(|h| h.messages.len() == 2) && idle(&w)()).await;
+    let approval = discard_core::event::ApprovalId("approval-1".into());
+    w.core.apply_channel(&thread, Update::Event(Box::new(Event { id: EventId::new(), session_id: SessionId::new(), seq: 9, kind: EventKind::ApprovalRequest { kind: Default::default(), paths: vec![], approval_id: approval.clone(), call_id: "call-1".into(), tool: "Bash".into(), input: serde_json::json!({"command": "ls"}) }, raw: None })));
+    assert_eq!(w.core.thread_delete_blocker(&thread).map(|reason| reason.contains("approval")), Some(true));
+    assert!(w.channels.delete_thread(&ChannelId(thread.clone())).is_err());
+    assert!(w.store.lock().unwrap().thread_info(&ChannelId(thread.clone())).unwrap().is_some(), "a refused delete changes nothing");
+    assert!(w.core.snapshot().open_thread.is_some() && w.core.has_channel(&thread), "the thread stays open and loaded");
+    // A running sub-agent task blocks the delete too.
+    let sub = w.store.lock().unwrap().create_sub_agent_thread(&w.parent.id, "Research", &w.agent).unwrap();
+    w.channels.refresh_threads(&w.parent.id).unwrap();
+    let error = w.channels.delete_thread(&sub.id).unwrap_err();
+    assert!(error.contains("task still runs"), "{error}");
+    assert!(w.store.lock().unwrap().thread_info(&sub.id).unwrap().is_some());
+    w.store.lock().unwrap().finish_sub_agent_thread(&sub.id, discard_core::model::ThreadState::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn removing_a_posted_message_from_the_channel_keeps_it_in_the_thread() {
+    let w = world(false).await;
+    let thread = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
+    until("the reply", || w.core.thread_history_snapshot().is_some_and(|h| h.messages.len() == 2) && idle(&w)()).await;
+    let reply = w.core.thread_history_snapshot().unwrap().messages[1].id.clone();
+    let reference = w.channels.post_thread_message(&reply).unwrap();
+    assert!(w.core.thread_history_snapshot().unwrap().messages[1].posted_to_channel);
+    // The channel read marker sits on the reference row. It moves to the row before it.
+    w.core.mark_read(&reference).unwrap();
+    let revision = (w.core.history_snapshot().rev, w.core.thread_history_snapshot().unwrap().rev);
+    w.channels.remove_posted_message(&reference).unwrap();
+    assert_eq!(w.core.history().len(), 2, "the row is gone");
+    assert!(w.core.history().iter().all(|m| m.id != reference && m.posted_from.is_none()));
+    assert_eq!(w.core.last_read(&w.parent.id.0).as_deref(), Some(w.answer.0.as_str()), "the marker moves to the row before");
+    let thread_view = w.core.thread_history_snapshot().unwrap();
+    assert!(!thread_view.messages[1].posted_to_channel, "Post to channel is available again");
+    assert_eq!(thread_view.messages.len(), 2, "the message stays in the thread");
+    assert!(w.core.history_snapshot().rev > revision.0 && thread_view.rev > revision.1);
+    assert_eq!(w.store.lock().unwrap().messages_for_channel(&w.parent.id).unwrap().len(), 2);
+    assert!(w.channels.remove_posted_message(&reference).is_err(), "it is gone");
+    assert!(w.channels.remove_posted_message(&reply).is_err(), "a thread message is not a reference");
+    let again = w.channels.post_thread_message(&reply).unwrap();
+    assert_ne!(again, reference);
+    assert_eq!(w.core.history().len(), 3);
+    assert_eq!(w.core.snapshot().open_thread.unwrap().channel_id, thread);
+}

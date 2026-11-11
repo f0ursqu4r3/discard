@@ -6,6 +6,7 @@ import MessageRow from './MessageRow.vue'
 import ThreadChip from './ThreadChip.vue'
 import AgentAvatar from './agents/AgentAvatar.vue'
 import { ContextMenuItem } from './ui/context-menu'
+import { clearAction, pendingAction } from './thread-actions'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 vi.mock('vue-sonner', () => ({ toast: { error: vi.fn() } }))
@@ -21,6 +22,7 @@ beforeEach(() => {
 afterEach(() => {
   views.splice(0).forEach((view) => view.unmount())
   document.body.innerHTML = ''
+  clearAction()
 })
 const chip: ThreadChipDto = {
   channelId: 'thread',
@@ -119,21 +121,29 @@ test('a reference row opens its source thread and cannot start one', async () =>
   expect(view.emitted('openThread')).toEqual([['source'], ['source']])
 })
 
-test('Remove from channel on a reference row is planned: disabled, labelled Soon, no handler', async () => {
+test('Remove from channel on a reference row asks for a confirm dialog, from the toolbar and the menu', async () => {
   const view = row({
     postedFrom: { sourceMessageId: 's', threadChannelId: 'source', threadName: 'Why?' },
   })
-  const button = toolbar(view).get('button[aria-label="Remove from channel — Soon"]')
-  expect(button.attributes('disabled')).toBeDefined()
+  const button = toolbar(view).get('button[aria-label="Remove from channel"]')
+  expect(button.attributes('disabled')).toBeUndefined()
+  expect(view.text()).not.toContain('Soon')
   await button.trigger('click')
+  expect(pendingAction.value).toEqual({
+    kind: 'remove-from-channel',
+    messageId: 'm1',
+    threadName: 'Why?',
+  })
+  expect(invoke).not.toHaveBeenCalledWith('remove_posted_message', expect.anything())
+  clearAction()
   const items = await menuItems(view)
-  const planned = items.find((entry) => entry.text().includes('Remove from channel'))!
-  expect(planned.attributes('aria-disabled')).toBe('true')
-  expect(planned.text()).toContain('Soon')
-  planned.vm.$emit('select')
-  expect(invoke).not.toHaveBeenCalledWith('post_thread_message', expect.anything())
+  const remove = items.find((entry) => entry.text() === 'Remove from channel')!
+  expect(remove.attributes('aria-disabled')).toBeUndefined()
+  remove.vm.$emit('select')
+  expect(pendingAction.value).toMatchObject({ kind: 'remove-from-channel', messageId: 'm1' })
+  expect(invoke).not.toHaveBeenCalledWith('remove_posted_message', expect.anything())
   // A normal message has no such control.
-  expect(row().find('button[aria-label="Remove from channel — Soon"]').exists()).toBe(false)
+  expect(row().find('button[aria-label="Remove from channel"]').exists()).toBe(false)
 })
 
 test('the anchor row in a thread panel has no thread action and no chip', () => {

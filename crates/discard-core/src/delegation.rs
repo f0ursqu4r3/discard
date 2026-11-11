@@ -43,13 +43,30 @@ pub struct DelegateTask {
 }
 
 /// How one task ended. `text` is the sub-agent's final message when the state is `Done`, and a detail for the
-/// agent otherwise.
+/// agent otherwise. `steer_note` is `steer_note(..)` for a task whose sub-agent got messages from the user. The result
+/// for the agent starts with it, in every state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DelegateResult {
     pub thread_channel_id: ChannelId,
     pub name: String,
     pub state: ThreadState,
     pub text: String,
+    pub steer_note: Option<String>,
+}
+
+/// The note is cut to this many characters of the latest user message.
+pub const MAX_STEER_NOTE_CHARS: usize = 500;
+
+/// The note that tells the parent agent the user steered a sub-agent: `count` is the number of user messages saved in
+/// the thread during the task, `latest` the text of the last one. `None` when the user sent none. The text is cut to
+/// `MAX_STEER_NOTE_CHARS` characters (with `…`), and its `"` become `'` so the quotes of the note stay clear.
+pub fn steer_note(count: usize, latest: &str) -> Option<String> {
+    if count == 0 { return None; }
+    let mut quoted: String = latest.chars().take(MAX_STEER_NOTE_CHARS).collect();
+    if latest.chars().nth(MAX_STEER_NOTE_CHARS).is_some() { quoted.push('…'); }
+    let quoted = quoted.replace('"', "'");
+    let messages = if count == 1 { "1 message".to_owned() } else { format!("{count} messages") };
+    Some(format!("Note: the user sent this sub-agent {messages} during the task. The result follows the user's instructions, which can differ from your brief. Latest user message: \"{quoted}\""))
 }
 
 /// Runs the tasks of one `delegate` call. The app implements it.
@@ -192,7 +209,9 @@ pub fn error_text(state: ThreadState, detail: &str) -> String {
 pub fn format_results(results: &[DelegateResult]) -> String {
     let entries = results.iter().enumerate().map(|(index, r)| {
         let mut entry = json!({"task": index + 1, "thread": r.name, "state": r.state.as_str()});
-        entry[if r.state == ThreadState::Done { "result" } else { "error" }] = json!(error_text(r.state, &r.text));
+        let body = error_text(r.state, &r.text);
+        let body = match &r.steer_note { Some(note) => format!("{note}\n\n{body}"), None => body };
+        entry[if r.state == ThreadState::Done { "result" } else { "error" }] = json!(body);
         entry
     }).collect::<Vec<_>>();
     json!({"results": entries}).to_string()
@@ -371,7 +390,7 @@ mod tests {
 
     #[test]
     fn results_come_back_in_task_order_and_each_failure_states_how_it_ended() {
-        let result = |name: &str, state, text: &str| DelegateResult { thread_channel_id: ChannelId::new(), name: name.into(), state, text: text.into() };
+        let result = |name: &str, state, text: &str| DelegateResult { thread_channel_id: ChannelId::new(), name: name.into(), state, text: text.into(), steer_note: None };
         let text = format_results(&[
             result("a", ThreadState::Done, "The answer."),
             result("b", ThreadState::Failed, "Provider error."),
@@ -392,11 +411,42 @@ mod tests {
     }
 
     #[test]
+    fn a_steer_note_counts_the_messages_and_quotes_the_latest() {
+        assert_eq!(steer_note(0, "ignored"), None, "no steer, no note");
+        assert_eq!(
+            steer_note(1, "Only count the .rs files.").unwrap(),
+            "Note: the user sent this sub-agent 1 message during the task. The result follows the user's instructions, which can differ from your brief. Latest user message: \"Only count the .rs files.\""
+        );
+        assert!(steer_note(2, "x").unwrap().starts_with("Note: the user sent this sub-agent 2 messages during the task."));
+        assert!(steer_note(11, "x").unwrap().contains("11 messages"));
+    }
+
+    #[test]
+    fn a_steer_note_cuts_the_message_at_500_characters_and_swaps_quotes() {
+        let at_limit = "é".repeat(MAX_STEER_NOTE_CHARS);
+        assert!(steer_note(1, &at_limit).unwrap().ends_with(&format!("\"{at_limit}\"")), "a message at the limit is not cut");
+        let cut = steer_note(1, &"é".repeat(MAX_STEER_NOTE_CHARS + 1)).unwrap();
+        assert!(cut.ends_with(&format!("\"{}…\"", "é".repeat(MAX_STEER_NOTE_CHARS))), "cut on a character: {cut}");
+        assert!(steer_note(1, "Say \"hi\" now").unwrap().ends_with("Latest user message: \"Say 'hi' now\""));
+    }
+
+    #[test]
+    fn the_note_leads_the_result_text_in_every_state() {
+        let result = |state, text: &str| DelegateResult { thread_channel_id: ChannelId::new(), name: "a".into(), state, text: text.into(), steer_note: steer_note(1, "Stop.") };
+        let value: serde_json::Value = serde_json::from_str(&format_results(&[result(ThreadState::Done, "Answer."), result(ThreadState::Done, ""), result(ThreadState::Cancelled, "")])).unwrap();
+        let rows = value["results"].as_array().unwrap();
+        let note = steer_note(1, "Stop.").unwrap();
+        assert_eq!(rows[0]["result"], format!("{note}\n\nAnswer.").as_str());
+        assert_eq!(rows[1]["result"], format!("{note}\n\nThe sub-agent finished without a text reply.").as_str());
+        assert_eq!(rows[2]["error"], format!("{note}\n\nThe sub-agent task was cancelled.").as_str());
+    }
+
+    #[test]
     fn the_slot_starts_empty_and_hands_out_the_installed_delegator() {
         struct Fixed;
         impl Delegator for Fixed {
             fn delegate(&self, _: &ChannelId, _: &AgentId, tasks: Vec<DelegateTask>) -> Result<Vec<DelegateResult>, String> {
-                Ok(tasks.into_iter().map(|t| DelegateResult { thread_channel_id: ChannelId::new(), name: t.name, state: ThreadState::Done, text: "ok".into() }).collect())
+                Ok(tasks.into_iter().map(|t| DelegateResult { thread_channel_id: ChannelId::new(), name: t.name, state: ThreadState::Done, text: "ok".into(), steer_note: None }).collect())
             }
         }
         let slot = DelegatorSlot::default();

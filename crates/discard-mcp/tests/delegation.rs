@@ -45,7 +45,7 @@ impl Delegator for FakeDelegator {
         Ok(tasks.iter().enumerate().map(|(i, t)| DelegateResult {
             thread_channel_id: ChannelId(format!("thread-{i}")), name: t.name.clone(),
             state: if t.brief.contains("fail") { ThreadState::Failed } else if t.brief.contains("slow") { ThreadState::TimedOut } else { ThreadState::Done },
-            text: format!("answer to {}", t.brief),
+            text: format!("answer to {}", t.brief), steer_note: None,
         }).collect())
     }
 }

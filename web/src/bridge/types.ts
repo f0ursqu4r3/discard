@@ -321,6 +321,11 @@ export interface SnapshotDto {
    * When the turn ends they move to `MessageDto.subAgentThreads` of the saved response. The app always sends it.
    */
   liveSubAgentThreads?: ThreadChipDto[]
+  /**
+   * Every thread of the selected channel, followed or not, latest activity first. A question thread with no
+   * message is not listed. The Threads list reads this. The app always sends it.
+   */
+  channelThreads?: ThreadChipDto[]
   /** Threads with an approval that waits, followed or not, in the loaded channels. The app always sends it. */
   threadApprovals?: ThreadApprovalDto[]
   /** The thread beside the selected channel, or null. */

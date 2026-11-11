@@ -3,15 +3,20 @@ import { invoke } from '@tauri-apps/api/core'
 import {
   closeThread,
   decideAgentRequest,
+  deleteThread,
   getAgentRequests,
   followThread,
   getThreadHistory,
   leaveThread,
   openThread,
   postThreadMessage,
+  removePostedMessage,
+  renameTextChannel,
+  renameThread,
   selectThread,
   sendMessage,
   startThread,
+  threadPostedCount,
 } from './api'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
@@ -71,5 +76,23 @@ test('agent request commands use the channel, the request and the decision', asy
     ['get_agent_requests', { channelId: 'channel-1' }],
     ['decide_agent_request', { channelId: 'channel-1', requestId: 'request-1', decision: 'add' }],
     ['decide_agent_request', { channelId: 'channel-1', requestId: 'request-1', decision: 'deny' }],
+  ])
+})
+
+test('thread and channel action commands send exact IDs and names', async () => {
+  await renameThread('thread-1', 'New name')
+  await threadPostedCount('thread-1')
+  await deleteThread('thread-1')
+  await removePostedMessage('row-1')
+  await renameTextChannel('project-1', 'channel-1', 'Release Notes')
+  expect(vi.mocked(invoke).mock.calls).toEqual([
+    ['rename_thread', { threadId: 'thread-1', name: 'New name' }],
+    ['thread_posted_count', { threadId: 'thread-1' }],
+    ['delete_thread', { threadId: 'thread-1' }],
+    ['remove_posted_message', { messageId: 'row-1' }],
+    [
+      'rename_text_channel',
+      { projectId: 'project-1', channelId: 'channel-1', name: 'Release Notes' },
+    ],
   ])
 })

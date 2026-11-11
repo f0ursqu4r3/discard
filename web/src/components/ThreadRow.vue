@@ -4,10 +4,10 @@ import { Bot, MessagesSquare } from '@lucide/vue'
 import type { ThreadLinkDto } from '../bridge/types'
 import { openContextMenuFromKeyboard } from './context-menu-keyboard'
 import { treePrefix } from './branch-navigation'
-import { threadMenuPlanned } from './thread-menu'
+import { threadActionLabels, threadDeleteBlock } from './thread-menu'
+import { requestAction } from './thread-actions'
 import { pendingApprovalsLabel, threadStates } from './threads'
 import BrailleSpinner from './BrailleSpinner.vue'
-import ProjectMenuItems from './ProjectMenuItems.vue'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import {
@@ -28,6 +28,14 @@ const props = defineProps<{
 const emit = defineEmits<{ select: [threadId: string]; leave: [threadId: string] }>()
 const subAgent = computed(() => props.link.kind === 'sub_agent')
 const running = computed(() => props.link.running || props.link.state === 'running')
+// A running turn or task, or a pending approval, blocks a delete for now. This is a state, not a planned action.
+const deleteBlock = computed(() =>
+  threadDeleteBlock({
+    running: props.link.running,
+    state: props.link.state,
+    pendingApprovals: props.link.pendingApprovals,
+  }),
+)
 // A finished run that did not succeed keeps a mark. A done run is quiet, like a thread with no news.
 const endState = computed(() => {
   const state = props.link.state
@@ -97,7 +105,22 @@ const endState = computed(() => {
         </ContextMenuItem>
         <ContextMenuItem @select="emit('leave', link.id)">Leave thread</ContextMenuItem>
         <ContextMenuSeparator />
-        <ProjectMenuItems :entries="threadMenuPlanned" />
+        <ContextMenuItem
+          @select="requestAction({ kind: 'rename-thread', threadId: link.id, name: link.name })"
+        >
+          {{ threadActionLabels.rename }}
+        </ContextMenuItem>
+        <ContextMenuItem
+          variant="destructive"
+          :disabled="!!deleteBlock"
+          :title="deleteBlock ?? undefined"
+          @select="
+            !deleteBlock &&
+            requestAction({ kind: 'delete-thread', threadId: link.id, name: link.name })
+          "
+        >
+          {{ threadActionLabels.remove }}
+        </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
   </div>

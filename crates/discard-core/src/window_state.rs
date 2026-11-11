@@ -147,6 +147,14 @@ impl StateStore {
         self.save(next)
     }
 
+    /// Forget the read marker of a channel that no longer exists. No marker means nothing changes.
+    pub fn clear_last_read(&mut self, channel: &str) -> Result<(), String> {
+        if !self.state.last_read.contains_key(channel) { return Ok(()); }
+        let mut next = self.state.clone();
+        next.last_read.remove(channel);
+        self.save(next)
+    }
+
     /// Write `next`. On error, the file and the in-memory state stay as they were.
     fn save(&mut self, next: WindowState) -> Result<(), String> {
         let io = |what: &str, e: std::io::Error| format!("{what}: {e}");
@@ -305,6 +313,20 @@ mod tests {
         assert_eq!(StateStore::open(&path).state().last_read.get("general").map(String::as_str), Some("message-1"));
         fs::write(&path, "[last_read]\ngeneral = 42\n").unwrap();
         assert!(StateStore::open(&path).state().last_read.is_empty());
+    }
+
+    #[test]
+    fn a_cleared_read_marker_stays_cleared_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        let mut store = StateStore::open(&path);
+        store.set_last_read("a", "m1").unwrap();
+        store.set_last_read("b", "m2").unwrap();
+        store.clear_last_read("a").unwrap();
+        store.clear_last_read("missing").unwrap();
+        assert_eq!((store.last_read("a"), store.last_read("b")), (None, Some("m2")));
+        let reopened = StateStore::open(&path);
+        assert_eq!((reopened.last_read("a"), reopened.last_read("b")), (None, Some("m2")));
     }
 
     #[test]

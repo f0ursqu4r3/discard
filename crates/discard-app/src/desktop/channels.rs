@@ -224,6 +224,48 @@ impl Channels {
         self.core.set_thread_followed(&thread.0, followed);
         Ok(())
     }
+    /// Give a thread a new name. Returns the stored name: trimmed, with line breaks changed to spaces.
+    pub fn rename_thread(&self, thread: &ChannelId, name: &str) -> Result<String, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let name = self.store.lock().unwrap_or_else(|e| e.into_inner()).rename_thread(thread, name).map_err(|e| e.to_string())?;
+        self.core.thread_renamed(&thread.0, &name);
+        Ok(name)
+    }
+    /// How many messages of a thread were posted to its channel. The delete dialog says how many stay.
+    pub fn thread_posted_count(&self, thread: &ChannelId) -> Result<usize, String> {
+        self.store.lock().unwrap_or_else(|e| e.into_inner()).posted_message_count(thread).map_err(|e| e.to_string())
+    }
+    /// Delete a thread and everything it owns. A message that was posted to the parent stays there as a normal
+    /// message. Returns how many messages stayed. Refused while a turn runs in the thread, while its sub-agent task
+    /// runs, and while an approval waits. A loaded provider session closes first.
+    pub fn delete_thread(&self, thread: &ChannelId) -> Result<usize, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        if self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(thread).map_err(|e| e.to_string())?.is_none() { return Err("This thread is unavailable.".into()); }
+        self.core.begin_thread_delete(&thread.0)?;
+        let result = (|| {
+            self.core.drop_thread_runtime(&thread.0);
+            let deletion = self.store.lock().unwrap_or_else(|e| e.into_inner()).delete_thread(thread).map_err(|e| e.to_string())?;
+            self.core.thread_deleted(&thread.0);
+            Ok(deletion.posted.len())
+        })();
+        self.core.end_channel_change(&thread.0);
+        result
+    }
+    /// Remove a posted reference row from its channel. The message stays in its thread and can be posted again.
+    pub fn remove_posted_message(&self, reference: &str) -> Result<(), String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let reference = MessageId(reference.to_owned());
+        let source = self.store.lock().unwrap_or_else(|e| e.into_inner()).remove_posted_reference(&reference).map_err(|e| e.to_string())?;
+        self.core.reference_removed(&reference, &source);
+        Ok(())
+    }
+    /// Rename a text channel with the checks of channel creation. Returns the stored name.
+    pub fn rename_text_channel(&self, project: &ProjectId, channel: &ChannelId, name: &str) -> Result<String, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let renamed = self.store.lock().unwrap_or_else(|e| e.into_inner()).rename_text_channel(project, channel, name).map_err(|e| e.to_string())?;
+        self.core.channel_renamed(&channel.0, &renamed.name);
+        Ok(renamed.name)
+    }
     fn project_channel(&self, project: &ProjectId, channel: &ChannelId, allow_archived: bool) -> Result<(Channel, discard_core::model::ProjectChannelMetadata, bool), String> {
         let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         let value = store.load_channel(channel).map_err(|e| e.to_string())?;
@@ -1412,6 +1454,34 @@ mod tests {
         let channels = service.list_project_channels(&project.id).unwrap();
         assert!(channels.iter().find(|channel| channel.id == id).unwrap().has_messages);
         assert!(!channels.iter().find(|channel| channel.id == general.id.0).unwrap().has_messages);
+    }
+
+    #[tokio::test]
+    async fn a_text_channel_renames_with_the_creation_checks_and_general_stays_fixed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let project = store.import_project_folder(dir.path()).unwrap();
+        let agent = configured_agent(&store);
+        store.set_project_main_agent(&project.id, &agent).unwrap();
+        let general = store.ensure_project_general_channel(&project.id, &agent).unwrap();
+        let store = Arc::new(Mutex::new(store));
+        let core = core(&general, dir.path());
+        let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
+        let plans = ChannelId(service.create_text_channel(&project.id, "plans").unwrap());
+        let notes = ChannelId(service.create_text_channel(&project.id, "notes").unwrap());
+        assert_eq!(service.rename_text_channel(&project.id, &plans, "  Release Notes ").unwrap(), "release-notes");
+        assert_eq!(store.lock().unwrap().load_channel(&plans).unwrap().name, "release-notes");
+        let listed = service.list_project_channels(&project.id).unwrap();
+        assert_eq!(listed.iter().find(|channel| channel.id == plans.0).unwrap().name, "release-notes");
+        assert_eq!(core.snapshot().channels.iter().find(|channel| channel.id == plans.0).unwrap().name, "release-notes", "a loaded channel shows the new name");
+        for name in ["NOTES", "General"] {
+            assert_eq!(service.rename_text_channel(&project.id, &plans, name).unwrap_err(), "A channel with this name already exists.");
+        }
+        assert!(service.rename_text_channel(&project.id, &plans, "bad/name").unwrap_err().starts_with("Use letters"));
+        assert!(service.rename_text_channel(&project.id, &general.id, "main").unwrap_err().contains("text channel"), "#general cannot be renamed");
+        assert!(service.rename_text_channel(&ProjectId::new(), &notes, "x").is_err(), "the channel must belong to the project");
+        assert_eq!(service.rename_text_channel(&project.id, &plans, "release-notes").unwrap(), "release-notes", "an unchanged name is not an error");
+        assert_eq!(store.lock().unwrap().load_channel(&notes).unwrap().name, "notes");
     }
 
     #[tokio::test]

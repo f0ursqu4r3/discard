@@ -7,8 +7,8 @@
 //! `AppCore::apply_runtime` calls for every update. The call holds no lock while it waits.
 use super::channels::Channels;
 use super::core::SubAgentNote;
-use discard_core::delegation::{DelegateResult, DelegateTask, Delegator, MAX_TASKS, SUB_AGENT_TIMEOUT};
-use discard_core::model::{AgentId, ChannelId, MessageAuthor, ThreadState};
+use discard_core::delegation::{DelegateResult, DelegateTask, Delegator, MAX_TASKS, SUB_AGENT_TIMEOUT, steer_note};
+use discard_core::model::{AgentId, Block, ChannelId, MessageAuthor, Role, ThreadState};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Mutex, Weak};
@@ -182,12 +182,25 @@ impl Drop for CallGuard<'_> {
 
 /// The result of a task that did not start because the parent turn was stopped or ended. It has no thread.
 fn not_started(name: &str) -> DelegateResult {
-    DelegateResult { thread_channel_id: ChannelId(String::new()), name: name.to_owned(), state: ThreadState::Cancelled, text: "The turn that asked for it was stopped before this sub-agent started.".into() }
+    DelegateResult { thread_channel_id: ChannelId(String::new()), name: name.to_owned(), state: ThreadState::Cancelled, text: "The turn that asked for it was stopped before this sub-agent started.".into(), steer_note: None }
 }
 
-fn result_of(ended: Ended, name: &str) -> DelegateResult {
+/// The note for the parent agent when the user steered the sub-agent of `thread`, counted from the saved messages. The
+/// brief has an author (the parent agent), and a message that the user wrote has none. A thread that cannot be read
+/// gives no note: the result is then the text of the run alone.
+fn steer_note_of(channels: &Channels, thread: &str) -> Option<String> {
+    let store = channels.store.lock().unwrap_or_else(|e| e.into_inner());
+    let thread = ChannelId(thread.to_owned());
+    let authors = store.message_authors(&thread).ok()?;
+    let steers: Vec<_> = store.messages_for_channel(&thread).ok()?.into_iter().filter(|m| m.role == Role::User && !authors.contains_key(&m.id)).collect();
+    let latest = steers.last()?;
+    let text = latest.blocks.iter().filter_map(|b| match b { Block::Markdown { text } => Some(text.as_str()), _ => None }).collect::<Vec<_>>().join("\n\n");
+    steer_note(steers.len(), &text)
+}
+
+fn result_of(ended: Ended, name: &str, steer_note: Option<String>) -> DelegateResult {
     let text = if ended.state == ThreadState::Done { ended.text } else { ended.detail };
-    DelegateResult { thread_channel_id: ChannelId(ended.thread), name: name.to_owned(), state: ended.state, text }
+    DelegateResult { thread_channel_id: ChannelId(ended.thread), name: name.to_owned(), state: ended.state, text, steer_note }
 }
 
 impl Delegator for AppDelegator {
@@ -220,7 +233,7 @@ impl Delegator for AppDelegator {
             let thread = match created {
                 Ok(thread) => thread,
                 // No thread exists, so the result has no thread ID.
-                Err(error) => { core.sub_agents().skip(call); results[index] = Some(DelegateResult { thread_channel_id: ChannelId(String::new()), name: task.name.clone(), state: ThreadState::Failed, text: error.to_string() }); continue; }
+                Err(error) => { core.sub_agents().skip(call); results[index] = Some(DelegateResult { thread_channel_id: ChannelId(String::new()), name: task.name.clone(), state: ThreadState::Failed, text: error.to_string(), steer_note: None }); continue; }
             };
             let id = thread.id.0.clone();
             core.sub_agents().register(&id, &parent.0, call, index, tx.clone());
@@ -233,7 +246,7 @@ impl Delegator for AppDelegator {
                 Err(error) => {
                     core.sub_agents().forget(&id);
                     channels.fail_sub_agent_thread(&thread.id, &error);
-                    results[index] = Some(DelegateResult { thread_channel_id: thread.id.clone(), name: task.name.clone(), state: ThreadState::Failed, text: error });
+                    results[index] = Some(DelegateResult { thread_channel_id: thread.id.clone(), name: task.name.clone(), state: ThreadState::Failed, text: error, steer_note: None });
                 }
             }
         }
@@ -246,7 +259,8 @@ impl Delegator for AppDelegator {
                 Ok(ended) => {
                     waiting.remove(&ended.thread);
                     let index = ended.index;
-                    results[index] = Some(result_of(ended, &tasks[index].name));
+                    let note = steer_note_of(&channels, &ended.thread);
+                    results[index] = Some(result_of(ended, &tasks[index].name, note));
                 }
                 Err(RecvTimeoutError::Timeout) if !stopped => {
                     // The first final state wins: set "timed out" before the stop makes the engine say "cancelled".
@@ -265,7 +279,8 @@ impl Delegator for AppDelegator {
                     };
                     for (thread, index) in waiting.drain() {
                         core.sub_agents().forget(&thread);
-                        results[index] = Some(DelegateResult { thread_channel_id: ChannelId(thread), name: tasks[index].name.clone(), state, text: text.into() });
+                        let steer_note = steer_note_of(&channels, &thread);
+                        results[index] = Some(DelegateResult { thread_channel_id: ChannelId(thread), name: tasks[index].name.clone(), state, text: text.into(), steer_note });
                     }
                 }
             }

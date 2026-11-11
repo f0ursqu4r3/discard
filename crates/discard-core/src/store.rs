@@ -206,6 +206,20 @@ pub fn thread_name(text: &str) -> String {
     }
 }
 
+/// Longest thread name a user can set, in characters.
+pub const THREAD_NAME_MAX: usize = 80;
+
+/// Check a name that the user gave a thread: line breaks become spaces, the ends are trimmed, and the length is 1 to
+/// `THREAD_NAME_MAX` characters. Duplicate names are allowed.
+pub fn normalize_thread_name(input: &str) -> std::result::Result<String, String> {
+    let flat: String = input.replace("\r\n", "\n").chars().map(|c| if matches!(c, '\r' | '\n' | '\u{2028}' | '\u{2029}') { ' ' } else { c }).collect();
+    let name = flat.trim();
+    if name.is_empty() || name.chars().count() > THREAD_NAME_MAX {
+        return Err(format!("Enter a thread name of 1 to {THREAD_NAME_MAX} characters."));
+    }
+    Ok(name.to_owned())
+}
+
 /// Normalize the name of a text channel: lowercase ASCII words joined by single hyphens.
 pub fn normalize_text_channel_name(input: &str) -> std::result::Result<String, String> {
     let lowered = input.trim().to_lowercase();
@@ -234,6 +248,39 @@ pub fn sub_agent_thread_name(title: &str, brief: &str) -> String {
     let named = thread_name(title);
     if title.trim().is_empty() { thread_name(brief) } else { named }
 }
+
+/// What `Store::delete_thread` changed outside the thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadDeletion {
+    /// The channel the thread hung under.
+    pub parent: ChannelId,
+    /// The reference rows of the parent that became normal messages, in channel order.
+    pub posted: Vec<MessageId>,
+}
+
+/// Rows that hang off one channel, in an order that leaves no dangling reference. Posted references in other
+/// channels go with their source message, so a caller that keeps them must turn them into messages first.
+const CHANNEL_PURGE_SQL: [&str; 19] = [
+    "DELETE FROM project_last_channels WHERE channel_id=?1",
+    "DELETE FROM project_channel_views WHERE channel_id=?1",
+    "DELETE FROM project_channels WHERE channel_id=?1",
+    "DELETE FROM channel_topic_revisions WHERE channel_id=?1",
+    "DELETE FROM channel_agents WHERE channel_id=?1",
+    "DELETE FROM agent_commits WHERE channel_id=?1",
+    "DELETE FROM autorun_responses WHERE channel_id=?1",
+    "DELETE FROM approval_audit WHERE approval_id IN (SELECT a.id FROM approvals a JOIN turns t ON a.turn_id=t.id JOIN sessions s ON t.session_id=s.id WHERE s.channel_id=?1)",
+    "DELETE FROM approvals WHERE turn_id IN (SELECT t.id FROM turns t JOIN sessions s ON t.session_id=s.id WHERE s.channel_id=?1)",
+    "DELETE FROM turns WHERE session_id IN (SELECT id FROM sessions WHERE channel_id=?1)",
+    "DELETE FROM events WHERE session_id IN (SELECT id FROM sessions WHERE channel_id=?1)",
+    "DELETE FROM conversation_context WHERE channel_id=?1",
+    "DELETE FROM response_memory WHERE channel_id=?1",
+    "DELETE FROM sessions WHERE channel_id=?1",
+    "DELETE FROM messages WHERE source_message_id IN (SELECT id FROM messages WHERE channel_id=?1)",
+    "DELETE FROM messages WHERE channel_id=?1",
+    "DELETE FROM worktrees WHERE channel_id=?1",
+    "DELETE FROM channel_branches WHERE channel_id=?1",
+    "DELETE FROM channels WHERE id=?1",
+];
 
 const THREAD_COLUMNS: &str = "id,parent_channel_id,anchor_message_id,thread_kind,followed,name,thread_state,agent_id";
 
@@ -1594,33 +1641,7 @@ impl Store {
                 params![id.0],
             )?;
             for channel in self.channels_to_delete(id, &channels)? {
-                for sql in [
-                    "DELETE FROM project_last_channels WHERE channel_id=?1",
-                    "DELETE FROM project_channel_views WHERE channel_id=?1",
-                    "DELETE FROM project_channels WHERE channel_id=?1",
-                    "DELETE FROM channel_topic_revisions WHERE channel_id=?1",
-                    "DELETE FROM channel_agents WHERE channel_id=?1",
-                ] {
-                    tx.execute(sql, params![channel.0])?;
-                }
-                for sql in [
-                    "DELETE FROM agent_commits WHERE channel_id=?1",
-                    "DELETE FROM autorun_responses WHERE channel_id=?1",
-                    "DELETE FROM approval_audit WHERE approval_id IN (SELECT a.id FROM approvals a JOIN turns t ON a.turn_id=t.id JOIN sessions s ON t.session_id=s.id WHERE s.channel_id=?1)",
-                    "DELETE FROM approvals WHERE turn_id IN (SELECT t.id FROM turns t JOIN sessions s ON t.session_id=s.id WHERE s.channel_id=?1)",
-                    "DELETE FROM turns WHERE session_id IN (SELECT id FROM sessions WHERE channel_id=?1)",
-                    "DELETE FROM events WHERE session_id IN (SELECT id FROM sessions WHERE channel_id=?1)",
-                    "DELETE FROM conversation_context WHERE channel_id=?1",
-                    "DELETE FROM response_memory WHERE channel_id=?1",
-                    "DELETE FROM sessions WHERE channel_id=?1",
-                    "DELETE FROM messages WHERE source_message_id IN (SELECT id FROM messages WHERE channel_id=?1)",
-                    "DELETE FROM messages WHERE channel_id=?1",
-                    "DELETE FROM worktrees WHERE channel_id=?1",
-                    "DELETE FROM channel_branches WHERE channel_id=?1",
-                    "DELETE FROM channels WHERE id=?1",
-                ] {
-                    self.conn.execute(sql, params![channel.0])?;
-                }
+                self.purge_channel(&channel)?;
             }
         }
         tx.execute(
@@ -2624,6 +2645,128 @@ impl Store {
         Ok(true)
     }
 
+    /// Remove every row of one channel. A message that other channels reference goes with its references.
+    fn purge_channel(&self, channel: &ChannelId) -> Result<()> {
+        for sql in CHANNEL_PURGE_SQL {
+            self.conn.execute(sql, params![channel.0])?;
+        }
+        Ok(())
+    }
+
+    /// Give a question or sub-agent thread a name that the user chose. Returns the stored name. A name that fails
+    /// `normalize_thread_name` changes nothing. Posted references and replay labels read the name from the thread
+    /// row, so they show the new name at once.
+    pub fn rename_thread(&self, thread: &ChannelId, name: &str) -> Result<String> {
+        let name = normalize_thread_name(name).map_err(StoreError::Invalid)?;
+        if self.thread_info(thread)?.is_none() {
+            return Err(StoreError::NotFound(format!("thread {}", thread.0)));
+        }
+        self.conn.execute("UPDATE channels SET name=?2 WHERE id=?1 AND parent_channel_id IS NOT NULL", params![thread.0, name])?;
+        Ok(name)
+    }
+
+    /// Delete a thread with everything it owns, in one transaction. A message that was posted to the parent stays in
+    /// the parent as a normal message: same role, author and content, at the position of its reference row, with no
+    /// thread link and no replay label. Refused while a turn runs in the thread, while a sub-agent task still runs,
+    /// and while an approval waits.
+    pub fn delete_thread(&self, thread: &ChannelId) -> Result<ThreadDeletion> {
+        let tx = self.conn.unchecked_transaction()?;
+        let info = self.thread_info(thread)?.ok_or_else(|| StoreError::NotFound(format!("thread {}", thread.0)))?;
+        if info.state == Some(ThreadState::Running) {
+            return Err(StoreError::Invalid("A sub-agent task still runs in this thread. Stop it or wait for it before you delete the thread.".into()));
+        }
+        let turns: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM turns WHERE state IN ('queued','running','awaiting_approval') AND session_id IN (SELECT id FROM sessions WHERE channel_id=?1)",
+            params![thread.0], |r| r.get(0))?;
+        if turns > 0 {
+            return Err(StoreError::Invalid("A turn runs in this thread. Stop it before you delete the thread.".into()));
+        }
+        let approvals: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM approvals WHERE state='pending' AND turn_id IN (SELECT t.id FROM turns t JOIN sessions s ON t.session_id=s.id WHERE s.channel_id=?1)",
+            params![thread.0], |r| r.get(0))?;
+        if approvals > 0 {
+            return Err(StoreError::Invalid("An approval waits in this thread. Decide it before you delete the thread.".into()));
+        }
+        let posted: Vec<MessageId> = {
+            let mut stmt = self.conn.prepare("SELECT id FROM messages WHERE source_message_id IN (SELECT id FROM messages WHERE channel_id=?1) ORDER BY ord")?;
+            stmt.query_map(params![thread.0], |r| r.get::<_, String>(0).map(MessageId))?.collect::<std::result::Result<_, _>>()?
+        };
+        // Keep the row, so the message keeps its place. It takes the content and author of its source.
+        self.conn.execute(
+            "UPDATE messages SET
+                role=(SELECT s.role FROM messages s WHERE s.id=messages.source_message_id),
+                blocks_json=(SELECT s.blocks_json FROM messages s WHERE s.id=messages.source_message_id),
+                author_json=(SELECT s.author_json FROM messages s WHERE s.id=messages.source_message_id),
+                source_message_id=NULL
+             WHERE source_message_id IN (SELECT id FROM messages WHERE channel_id=?1)",
+            params![thread.0],
+        )?;
+        self.purge_channel(thread)?;
+        tx.commit()?;
+        Ok(ThreadDeletion { parent: info.parent_channel_id, posted })
+    }
+
+    /// Remove a posted reference row from its parent channel. The message stays in its thread and can be posted
+    /// again. Returns where the row pointed. When the parent's replay summary ended at this row, it ends at the
+    /// row before it, so the next turn does not replay the whole transcript again.
+    pub fn remove_posted_reference(&self, reference: &MessageId) -> Result<PostedSource> {
+        let tx = self.conn.unchecked_transaction()?;
+        let row: Option<(String, Option<String>)> = self.conn
+            .query_row("SELECT channel_id,source_message_id FROM messages WHERE id=?1", params![reference.0], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        let (parent, source) = row.ok_or_else(|| StoreError::NotFound(format!("message {}", reference.0)))?;
+        if source.is_none() {
+            return Err(StoreError::Invalid("Only a message that was posted from a thread can be removed from the channel.".into()));
+        }
+        let parent = ChannelId(parent);
+        let posted = self.posted_sources(&parent)?.remove(reference).ok_or_else(|| StoreError::Corrupt(format!("reference {}", reference.0)))?;
+        let mut state = self.conversation_context(&parent)?;
+        if state.through.as_ref().is_some_and(|through| through.0.split(":part:").next() == Some(reference.0.as_str())) {
+            let history = self.channel_history(&parent)?;
+            let replay = crate::conversation_context::replay_with_posted(&history.messages, &history.authors, &history.posted);
+            let first = replay.iter().position(|(id, _)| id.0.split(":part:").next() == Some(reference.0.as_str()));
+            state.through = first.and_then(|index| index.checked_sub(1)).map(|index| replay[index].0.clone());
+            self.set_conversation_context(&parent, &state)?;
+        }
+        self.conn.execute("DELETE FROM messages WHERE id=?1", params![reference.0])?;
+        tx.commit()?;
+        Ok(posted)
+    }
+
+    /// Rename an active text channel. The name follows `normalize_text_channel_name` and must be unique among the
+    /// active general and text channels of the project, like a new channel. `#general` and branch channels cannot
+    /// be renamed. A name that equals the current one changes nothing.
+    pub fn rename_text_channel(&self, project: &ProjectId, channel: &ChannelId, name: &str) -> Result<Channel> {
+        let name = normalize_text_channel_name(name).map_err(StoreError::Invalid)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let row: Option<(String, bool)> = self.conn
+            .query_row(
+                "SELECT pc.kind,c.archived FROM project_channels pc JOIN channels c ON c.id=pc.channel_id WHERE pc.channel_id=?1 AND pc.project_id=?2",
+                params![channel.0, project.0], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        let (kind, archived) = row.ok_or_else(|| StoreError::NotFound(format!("channel {}", channel.0)))?;
+        if kind != "text" {
+            return Err(StoreError::Invalid("Only a text channel can be renamed here.".into()));
+        }
+        if archived {
+            return Err(StoreError::Invalid("Restore this channel before you rename it.".into()));
+        }
+        let current = self.load_channel(channel)?;
+        if current.name == name {
+            return Ok(current);
+        }
+        let taken: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM project_channels pc JOIN channels c ON c.id=pc.channel_id
+             WHERE pc.project_id=?1 AND pc.kind IN ('general','text') AND c.archived=0 AND c.id<>?2 AND lower(c.name)=?3)",
+            params![project.0, channel.0, name], |r| r.get(0))?;
+        if taken || name == "general" {
+            return Err(StoreError::Invalid("A channel with this name already exists.".into()));
+        }
+        tx.execute("UPDATE channels SET name=?2 WHERE id=?1", params![channel.0, name])?;
+        tx.commit()?;
+        Ok(Channel { name, ..current })
+    }
+
     /// Show a user or agent thread message in the thread's parent channel. The message stays stored once, in the
     /// thread. The parent gets a reference row at the current position. Posting again returns the existing
     /// reference. The flag is true when this call created it.
@@ -2653,6 +2796,14 @@ impl Store {
         let posted = self.messages_for_channel(&thread.parent_channel_id)?.into_iter().find(|m| m.id == reference)
             .ok_or_else(|| StoreError::Corrupt(format!("reference {}", reference.0)))?;
         Ok((posted, created))
+    }
+
+    /// How many messages of a thread were posted to its parent channel. A delete keeps this many in the channel.
+    pub fn posted_message_count(&self, thread: &ChannelId) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE source_message_id IN (SELECT id FROM messages WHERE channel_id=?1)",
+            params![thread.0], |r| r.get(0))?;
+        Ok(count as usize)
     }
 
     /// Reference rows of a channel: reference ID to the thread message it shows.
@@ -3998,6 +4149,182 @@ mod tests {
         let rows: i64 = f.store.conn.query_row("SELECT COUNT(*) FROM channels", [], |r| r.get(0)).unwrap();
         assert_eq!(rows, 0, "a thread never outlives its parent");
     }
+
+    fn rows(store: &Store, table: &str) -> i64 {
+        store.conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap()
+    }
+
+    /// A thread with a turn, an event and an approval, so a delete has every kind of row to remove.
+    fn busy_thread(f: &Fixture, anchor: &MessageId) -> (Channel, Turn, Approval) {
+        let thread = f.store.create_thread(&f.channel.id, anchor, "Why?", &f.agent).unwrap();
+        let session = f.store.latest_session(&thread.id).unwrap().unwrap();
+        let turn = Turn::new(session.clone());
+        f.store.insert_turn(&turn).unwrap();
+        f.store.update_turn_state(&turn.id, TurnState::Running).unwrap();
+        f.store.append_event(&Event { id: EventId::new(), session_id: session, seq: 1, kind: EventKind::TextDelta { text: "x".into() }, raw: None }).unwrap();
+        let approval = Approval::new(turn.id.clone(), "Bash", json!({}));
+        f.store.save_approval(&approval).unwrap();
+        (thread, turn, approval)
+    }
+
+    #[test]
+    fn deleting_a_thread_with_no_posted_message_removes_every_row_it_owns() {
+        let f = fixture();
+        let anchor = say(&f.store, &f.channel.id, Role::Agent, "answer", Some(&f.agent));
+        let (thread, turn, approval) = busy_thread(&f, &anchor);
+        say(&f.store, &thread.id, Role::User, "why", None);
+        say(&f.store, &thread.id, Role::Agent, "because", Some(&f.agent));
+        let before = ["sessions", "channels", "messages"].map(|t| rows(&f.store, t));
+        assert!(matches!(f.store.delete_thread(&thread.id), Err(StoreError::Invalid(message)) if message.contains("turn runs")), "a running turn blocks the delete");
+        f.store.update_turn_state(&turn.id, TurnState::Completed).unwrap();
+        assert!(matches!(f.store.delete_thread(&thread.id), Err(StoreError::Invalid(message)) if message.contains("approval waits")), "a pending approval blocks the delete");
+        let mut decided = approval.clone();
+        decided.decide(Decision::Deny, Decider::User, "ask").unwrap();
+        f.store.save_approval(&decided).unwrap();
+        assert_eq!(["sessions", "channels", "messages"].map(|t| rows(&f.store, t)), before, "a refused delete changes nothing");
+        let deletion = f.store.delete_thread(&thread.id).unwrap();
+        assert_eq!(deletion, ThreadDeletion { parent: f.channel.id.clone(), posted: vec![] });
+        assert!(f.store.thread_info(&thread.id).unwrap().is_none());
+        assert!(f.store.load_channel(&thread.id).is_err());
+        for (table, column) in [("sessions", "channel_id"), ("messages", "channel_id")] {
+            let left: i64 = f.store.conn.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE {column}=?1"), params![thread.id.0], |r| r.get(0)).unwrap();
+            assert_eq!(left, 0, "{table}");
+        }
+        assert_eq!((rows(&f.store, "turns"), rows(&f.store, "events"), rows(&f.store, "approvals"), rows(&f.store, "approval_audit")), (0, 0, 0, 0));
+        assert_eq!(texts(&f.store.messages_for_channel(&f.channel.id).unwrap()), ["answer"]);
+        assert!(f.store.thread_for_anchor(&anchor).unwrap().is_none(), "the anchor can start a new thread");
+        assert!(matches!(f.store.delete_thread(&thread.id), Err(StoreError::NotFound(_))));
+        assert!(matches!(f.store.delete_thread(&f.channel.id), Err(StoreError::NotFound(_))), "a normal channel is not a thread");
+    }
+
+    #[test]
+    fn deleting_a_thread_keeps_each_posted_message_in_the_parent_at_its_place() {
+        let f = fixture();
+        let other = AgentId::new();
+        f.store.insert_agent(&other, &store_agent_config()).unwrap();
+        let anchor = say(&f.store, &f.channel.id, Role::User, "question", None);
+        let thread = f.store.create_thread(&f.channel.id, &anchor, "Why?", &f.agent).unwrap();
+        let first = say(&f.store, &thread.id, Role::User, "side question", None);
+        let second = say(&f.store, &thread.id, Role::Agent, "side answer", Some(&other));
+        let unposted = say(&f.store, &thread.id, Role::Agent, "private note", Some(&f.agent));
+        let (user_ref, _) = f.store.post_thread_message(&first).unwrap();
+        say(&f.store, &f.channel.id, Role::Agent, "parent reply", Some(&f.agent));
+        let (agent_ref, _) = f.store.post_thread_message(&second).unwrap();
+        let author_before = f.store.message_authors(&f.channel.id).unwrap().get(&agent_ref.id).cloned();
+        assert!(author_before.is_some());
+        assert_eq!(f.store.posted_message_count(&thread.id).unwrap(), 2);
+        let deletion = f.store.delete_thread(&thread.id).unwrap();
+        assert_eq!(deletion.posted, vec![user_ref.id.clone(), agent_ref.id.clone()], "in channel order");
+        let parent = f.store.messages_for_channel(&f.channel.id).unwrap();
+        assert_eq!(parent.iter().map(|m| m.id.clone()).collect::<Vec<_>>().len(), 4);
+        assert_eq!(texts(&parent), ["question", "side question", "parent reply", "side answer"], "each row keeps its position");
+        assert_eq!(parent.iter().map(|m| m.role).collect::<Vec<_>>(), [Role::User, Role::User, Role::Agent, Role::Agent]);
+        assert_eq!((parent[1].id.clone(), parent[3].id.clone()), (user_ref.id.clone(), agent_ref.id.clone()), "the row IDs stay, so read markers and summaries stay valid");
+        assert!(f.store.posted_sources(&f.channel.id).unwrap().is_empty(), "no reference row is left");
+        assert_eq!(f.store.message_authors(&f.channel.id).unwrap().get(&agent_ref.id).cloned(), author_before, "the author stays");
+        assert!(!f.store.message_authors(&f.channel.id).unwrap().contains_key(&user_ref.id));
+        let source_rows: i64 = f.store.conn.query_row("SELECT COUNT(*) FROM messages WHERE source_message_id IS NOT NULL", [], |r| r.get(0)).unwrap();
+        assert_eq!(source_rows, 0);
+        let history = f.store.channel_history(&f.channel.id).unwrap();
+        let replay = crate::conversation_context::replay_with_posted(&history.messages, &history.authors, &history.posted);
+        assert!(replay.iter().all(|(_, text)| !text.contains("[From thread")), "no thread label after the delete");
+        assert!(replay.iter().any(|(_, text)| text.contains("side answer") && text.contains("role=\"agent\"")), "the parent context keeps the posted message");
+        assert!(replay.iter().all(|(_, text)| !text.contains("private note")));
+        assert!(f.store.messages_for_channel(&thread.id).unwrap().is_empty());
+        let left: i64 = f.store.conn.query_row("SELECT COUNT(*) FROM messages WHERE id=?1", params![unposted.0], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0, "a message that was not posted is gone");
+    }
+
+    #[test]
+    fn a_running_sub_agent_thread_cannot_be_deleted_until_its_task_ends() {
+        let f = fixture();
+        say(&f.store, &f.channel.id, Role::User, "go", None);
+        let thread = f.store.create_sub_agent_thread(&f.channel.id, "Research", &f.agent).unwrap();
+        assert!(matches!(f.store.delete_thread(&thread.id), Err(StoreError::Invalid(message)) if message.contains("task still runs")));
+        assert!(f.store.thread_info(&thread.id).unwrap().is_some());
+        f.store.finish_sub_agent_thread(&thread.id, ThreadState::Failed).unwrap();
+        f.store.delete_thread(&thread.id).unwrap();
+        assert!(f.store.thread_info(&thread.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn removing_a_reference_keeps_the_thread_message_and_allows_posting_again() {
+        let f = fixture();
+        let anchor = say(&f.store, &f.channel.id, Role::User, "question", None);
+        let thread = f.store.create_thread(&f.channel.id, &anchor, "Why?", &f.agent).unwrap();
+        let reply = say(&f.store, &thread.id, Role::Agent, "because", Some(&f.agent));
+        let (reference, _) = f.store.post_thread_message(&reply).unwrap();
+        say(&f.store, &f.channel.id, Role::User, "later", None);
+        let removed = f.store.remove_posted_reference(&reference.id).unwrap();
+        assert_eq!(removed, PostedSource { source_message_id: reply.clone(), thread_channel_id: thread.id.clone(), thread_name: "Why?".into() });
+        assert_eq!(texts(&f.store.messages_for_channel(&f.channel.id).unwrap()), ["question", "later"]);
+        assert_eq!(texts(&f.store.messages_for_channel(&thread.id).unwrap()), ["because"], "the message stays in the thread");
+        assert!(f.store.posted_sources(&f.channel.id).unwrap().is_empty());
+        let history = f.store.channel_history(&f.channel.id).unwrap();
+        assert!(crate::conversation_context::replay_with_posted(&history.messages, &history.authors, &history.posted).iter().all(|(_, text)| !text.contains("because")), "later turns do not see it");
+        let (again, created) = f.store.post_thread_message(&reply).unwrap();
+        assert!(created, "Post to channel works again");
+        assert_ne!(again.id, reference.id);
+        assert!(matches!(f.store.remove_posted_reference(&reply), Err(StoreError::Invalid(_))), "a thread message is not a reference");
+        assert!(matches!(f.store.remove_posted_reference(&anchor), Err(StoreError::Invalid(_))), "a normal message is not a reference");
+        assert!(matches!(f.store.remove_posted_reference(&MessageId::new()), Err(StoreError::NotFound(_))));
+    }
+
+    #[test]
+    fn removing_the_reference_that_ends_a_summary_moves_the_summary_to_the_row_before() {
+        let f = fixture();
+        let anchor = say(&f.store, &f.channel.id, Role::User, "question", None);
+        let thread = f.store.create_thread(&f.channel.id, &anchor, "Why?", &f.agent).unwrap();
+        let reply = say(&f.store, &thread.id, Role::Agent, "because", Some(&f.agent));
+        let (reference, _) = f.store.post_thread_message(&reply).unwrap();
+        let history = f.store.channel_history(&f.channel.id).unwrap();
+        let replay = crate::conversation_context::replay_with_posted(&history.messages, &history.authors, &history.posted);
+        let ending = replay.last().unwrap().0.clone();
+        assert!(ending.0.starts_with(&reference.id.0));
+        let before = replay[replay.len() - 2].0.clone();
+        f.store.set_conversation_context(&f.channel.id, &crate::conversation_context::ConversationContext { summary: Some("s".into()), through: Some(ending), ..Default::default() }).unwrap();
+        f.store.remove_posted_reference(&reference.id).unwrap();
+        assert_eq!(f.store.conversation_context(&f.channel.id).unwrap().through, Some(before));
+    }
+
+    #[test]
+    fn thread_names_normalize_and_rename_both_kinds() {
+        for (input, expected) in [("  Plan  ", "Plan"), ("a\nb\r\nc", "a b c"), ("é".repeat(80).as_str(), "é".repeat(80).as_str())] {
+            assert_eq!(normalize_thread_name(input).unwrap(), expected, "{input:?}");
+        }
+        for input in ["", "  \n ", &"a".repeat(81)] {
+            assert_eq!(normalize_thread_name(input).unwrap_err(), "Enter a thread name of 1 to 80 characters.", "{input:?}");
+        }
+        let f = fixture();
+        let anchor = say(&f.store, &f.channel.id, Role::Agent, "answer", Some(&f.agent));
+        let question = f.store.create_thread(&f.channel.id, &anchor, "Why?", &f.agent).unwrap();
+        say(&f.store, &f.channel.id, Role::User, "go", None);
+        let sub = f.store.create_sub_agent_thread(&f.channel.id, "Research", &f.agent).unwrap();
+        assert_eq!(f.store.rename_thread(&question.id, " Better\nname ").unwrap(), "Better name");
+        assert_eq!(f.store.rename_thread(&sub.id, "Better name").unwrap(), "Better name", "duplicate names are allowed");
+        assert_eq!(f.store.thread_info(&question.id).unwrap().unwrap().name, "Better name");
+        assert!(matches!(f.store.rename_thread(&question.id, "  "), Err(StoreError::Invalid(_))));
+        assert_eq!(f.store.thread_info(&question.id).unwrap().unwrap().name, "Better name", "a refused name changes nothing");
+        assert!(matches!(f.store.rename_thread(&f.channel.id, "x"), Err(StoreError::NotFound(_))), "a channel is not a thread");
+        assert!(matches!(f.store.rename_thread(&ChannelId::new(), "x"), Err(StoreError::NotFound(_))));
+    }
+
+    #[test]
+    fn a_renamed_thread_changes_the_replay_label_of_its_posted_messages() {
+        let f = fixture();
+        let anchor = say(&f.store, &f.channel.id, Role::User, "question", None);
+        let thread = f.store.create_thread(&f.channel.id, &anchor, "Why?", &f.agent).unwrap();
+        let reply = say(&f.store, &thread.id, Role::Agent, "because", Some(&f.agent));
+        let (reference, _) = f.store.post_thread_message(&reply).unwrap();
+        let label = |store: &Store| {
+            let history = store.channel_history(&f.channel.id).unwrap();
+            crate::conversation_context::replay_with_posted(&history.messages, &history.authors, &history.posted).into_iter().find(|(id, _)| id.0.starts_with(&reference.id.0)).unwrap().1
+        };
+        assert!(label(&f.store).contains("[From thread \"Why?\"]"));
+        f.store.rename_thread(&thread.id, "Latency").unwrap();
+        assert!(label(&f.store).contains("[From thread \"Latency\"]"), "{}", label(&f.store));
+        assert_eq!(f.store.posted_sources(&f.channel.id).unwrap()[&reference.id].thread_name, "Latency");
+    }
 }
 
 #[cfg(test)]
@@ -5023,5 +5350,43 @@ mod text_channel_tests {
         assert!(store.conn.execute("INSERT INTO project_channels(channel_id,project_id,kind) VALUES(?1,?2,'general')", params![other.id.0, project.id.0]).is_err(), "the general index still holds");
         store.migrate().unwrap();
         assert_eq!(store.schema_version().unwrap(), 13);
+    }
+
+    #[test]
+    fn a_text_channel_renames_with_the_creation_rules() {
+        let f = fixture();
+        let general = f.store.ensure_project_general_channel(&f.project.id, &f.agent).unwrap();
+        let plans = f.store.create_project_text_channel(&f.project.id, "plans").unwrap();
+        let notes = f.store.create_project_text_channel(&f.project.id, "notes").unwrap();
+        let renamed = f.store.rename_text_channel(&f.project.id, &plans.id, "  Release Notes ").unwrap();
+        assert_eq!((renamed.name.as_str(), renamed.id.clone()), ("release-notes", plans.id.clone()));
+        assert_eq!(f.store.load_channel(&plans.id).unwrap().name, "release-notes");
+        for name in ["NOTES", "general", "General"] {
+            assert!(matches!(f.store.rename_text_channel(&f.project.id, &plans.id, name), Err(StoreError::Invalid(message)) if message == "A channel with this name already exists."), "{name}");
+        }
+        assert!(matches!(f.store.rename_text_channel(&f.project.id, &plans.id, "bad/name"), Err(StoreError::Invalid(message)) if message.starts_with("Use letters")));
+        assert!(matches!(f.store.rename_text_channel(&f.project.id, &plans.id, "---"), Err(StoreError::Invalid(message)) if message.contains("1 to 50")));
+        assert_eq!(f.store.load_channel(&plans.id).unwrap().name, "release-notes", "a refused name changes nothing");
+        // The same name, in another spelling, is the unchanged name: it is not a clash with the channel itself.
+        assert_eq!(f.store.rename_text_channel(&f.project.id, &plans.id, "Release  NOTES").unwrap().name, "release-notes");
+        // A name that an archived channel holds is free.
+        f.store.archive_channel(&notes.id).unwrap();
+        assert_eq!(f.store.rename_text_channel(&f.project.id, &plans.id, "notes").unwrap().name, "notes");
+        assert!(matches!(f.store.rename_text_channel(&f.project.id, &notes.id, "again"), Err(StoreError::Invalid(message)) if message.contains("Restore")), "an archived channel stays as it is");
+        assert!(matches!(f.store.rename_text_channel(&f.project.id, &general.id, "main"), Err(StoreError::Invalid(message)) if message.contains("text channel")), "#general cannot be renamed");
+        assert_eq!(f.store.load_channel(&general.id).unwrap().name, general.name);
+        assert!(matches!(f.store.rename_text_channel(&ProjectId::new(), &plans.id, "x"), Err(StoreError::NotFound(_))), "the channel must belong to the project");
+        assert!(matches!(f.store.rename_text_channel(&f.project.id, &ChannelId::new(), "x"), Err(StoreError::NotFound(_))));
+    }
+
+    #[test]
+    fn a_branch_channel_cannot_be_renamed_as_a_text_channel() {
+        let f = fixture();
+        f.store.ensure_project_general_channel(&f.project.id, &f.agent).unwrap();
+        let branch = Channel { id: ChannelId::new(), project_id: Some(f.project.id.clone()), name: "feature".into(), agent_id: f.agent.clone(), workspace_mode: WorkspaceMode::MainCheckout };
+        f.store.insert_channel(&branch).unwrap();
+        f.store.conn.execute("INSERT INTO project_channels(channel_id,project_id,kind,branch_name) VALUES(?1,?2,'branch','feature')", params![branch.id.0, f.project.id.0]).unwrap();
+        assert!(matches!(f.store.rename_text_channel(&f.project.id, &branch.id, "other"), Err(StoreError::Invalid(message)) if message.contains("text channel")));
+        assert_eq!(f.store.load_channel(&branch.id).unwrap().name, "feature");
     }
 }
