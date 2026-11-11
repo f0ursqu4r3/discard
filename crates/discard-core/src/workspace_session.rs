@@ -157,7 +157,7 @@ pub fn paths_inside(root: &Path, paths: &[String]) -> bool {
 pub fn is_edit_tool(tool: &str) -> bool { matches!(tool, "Edit" | "Write" | "NotebookEdit" | "file_change") }
 
 /// Entries that the nested-`.git` walk may read before it fails closed.
-pub const NESTED_GIT_WALK_CAP: usize = 200_000;
+pub const NESTED_GIT_WALK_CAP: usize = 5_000_000;
 
 /// Why the nested-`.git` walk gave no answer. Both cases are unsafe: treat them as "could not check".
 #[derive(Debug, Clone, PartialEq, Eq)]

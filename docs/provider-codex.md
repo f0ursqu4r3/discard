@@ -242,7 +242,7 @@ changes card lists the root's tracked changes. It does not show files under a ne
 The adapter closes the part that it can check at start. At autorun session start, `start_session` walks
 the root. It skips the root `.git` pointer. It refuses autorun with `SandboxUnavailable` when any other
 entry is named `.git` (any case, file or directory). Symlinks are not followed. The walk reads at most
-200,000 entries. If it reaches the cap or cannot read a directory, it refuses. The engine then falls back
+5,000,000 entries. If it reaches the cap or cannot read a directory, it refuses. The engine then falls back
 to a read-only response and shows the reason. Non-autorun Codex sessions are unchanged, because
 `untrusted` asks for each patch and command.
 
