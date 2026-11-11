@@ -462,7 +462,9 @@ async function remove() {
         </Field>
         <Field orientation="horizontal">
           <FieldContent>
-            <FieldLabel for="agent-sandbox-autorun">Run sandboxed commands without asking</FieldLabel>
+            <FieldLabel for="agent-sandbox-autorun">
+              Run sandboxed commands without asking
+            </FieldLabel>
             <FieldDescription id="agent-sandbox-autorun-description">
               Shell commands in the worktree run without approval. The sandbox blocks writes outside
               the worktree and network access. It does not block reads. It cannot block Keychain
