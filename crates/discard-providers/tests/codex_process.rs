@@ -490,8 +490,42 @@ async fn workspace_thread_starts_in_the_granted_directory() {
     let params = log.lines().filter_map(|l| l.strip_prefix("STDIN ")).filter_map(|l| serde_json::from_str::<Value>(l).ok()).find(|v| v["method"] == "thread/start").unwrap();
     assert_eq!(params["params"]["cwd"], s.cwd.to_string_lossy().as_ref());
     assert_eq!(params["params"]["sandbox"], "workspace-write");
+    assert_eq!(params["params"]["approvalPolicy"], "untrusted", "without autorun, every command still asks");
     assert!(params["params"]["config"]["mcp_servers"]["discard-memory"]["enabled_tools"].as_array().unwrap().contains(&json!("worktree_commit")));
     assert!(log.contains(&format!("CWD {}", s.cwd.display())));
+}
+
+/// A linked-worktree stand-in: its `.git` is a pointer file, not a directory.
+#[cfg(target_os = "macos")]
+fn linked_worktree_spec(rig: &Rig) -> SessionSpec {
+    let mut s = conversation_spec(rig);
+    s.mode = discard_core::provider::SessionMode::Workspace;
+    s.cwd = rig.dir.path().canonicalize().unwrap();
+    std::fs::write(s.cwd.join(".git"), "gitdir: /nowhere/.git/worktrees/linked\n").unwrap();
+    s
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn autorun_workspace_thread_starts_with_on_request_and_workspace_write() {
+    let rig = Rig::new(); let mut s = linked_worktree_spec(&rig); s.sandbox_autorun = true;
+    let mut session = rig.provider("approval").with_env("CODEX_HOME", rig.dir.path()).start_session(s).await.unwrap();
+    session.send_user_message("synthetic").await.unwrap();
+    let params = rig.request("thread/start")["params"].clone();
+    assert_eq!(params["approvalPolicy"], "on-request");
+    assert_eq!(params["sandbox"], "workspace-write");
+    // The sandbox controls stay in force: no network, no extra writable roots.
+    assert_eq!(params["config"]["sandbox_workspace_write"]["network_access"], false);
+    assert_eq!(params["config"]["sandbox_workspace_write"]["writable_roots"], json!([]));
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_workspace_thread_without_autorun_keeps_untrusted_in_a_linked_worktree() {
+    let rig = Rig::new(); let s = linked_worktree_spec(&rig);
+    let mut session = rig.provider("approval").with_env("CODEX_HOME", rig.dir.path()).start_session(s).await.unwrap();
+    session.send_user_message("synthetic").await.unwrap();
+    assert_eq!(rig.request("thread/start")["params"]["approvalPolicy"], "untrusted");
 }
 
 #[tokio::test]

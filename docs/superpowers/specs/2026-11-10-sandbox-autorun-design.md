@@ -69,6 +69,8 @@ The OS sandbox already enforces the important limits: writes stay in the session
 
     If any check fails, Codex reports `SandboxAutorun::Unsupported` with the reason, and Codex sessions keep today's behavior. Record the results in `docs/provider-codex.md`.
 
+    **Outcome (2026-11-10): all four checks pass.** The spike ran on codex-cli 0.166.0 on macOS with `probes/codex_workspace.py --on-request`. Results are in [Codex autorun spike results](../../provider-codex.md#autorun-spike-results). Codex reports `SandboxAutorun::Supported` on macOS. In an autorun session the adapter uses `approvalPolicy: "on-request"`. Every command approval is an escalation and keeps the `SandboxEscape` card with no Always allow. File-change approvals keep their path classification. One addition: a file-change request with a `reason` is a sandbox retry ("command failed; retry without sandbox?"), so it also gets the `SandboxEscape` card. Check c passed through its second condition: in-root `apply_patch` sends no request, and the `fileChange` item gives the paths before the change applies. The spike covers macOS and linked worktrees only, so the adapter refuses autorun on other platforms and in roots without a `.git` pointer file. Non-autorun Codex sessions keep `untrusted`.
+
 ### Visibility
 
 13. The agent settings page shows the toggle. The channel header shows "Autorun" beside the write-session indicator while an autorun response runs. If the agent has the setting and the provider or channel does not allow it, the indicator says "Autorun off: <reason>".
@@ -87,11 +89,12 @@ The OS sandbox already enforces the important limits: writes stay in the session
 
 - The sandbox limits writes and network access, not reads. `denyRead` (Claude) covers known credential paths only. An agent can read other files that the user's OS user can read.
 - With autorun, a prompt injection in repository files can make the agent run commands without a person seeing them first. The sandbox, `denyRead`, and network-off contain the effect: data can reach only files in the session root, which the changes card shows before the user pushes.
+- Codex has no read denials. A Codex autorun command can read credential paths such as `~/.ssh`. Network-off and the writes-only-in-root limit contain what it can send out. Do not turn on Codex autorun if the agent must not see those files.
 - Build scripts and test runners execute repository code inside the sandbox. That code has the same limits as the agent's commands.
 
 ## UI honesty
 
-Follow `AGENTS.md`. If Codex fails the spike, its autorun toggle is disabled with the provider reason. That is a state block, not a planned action. If the Codex spike is not done when the Claude part ships, the Codex toggle is disabled, labelled `Soon`, and has a `TODO` that names the spike.
+Follow `AGENTS.md`. A provider that cannot run autorun gets a disabled toggle with the provider reason. That is a state block, not a planned action, so it has no `Soon` label and no `TODO`. The Codex spike passed. Codex shows the reason only where its adapter reports one (a platform other than macOS).
 
 ## What is left to the builder
 
@@ -102,6 +105,6 @@ Follow `AGENTS.md`. If Codex fails the spike, its autorun toggle is disabled wit
 ## Delivery
 
 1. Claude: `sandbox_autorun`, eligibility, adapter settings, `denyRead`, the managed-settings check, the prompt line, the indicator, the "Ran in sandbox" label, and the audit row.
-2. Codex: the spike, then `on-request` support or a recorded `Unsupported` reason.
+2. Codex: the spike, then `on-request` support or a recorded `Unsupported` reason. Done: supported on macOS (see decision 12).
 
 Each part needs unit tests, process-fixture tests with the fake providers, an opt-in live probe (Claude: a writing command runs without `can_use_tool`, a write to `.git` fails, a read of a `denyRead` path fails, `curl` still sends `SandboxNetworkAccess`), `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `pnpm --dir web check`, `pnpm --dir web test`, and `pnpm --dir web build`.

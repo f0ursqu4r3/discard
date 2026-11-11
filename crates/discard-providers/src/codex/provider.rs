@@ -143,6 +143,9 @@ impl CodexProvider {
 /// Returns the method name and its params.
 pub fn thread_params(spec: &SessionSpec) -> (&'static str, Value) {
     let (policy, sandbox) = match (spec.mode, spec.enforcement) {
+        // Autorun: Codex runs sandboxed commands without asking. It asks only when the model requests
+        // an escalation, so every command approval in this mode is an escalation (spec decision 11).
+        (SessionMode::Workspace, EnforcementMode::HostPrompts) if spec.sandbox_autorun => ("on-request", "workspace-write"),
         (SessionMode::Coding | SessionMode::Workspace, EnforcementMode::HostPrompts) => ("untrusted", "workspace-write"),
         _ => ("never", "read-only"),
     };
@@ -194,9 +197,14 @@ fn mcp_thread_config(path: &Path) -> Result<Value, ProviderError> {
 
 #[async_trait]
 impl Provider for CodexProvider {
-    // TODO: Run the Codex on-request sandbox spike (spec decision 12) and support autorun if it passes.
+    /// The autorun spike (`probes/codex_workspace.py --on-request`, see `docs/provider-codex.md`) ran on
+    /// macOS only. Fail closed elsewhere.
     fn sandbox_autorun(&self) -> SandboxAutorun {
-        SandboxAutorun::Unsupported("Codex autorun needs a sandbox check first.".into())
+        if cfg!(target_os = "macos") {
+            SandboxAutorun::Supported
+        } else {
+            SandboxAutorun::Unsupported("Codex autorun was checked on macOS only.".into())
+        }
     }
 
     fn id(&self) -> &str {
@@ -252,7 +260,13 @@ impl Provider for CodexProvider {
     async fn start_session(&self, mut spec: SessionSpec) -> Result<Box<dyn ProviderSession>, ProviderError> {
         let workspace = spec.mode == SessionMode::Workspace;
         if workspace && spec.sandbox_autorun {
-            return Err(ProviderError::SandboxUnavailable("Codex does not support autorun".into()));
+            if !cfg!(target_os = "macos") {
+                return Err(ProviderError::SandboxUnavailable("Codex autorun was checked on macOS only".into()));
+            }
+            // The spike covers a linked worktree, where `.git` is a pointer file.
+            if !spec.cwd.join(".git").is_file() {
+                return Err(ProviderError::SandboxUnavailable("Codex autorun needs a linked worktree".into()));
+            }
         }
         if workspace && spec.cwd.join(".git").is_dir() {
             return Err(ProviderError::SandboxUnavailable("Codex cannot protect Git metadata in the main checkout".into()));
@@ -381,7 +395,7 @@ impl Provider for CodexProvider {
         {
             let (stdin, shared) = (Arc::clone(&stdin), Arc::clone(&shared));
             tokio::spawn(async move {
-                let mut mapper = Mapper::with_mode(spec.mode);
+                let mut mapper = Mapper::with_mode(spec.mode).with_autorun(spec.mode == SessionMode::Workspace && spec.sandbox_autorun);
                 while let Ok(Some(line)) = lines.next_line().await {
                     let Ok(msg) = serde_json::from_str::<Value>(&line) else {
                         continue;
@@ -626,17 +640,26 @@ mod tests {
     }
 
     #[test]
-    fn codex_reports_autorun_unsupported() {
-        assert!(matches!(CodexProvider::new("unused").sandbox_autorun(), SandboxAutorun::Unsupported(_)));
+    fn codex_supports_autorun_on_macos_only() {
+        let answer = CodexProvider::new("unused").sandbox_autorun();
+        if cfg!(target_os = "macos") {
+            assert_eq!(answer, SandboxAutorun::Supported);
+        } else {
+            assert_eq!(answer, SandboxAutorun::Unsupported("Codex autorun was checked on macOS only.".into()));
+        }
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn codex_refuses_to_start_an_autorun_session() {
+    async fn codex_autorun_needs_a_linked_worktree() {
+        // A directory without a `.git` pointer file is not the spiked setup.
+        let dir = tempfile::tempdir().unwrap();
         let mut s = spec(EnforcementMode::HostPrompts);
         s.mode = SessionMode::Workspace;
+        s.cwd = dir.path().canonicalize().unwrap();
         s.sandbox_autorun = true;
         let error = CodexProvider::new("unused").start_session(s).await.err().unwrap();
-        assert!(matches!(&error, ProviderError::SandboxUnavailable(m) if m == "Codex does not support autorun"), "{error:?}");
+        assert!(matches!(&error, ProviderError::SandboxUnavailable(m) if m == "Codex autorun needs a linked worktree"), "{error:?}");
     }
 
     #[tokio::test]
@@ -654,6 +677,24 @@ mod tests {
         assert_eq!(p["approvalPolicy"], "untrusted"); assert_eq!(p["sandbox"], "workspace-write");
         assert_eq!(p["ephemeral"], true); assert_eq!(p["allowProviderModelFallback"], false);
         assert_eq!(p["cwd"], s.cwd.to_string_lossy().as_ref());
+    }
+
+    #[test]
+    fn autorun_workspace_thread_uses_on_request_and_other_modes_keep_their_policy() {
+        let policy = |mode: SessionMode, enforcement: EnforcementMode, autorun: bool| {
+            let mut s = spec(enforcement);
+            s.mode = mode;
+            s.sandbox_autorun = autorun;
+            let (_, p) = thread_params(&s);
+            (p["approvalPolicy"].clone(), p["sandbox"].clone())
+        };
+        let host = EnforcementMode::HostPrompts;
+        assert_eq!(policy(SessionMode::Workspace, host, true), (json!("on-request"), json!("workspace-write")));
+        assert_eq!(policy(SessionMode::Workspace, host, false), (json!("untrusted"), json!("workspace-write")));
+        // Only a Workspace session reads the flag.
+        assert_eq!(policy(SessionMode::Coding, host, true), (json!("untrusted"), json!("workspace-write")));
+        assert_eq!(policy(SessionMode::Conversation, host, true), (json!("never"), json!("read-only")));
+        assert_eq!(policy(SessionMode::Workspace, EnforcementMode::ProviderDenies, true), (json!("never"), json!("read-only")));
     }
 
     #[test]

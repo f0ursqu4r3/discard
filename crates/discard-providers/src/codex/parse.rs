@@ -38,6 +38,8 @@ pub enum Item {
 pub struct Mapper {
     started: HashSet<String>,
     mode: SessionMode,
+    /// The session runs under `on-request`. Codex then asks only to leave the sandbox.
+    autorun: bool,
     edit_paths: std::collections::HashMap<String, Vec<String>>,
     input_tokens: u64,
     output_tokens: u64,
@@ -49,6 +51,9 @@ impl Mapper {
     }
 
     pub fn with_mode(mode: SessionMode) -> Self { Self { mode, ..Self::default() } }
+
+    /// Mark the session as autorun (`approvalPolicy: "on-request"`).
+    pub fn with_autorun(mut self, autorun: bool) -> Self { self.autorun = autorun; self }
 
     /// Map one server message. Responses to our own requests are not handled here.
     pub fn on_message(&mut self, msg: &Value) -> Vec<Item> {
@@ -151,7 +156,10 @@ impl Mapper {
         // Only complete item notifications carry every edit and rename target.
         let paths = self.edit_paths.get(&call_id).cloned().unwrap_or_default();
         if kind == RequestKind::FileChange { input["paths"] = serde_json::json!(paths); }
-        let approval_kind = if self.mode == SessionMode::Workspace && (kind == RequestKind::Command || kind == RequestKind::FileChange && !params["grantRoot"].is_null()) {
+        // Under on-request, a file-change request with a reason is a sandbox retry ("command failed; retry
+        // without sandbox?"). That leaves the sandbox, so it gets the escape card whatever the path is.
+        let retry = self.autorun && kind == RequestKind::FileChange && !params["reason"].is_null();
+        let approval_kind = if self.mode == SessionMode::Workspace && (kind == RequestKind::Command || kind == RequestKind::FileChange && (!params["grantRoot"].is_null() || retry)) {
             ApprovalKind::SandboxEscape
         } else { ApprovalKind::ProviderTool };
         vec![
@@ -293,6 +301,75 @@ mod tests {
             }
         }
         assert!(edits >= 2 && commands >= 4);
+    }
+
+    /// Replays `codex-autorun-turn.jsonl`, recorded from `codex_workspace.py --on-request`: a linked worktree
+    /// under `on-request`. Returns every approval as (item id, tool, kind) and the timeline built with autorun on.
+    fn replay_autorun() -> (Vec<(String, String, ApprovalKind)>, discard_core::timeline::Timeline) {
+        let mut mapper = Mapper::with_mode(SessionMode::Workspace).with_autorun(true);
+        let mut timeline = discard_core::timeline::Timeline::new();
+        timeline.set_autorun(true);
+        let mut approvals = Vec::new();
+        for line in include_str!("../../fixtures/codex-autorun-turn.jsonl").lines() {
+            for item in mapper.on_message(&serde_json::from_str(line).unwrap()) {
+                if let Item::Event(e) = item {
+                    if let EventKind::ApprovalRequest { call_id, tool, kind, .. } = &e.kind { approvals.push((call_id.clone(), tool.clone(), *kind)); }
+                    timeline.apply(&e.kind);
+                }
+            }
+        }
+        (approvals, timeline)
+    }
+
+    /// The `sandboxed` mark of the tool call whose input text contains `needle`.
+    fn sandboxed_mark(timeline: &discard_core::timeline::Timeline, needle: &str) -> Option<bool> {
+        use discard_core::model::Block;
+        timeline.blocks().iter().find_map(|block| match block {
+            Block::ToolCall { input, sandboxed, .. } if input.to_string().contains(needle) => Some(*sandboxed),
+            _ => None,
+        }).unwrap_or_else(|| panic!("no tool call containing {needle}"))
+    }
+
+    #[test]
+    fn autorun_recording_asks_only_to_leave_the_sandbox() {
+        let (approvals, _) = replay_autorun();
+        let commands: Vec<_> = approvals.iter().filter(|(_, tool, _)| tool == "command").collect();
+        // The one escalation is the only command approval. Every command approval is a full-access card.
+        assert_eq!(commands.len(), 1, "{approvals:?}");
+        assert_eq!(commands[0].2, ApprovalKind::SandboxEscape);
+        // The sandbox retry ("command failed; retry without sandbox?") is an escape whatever its path is.
+        assert!(approvals.contains(&("onrequest_4".into(), "file_change".into(), ApprovalKind::SandboxEscape)), "{approvals:?}");
+        // Other file-change requests keep today's classification. The engine reclassifies them by path.
+        for id in ["onrequest_1", "onrequest_2", "onrequest_5", "onrequest_9"] {
+            assert!(approvals.contains(&(id.into(), "file_change".into(), ApprovalKind::ProviderTool)), "{id}: {approvals:?}");
+        }
+        // Commands and the in-root edit that ran in the sandbox raised no request.
+        let asked: Vec<&str> = approvals.iter().map(|(id, ..)| id.as_str()).collect();
+        for id in ["onrequest_10", "onrequest_11", "onrequest_12", "onrequest_13", "onrequest_14"] {
+            assert!(!asked.contains(&id), "{id} asked: {approvals:?}");
+        }
+    }
+
+    #[test]
+    fn autorun_recording_marks_only_commands_that_ran_without_a_card() {
+        let (_, timeline) = replay_autorun();
+        assert_eq!(sandboxed_mark(&timeline, "touch inside.txt"), Some(true));
+        assert_eq!(sandboxed_mark(&timeline, "git add -A"), Some(true), "a command that failed in the sandbox still ran there");
+        assert_eq!(sandboxed_mark(&timeline, "example.com"), Some(true));
+        assert_eq!(sandboxed_mark(&timeline, "escalation-marker"), None, "an escalation had a card");
+        assert_eq!(sandboxed_mark(&timeline, "edit.txt"), None, "edits are not shell calls");
+    }
+
+    #[test]
+    fn a_sandbox_retry_is_an_escape_only_under_autorun() {
+        let request = json!({"method": "item/fileChange/requestApproval", "id": 0, "params": {"itemId": "f1", "reason": "command failed; retry without sandbox?", "grantRoot": null}});
+        let kind = |mut mapper: Mapper| {
+            let items = mapper.on_message(&request);
+            items.iter().find_map(|i| match i { Item::Event(e) => match &e.kind { EventKind::ApprovalRequest { kind, .. } => Some(*kind), _ => None }, _ => None }).unwrap()
+        };
+        assert_eq!(kind(Mapper::with_mode(SessionMode::Workspace).with_autorun(true)), ApprovalKind::SandboxEscape);
+        assert_eq!(kind(Mapper::with_mode(SessionMode::Workspace)), ApprovalKind::ProviderTool, "untrusted sessions keep today's classification");
+        assert_eq!(kind(Mapper::with_mode(SessionMode::Coding).with_autorun(true)), ApprovalKind::ProviderTool);
     }
 
     #[test]
