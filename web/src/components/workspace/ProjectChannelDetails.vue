@@ -281,16 +281,20 @@ function authorName(authorKind: string, authorId: string | null) {
             <dd class="min-w-0 truncate text-right">{{ details.channel.branch }}</dd>
           </div>
           <div
-            v-else-if="details.channel.kind === 'general' || details.channel.kind === 'legacy'"
+            v-else-if="
+              details.channel.kind === 'general' ||
+              details.channel.kind === 'text' ||
+              details.channel.kind === 'legacy'
+            "
             class="flex items-baseline font-mono text-xs"
           >
             <dt class="text-muted-foreground">scope</dt>
             <span aria-hidden="true" class="kv-leader" />
             <dd class="text-right">
               {{
-                details.channel.kind === 'general'
-                  ? 'Project-wide channel'
-                  : 'Saved workspace channel'
+                details.channel.kind === 'legacy'
+                  ? 'Saved workspace channel'
+                  : 'Project-wide channel'
               }}
             </dd>
           </div>
@@ -417,7 +421,7 @@ function authorName(authorKind: string, authorId: string | null) {
           </option>
         </select>
         <p v-if="generalRunning" class="text-xs text-muted-foreground">
-          The main agent cannot change while the general channel is running.
+          The main agent cannot change while the general channel or a text channel is running.
         </p>
       </section>
 

@@ -3,7 +3,8 @@ import { expect, test, vi } from 'vite-plus/test'
 import ContextPanel from './ContextPanel.vue'
 import MemberList from '../MemberList.vue'
 import fixture from '@/bridge/fixtures/snapshot.json'
-import type { SnapshotDto } from '@/bridge/types'
+import type { ProjectChannelDto, SnapshotDto } from '@/bridge/types'
+import ProjectChannelDetails from './ProjectChannelDetails.vue'
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
 test('context values have lowercase keys and dotted leaders without row icons', () => {
   const snapshot: SnapshotDto = {
@@ -77,4 +78,56 @@ test('shows no autorun text when autorun is not configured', () => {
   const view = mount(ContextPanel, { props: { snapshot } })
   expect(view.text()).not.toContain('Autorun')
   view.unmount()
+})
+
+test('a running text channel blocks a main agent change like a running general channel', () => {
+  const channel = (id: string, kind: 'general' | 'text' | 'branch', archived = false) =>
+    ({
+      id,
+      projectId: 'project',
+      name: id,
+      agentId: 'agent',
+      workspaceMode: 'main_checkout',
+      kind,
+      branch: null,
+      archived,
+      archivedInto: null,
+      hasMessages: false,
+    }) as ProjectChannelDto
+  const projectChannels = [
+    channel('general', 'general'),
+    channel('plans', 'text'),
+    channel('old', 'text', true),
+    channel('feature', 'branch'),
+  ]
+  const snapshotWith = (running: string[]): SnapshotDto => ({
+    ...(fixture as SnapshotDto),
+    activeProjectId: 'project',
+    channelId: 'general',
+    channels: projectChannels.map((entry) => ({
+      id: entry.id,
+      projectId: 'project',
+      agentId: 'agent',
+      name: entry.name,
+      agent: 'Agent',
+      provider: 'codex',
+      workspaceMode: 'main_checkout',
+      running: running.includes(entry.id),
+      unread: false,
+      pendingApprovals: 0,
+    })),
+  })
+  const generalRunning = (running: string[]) => {
+    const view = mount(ContextPanel, {
+      props: { snapshot: snapshotWith(running), projectChannels },
+      global: { stubs: { ProjectChannelDetails: true } },
+    })
+    const value = view.findComponent(ProjectChannelDetails).props('generalRunning')
+    view.unmount()
+    return value
+  }
+  expect(generalRunning([])).toBe(false)
+  expect(generalRunning(['general'])).toBe(true)
+  expect(generalRunning(['plans'])).toBe(true)
+  expect(generalRunning(['old', 'feature'])).toBe(false)
 })

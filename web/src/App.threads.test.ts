@@ -47,6 +47,7 @@ vi.mock('./bridge/api', async (original) => ({
   getProjectChannels: vi.fn(async () => []),
 }))
 vi.mock('vue-sonner', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() } }))
+import { toast } from 'vue-sonner'
 import App from './App.vue'
 import ChannelHeader from './components/ChannelHeader.vue'
 import Composer from './components/Composer.vue'
@@ -284,29 +285,80 @@ test('Stop in the thread cancels the thread turn, not the channel turn', async (
   expect(mocks.api.cancelTurn).toHaveBeenCalledWith('thread')
 })
 
-test('quoting a thread message appends to the thread draft and leaves the channel draft alone', async () => {
+test('replying to a thread message sets the thread reply and leaves the channel composer alone', async () => {
   open()
   const wrapper = app()
   const reply = (thread.threadHistory as ThreadHistoryDto).messages[1]!
-  wrapper.getComponent(ThreadPanel).vm.$emit('quote', reply)
+  wrapper.getComponent(ThreadPanel).vm.$emit('reply', reply)
   await flushPromises()
-  const draft = wrapper.getComponent(ThreadPanel).props('draft')
-  expect(draft).toContain('> [Message from Agent](#discard-message/thread/reply)')
-  expect(draft).toContain('It keeps the channel clean.')
-  expect(wrapper.getComponent(Composer).props('draft')).toBeUndefined()
+  const panel = wrapper.getComponent(ThreadPanel)
+  expect(panel.props('reply')).toMatchObject({
+    author: 'Agent',
+    source: { channelId: 'thread', messageId: 'reply' },
+  })
+  expect(panel.props('reply')?.excerpt).toContain('It keeps the channel clean.')
+  expect(panel.props('draft')).toBeUndefined()
+  expect(wrapper.getComponent(Composer).props('reply')).toBeUndefined()
+  panel.vm.$emit('send', 'Thanks', [], false)
+  await flushPromises()
+  expect(mocks.api.sendMessage).toHaveBeenCalledWith(
+    'thread',
+    expect.stringMatching(
+      /^> \[Message from Agent\]\(#discard-message\/thread\/reply\)\n>\n> .*\n\nThanks$/s,
+    ),
+    [],
+    false,
+  )
+  expect(wrapper.getComponent(ThreadPanel).props('reply')).toBeUndefined()
 })
 
-test('quoting the anchor links to its parent channel', async () => {
-  open()
+test('the first message of a new thread can be a reply', async () => {
   const wrapper = app()
-  wrapper.getComponent(ThreadPanel).vm.$emit('quote', anchor)
+  wrapper.getComponent(MessageList).vm.$emit('start-thread', plain)
   await flushPromises()
-  expect(wrapper.getComponent(ThreadPanel).props('draft')).toContain(
-    '(#discard-message/channel/answer)',
+  wrapper.getComponent(ThreadPanel).vm.$emit('reply', plain)
+  await flushPromises()
+  expect(wrapper.getComponent(ThreadPanel).props('reply')).toMatchObject({
+    source: { messageId: 'plain' },
+  })
+  wrapper.getComponent(ThreadPanel).vm.$emit('send', 'Why?', [], false)
+  await flushPromises()
+  expect(mocks.api.startThread).toHaveBeenCalledWith(
+    'channel',
+    'plain',
+    expect.stringMatching(/\n\nWhy\?$/),
+    [],
+    false,
   )
 })
 
-test('a quote link to a thread message scrolls the thread panel', async () => {
+test('a failed thread send keeps the reply, and Cancel reply clears it', async () => {
+  open()
+  const wrapper = app()
+  wrapper
+    .getComponent(ThreadPanel)
+    .vm.$emit('reply', (thread.threadHistory as ThreadHistoryDto).messages[1])
+  await flushPromises()
+  mocks.api.sendMessage.mockRejectedValueOnce(new Error('offline'))
+  wrapper.getComponent(ThreadPanel).vm.$emit('send', 'Thanks', [], false)
+  await flushPromises()
+  expect(wrapper.getComponent(ThreadPanel).props('reply')).toBeDefined()
+  wrapper.getComponent(ThreadPanel).vm.$emit('cancel-reply')
+  await flushPromises()
+  expect(wrapper.getComponent(ThreadPanel).props('reply')).toBeUndefined()
+})
+
+test('replying to the anchor links to its parent channel', async () => {
+  open()
+  const wrapper = app()
+  wrapper.getComponent(ThreadPanel).vm.$emit('reply', anchor)
+  await flushPromises()
+  expect(wrapper.getComponent(ThreadPanel).props('reply')).toMatchObject({
+    source: { channelId: 'channel', messageId: 'answer' },
+  })
+})
+
+test('a reply link to a thread message scrolls the thread panel', async () => {
   open()
   const wrapper = app()
   const link = document.createElement('a')
@@ -315,6 +367,19 @@ test('a quote link to a thread message scrolls the thread panel', async () => {
   await link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
   await flushPromises()
   expect(wrapper.getComponent(ThreadPanel).props('jumpTo')).toMatchObject({ messageId: 'ask' })
+  expect(toast.error).not.toHaveBeenCalled()
+})
+
+test('a reply link to a thread message that is gone shows a toast', async () => {
+  open()
+  const wrapper = app()
+  const link = document.createElement('a')
+  link.href = '#discard-message/thread/gone'
+  wrapper.getComponent(ThreadPanel).element.parentElement!.append(link)
+  await link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+  await flushPromises()
+  expect(toast.error).toHaveBeenCalledWith('Original message is not available.')
+  expect(wrapper.getComponent(ThreadPanel).props('jumpTo')).toBeUndefined()
 })
 
 test('a thread row in the channel bar selects its thread, and Leave leaves it', async () => {
@@ -382,17 +447,17 @@ test('Stop in a sub-agent thread cancels that thread and not the channel turn', 
   expect(mocks.api.cancelTurn).toHaveBeenCalledWith('find-callers')
 })
 
-test('a quote from a sub-agent thread goes to the channel composer, which stays on', async () => {
+test('a reply from a sub-agent thread goes to the channel composer, which stays on', async () => {
   openSub()
   const wrapper = app()
   const panel = wrapper.getComponent(ThreadPanel)
-  expect(panel.props('quoteDisabled')).toBe(false)
-  panel.vm.$emit('quote', subHistory.messages[0])
+  expect(panel.props('replyDisabled')).toBe(false)
+  panel.vm.$emit('reply', subHistory.messages[0])
   await flushPromises()
-  expect(wrapper.getComponent(Composer).props('draft')).toContain(
-    '(#discard-message/find-callers/brief)',
-  )
-  expect(wrapper.getComponent(ThreadPanel).props('draft')).toBeUndefined()
+  expect(wrapper.getComponent(Composer).props('reply')).toMatchObject({
+    source: { channelId: 'find-callers', messageId: 'brief' },
+  })
+  expect(wrapper.getComponent(ThreadPanel).props('reply')).toBeUndefined()
 })
 
 test('the agent request cards get the requests of the store and decide through it', async () => {

@@ -62,7 +62,7 @@ pub fn eligibility(store: &Store, channel: &ChannelId, agent: &AgentConfig) -> R
     let conversation = store.load_channel(channel).map_err(|_| NotProjectChannel)?;
     if conversation.project_id.is_none() { return Err(NotProjectChannel); }
     let metadata = store.project_channel_metadata(channel).map_err(|_| NotProjectChannel)?;
-    if metadata.as_ref().is_some_and(|m| matches!(m.kind, ProjectChannelKind::General | ProjectChannelKind::ArchivedLegacy)) { return Err(NotProjectChannel); }
+    if metadata.as_ref().is_some_and(|m| matches!(m.kind, ProjectChannelKind::General | ProjectChannelKind::Text | ProjectChannelKind::ArchivedLegacy)) { return Err(NotProjectChannel); }
     let record = store.worktree_for(channel).map_err(|_| NoWorktree)?;
     let branch_channel = metadata.as_ref().is_some_and(|m| m.kind == ProjectChannelKind::Branch);
     if !branch_channel && record.is_none() { return Err(NotProjectChannel); }
@@ -263,6 +263,8 @@ mod tests {
         assert_eq!(eligibility(&r.store, &direct.id, &r.agent), Err(ReadOnlyReason::NotProjectChannel));
         let general = r.store.ensure_project_general_channel(channel.project_id.as_ref().unwrap(), &channel.agent_id).unwrap();
         assert_eq!(eligibility(&r.store, &general.id, &r.agent), Err(ReadOnlyReason::NotProjectChannel));
+        let text = r.store.create_project_text_channel(channel.project_id.as_ref().unwrap(), "plans").unwrap();
+        assert_eq!(eligibility(&r.store, &text.id, &r.agent), Err(ReadOnlyReason::NotProjectChannel));
         let legacy = Channel { id: ChannelId::new(), name: "legacy".into(), ..channel.clone() };
         r.store.insert_channel(&legacy).unwrap();
         assert_eq!(eligibility(&r.store, &legacy.id, &r.agent), Err(ReadOnlyReason::NotProjectChannel));

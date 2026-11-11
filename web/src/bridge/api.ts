@@ -112,6 +112,8 @@ export const createChannel = (name: string, workspaceMode: string, sourceChannel
   invoke<string>('create_channel', { name, workspaceMode, sourceChannel })
 export const switchChannel = (channelId: string) => invoke<void>('switch_channel', { channelId })
 export const openBranchChannel = (key: string) => invoke<string>('open_branch_channel', { key })
+export const createTextChannel = (projectId: string, name: string) =>
+  invoke<string>('create_text_channel', { projectId, name })
 export const getProjectChannels = (projectId: string) =>
   invoke<ProjectChannelDto[]>('get_project_channels', { projectId })
 export const getProjectMembers = (projectId: string) =>
@@ -146,7 +148,11 @@ export interface ProjectEntry {
   path: string
   avatar?: string | null
   mainAgentId?: string | null
+  /** The channel list shows its Archived section. Off when absent. */
+  showArchived?: boolean
 }
+export const setProjectShowArchived = (projectId: string, show: boolean) =>
+  invoke<void>('set_project_show_archived', { projectId, show })
 export const updateProjectProfile = (projectId: string, name: string, avatar: string | null) =>
   invoke<void>('update_project_profile', { projectId, name, avatar })
 export const getProjects = () => invoke<ProjectEntry[]>('get_projects')

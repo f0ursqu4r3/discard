@@ -251,11 +251,12 @@ impl Channels {
             let worktree = store.worktree_for(&channel.id).map_err(|e| e.to_string())?
                 .map(|record| super::dto::ChannelWorktreeDto { path: record.path, branch: record.branch });
             let threads = super::threads::stored_links(&store, &channel.id, |id| self.core.last_read(id))?;
+            let has_messages = store.channel_has_messages(&channel.id).map_err(|e| e.to_string())?;
             Ok(super::dto::ProjectChannelDto {
-                worktree,
+                worktree, has_messages,
                 id: channel.id.0, project_id: project.0.clone(), name: channel.name,
                 agent_id: channel.agent_id.0, workspace_mode: channel.workspace_mode.as_str().into(),
-                kind: match metadata.kind { discard_core::model::ProjectChannelKind::General => "general", discard_core::model::ProjectChannelKind::Branch => "branch", discard_core::model::ProjectChannelKind::ArchivedLegacy => "archived_legacy", discard_core::model::ProjectChannelKind::Legacy => "legacy" }.into(),
+                kind: metadata.kind.as_str().into(),
                 repository: metadata.repository, branch: metadata.branch, archived, archived_into: metadata.archived_into.map(|id| id.0),
                 threads,
             })
@@ -365,13 +366,15 @@ impl Channels {
         }).collect();
         let main_agent_id = store.project_main_agent(project).map_err(|e| e.to_string())?.map(|id| id.0);
         let threads = super::threads::stored_links(&store, &channel.id, |id| self.core.last_read(id))?;
+        let has_messages = store.channel_has_messages(&channel.id).map_err(|e| e.to_string())?;
         Ok(super::dto::ChannelDetailsDto {
             channel: super::dto::ProjectChannelDto {
+                has_messages,
                 worktree: store.worktree_for(&channel.id).map_err(|e| e.to_string())?
                     .map(|record| super::dto::ChannelWorktreeDto { path: record.path, branch: record.branch }),
                 id: channel.id.0.clone(), project_id: project.0.clone(), name: channel.name,
                 agent_id: channel.agent_id.0, workspace_mode: channel.workspace_mode.as_str().into(),
-                kind: match metadata.kind { discard_core::model::ProjectChannelKind::General => "general", discard_core::model::ProjectChannelKind::Branch => "branch", discard_core::model::ProjectChannelKind::ArchivedLegacy => "archived_legacy", discard_core::model::ProjectChannelKind::Legacy => "legacy" }.into(),
+                kind: metadata.kind.as_str().into(),
                 repository: metadata.repository, branch: metadata.branch, archived, archived_into: metadata.archived_into.map(|id| id.0),
                 threads,
             },
@@ -385,33 +388,55 @@ impl Channels {
     }
     pub fn change_project_main_agent(&self, project: &ProjectId, agent: &discard_core::model::AgentId) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        let channel = {
+        // The active general channel and every active text channel follow the project main agent.
+        let channels = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            let mut channels = Vec::new();
             let mut general = None;
             for (candidate, archived) in store.all_channels_for_project(project).map_err(|e| e.to_string())? {
-                if !archived && store.project_channel_metadata(&candidate.id).map_err(|e| e.to_string())?.is_some_and(|m| m.kind == discard_core::model::ProjectChannelKind::General) { general = Some(candidate); break; }
+                if archived { continue; }
+                let kind = store.project_channel_metadata(&candidate.id).map_err(|e| e.to_string())?.map(|m| m.kind);
+                if kind == Some(discard_core::model::ProjectChannelKind::General) { general = Some(candidate.id.clone()); }
+                if matches!(kind, Some(discard_core::model::ProjectChannelKind::General | discard_core::model::ProjectChannelKind::Text)) { channels.push(candidate); }
             }
-            if let Some(general) = general { general }
-            else { store.ensure_project_general_channel(project, agent).map_err(|e| e.to_string())? }
+            let general = match general {
+                Some(general) => general,
+                None => { let created = store.ensure_project_general_channel(project, agent).map_err(|e| e.to_string())?; let id = created.id.clone(); channels.insert(0, created); id }
+            };
+            (channels, general)
         };
-        self.core.begin_channel_change(&channel.id.0)?;
+        let (channels, general) = channels;
+        let mut guarded: Vec<String> = channels.iter().map(|channel| channel.id.0.clone()).collect();
+        guarded.sort();
+        let mut begun: Vec<String> = Vec::new();
+        for id in &guarded {
+            if let Err(error) = self.core.begin_channel_change(id) {
+                for id in begun { self.core.end_channel_change(&id); }
+                return Err(error);
+            }
+            begun.push(id.clone());
+        }
         let result = (|| {
             self.store.lock().unwrap_or_else(|e| e.into_inner()).set_project_main_agent(project, agent).map_err(|e| e.to_string())?;
-            let mut updated_identity = channel.clone();
-            updated_identity.agent_id = agent.clone();
-            if self.core.has_channel(&updated_identity.id.0) {
-                self.core.invalidate_idle_channel(&updated_identity)?;
-            }
-            let updated = self.store.lock().unwrap_or_else(|e| e.into_inner()).load_channel(&updated_identity.id).map_err(|e| e.to_string())?;
-            if self.core.has_channel(&updated.id.0) {
-                if let Err(error) = self.start_mode(&updated, true) {
-                    self.core.append_channel_notice(&updated.id.0, format!("The project main agent changed, but its channel session could not restart: {error}. Select this channel again to retry."));
-                    return Err(error);
+            let mut failure = None;
+            for channel in &channels {
+                let mut updated_identity = channel.clone();
+                updated_identity.agent_id = agent.clone();
+                if self.core.has_channel(&updated_identity.id.0) {
+                    self.core.invalidate_idle_channel(&updated_identity)?;
                 }
-            } else { self.start(&updated)?; }
-            Ok(())
+                let updated = self.store.lock().unwrap_or_else(|e| e.into_inner()).load_channel(&updated_identity.id).map_err(|e| e.to_string())?;
+                let restarted = if self.core.has_channel(&updated.id.0) {
+                    self.start_mode(&updated, true).inspect_err(|error| {
+                        self.core.append_channel_notice(&updated.id.0, format!("The project main agent changed, but its channel session could not restart: {error}. Select this channel again to retry."));
+                    })
+                } else if channel.id == general { self.start(&updated) }
+                else { Ok(()) };
+                if let Err(error) = restarted { failure.get_or_insert(error); }
+            }
+            failure.map_or(Ok(()), Err)
         })();
-        self.core.end_channel_change(&channel.id.0);
+        for id in begun { self.core.end_channel_change(&id); }
         result
     }
     fn select_inner(&self, id: &str) -> Result<(), String> { self.select_inner_mode(id, false) }
@@ -553,6 +578,16 @@ impl Channels {
         if self.core.current_project().id.0.is_empty() { return Err("Select a project first.".into()); }
         let _ = (name, mode);
         Err("Open a Git branch to start another project channel.".into())
+    }
+    /// Create a text channel for the current project, start it, and select it. Returns the channel ID.
+    pub fn create_text_channel(&self, project: &ProjectId, name: &str) -> Result<String, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        self.core.can_switch()?;
+        if self.core.current_project().id != *project { return Err("Open this project before you add a channel.".into()); }
+        let channel = self.store.lock().unwrap_or_else(|e| e.into_inner()).create_project_text_channel(project, name).map_err(|e| e.to_string())?;
+        self.start(&channel)?;
+        self.select_inner(&channel.id.0)?;
+        Ok(channel.id.0)
     }
     fn create_inner(&self, name: String, row: &discard_core::branch_tree::TreeRow, repository: &str, repository_path: &std::path::Path) -> Result<String, String> {
         let project = self.core.current_project().id;
@@ -1344,6 +1379,75 @@ mod tests {
         assert_eq!(next.session_id, builder.session_id);
         let reopened_service = Channels::new(core(&next.channel, &project_dir), reopened, Handle::current(), launcher());
         assert_eq!(reopened_service.list_project_channels(&next.project.id).unwrap()[0].id, builder.channel.id.0);
+    }
+
+    #[tokio::test]
+    async fn text_channels_are_created_selected_and_listed_with_their_kind_and_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let project = store.import_project_folder(dir.path()).unwrap();
+        let agent = configured_agent(&store);
+        store.set_project_main_agent(&project.id, &agent).unwrap();
+        let general = store.ensure_project_general_channel(&project.id, &agent).unwrap();
+        let store = Arc::new(Mutex::new(store));
+        let core = core(&general, dir.path());
+        let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
+        let id = service.create_text_channel(&project.id, "  Release Notes ").unwrap();
+        assert_eq!(core.active_channel_id(), id, "the new channel opens");
+        assert!(core.has_channel(&id));
+        let channels = service.list_project_channels(&project.id).unwrap();
+        let text = channels.iter().find(|channel| channel.id == id).unwrap();
+        assert_eq!((text.kind.as_str(), text.name.as_str(), text.workspace_mode.as_str(), text.agent_id.as_str()), ("text", "release-notes", "main_checkout", agent.0.as_str()));
+        assert!(!text.archived && !text.has_messages && text.branch.is_none() && text.worktree.is_none());
+        assert_eq!(channels.iter().find(|channel| channel.id == general.id.0).unwrap().kind, "general");
+        assert_eq!(service.create_text_channel(&project.id, "RELEASE-notes").unwrap_err(), "A channel with this name already exists.");
+        assert_eq!(service.create_text_channel(&project.id, "General").unwrap_err(), "A channel with this name already exists.");
+        assert!(service.create_text_channel(&project.id, "bad/name").unwrap_err().starts_with("Use letters"));
+        assert!(service.create_text_channel(&ProjectId::new(), "other").unwrap_err().contains("Open this project"));
+        assert_eq!(service.list_project_channels(&project.id).unwrap().len(), 2, "a refused name creates no channel");
+        // A saved message makes the channel show in Archived after its branch goes. A channel with none does not.
+        store.lock().unwrap().insert_message(&discard_core::model::Message { id: MessageId::new(), channel_id: ChannelId(id.clone()), role: discard_core::model::Role::User, blocks: vec![discard_core::model::Block::Markdown { text: "question".into() }] }).unwrap();
+        let details = service.channel_details(&project.id, &ChannelId(id.clone())).unwrap();
+        assert_eq!((details.channel.kind.as_str(), details.channel.has_messages), ("text", true));
+        let channels = service.list_project_channels(&project.id).unwrap();
+        assert!(channels.iter().find(|channel| channel.id == id).unwrap().has_messages);
+        assert!(!channels.iter().find(|channel| channel.id == general.id.0).unwrap().has_messages);
+    }
+
+    #[tokio::test]
+    async fn changing_the_main_agent_restarts_a_loaded_text_channel_with_the_new_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let project = store.import_project_folder(dir.path()).unwrap();
+        let old_agent = configured_agent(&store);
+        let new_agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "New main".into(), provider: "claude".into(), model: Some("new-model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        store.set_project_main_agent(&project.id, &old_agent).unwrap();
+        let general = store.ensure_project_general_channel(&project.id, &old_agent).unwrap();
+        let store = Arc::new(Mutex::new(store));
+        let core = core(&general, dir.path());
+        let receivers = Arc::new(Mutex::new(Vec::new()));
+        let kept: Launcher = {
+            let receivers = receivers.clone();
+            Arc::new(move |channel| {
+                let (commands, receiver) = mpsc::unbounded_channel(); receivers.lock().unwrap().push(receiver);
+                let (_, updates) = mpsc::unbounded_channel();
+                Ok((CoreInit { state: UiState::new(channel.id.clone(), vec![]), commands, project: "Project".into(), channel: channel.name.clone(), agent: "Builder".into(), provider: "codex".into() }, updates))
+            })
+        };
+        let service = Channels::new(core.clone(), store.clone(), Handle::current(), kept);
+        let id = service.create_text_channel(&project.id, "plans").unwrap();
+        let unloaded = store.lock().unwrap().create_project_text_channel(&project.id, "unloaded").unwrap();
+        service.change_project_main_agent(&project.id, &new_agent).unwrap();
+        assert_eq!(store.lock().unwrap().load_channel(&ChannelId(id.clone())).unwrap().agent_id, new_agent);
+        assert_eq!(store.lock().unwrap().load_channel(&unloaded.id).unwrap().agent_id, new_agent);
+        assert_eq!(store.lock().unwrap().load_channel(&general.id).unwrap().agent_id, new_agent);
+        assert_eq!(core.active_channel_id(), id);
+        assert_eq!(core.active_context().0, new_agent, "the open text channel runs the new agent");
+        assert!(!core.has_channel(&unloaded.id.0), "a text channel that is not loaded starts when it opens");
+        assert!(core.send_to(Some(&id), "new agent is ready".into()).is_ok());
+        // The text channel now runs a response. The change waits, as it does for a general channel.
+        assert!(service.change_project_main_agent(&project.id, &old_agent).unwrap_err().contains("Finish this channel's response"));
+        assert_eq!(store.lock().unwrap().project_main_agent(&project.id).unwrap(), Some(new_agent));
     }
 
     #[tokio::test]

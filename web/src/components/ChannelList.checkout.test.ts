@@ -28,6 +28,7 @@ const general: ProjectChannelDto = {
   branch: null,
   archived: false,
   archivedInto: null,
+  hasMessages: false,
 }
 const props = {
   projectId: 'project',

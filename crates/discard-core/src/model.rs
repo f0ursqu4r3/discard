@@ -28,6 +28,8 @@ text_id!(MessageId);
 #[serde(rename_all = "snake_case")]
 pub enum ProjectChannelKind {
     General,
+    /// A project channel with no branch. `#general` is the first text channel but has its own kind.
+    Text,
     Branch,
     ArchivedLegacy,
     /// Active project channel created by the retained workspace bootstrap path.
@@ -38,6 +40,7 @@ impl ProjectChannelKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::General => "general",
+            Self::Text => "text",
             Self::Branch => "branch",
             Self::ArchivedLegacy => "archived_legacy",
             Self::Legacy => "legacy",
@@ -46,6 +49,7 @@ impl ProjectChannelKind {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "general" => Some(Self::General),
+            "text" => Some(Self::Text),
             "branch" => Some(Self::Branch),
             "archived_legacy" => Some(Self::ArchivedLegacy),
             "legacy" => Some(Self::Legacy),

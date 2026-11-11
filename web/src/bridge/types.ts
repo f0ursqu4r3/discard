@@ -191,10 +191,12 @@ export interface ProjectChannelDto {
   name: string
   agentId: string
   workspaceMode: string
-  kind: 'general' | 'branch' | 'archived_legacy' | 'legacy'
+  kind: 'general' | 'text' | 'branch' | 'archived_legacy' | 'legacy'
   branch: string | null
   archived: boolean
   archivedInto: string | null
+  /** The channel, or a thread of the channel, has a saved message. */
+  hasMessages: boolean
   /** Followed threads of this channel, from storage. */
   threads?: ThreadLinkDto[]
 }

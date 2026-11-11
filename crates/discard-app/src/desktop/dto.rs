@@ -160,6 +160,8 @@ pub struct ProjectChannelDto {
     pub branch: Option<String>,
     pub archived: bool,
     pub archived_into: Option<String>,
+    /// The channel, or a thread of the channel, has a saved message.
+    pub has_messages: bool,
     /// Followed threads of this channel, from storage.
     pub threads: Vec<ThreadLinkDto>,
 }

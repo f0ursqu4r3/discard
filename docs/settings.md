@@ -203,12 +203,23 @@ times; the bridge exposes them as Unix milliseconds. The UI uses the device's ti
 for timestamps and date dividers, including daylight saving time. Messages without a valid saved time
 leave the timestamp blank.
 
-Saved messages show Copy, Quote, and a thread action on hover or keyboard focus.
+Saved messages show Copy, Reply, and a thread action on hover or keyboard focus.
 The icon toolbar aligns with the message's top-right corner. Tooltips appear after 500 ms.
-Quote appends editable Markdown and a link to the source message to the current draft. It preserves
-existing draft text and attachments, focuses the composer, and does not send. Source links open the
-original conversation and highlight the message. Quote is also available in the message context menu.
-It is disabled when the composer is unavailable or the message has no text.
+Text in messages, code blocks, diffs, and tool calls can be selected. The toolbar cannot be selected.
+
+**Reply to message** sets a pending reply for the composer. It does not change the draft. It focuses
+the composer. The reply shows as a chip above the input: "Replying to" the author, a one-line
+excerpt, and **Cancel reply**. Escape in the input cancels the reply. Select the chip to open the
+source message. A composer has one pending reply. A new reply replaces it. A failed send keeps the
+reply. Reply is also in the message context menu. It is disabled when the composer is unavailable or
+the message has no text.
+
+Send joins the reply prefix and the typed text. The prefix is a Markdown quote of the source text
+with a link to the source message. The agent receives the full source text. The transcript hides the
+prefix and shows a reply row above the message: a reply icon, the source author, and an excerpt.
+Select the row to open the source message in its conversation and highlight it. A source in the open
+thread scrolls the thread panel. When the source is gone, a toast says "Original message is not
+available." The row stays.
 
 A thread is a side conversation about one message. The thread action is **Start thread** on a message
 with no thread. It opens the thread panel with the message and an empty composer. No thread exists
@@ -224,7 +235,7 @@ the thread name and its channel, **Follow** or **Leave**, and a close button. Th
 at the top, then the thread messages. They use the same rows as the channel, so live replies, approvals,
 and tool calls work the same way. Approvals and Stop act on the thread. A note says that threads
 are read-only. The composer has the same attachments and mentions as the channel composer. A
-quote of a thread message goes to the thread composer. The thread is marked read when its panel
+reply to a thread message goes to the thread composer. The thread is marked read when its panel
 shows the newest message.
 
 The thread composer has an **Also post to #channel** box. It is off by default and applies to one
@@ -258,7 +269,7 @@ parent turn runs, the thread has no anchor, so no anchor message shows. After th
 is the saved response. The first message is the brief. It shows the parent agent as its author, not
 **You**. The transcript is live while the sub-agent runs. **Stop** in the thread stops that
 sub-agent only. The parent agent gets "cancelled" for that task and continues. **Post to channel**,
-Copy, Quote, **Follow**, and **Leave** work. A quote from a sub-agent thread goes to the channel
+Copy, Reply, **Follow**, and **Leave** work. A reply from a sub-agent thread goes to the channel
 composer. The composer is on. While the sub-agent works, it reads **Steer this sub-agent**: a message stops the
 current turn, keeps the partial work, and starts a new turn with your message. The task does not end,
 and the parent agent gets the final message of the last turn. After the task ended, the composer reads
@@ -349,6 +360,39 @@ Discard writes redacted JSON lines to stderr and `$DISCARD_HOME/logs/discard.log
 ### Advanced page
 
 Reset settings saves a backup at `settings.toml.bak`. Rebuild memory index reads the memory files again. Clear logs removes old log files and empties the active file. Each action asks for confirmation.
+
+## The channel list
+
+The channel list in the main window has these sections:
+
+- **Text channels** holds `#general` and the text channels of the project. `#general` comes first.
+  Text channels follow in the order you created them. A text channel has no branch and works in the
+  project folder. It uses the project main agent. When the main agent changes, each active text
+  channel changes with it.
+- **Branch channels** holds one row for each Git branch of the project.
+- **Archived** holds archived channels and saved history. It is hidden by default.
+
+Use the **+** button of Text channels, or **New text channel** in the project menu, to create a text
+channel. Enter a name. The dialog shows the saved name as `#name`. Discard saves the name in lower
+case. It joins words with hyphens. A name holds 1 to 50 letters, numbers, hyphens, and underscores.
+A name cannot match another active text channel or `general`. The new channel opens at once.
+
+**Mute Channel**, **Rename Channel…**, and **Archive Channel…** show in the row menu of a text
+channel. They are disabled and marked Soon. `#general` has no rename item. **Archive Channel** in the
+menu bar archives the open text channel. An archived text channel shows in Archived.
+
+Archived holds a channel when one of these is true:
+
+- The channel is archived.
+- The channel is saved history from an older version.
+- The channel belongs to a branch that Git no longer lists, and the channel has a saved message.
+
+A deleted branch whose channel has no message never shows in Archived. Discard keeps its record. If
+the branch comes back, Discard opens the same channel again.
+
+To show Archived, open **Project settings**. In the **Channel list** card, turn on **Show archived
+channels**. The setting belongs to one project. Archived stays hidden when the setting is off, even
+when the open channel is in it. Archived also stays hidden when it has no channel.
 
 ## Context menus and archive
 

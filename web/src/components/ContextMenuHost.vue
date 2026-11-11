@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import type { ContextTargetDto, MenuEntryDto } from '../bridge/types'
 import { contextMenu, pluginMenuAction, runAction } from '../bridge/api'
 import type { PlannedMenuEntry } from './project-menu'
@@ -13,25 +13,29 @@ import {
 } from './ui/context-menu'
 const props = defineProps<{
   target: ContextTargetDto | null
-  quoteEnabled?: boolean
+  replyEnabled?: boolean
   /** The thread item of a message menu. Left out where a message has no thread action. */
   threadAction?: { label: string; disabled: boolean }
   /** The "Post to channel" item of a thread message. `posted` shows the done state. */
   postAction?: { posted: boolean; disabled: boolean }
   plannedEntries?: PlannedMenuEntry[]
 }>()
-const emit = defineEmits<{ quote: []; thread: []; post: [] }>()
-const quoted = ref(false)
-function quote() {
-  if (!props.quoteEnabled) return
-  quoted.value = true
+const emit = defineEmits<{ reply: []; thread: []; post: [] }>()
+// Message text, code, diffs, and tool calls can be selected. Other targets keep the default.
+const selectable = computed(() =>
+  ['message', 'code_block', 'diff_block', 'tool_call'].includes(props.target?.type ?? ''),
+)
+const replying = ref(false)
+function reply() {
+  if (!props.replyEnabled) return
+  replying.value = true
 }
 function closeAutoFocus(event: Event) {
-  if (!quoted.value) return
+  if (!replying.value) return
   event.preventDefault()
-  quoted.value = false
+  replying.value = false
   // Wait for the menu's focus trap to close before focusing the composer.
-  if (props.quoteEnabled) emit('quote')
+  if (props.replyEnabled) emit('reply')
 }
 const entries = ref<MenuEntryDto[]>([])
 function load() {
@@ -51,7 +55,7 @@ async function select(entry: MenuEntryDto) {
 </script>
 <template>
   <ContextMenu v-if="target">
-    <ContextMenuTrigger as-child>
+    <ContextMenuTrigger as-child :class="selectable ? 'select-text' : undefined">
       <div @contextmenu.stop="load"><slot /></div>
     </ContextMenuTrigger>
     <ContextMenuContent @close-auto-focus="closeAutoFocus">
@@ -66,11 +70,11 @@ async function select(entry: MenuEntryDto) {
         </ContextMenuItem>
       </template>
       <ContextMenuItem
-        v-if="target.type === 'message' && quoteEnabled !== undefined"
-        :disabled="!quoteEnabled"
-        @select="quote"
+        v-if="target.type === 'message' && replyEnabled !== undefined"
+        :disabled="!replyEnabled"
+        @select="reply"
       >
-        Quote
+        Reply
       </ContextMenuItem>
       <ContextMenuItem
         v-if="target.type === 'message' && threadAction"

@@ -34,7 +34,13 @@ import {
   type ProjectEntry,
   type HistoryMatch,
 } from './bridge/api'
-import { appendQuote, quoteMessage, parseMessageSource } from './components/quote'
+import {
+  createReply,
+  joinReply,
+  parseMessageSource,
+  type MessageSource,
+  type PendingReply,
+} from './components/reply'
 import type { AttachmentDto, MessageDto, ProjectChannelDto } from './bridge/types'
 import ChannelList from './components/ChannelList.vue'
 import ChannelHeader from './components/ChannelHeader.vue'
@@ -186,6 +192,8 @@ watch(
 useWebShortcuts()
 const composer = ref<InstanceType<typeof Composer> | null>(null)
 const drafts = reactive<Record<string, string>>({})
+// The reply that waits for each composer. It uses the keys of `drafts`.
+const replies = reactive<Record<string, PendingReply>>({})
 const attachmentDrafts = reactive<Record<string, import('./bridge/types').AttachmentDto[]>>({})
 const transcriptPositions = reactive<Record<string, TranscriptPosition>>({})
 const page = ref<WorkspacePage>('conversation')
@@ -307,7 +315,8 @@ const threadPanelProps = computed(() => {
     agentAvatar: open ? (agentAvatars.value[open.agentId] ?? null) : null,
     composerDisabled: threadStartDisabled.value,
     busy: switching.value || sending.value,
-    quoteDisabled: threadQuoteDisabled.value,
+    replyDisabled: threadReplyDisabled.value,
+    reply: replies[threadKey.value],
     draft: drafts[threadKey.value],
     attachments: attachmentDrafts[threadKey.value] ?? [],
     jumpTo: threadJump.value ?? undefined,
@@ -538,22 +547,31 @@ async function searchHistory(query: string) {
     toast.error(String(error))
   }
 }
-async function selectHistoryMatch(match: Pick<HistoryMatch, 'channelId' | 'messageId'>) {
+const missingSourceNotice = 'Original message is not available.'
+async function selectHistoryMatch(
+  match: Pick<HistoryMatch, 'channelId' | 'messageId'>,
+  missing?: string,
+) {
   if (switching.value) return
   switching.value = true
   try {
     if (store.snapshot?.channelId !== match.channelId) await switchChannel(match.channelId)
     await store.refresh()
     await nextTick()
-    messageJump.value = {
-      channelId: match.channelId,
-      messageId: match.messageId,
-      request: ++jumpRequest,
-    }
+    // A reply link can point to a message that is gone. Open the channel, skip the jump, and say so.
+    const found = !missing || store.history.some((item) => item.id === match.messageId)
+    if (found)
+      messageJump.value = {
+        channelId: match.channelId,
+        messageId: match.messageId,
+        request: ++jumpRequest,
+      }
     navigate('conversation')
     if (!isWide.value) contextOpen.value = false
+    if (!found && missing) toast.error(missing)
   } catch (error) {
-    toast.error('Could not open message', { description: String(error) })
+    if (missing) toast.error(missing, { description: String(error) })
+    else toast.error('Could not open message', { description: String(error) })
   } finally {
     switching.value = false
   }
@@ -604,7 +622,7 @@ async function savePanels() {
 function resizeFinished(dragging: boolean) {
   if (!dragging) void savePanels()
 }
-const quoteDisabled = computed(
+const replyDisabled = computed(
   () =>
     !store.snapshot?.channelId ||
     store.snapshot.composerDisabled ||
@@ -614,40 +632,55 @@ const quoteDisabled = computed(
     store.snapshot.archiveBusy ||
     !!store.snapshot.banners.archive,
 )
-function quote(message: MessageDto) {
+function reply(message: MessageDto) {
   const snapshot = store.snapshot
-  if (!snapshot || quoteDisabled.value) return
+  if (!snapshot || replyDisabled.value) return
   const source = store.history.find((item) => item.id === message.id)
   if (!source) return
-  const quoted = quoteMessage(source, snapshot.channelId, snapshot.agent)
-  if (!quoted) return
-  drafts[snapshot.channelId] = appendQuote(drafts[snapshot.channelId] ?? '', quoted)
+  const pending = createReply(source, snapshot.channelId, snapshot.agent)
+  if (!pending) return
+  replies[snapshot.channelId] = pending
   void composer.value?.focusEnd?.()
+}
+function cancelReply(key: string) {
+  delete replies[key]
+}
+function jumpToSource(source: MessageSource) {
+  const thread = store.snapshot?.openThread
+  if (source.channelId === thread?.channelId) {
+    // A reply to a thread message stays in the thread panel.
+    const history = store.threadHistory
+    if (history && !history.messages.some((item) => item.id === source.messageId)) {
+      toast.error(missingSourceNotice)
+      return
+    }
+    threadJump.value = { messageId: source.messageId, request: ++jumpRequest }
+    return
+  }
+  conversationTab.value = 'conversation'
+  void selectHistoryMatch(source, missingSourceNotice)
 }
 function openMessageSource(event: MouseEvent) {
   const anchor = event.target instanceof Element ? event.target.closest('a') : null
   const source = parseMessageSource(anchor?.getAttribute('href') ?? '')
   if (!source) return
   event.preventDefault()
-  if (source.channelId === store.snapshot?.openThread?.channelId) {
-    // A quote of a thread message stays in the thread panel.
-    threadJump.value = { messageId: source.messageId, request: ++jumpRequest }
-    return
-  }
-  conversationTab.value = 'conversation'
-  void selectHistoryMatch(source)
+  jumpToSource(source)
 }
 async function send(text: string, attachments: import('./bridge/types').AttachmentDto[] = []) {
   const id = store.snapshot?.channelId
   if (!id || switching.value || sending.value) return
   sending.value = true
+  const pending = replies[id]
   try {
     await sendMessage(
       id,
-      text,
+      pending ? joinReply(pending.prefix, text) : text,
       attachments.map((file) => file.id),
     )
+    // `text` is the typed text. The draft never holds the reply prefix.
     if (drafts[id]?.trim() === text) drafts[id] = ''
+    if (replies[id] === pending) delete replies[id]
     const sentIds = new Set(attachments.map((file) => file.id))
     attachmentDrafts[id] = (attachmentDrafts[id] ?? []).filter((file) => !sentIds.has(file.id))
   } catch (error) {
@@ -659,10 +692,10 @@ async function send(text: string, attachments: import('./bridge/types').Attachme
 const threadStartDisabled = computed(
   () => !store.snapshot?.channelId || store.snapshot.composerDisabled || store.snapshot.archived,
 )
-const threadQuoteDisabled = computed(() => {
+const threadReplyDisabled = computed(() => {
   const open = openThreadView.value
-  // A sub-agent thread has no composer to take a quote. Its quote goes to the channel composer.
-  if (open?.kind === 'sub_agent') return quoteDisabled.value
+  // A sub-agent thread has no composer to take a reply. Its reply goes to the channel composer.
+  if (open?.kind === 'sub_agent') return replyDisabled.value
   return (
     !threadActive.value ||
     (open ? open.composerDisabled : threadStartDisabled.value) ||
@@ -689,6 +722,7 @@ async function openThreadById(id: string) {
 async function closeThreadPanel(keepDraft = false) {
   if (!keepDraft && draftThread.value) {
     delete drafts[threadKey.value]
+    delete replies[threadKey.value]
     delete attachmentDrafts[threadKey.value]
     draftThread.value = null
   }
@@ -731,15 +765,19 @@ async function sendThread(text: string, attachments: AttachmentDto[], alsoPost: 
   const key = threadKey.value
   if (!draft && !open) return
   sending.value = true
+  const pending = replies[key]
   try {
     const ids = attachments.map((file) => file.id)
+    const body = pending ? joinReply(pending.prefix, text) : text
     if (draft) {
       // No thread exists before this call. It creates the thread and opens it.
-      await startThread(draft.parentChannelId, draft.anchor.id, text, ids, alsoPost)
+      await startThread(draft.parentChannelId, draft.anchor.id, body, ids, alsoPost)
       await store.refresh()
       if (draftThread.value === draft) draftThread.value = null
-    } else if (open) await sendMessage(open.channelId, text, ids, alsoPost)
+    } else if (open) await sendMessage(open.channelId, body, ids, alsoPost)
+    // `text` is the typed text. The draft never holds the reply prefix.
     if (drafts[key]?.trim() === text) drafts[key] = ''
+    if (replies[key] === pending) delete replies[key]
     const sentIds = new Set(attachments.map((file) => file.id))
     attachmentDrafts[key] = (attachmentDrafts[key] ?? []).filter((file) => !sentIds.has(file.id))
   } catch (error) {
@@ -757,9 +795,9 @@ async function stopThread() {
     toast.error('Could not stop the agent')
   }
 }
-function quoteInThread(message: MessageDto) {
+function replyInThread(message: MessageDto) {
   const snapshot = store.snapshot
-  if (!snapshot || threadQuoteDisabled.value) return
+  if (!snapshot || threadReplyDisabled.value) return
   const open = openThreadView.value
   const history = store.threadHistory
   const anchor = draftThread.value?.anchor ?? history?.anchor
@@ -769,15 +807,14 @@ function quoteInThread(message: MessageDto) {
       ? [anchor, draftThread.value?.parentChannelId ?? history?.parentChannelId]
       : [history?.messages.find((item) => item.id === message.id), open?.channelId]
   if (!source || !channelId) return
-  const quoted = quoteMessage(source, channelId, open?.agent ?? snapshot.agent)
-  if (!quoted) return
+  const pending = createReply(source, channelId, open?.agent ?? snapshot.agent)
+  if (!pending) return
   if (open?.kind === 'sub_agent') {
-    drafts[snapshot.channelId] = appendQuote(drafts[snapshot.channelId] ?? '', quoted)
+    replies[snapshot.channelId] = pending
     void composer.value?.focusEnd?.()
     return
   }
-  const key = threadKey.value
-  drafts[key] = appendQuote(drafts[key] ?? '', quoted)
+  replies[threadKey.value] = pending
   void threadPanel.value?.focusComposer?.()
 }
 async function copyUnsavedReply() {
@@ -1129,9 +1166,9 @@ watch(
                 v-if="!store.snapshot.activeProjectId || conversationTab === 'conversation'"
                 :key="store.snapshot.channelId"
                 :messages="store.history"
-                :quote-disabled="quoteDisabled"
+                :reply-disabled="replyDisabled"
                 :thread-disabled="threadStartDisabled"
-                @quote="quote"
+                @reply="reply"
                 @start-thread="startThreadDraft"
                 @open-thread="openThreadById"
                 @decide-agent-request="decideAgentRequest"
@@ -1224,6 +1261,7 @@ watch(
               :snapshot="store.snapshot"
               :messages="store.history"
               :project="projects.find((entry) => entry.id === store.snapshot?.projectId)"
+              :project-channels="projectChannels"
               @project-changed="refreshProjectContext"
               @action="action"
               @conversation="navigate('conversation')"
@@ -1335,6 +1373,8 @@ watch(
                   !!store.snapshot.banners.archive
                 "
                 :running="store.snapshot.turnRunning"
+                :reply="replies[store.snapshot.channelId]"
+                @cancel-reply="cancelReply(store.snapshot.channelId)"
                 @send="send"
                 @stop="stop"
               />
@@ -1370,7 +1410,8 @@ watch(
                   @close="closeThreadPanel()"
                   @send="sendThread"
                   @stop="stopThread"
-                  @quote="quoteInThread"
+                  @reply="replyInThread"
+                  @cancel-reply="cancelReply(threadKey)"
                 />
               </div>
               <AgentHistorySearch
@@ -1477,7 +1518,8 @@ watch(
               @close="closeThreadPanel()"
               @send="sendThread"
               @stop="stopThread"
-              @quote="quoteInThread"
+              @reply="replyInThread"
+              @cancel-reply="cancelReply(threadKey)"
             />
           </div>
         </SheetContent>

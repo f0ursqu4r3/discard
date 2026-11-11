@@ -77,6 +77,9 @@ const emit = defineEmits<{
         :busy="busy"
         :channels="snapshot.channels"
         :project-channels="projectChannels"
+        :show-archived="
+          projects?.find((entry) => entry.id === snapshot.projectId)?.showArchived ?? false
+        "
         :channel-id="snapshot.channelId"
         :project="snapshot.project"
         :project-avatar="projects?.find((entry) => entry.id === snapshot.projectId)?.avatar"

@@ -74,7 +74,7 @@ test('a parent-owned draft survives a composer remount', async () => {
   expect((host.get('textarea').element as HTMLTextAreaElement).value).toBe('Unsent message')
 })
 
-test('focusEnd places the cursor after an inserted quote without sending', async () => {
+test('focusEnd places the cursor after an inserted draft without sending', async () => {
   const composer = mount(Composer, {
     attachTo: document.body,
     props: {

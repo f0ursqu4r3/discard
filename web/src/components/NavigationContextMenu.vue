@@ -17,6 +17,8 @@ const props = defineProps<{
   id?: string
   path?: string | null
   busy?: boolean
+  /** The channel can be renamed. `#general` cannot. */
+  renamable?: boolean
 }>()
 const emit = defineEmits<{ open: [] }>()
 const label = computed(() => props.kind[0]!.toUpperCase() + props.kind.slice(1))
@@ -27,6 +29,9 @@ const plannedEntries = computed(() => {
   // TODO: Create a branch in a worktree and remove worktrees after checking for local changes.
   if (props.kind === 'worktree') return [planned('Create Branch…'), planned('Remove Worktree…')]
   // TODO: Persist channel mute settings and archive channels from the sidebar.
+  // TODO: Rename text channels with the same name checks as channel creation.
+  if (props.renamable)
+    return [planned('Mute Channel'), planned('Rename Channel…'), planned('Archive Channel…')]
   return [planned('Mute Channel'), planned('Archive Channel…')]
 })
 async function copy(text: string) {

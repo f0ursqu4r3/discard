@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import {
   ChevronDown,
   ChevronRight,
@@ -19,7 +19,14 @@ import BrailleSpinner from './BrailleSpinner.vue'
 import SidebarWorktree from './SidebarWorktree.vue'
 import ThreadRow from './ThreadRow.vue'
 import { channelApprovals, threadLinks } from './threads'
-import { branchActions, channelRowClass, groupBranchRows } from './branch-navigation'
+import {
+  archivedChannels,
+  branchActions,
+  branchIdentity,
+  channelRowClass,
+  groupBranchRows,
+} from './branch-navigation'
+import CreateTextChannelDialog from './workspace/CreateTextChannelDialog.vue'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
@@ -49,6 +56,8 @@ const props = withDefaults(
     repositoriesLoading?: boolean
     channels?: ChannelDto[]
     projectChannels?: ProjectChannelDto[]
+    /** Show the Archived section. The project setting turns it on. */
+    showArchived?: boolean
     channelId?: string
     project?: string
     projectAvatar?: string | null
@@ -83,6 +92,15 @@ function threadsOf(channelId: string | undefined) {
 const generalChannel = computed(() =>
   props.projectChannels.find((channel) => channel.kind === 'general' && !channel.archived),
 )
+const textChannels = computed(() =>
+  props.projectChannels.filter((channel) => channel.kind === 'text' && !channel.archived),
+)
+// `#general` is the first text channel. Text channels follow in creation order.
+const textRows = computed(() => [
+  { general: true, channel: generalChannel.value },
+  ...textChannels.value.map((channel) => ({ general: false, channel })),
+])
+const createTextOpen = ref(false)
 const unreadChannelIds = computed(
   () =>
     new Set(
@@ -152,6 +170,7 @@ const navigation = [
   { id: 'artifacts', label: 'Artifacts', icon: FileText },
 ] as const
 const sections = reactive<Record<string, boolean>>({
+  text: true,
   branches: true,
   worktrees: true,
   integrations: true,
@@ -169,31 +188,13 @@ const repositoryGroups = computed(() =>
 function sectionKey(repository: string, section: string) {
   return repository ? JSON.stringify([repository, section]) : section
 }
-function branchIdentity(repository: string | undefined, branch: string) {
-  return JSON.stringify([repository ?? '', branch])
-}
-const savedChannels = computed(() =>
-  props.projectChannels.filter((channel) => {
-    if (channel.kind === 'general') return false
-    if (
-      !channel.archived &&
-      channel.kind === 'branch' &&
-      channel.branch &&
-      gitBranches.value.some(
-        (row) =>
-          branchIdentity(row.repository, row.label) ===
-          branchIdentity(channel.repository, channel.branch ?? ''),
-      )
-    )
-      return false
-    return true
-  }),
-)
+const archivedList = computed(() => archivedChannels(props.projectChannels, gitBranches.value))
 watch(
   () => props.projectPath,
   (path) => {
     for (const key of Object.keys(sections)) delete sections[key]
     Object.assign(sections, {
+      text: true,
       branches: true,
       worktrees: true,
       integrations: true,
@@ -259,11 +260,13 @@ const approvals = computed(
           <Monitor />
           Project overview
         </DropdownMenuItem>
-        <!-- TODO: Create project channels from a branch instead of creating an unbound conversation. -->
-        <DropdownMenuItem disabled>
+        <DropdownMenuItem
+          data-ui-id="project-menu-new-text-channel"
+          :disabled="busy"
+          @select="createTextOpen = true"
+        >
           <Plus />
-          New conversation
-          <span class="ml-auto text-xs text-muted-foreground">Soon</span>
+          New text channel
         </DropdownMenuItem>
         <DropdownMenuItem @select="emit('action', 'show_friends')">
           <Users />
@@ -314,65 +317,110 @@ const approvals = computed(
           </Button>
         </div>
 
-        <NavigationContextMenu
-          kind="channel"
-          name="general"
-          :id="generalChannel?.id"
-          :busy="busy"
-          @open="
-            generalChannel
-              ? emit('selectChannel', generalChannel.id)
-              : emit('action', `select_project:${projectId}`)
-          "
-        >
-          <button
-            type="button"
-            data-ui-id="project-general-channel"
-            :aria-current="
-              generalChannel?.id === channelId && page === 'conversation' ? 'page' : undefined
-            "
-            :disabled="busy"
-            :class="
-              cn(
-                channelRowClass,
-                'mt-3',
-                generalChannel?.id === channelId && page === 'conversation'
-                  ? 'nav-active-edge bg-sidebar-accent text-sidebar-accent-foreground'
-                  : 'text-muted-foreground',
-              )
-            "
-            @click="
-              generalChannel
-                ? emit('selectChannel', generalChannel.id)
-                : emit('action', `select_project:${projectId}`)
-            "
-          >
-            <Hash class="size-4 shrink-0" />
-            <span class="min-w-0 flex-1 truncate font-mono text-[0.92em]">general</span>
-            <BrailleSpinner
-              v-if="runner(generalChannel?.id)"
-              :agent-id="runner(generalChannel?.id)?.agentId"
-              class="shrink-0"
-            />
-            <span
-              v-if="generalChannel && unreadChannelIds.has(generalChannel.id)"
-              data-ui-id="channel-unread-pip"
-              role="img"
-              aria-label="Unread messages"
-              class="size-2 shrink-0 rounded-full bg-sidebar-foreground"
-            />
-          </button>
-        </NavigationContextMenu>
-        <ThreadRow
-          v-for="(link, index) in threadsOf(generalChannel?.id)"
-          :key="link.id"
-          :link="link"
-          :is-last="index === threadsOf(generalChannel?.id).length - 1"
-          :active="link.id === openThreadId && page === 'conversation'"
-          :busy="busy"
-          @select="emit('selectThread', $event)"
-          @leave="emit('leaveThread', $event)"
-        />
+        <Collapsible v-model:open="sections.text" data-ui-id="text-channels-list" class="mt-3">
+          <div class="flex items-center gap-1">
+            <CollapsibleTrigger as-child>
+              <button
+                type="button"
+                data-ui-id="text-channels-toggle"
+                class="section-label flex h-7 min-w-0 flex-1 items-center px-1 text-left outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <component
+                  :is="sections.text ? ChevronDown : ChevronRight"
+                  class="size-3 shrink-0 text-muted-foreground"
+                />
+                Text channels
+                <span class="ml-1 font-mono font-normal tabular-nums text-muted-foreground">
+                  {{ textRows.length }}
+                </span>
+              </button>
+            </CollapsibleTrigger>
+            <TooltipProvider :delay-duration="500" :skip-delay-duration="0">
+              <Tooltip>
+                <TooltipTrigger as-child>
+                  <Button
+                    data-ui-id="text-channels-create"
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label="New text channel"
+                    :disabled="busy"
+                    @click="createTextOpen = true"
+                  >
+                    <Plus aria-hidden="true" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>New text channel</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
+          <CollapsibleContent class="flex flex-col gap-0.5">
+            <template v-for="row in textRows" :key="row.channel?.id ?? 'general'">
+              <NavigationContextMenu
+                kind="channel"
+                :name="row.general ? 'general' : row.channel!.name"
+                :id="row.channel?.id"
+                :renamable="!row.general"
+                :busy="busy"
+                @open="
+                  row.channel
+                    ? emit('selectChannel', row.channel.id)
+                    : emit('action', `select_project:${projectId}`)
+                "
+              >
+                <button
+                  type="button"
+                  :data-ui-id="
+                    row.general ? 'project-general-channel' : `text-channel-${row.channel!.id}`
+                  "
+                  :aria-current="
+                    row.channel?.id === channelId && page === 'conversation' ? 'page' : undefined
+                  "
+                  :disabled="busy"
+                  :class="
+                    cn(
+                      channelRowClass,
+                      row.channel?.id === channelId && page === 'conversation'
+                        ? 'nav-active-edge bg-sidebar-accent text-sidebar-accent-foreground'
+                        : 'text-muted-foreground',
+                    )
+                  "
+                  @click="
+                    row.channel
+                      ? emit('selectChannel', row.channel.id)
+                      : emit('action', `select_project:${projectId}`)
+                  "
+                >
+                  <Hash class="size-4 shrink-0" />
+                  <span class="min-w-0 flex-1 truncate font-mono text-[0.92em]">
+                    {{ row.general ? 'general' : row.channel!.name }}
+                  </span>
+                  <BrailleSpinner
+                    v-if="runner(row.channel?.id)"
+                    :agent-id="runner(row.channel?.id)?.agentId"
+                    class="shrink-0"
+                  />
+                  <span
+                    v-if="row.channel && unreadChannelIds.has(row.channel.id)"
+                    data-ui-id="channel-unread-pip"
+                    role="img"
+                    aria-label="Unread messages"
+                    class="size-2 shrink-0 rounded-full bg-sidebar-foreground"
+                  />
+                </button>
+              </NavigationContextMenu>
+              <ThreadRow
+                v-for="(link, index) in threadsOf(row.channel?.id)"
+                :key="link.id"
+                :link="link"
+                :is-last="index === threadsOf(row.channel?.id).length - 1"
+                :active="link.id === openThreadId && page === 'conversation'"
+                :busy="busy"
+                @select="emit('selectThread', $event)"
+                @leave="emit('leaveThread', $event)"
+              />
+            </template>
+          </CollapsibleContent>
+        </Collapsible>
 
         <p v-if="repositoriesLoading" role="status" class="mt-5 px-2 text-xs text-muted-foreground">
           Scanning repositories…
@@ -616,23 +664,23 @@ const approvals = computed(
           </CollapsibleContent>
         </Collapsible>
         <Collapsible
-          v-if="savedChannels.length"
+          v-if="showArchived && archivedList.length"
           v-model:open="sections.archived"
-          data-ui-id="saved-channel-navigation"
+          data-ui-id="archived-channel-navigation"
           class="mt-3"
         >
           <CollapsibleTrigger as-child>
             <button
               type="button"
-              data-ui-id="saved-channel-toggle"
+              data-ui-id="archived-channel-toggle"
               class="section-label flex h-7 w-full items-center px-1 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
               <component :is="sections.archived ? ChevronDown : ChevronRight" class="size-3" />
-              Saved channels
+              Archived
             </button>
           </CollapsibleTrigger>
           <CollapsibleContent class="flex flex-col gap-0.5">
-            <template v-for="channel in savedChannels" :key="channel.id">
+            <template v-for="channel in archivedList" :key="channel.id">
               <NavigationContextMenu
                 kind="channel"
                 :name="channel.branch ?? channel.name"
@@ -642,7 +690,7 @@ const approvals = computed(
               >
                 <Button
                   variant="ghost"
-                  :data-ui-id="`saved-channel-${channel.id}`"
+                  :data-ui-id="`archived-channel-${channel.id}`"
                   :class="{
                     'nav-active-edge bg-sidebar-accent':
                       channel.id === channelId && page === 'conversation',
@@ -743,5 +791,10 @@ const approvals = computed(
       </template>
       <slot />
     </div>
+    <CreateTextChannelDialog
+      v-if="projectId"
+      v-model:open="createTextOpen"
+      :project-id="projectId"
+    />
   </nav>
 </template>

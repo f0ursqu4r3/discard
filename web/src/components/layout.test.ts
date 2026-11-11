@@ -1,4 +1,4 @@
-import { mount, shallowMount } from '@vue/test-utils'
+import { flushPromises, mount, shallowMount } from '@vue/test-utils'
 import { describe, expect, test } from 'vite-plus/test'
 import { serverInitials, serverPillHeight } from './layout'
 import ChannelList from './ChannelList.vue'
@@ -297,6 +297,7 @@ test('project general channel stays available when the active conversation has n
           branch: null,
           archived: false,
           archivedInto: null,
+          hasMessages: false,
         },
       ],
     },
@@ -330,7 +331,7 @@ test('branch rows can open selected-project channels when the active conversatio
   expect(list.emitted('openBranch')).toEqual([['feature/x']])
 })
 
-test('channel unread pips track general, branch, worktree, and saved channel IDs', async () => {
+test('channel unread pips track general, branch, worktree, and archived channel IDs', async () => {
   const projectChannels: ProjectChannelDto[] = [
     { id: 'general-id', kind: 'general', branch: null },
     { id: 'branch-id', kind: 'branch', branch: 'feature/x' },
@@ -343,6 +344,7 @@ test('channel unread pips track general, branch, worktree, and saved channel IDs
     workspaceMode: 'main_checkout',
     archived: false,
     archivedInto: null,
+    hasMessages: false,
     ...channel,
   })) as ProjectChannelDto[]
   const channels = projectChannels.map((channel) => ({
@@ -369,9 +371,10 @@ test('channel unread pips track general, branch, worktree, and saved channel IDs
       })),
       projectChannels,
       channels,
+      showArchived: true,
     },
   })
-  await list.get('[data-ui-id="saved-channel-toggle"]').trigger('click')
+  await list.get('[data-ui-id="archived-channel-toggle"]').trigger('click')
   const pip = '[data-ui-id="channel-unread-pip"]'
   const hasPip = (row: string) => list.get(`[data-ui-id="${row}"]`).find(pip).exists()
   expect(list.findAll(pip)).toHaveLength(0)
@@ -392,7 +395,7 @@ test('channel unread pips track general, branch, worktree, and saved channel IDs
     'project-general-channel',
     'branches-row-feature/x',
     'worktrees-row-feature/x',
-    'saved-channel-history-id',
+    'archived-channel-history-id',
   ]) {
     expect(hasPip(row)).toBe(true)
     expect(list.get(`[data-ui-id="${row}"]`).get(pip).attributes('aria-label')).toBe(
@@ -409,33 +412,35 @@ test('channel unread pips track general, branch, worktree, and saved channel IDs
   expect(hasPip('project-general-channel')).toBe(false)
   expect(hasPip('branches-row-feature/x')).toBe(false)
   expect(hasPip('worktrees-row-feature/x')).toBe(false)
-  expect(hasPip('saved-channel-history-id')).toBe(true)
+  expect(hasPip('archived-channel-history-id')).toBe(true)
   await list.setProps({ channels })
   expect(list.findAll(pip)).toHaveLength(0)
   list.unmount()
 })
 
-test('saved channel history opens by its durable channel id', async () => {
+test('archived channel history opens by its durable channel id', async () => {
   const list = mount(ChannelList, {
     props: {
       projectId: 'project',
       activeProjectId: 'project',
       branches: [],
       projectChannels: archivedChannelsFixture as ProjectChannelDto[],
+      showArchived: true,
     },
   })
-  expect(list.text()).toContain('Saved channels')
-  await list.get('[data-ui-id="saved-channel-toggle"]').trigger('click')
-  await list.get('[data-ui-id="saved-channel-legacy-id"]').trigger('click')
+  expect(list.text()).toContain('Archived')
+  await list.get('[data-ui-id="archived-channel-toggle"]').trigger('click')
+  await list.get('[data-ui-id="archived-channel-legacy-id"]').trigger('click')
   expect(list.emitted('selectChannel')).toEqual([['legacy-id']])
 })
 
-test('saved branch opens by id when live Git rows omit it', async () => {
+test('a deleted branch with messages opens by id from Archived', async () => {
   const list = mount(ChannelList, {
     props: {
       projectId: 'project',
       activeProjectId: 'project',
       projectPath: '/test/saved-branch-missing-git',
+      showArchived: true,
       branches: [],
       projectChannels: [
         {
@@ -448,12 +453,13 @@ test('saved branch opens by id when live Git rows omit it', async () => {
           branch: 'feature/x',
           archived: false,
           archivedInto: null,
+          hasMessages: true,
         },
       ],
     },
   })
-  await list.get('[data-ui-id="saved-channel-toggle"]').trigger('click')
-  await list.get('[data-ui-id="saved-channel-saved-branch-id"]').trigger('click')
+  await list.get('[data-ui-id="archived-channel-toggle"]').trigger('click')
+  await list.get('[data-ui-id="archived-channel-saved-branch-id"]').trigger('click')
   expect(list.emitted('selectChannel')).toEqual([['saved-branch-id']])
   expect(list.emitted('openBranch')).toBeUndefined()
 })
@@ -464,6 +470,7 @@ test('archived branch history stays reachable when Git still lists the branch', 
       projectId: 'project',
       activeProjectId: 'project',
       projectPath: '/test/saved-branch-still-listed',
+      showArchived: true,
       branches: [
         {
           key: 'feature/x',
@@ -486,28 +493,30 @@ test('archived branch history stays reachable when Git still lists the branch', 
           branch: 'feature/x',
           archived: true,
           archivedInto: null,
+          hasMessages: false,
         },
       ],
     },
   })
-  await list.get('[data-ui-id="saved-channel-toggle"]').trigger('click')
-  await list.get('[data-ui-id="saved-channel-archived-branch-id"]').trigger('click')
+  await list.get('[data-ui-id="archived-channel-toggle"]').trigger('click')
+  await list.get('[data-ui-id="archived-channel-archived-branch-id"]').trigger('click')
   expect(list.emitted('selectChannel')).toEqual([['archived-branch-id']])
 })
 
-test('project conversation creation stays visible, disabled, and marked Soon', async () => {
+test('the project menu opens the new text channel dialog', async () => {
   const list = mount(ChannelList, {
     attachTo: document.body,
     props: { projectId: 'project', activeProjectId: 'project', branches: [] },
   })
   await list.get('[data-ui-id="project-header"]').trigger('click')
-  const item = [...document.body.querySelectorAll('[role="menuitem"]')].find((entry) =>
-    entry.textContent?.includes('New conversation'),
-  )
-  expect(item?.textContent).toContain('New conversation')
-  expect(item?.textContent).toContain('Soon')
-  expect(item?.getAttribute('aria-disabled')).toBe('true')
-  expect(list.emitted('createChannel')).toBeUndefined()
+  const items = [...document.body.querySelectorAll('[role="menuitem"]')]
+  expect(items.some((entry) => entry.textContent?.includes('New conversation'))).toBe(false)
+  const item = items.find((entry) => entry.textContent?.includes('New text channel'))
+  expect(item?.textContent).not.toContain('Soon')
+  expect(item?.getAttribute('aria-disabled')).toBeNull()
+  ;(item as HTMLElement).click()
+  await flushPromises()
+  expect(document.body.querySelector('[data-ui-id="create-text-channel-dialog"]')).not.toBeNull()
   list.unmount()
 })
 

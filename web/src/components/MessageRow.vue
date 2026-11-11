@@ -5,7 +5,7 @@ import { Marker, MarkerContent, MarkerIcon } from './ui/marker'
 import {
   Info,
   Copy,
-  Quote,
+  Reply,
   MessagesSquare,
   Forward,
   CircleCheck,
@@ -26,6 +26,7 @@ import { computed, ref } from 'vue'
 import { useAppearance } from '@/bridge/appearance'
 import { serverInitials } from './layout'
 import { groupBlocks, messageTime } from './messages'
+import { messageReply, messageSourceLink } from './reply'
 import { threadAction } from './threads'
 import { referenceMenuPlanned, threadActions } from './thread-menu'
 const props = defineProps<{
@@ -37,7 +38,7 @@ const props = defineProps<{
   prompts?: PromptDto[]
   showCursor?: boolean
   preview?: boolean
-  quoteDisabled?: boolean
+  replyDisabled?: boolean
   /**
    * Where the row shows. A channel row can start or open a thread. A thread row can post to the
    * channel. The anchor row at the top of a thread panel has neither.
@@ -47,14 +48,23 @@ const props = defineProps<{
   threadDisabled?: boolean
 }>()
 const emit = defineEmits<{
-  quote: [message: MessageDto]
+  reply: [message: MessageDto]
   startThread: [message: MessageDto]
   openThread: [threadId: string]
 }>()
-function quote() {
-  if (target.value?.hasText && !props.quoteDisabled) emit('quote', props.message)
+function reply() {
+  if (target.value?.hasText && !props.replyDisabled) emit('reply', props.message)
 }
-const segments = computed(() => groupBlocks(props.message.blocks))
+const replySource = computed(() => messageReply(props.message))
+// The reply row shows the prefix of a reply. The block keeps its index and shows only the typed text.
+const segments = computed(() => {
+  const held = replySource.value
+  return groupBlocks(props.message.blocks).flatMap((segment) => {
+    if (!held || segment.kind !== 'block' || segment.index !== held.index) return [segment]
+    if (!held.reply.body.trim()) return []
+    return [{ ...segment, block: { type: 'markdown' as const, text: held.reply.body } }]
+  })
+})
 const date = computed(() => messageTime(props.message))
 const timeLabel = computed(() =>
   date.value?.toLocaleTimeString(undefined, {
@@ -143,11 +153,11 @@ async function copy() {
 <template>
   <ContextMenuHost
     :target="target"
-    :quote-enabled="!!target?.hasText && !quoteDisabled"
+    :reply-enabled="!!target?.hasText && !replyDisabled"
     :thread-action="threadItem"
     :post-action="postItem"
     :planned-entries="plannedEntries"
-    @quote="quote"
+    @reply="reply"
     @thread="openThread"
     @post="post"
   >
@@ -205,6 +215,17 @@ async function copy() {
         </Avatar>
       </div>
       <div class="min-w-0 flex-1">
+        <a
+          v-if="replySource"
+          data-ui-id="reply-source"
+          :href="messageSourceLink(replySource.reply.source)"
+          :aria-label="`Reply to ${replySource.reply.author}`"
+          class="mb-0.5 flex max-w-full items-center gap-1 rounded-sm text-xs text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
+        >
+          <Reply class="size-3 shrink-0" aria-hidden="true" />
+          <span class="shrink-0 font-medium">{{ replySource.reply.author }}</span>
+          <span class="min-w-0 truncate">{{ replySource.reply.excerpt }}</span>
+        </a>
         <button
           v-if="reference"
           type="button"
@@ -279,7 +300,7 @@ async function copy() {
         <div
           role="group"
           aria-label="Message actions"
-          class="absolute right-0 top-0 -translate-y-3/4 z-10 invisible flex gap-0.5 rounded-md border bg-background p-1 shadow-sm group-hover:visible group-focus-within:visible"
+          class="absolute right-0 top-0 -translate-y-3/4 z-10 invisible flex select-none gap-0.5 rounded-md border bg-background p-1 shadow-sm group-hover:visible group-focus-within:visible"
         >
           <Tooltip>
             <TooltipTrigger as-child>
@@ -299,17 +320,17 @@ async function copy() {
           <Tooltip>
             <TooltipTrigger as-child>
               <Button
-                :disabled="quoteDisabled || !target.hasText"
+                :disabled="replyDisabled || !target.hasText"
                 variant="ghost"
                 size="icon-xs"
                 class="transition-colors"
-                aria-label="Quote message"
-                @click="quote"
+                aria-label="Reply to message"
+                @click="reply"
               >
-                <Quote aria-hidden="true" />
+                <Reply aria-hidden="true" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Quote message</TooltipContent>
+            <TooltipContent>Reply to message</TooltipContent>
           </Tooltip>
           <Tooltip v-if="threadItem">
             <TooltipTrigger as-child>

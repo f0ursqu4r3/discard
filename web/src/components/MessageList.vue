@@ -25,7 +25,7 @@ defineProps<{
   projectId?: string | null
   jumpTo?: { messageId: string; request: number }
   position?: TranscriptPosition
-  quoteDisabled?: boolean
+  replyDisabled?: boolean
   surface?: 'channel' | 'thread'
   anchor?: MessageDto | null
   anchorChannelId?: string
@@ -36,7 +36,7 @@ defineProps<{
 }>()
 const emit = defineEmits<{
   savePosition: [id: string, position: TranscriptPosition]
-  quote: [message: MessageDto]
+  reply: [message: MessageDto]
   startThread: [message: MessageDto]
   openThread: [threadId: string]
   decideAgentRequest: [requestId: string, decision: 'add' | 'deny']
@@ -50,7 +50,7 @@ const emit = defineEmits<{
   >
     <TranscriptContent
       v-bind="$props"
-      @quote="emit('quote', $event)"
+      @reply="emit('reply', $event)"
       @start-thread="emit('startThread', $event)"
       @open-thread="emit('openThread', $event)"
       @decide-agent-request="(id, decision) => emit('decideAgentRequest', id, decision)"
