@@ -6,6 +6,7 @@ import type {
   ChannelDetailsDto,
   ChannelMemberDto,
   ChannelTopicDto,
+  CommandDto,
   HistoryDto,
   ProjectChannelDto,
   SnapshotDto,
@@ -390,3 +391,9 @@ export const decideAgentRequest = (
   requestId: string,
   decision: 'add' | 'deny',
 ) => invoke<AgentRequest>('decide_agent_request', { channelId, requestId, decision })
+
+/** The slash command registry: built-ins first, then plugin commands. */
+export const getCommands = () => invoke<CommandDto[]>('list_commands')
+/** Runs `/name args` in the channel. Returns the text to show, or null when the command shows none. */
+export const runCommand = (channelId: string, name: string, args: string) =>
+  invoke<string | null>('run_command', { channelId, name, args })
