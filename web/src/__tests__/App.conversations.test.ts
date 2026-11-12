@@ -132,6 +132,16 @@ test('replying sets a pending reply, leaves the draft alone, and keeps attachmen
   expect(composer.props('reply')).toBeUndefined()
 })
 
+test('an escaped slash sends the unescaped text and clears the draft', async () => {
+  const wrapper = app()
+  const composer = wrapper.getComponent(Composer)
+  composer.vm.$emit('update:draft', '//help')
+  composer.vm.$emit('send', '//help')
+  await flushPromises()
+  expect(mocks.send).toHaveBeenCalledWith('channel', '/help', [])
+  expect(composer.props('draft')).toBe('')
+})
+
 test('a failed send keeps the pending reply, and Cancel reply clears it', async () => {
   const source: MessageDto = {
     id: 'source',

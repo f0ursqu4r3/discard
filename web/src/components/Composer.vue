@@ -7,6 +7,7 @@ import {
   importAttachmentFiles,
   getAgents,
   getProjectMembers,
+  runCommand,
   type AgentEntry,
 } from '../bridge/api'
 import { mentionQuery, mentionToken } from './mentions'
@@ -19,7 +20,10 @@ import { Label } from './ui/label'
 import { Button } from './ui/button'
 import { messageSourceLink, type PendingReply } from './reply'
 import { maySend, mayStop } from './composer'
+import { commandLine, parseSlash } from './slash'
 const props = defineProps<{
+  /** The id of the channel or thread that this composer serves. Commands run against it. */
+  channelId: string
   archived: boolean
   busy: boolean
   running: boolean
@@ -57,6 +61,10 @@ const alsoPostId = useId()
 const localAttachments = ref<AttachmentDto[]>([])
 const importing = ref(false)
 const attachmentError = ref('')
+// The last command result. It clears on a dismiss, a message, or a channel change.
+const commandResult = ref<{ line: string; output: string; error: boolean } | null>(null)
+const commandRunning = ref(false)
+let commandRun = 0
 let disposed = false
 onUnmounted(() => {
   disposed = true
@@ -163,6 +171,16 @@ const text = computed({
     emit('update:draft', value)
   },
 })
+const isCommand = computed(() => parseSlash(text.value) !== null)
+watch(
+  () => props.channelId,
+  () => {
+    // Drop the result of a command that still runs for the old channel.
+    commandRun++
+    commandRunning.value = false
+    commandResult.value = null
+  },
+)
 const host = ref<HTMLElement | null>(null)
 const dropZone = computed(() => props.dropTarget ?? host.value)
 useEventListener(dropZone, 'dragenter', dragEnter)
@@ -307,12 +325,42 @@ function cancelReply() {
 function blur(event: FocusEvent) {
   if (!host.value?.contains(event.relatedTarget as Node | null)) dismissed.value = true
 }
+async function runSlash(command: NonNullable<ReturnType<typeof parseSlash>>) {
+  if (commandRunning.value) return
+  const line = commandLine(command)
+  if (files.value.length) {
+    commandResult.value = { line, output: 'A command cannot have attachments.', error: true }
+    return
+  }
+  const run = ++commandRun
+  commandRunning.value = true
+  try {
+    const output = await runCommand(props.channelId, command.name, command.args)
+    if (disposed || run !== commandRun) return
+    text.value = ''
+    commandResult.value = output ? { line, output, error: false } : null
+  } catch (error) {
+    if (disposed || run !== commandRun) return
+    commandResult.value = { line, output: String(error), error: true }
+  } finally {
+    if (!disposed && run === commandRun) commandRunning.value = false
+  }
+}
 function send() {
   if (
-    (props.running && !props.sendWhileRunning) ||
-    !maySend(props.archived || props.busy || importing.value, text.value, files.value.length)
+    props.archived ||
+    props.busy ||
+    importing.value ||
+    !maySend(false, text.value, files.value.length)
   )
     return
+  const command = parseSlash(text.value)
+  if (command) {
+    void runSlash(command)
+    return
+  }
+  if (props.running && !props.sendWhileRunning) return
+  commandResult.value = null
   if (props.alsoPostLabel !== undefined) {
     emit('send', text.value.trim(), [...files.value], alsoPost.value)
     alsoPost.value = false
@@ -455,6 +503,32 @@ function keydown(event: KeyboardEvent) {
           <X aria-hidden="true" />
         </Button>
       </div>
+      <div
+        v-if="commandResult"
+        data-ui-id="command-result"
+        class="flex min-w-0 items-start gap-1 rounded-sm bg-muted/50 py-0.5 pr-0.5 pl-2 text-xs"
+      >
+        <div class="min-w-0 flex-1">
+          <p class="truncate font-mono text-muted-foreground">{{ commandResult.line }}</p>
+          <p
+            :role="commandResult.error ? 'alert' : 'status'"
+            class="max-h-48 overflow-y-auto break-words whitespace-pre-wrap"
+            :class="commandResult.error ? 'text-destructive' : 'text-foreground'"
+          >
+            {{ commandResult.output }}
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label="Dismiss command result"
+          title="Dismiss command result"
+          @click="commandResult = null"
+        >
+          <X aria-hidden="true" />
+        </Button>
+      </div>
       <div v-if="files.length" aria-label="Attachments" class="flex gap-2 overflow-x-auto pb-1">
         <AttachmentCard
           v-for="file in files"
@@ -528,15 +602,19 @@ function keydown(event: KeyboardEvent) {
             Stop
           </InputGroupButton>
           <InputGroupButton
-            v-if="!mayStop(running) || sendWhileRunning"
+            v-if="!mayStop(running) || sendWhileRunning || isCommand"
             data-ui-id="composer-send"
             size="icon-sm"
             variant="default"
-            :disabled="!maySend(archived || busy || importing, text, files.length)"
+            :disabled="
+              commandRunning || !maySend(archived || busy || importing, text, files.length)
+            "
+            :aria-busy="commandRunning"
             aria-label="Send message"
             @click="send"
           >
-            <Send />
+            <LoaderCircle v-if="commandRunning" class="motion-safe:animate-spin" />
+            <Send v-else />
             <span class="sr-only">Send</span>
           </InputGroupButton>
         </InputGroupAddon>

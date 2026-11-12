@@ -46,6 +46,7 @@ import ChannelList from './components/ChannelList.vue'
 import ChannelHeader from './components/ChannelHeader.vue'
 import MessageList from './components/MessageList.vue'
 import Composer from './components/Composer.vue'
+import { unescapeSlash } from './components/slash'
 import Notices from './components/Notices.vue'
 import ApprovalCard from './components/ApprovalCard.vue'
 import DiffBlock from './components/DiffBlock.vue'
@@ -687,7 +688,7 @@ async function send(text: string, attachments: import('./bridge/types').Attachme
   try {
     await sendMessage(
       id,
-      pending ? joinReply(pending.prefix, text) : text,
+      pending ? joinReply(pending.prefix, unescapeSlash(text)) : unescapeSlash(text),
       attachments.map((file) => file.id),
     )
     // `text` is the typed text. The draft never holds the reply prefix.
@@ -780,7 +781,8 @@ async function sendThread(text: string, attachments: AttachmentDto[], alsoPost: 
   const pending = replies[key]
   try {
     const ids = attachments.map((file) => file.id)
-    const body = pending ? joinReply(pending.prefix, text) : text
+    const typed = unescapeSlash(text)
+    const body = pending ? joinReply(pending.prefix, typed) : typed
     if (draft) {
       // No thread exists before this call. It creates the thread and opens it.
       await startThread(draft.parentChannelId, draft.anchor.id, body, ids, alsoPost)
@@ -1368,6 +1370,7 @@ watch(
               <Composer
                 ref="composer"
                 :key="store.snapshot.channelId"
+                :channel-id="store.snapshot.channelId"
                 :drop-target="mainPanel"
                 v-model:draft="drafts[store.snapshot.channelId]"
                 :attachments="attachmentDrafts[store.snapshot.channelId] ?? []"

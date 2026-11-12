@@ -28,7 +28,7 @@ const document: AttachmentDto = {
   size: 500,
   text: 'Extracted document text',
 }
-const props = { archived: false, busy: false, running: false, channel: 'general' }
+const props = { channelId: 'c1', archived: false, busy: false, running: false, channel: 'general' }
 beforeEach(() => {
   vi.clearAllMocks()
   api.chooseAttachments.mockResolvedValue([image, document])

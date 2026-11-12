@@ -267,6 +267,7 @@ defineExpose({ focusComposer: () => composer.value?.focusEnd?.() })
     <Composer
       ref="composer"
       :key="key"
+      :channel-id="key"
       :drop-target="host"
       :draft="draft"
       :attachments="attachments ?? []"
