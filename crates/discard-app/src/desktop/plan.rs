@@ -57,6 +57,11 @@ pub enum Close {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetedPlan { Copy, Archive, ArchiveBlocked, Nothing }
 
+/// Stopping a turn may target a loaded thread. Every other action needs the active channel.
+pub fn channel_target_allowed(action: Action, target_channel: Option<&str>, active_channel: &str) -> bool {
+    action == Action::CancelTurn || target_channel.is_none_or(|id| id == active_channel)
+}
+
 pub fn plan_targeted(action: Action, has_target: bool, turn_running: bool, archived: bool) -> TargetedPlan {
     if action.needs_target() { return if has_target { TargetedPlan::Copy } else { TargetedPlan::Nothing }; }
     if action == Action::ArchiveChannel {
@@ -141,12 +146,20 @@ pub fn plugin_item_notice(plugin: &str, error: &str) -> String { format!("{plugi
 
 #[cfg(test)]
 mod tests {
-    use super::{ArchiveStep, Close, Confirm, Plan, TargetedPlan, archive_step, close_plan, plan, plan_targeted, prepare_exit};
+    use super::{ArchiveStep, Close, Confirm, Plan, TargetedPlan, archive_step, channel_target_allowed, close_plan, plan, plan_targeted, prepare_exit};
     use discard_core::workspace::ArchiveOutcome;
     use discard_core::action::Action;
     use discard_core::settings_page::SettingsPage;
     use std::cell::Cell;
 
+    #[test] fn cancel_turn_may_target_a_channel_that_is_not_active() { assert!(channel_target_allowed(Action::CancelTurn, Some("thread"), "main")); }
+    #[test] fn other_actions_need_the_active_channel() {
+        assert!(!channel_target_allowed(Action::ArchiveChannel, Some("thread"), "main"));
+        for &action in Action::all() {
+            assert!(channel_target_allowed(action, Some("main"), "main"));
+            assert!(channel_target_allowed(action, None, "main"));
+        }
+    }
     #[test] fn open_agent_profile_and_workspace_settings() { assert_eq!(plan(Action::OpenAgentSettings,false,true,false),Plan::OpenAgentProfile); assert_eq!(plan(Action::OpenWorkspaceSettings,false,true,false),Plan::OpenSettings(SettingsPage::Workspaces)); }
     #[test] fn plan_targeted_copies_for_every_copy_action() { for &action in Action::all() { if action.needs_target() { assert_eq!(plan_targeted(action,true,false,false),TargetedPlan::Copy); assert_eq!(plan_targeted(action,false,false,false),TargetedPlan::Nothing); } } }
     #[test] fn the_new_copy_actions_need_a_target() { for a in [Action::CopyDiff,Action::CopyToolInput,Action::CopyToolOutput,Action::CopyAgentName,Action::CopyProjectName,Action::CopyProjectPath] { assert_eq!(plan_targeted(a,false,false,false),TargetedPlan::Nothing); assert_eq!(plan_targeted(a,true,false,false),TargetedPlan::Copy); } }

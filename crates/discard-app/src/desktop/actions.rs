@@ -52,9 +52,8 @@ fn archive_for(core: Arc<AppCore>, actions: &DesktopActions, force: bool, channe
 }
 /// Run a core action. Copy results return to the webview for the Web Clipboard API.
 pub fn run(app: &AppHandle, core: &Arc<AppCore>, actions: &DesktopActions, action: Action, target: Option<ContextTarget>) -> Option<String> {
-    // Stopping a turn may target a loaded thread. Every other action needs the active channel.
     let channel = match &target { Some(ContextTarget::Channel { id }) => Some(id.as_str()), _ => None };
-    if action != Action::CancelTurn && channel.is_some_and(|id| id != core.active_channel_id()) { return None; }
+    if !plan::channel_target_allowed(action, channel, &core.active_channel_id()) { return None; }
     let ctx = core.menu_context();
     // The turn state of the target channel decides a stop. Other actions use the active channel.
     let turn_running = match channel { Some(id) if action == Action::CancelTurn => core.channel_running(id), _ => ctx.turn_running };
