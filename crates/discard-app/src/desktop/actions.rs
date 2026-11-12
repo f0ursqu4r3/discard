@@ -52,8 +52,12 @@ fn archive_for(core: Arc<AppCore>, actions: &DesktopActions, force: bool, channe
 }
 /// Run a core action. Copy results return to the webview for the Web Clipboard API.
 pub fn run(app: &AppHandle, core: &Arc<AppCore>, actions: &DesktopActions, action: Action, target: Option<ContextTarget>) -> Option<String> {
-    if let Some(ContextTarget::Channel { id }) = &target && id != &core.active_channel_id() { return None; }
+    // Stopping a turn may target a loaded thread. Every other action needs the active channel.
+    let channel = match &target { Some(ContextTarget::Channel { id }) => Some(id.as_str()), _ => None };
+    if action != Action::CancelTurn && channel.is_some_and(|id| id != core.active_channel_id()) { return None; }
     let ctx = core.menu_context();
+    // The turn state of the target channel decides a stop. Other actions use the active channel.
+    let turn_running = match channel { Some(id) if action == Action::CancelTurn => core.channel_running(id), _ => ctx.turn_running };
     match plan::plan_targeted(action, target.is_some(), ctx.turn_running, ctx.archived) {
         plan::TargetedPlan::Copy => return target.as_ref().and_then(|target| core.resolve_copy(target, action)),
         plan::TargetedPlan::Archive => {
@@ -63,7 +67,7 @@ pub fn run(app: &AppHandle, core: &Arc<AppCore>, actions: &DesktopActions, actio
         plan::TargetedPlan::ArchiveBlocked => { core.notice("Stop the turn before archiving the channel".into()); return None; }
         plan::TargetedPlan::Nothing => {}
     }
-    match plan::plan(action, if matches!(action, Action::Quit | Action::ToggleSafeMode | Action::CloseWindow) { core.any_running() } else { ctx.turn_running }, actions.confirms(), ctx.safe_mode) {
+    match plan::plan(action, if matches!(action, Action::Quit | Action::ToggleSafeMode | Action::CloseWindow) { core.any_running() } else { turn_running }, actions.confirms(), ctx.safe_mode) {
         Plan::OpenSettings(page) => if let Err(error) = super::windows::open_settings(app, page) { core.notice(format!("Cannot open Settings: {error}")); },
         Plan::OpenAgentProfile => {
             let id = match &target {
@@ -76,7 +80,7 @@ pub fn run(app: &AppHandle, core: &Arc<AppCore>, actions: &DesktopActions, actio
                 let _ = window.set_focus();
             }
         }
-        Plan::CancelTurn => core.cancel(),
+        Plan::CancelTurn => core.cancel_in(channel),
         Plan::ToggleMemberList => { let _ = core.set_member_list_visible(!core.snapshot().member_list_visible); }
         Plan::Ask(ending) => core.ask(ending),
         Plan::Perform(ending) => perform(app, core, actions, ending),

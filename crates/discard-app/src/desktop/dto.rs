@@ -7,6 +7,16 @@ use std::collections::BTreeMap;
 
 pub type BlockDto = Block;
 
+/// One slash command in the registry.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandDto { pub name: String, pub description: String, pub args: Option<String>, pub source: String, pub planned: bool }
+impl From<discard_core::slash::Entry> for CommandDto {
+    fn from(entry: discard_core::slash::Entry) -> Self {
+        Self { name: entry.name, description: entry.description, args: entry.args, source: entry.source, planned: entry.planned }
+    }
+}
+
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelDto {

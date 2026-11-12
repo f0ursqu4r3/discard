@@ -275,7 +275,7 @@ pub fn run(
             commands::plugin_action,
             commands::context_menu,
             commands::run_action,
-            commands::plugin_menu_action,
+            commands::plugin_menu_action, commands::list_commands, commands::run_command,
             commands::web_shortcuts,
             windows::settings_current_page,
             settings::settings_search,
@@ -332,5 +332,7 @@ pub mod plan;
 pub mod menu;
 
 pub mod actions;
+
+mod slash;
 
 pub mod settings;
