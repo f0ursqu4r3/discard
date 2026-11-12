@@ -12,7 +12,7 @@ use discard_core::branch_tree::{TreeRow, RowKind, current_row};
 use discard_core::window_state::{Bounds, PanelWidths, StateStore};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, mpsc::UnboundedSender};
@@ -299,6 +299,8 @@ struct State {
     confirm: Option<super::plan::Confirm>,
     plugin_notice: Option<String>,
 }
+/// The canonical (repository, branch) of the selected channel, and its working directory for a legacy channel.
+type BranchHint = (Option<(String, String)>, Option<PathBuf>);
 #[derive(Clone)]
 struct BranchSource {
     store: Arc<Mutex<discard_core::store::Store>>,
@@ -312,6 +314,8 @@ pub struct AppCore {
     plugin_signature: Mutex<String>,
     branch_source: Mutex<Option<BranchSource>>,
     branch_generation: AtomicU64,
+    /// Background branch refreshes that have not finished.
+    branch_refreshes_pending: AtomicUsize,
     /// Moves when a thread list that the webview reads from storage changed without a command of the webview.
     conversations_rev: AtomicU64,
     sub_agents: super::delegation::SubAgents,
@@ -365,6 +369,7 @@ impl AppCore {
             plugin_signature: Mutex::new(String::new()),
             branch_source: Mutex::new(None),
             branch_generation: AtomicU64::new(0),
+            branch_refreshes_pending: AtomicUsize::new(0),
             conversations_rev: AtomicU64::new(0),
             sub_agents: super::delegation::SubAgents::default(),
             changed: Notify::new(),
@@ -386,9 +391,17 @@ impl AppCore {
     /// Browse projects independently of the active conversation.
     pub fn select_sidebar_project(&self, project: Option<&discard_core::model::Project>) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // The same project keeps its rows. A refresh replaces them in one step.
+        let same = project.is_some_and(|p| p.id.0 == s.project_id && p.path == s.project_path);
         s.project = project.map(|p| p.name.clone()).unwrap_or_default();
         s.project_id = project.map(|p| p.id.0.clone()).unwrap_or_default();
         s.project_path = project.map(|p| p.path.clone()).unwrap_or_default();
+        if same {
+            self.branch_generation.fetch_add(1, Ordering::SeqCst);
+            s.rev += 1;
+            self.changed.notify_one();
+            return;
+        }
         s.branches.clear(); s.branch_repositories.clear(); s.repositories.clear(); s.repositories_loading = project.is_some();
         s.current_branch = None;
         s.collapsed.clear();
@@ -786,16 +799,16 @@ impl AppCore {
         state.active.mode = mode;
     }
     pub fn request_branch_refresh(&self) -> u64 { self.branch_generation.fetch_add(1, Ordering::SeqCst) + 1 }
-    /// Reload repositories for the selected project, even without an active conversation.
-    pub fn refresh_branches(&self, generation: u64) {
+    /// What marks the selected branch row: the canonical branch of the channel, or its legacy working directory.
+    fn branch_hint(&self) -> Option<(PathBuf, BranchHint)> {
         let source = self.branch_source.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let (project, channel, mode, active_project) = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             (PathBuf::from(&state.project_path), discard_core::model::ChannelId(state.active.channel_id.clone()), state.active.mode,
                 state.active.project_id.as_ref().is_some_and(|id| id.0 == state.project_id))
         };
-        if project.as_os_str().is_empty() { return; }
-        let (canonical_branch, current) = source.filter(|source| active_project && source.project == project).map(|source| {
+        if project.as_os_str().is_empty() { return None; }
+        let hint = source.filter(|source| active_project && source.project == project).map(|source| {
             let store = source.store.lock().unwrap_or_else(|e| e.into_inner());
             let metadata = store.project_channel_metadata(&channel).ok().flatten();
             let canonical_branch = metadata.as_ref().and_then(|m| {
@@ -807,6 +820,43 @@ impl AppCore {
             let current = legacy.then(|| super::windows::branch_current_directory(Some(mode), &project, worktree.as_deref())).flatten();
             (canonical_branch, current)
         }).unwrap_or((None, None));
+        Some((project, hint))
+    }
+    fn pick_branch(rows: &[TreeRow], repositories: &[String], (canonical_branch, current): BranchHint) -> Option<usize> {
+        canonical_branch.and_then(|(repository, branch)| {
+            rows.iter().enumerate().position(|(index, row)| repositories[index] == repository && !row.detached && row.name == branch)
+        }).or_else(|| current.and_then(|path| current_row(rows, &path.canonicalize().unwrap_or(path))))
+    }
+    /// Mark the selected channel's row in the rows already in state. It runs no Git command.
+    pub fn reselect_current_branch(&self) {
+        let Some((_, hint)) = self.branch_hint() else {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.current_branch = None;
+            state.rev += 1;
+            self.changed.notify_one();
+            return;
+        };
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.current_branch = Self::pick_branch(&state.branches, &state.branch_repositories, hint);
+        state.rev += 1;
+        self.changed.notify_one();
+    }
+    /// Reload repositories on a blocking thread. The caller does not wait for Git.
+    pub fn refresh_branches_in_background(self: &Arc<Self>) {
+        let generation = self.request_branch_refresh();
+        let core = self.clone();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else { return core.refresh_branches(generation) };
+        self.branch_refreshes_pending.fetch_add(1, Ordering::SeqCst);
+        runtime.spawn_blocking(move || {
+            core.refresh_branches(generation);
+            core.branch_refreshes_pending.fetch_sub(1, Ordering::SeqCst);
+        });
+    }
+    /// True while a background branch refresh runs.
+    pub fn branch_refresh_pending(&self) -> bool { self.branch_refreshes_pending.load(Ordering::SeqCst) > 0 }
+    /// Reload repositories for the selected project, even without an active conversation.
+    pub fn refresh_branches(&self, generation: u64) {
+        let Some((project, hint)) = self.branch_hint() else { return };
         let discovered = discard_core::worktree::discover_repositories(&project).unwrap_or_default();
         let mut rows = Vec::new();
         let mut branch_repositories = Vec::new();
@@ -821,9 +871,7 @@ impl AppCore {
                 path: repository.path.to_string_lossy().into_owned(),
             });
         }
-        let selected = canonical_branch.and_then(|(repository, branch)| {
-            rows.iter().enumerate().position(|(index, row)| branch_repositories[index] == repository && !row.detached && row.name == branch)
-        }).or_else(|| current.and_then(|path| current_row(&rows, &path.canonicalize().unwrap_or(path))));
+        let selected = Self::pick_branch(&rows, &branch_repositories, hint);
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if self.branch_generation.load(Ordering::SeqCst) == generation {
             state.branches = rows;

@@ -249,7 +249,7 @@ pub async fn decide_worktree_removal(
         };
         store.lock().unwrap_or_else(|e| e.into_inner()).insert_message(&message).map_err(|e| format!("Action status: {}. Could not save its transcript note: {e}", request.state))?;
         core.apply_channel(&channel.0, discard_core::ui_state::Update::ConversationMarker(message));
-        core.refresh_branches(core.request_branch_refresh());
+        core.refresh_branches_in_background();
         Ok(request)
     }).await.map_err(|e| e.to_string())?
 }
@@ -339,9 +339,12 @@ pub async fn create_channel(channels: State<'_, Arc<super::channels::Channels>>,
 #[tauri::command]
 pub async fn switch_channel(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, channel_id: String) -> Result<(), String> {
     let channels = channels.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || channels.select(&channel_id)).await.map_err(|e| e.to_string())??;
-    use tauri::Emitter;
-    let _ = app.emit("discard://conversations", ());
+    let in_project = tauri::async_runtime::spawn_blocking(move || channels.select(&channel_id).map(|()| channels.in_project(&channel_id))).await.map_err(|e| e.to_string())??;
+    // A project channel is in the lists already. Only a direct message can change the catalogs.
+    if !in_project {
+        use tauri::Emitter;
+        let _ = app.emit("discard://conversations", ());
+    }
     super::windows::show_conversation(&app);
     Ok(())
 }

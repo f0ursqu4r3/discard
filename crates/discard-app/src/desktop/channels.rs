@@ -43,7 +43,7 @@ impl Channels {
         self.core.select_sidebar_project(Some(&project));
         self.select_inner_mode(&channel.id.0, true)?;
         self.store.lock().unwrap_or_else(|e| e.into_inner()).select_project_channel(id, &channel.id).map_err(|e| e.to_string())?;
-        self.core.refresh_branches(self.core.request_branch_refresh());
+        self.core.refresh_branches_in_background();
         Ok(channel.id.0)
     }
     pub fn restore(&self) -> Result<(), String> {
@@ -94,6 +94,10 @@ impl Channels {
             if core.sub_agents().is_running(&id) { sub_agent_stream_closed(&core, &store, &id); }
         });
         Ok(())
+    }
+    /// True when the channel belongs to a project. Selecting it leaves the catalogs as they are.
+    pub fn in_project(&self, id: &str) -> bool {
+        self.store.lock().unwrap_or_else(|e| e.into_inner()).load_channel(&ChannelId(id.to_owned())).is_ok_and(|channel| channel.project_id.is_some())
     }
     /// Select a channel. A thread opens beside its parent channel, which becomes the selected channel.
     pub fn select(&self, id: &str) -> Result<(), String> {
@@ -350,7 +354,7 @@ impl Channels {
                 if !self.core.has_channel(&updated.id.0) { self.start(&updated)?; }
                 self.select_inner(&updated.id.0)?;
             }
-            self.core.refresh_branches(self.core.request_branch_refresh());
+            self.core.refresh_branches_in_background();
             Ok(())
         })();
         for id in begun { self.core.end_channel_change(&id); }
@@ -394,7 +398,7 @@ impl Channels {
             if previous.as_ref().is_some_and(|old| old.id != updated.id && self.core.active_channel_id() == old.id.0) {
                 self.select_inner(&updated.id.0)?;
             }
-            self.core.refresh_branches(self.core.request_branch_refresh());
+            self.core.refresh_branches_in_background();
             Ok(())
         })();
         for id in begun { self.core.end_channel_change(&id); }
@@ -506,7 +510,8 @@ impl Channels {
         else { self.core.clear_branch_source(); }
         self.refresh_threads(&channel.id)?;
         self.core.clear_slots();
-        self.core.refresh_branches(self.core.request_branch_refresh());
+        // The rows are in state already. Mark the selected row from them. Git runs only in a refresh.
+        self.core.reselect_current_branch();
         if channel.project_id.is_none() {
             if let Err(error) = self.store.lock().unwrap_or_else(|e| e.into_inner()).add_direct_message(&channel.agent_id) {
                 self.core.append_channel_notice(id, format!("Chat opened, but could not save it to Direct Messages: {error}"));
@@ -564,7 +569,7 @@ impl Channels {
                 failures.push(format!("{id}: {error}"));
             }
         }
-        self.core.refresh_branches(self.core.request_branch_refresh());
+        self.core.refresh_branches_in_background();
         if failures.is_empty() { Ok(()) } else { Err(failures.join("; ")) }
     }
     pub fn restore_conversation(&self, id: &str) -> Result<(), String> {
@@ -638,6 +643,8 @@ impl Channels {
         let channel = self.store.lock().unwrap_or_else(|e| e.into_inner()).create_project_text_channel(project, name).map_err(|e| e.to_string())?;
         self.start(&channel)?;
         self.select_inner(&channel.id.0)?;
+        // A new channel changes the list. Refresh it without a wait.
+        self.core.refresh_branches_in_background();
         Ok(channel.id.0)
     }
     fn create_inner(&self, name: String, row: &discard_core::branch_tree::TreeRow, repository: &str, repository_path: &std::path::Path) -> Result<String, String> {
@@ -662,6 +669,8 @@ impl Channels {
         }
         self.start(&channel)?;
         self.select_inner(&channel.id.0)?;
+        // A new channel changes the list. Refresh it without a wait.
+        self.core.refresh_branches_in_background();
         Ok(channel.id.0)
     }
     pub fn decide_write_request(&self, requests: &discard_core::write_requests::WriteRequests, workspace: &discard_core::workspace::GitWorkspace, grants: &discard_core::workspace_grants::MainCheckoutGrants, channel: &str, id: &str, approve: bool) -> Result<discard_core::write_requests::WriteRequest, String> {
@@ -704,7 +713,7 @@ impl Channels {
             };
             self.store.lock().unwrap_or_else(|e| e.into_inner()).insert_message(&message).map_err(|e| e.to_string())?;
             self.core.apply_channel(channel, discard_core::ui_state::Update::ConversationMarker(message));
-            self.core.refresh_branches(self.core.request_branch_refresh());
+            self.core.refresh_branches_in_background();
             Ok((request, note))
         })();
         if approve { self.core.end_project_change(); }
@@ -809,7 +818,7 @@ impl Channels {
     }
     fn release(&self, held: Vec<String>) { for id in held { self.core.end_channel_change(&id); } }
     /// Show the new Git state: the branch list and the rows that depend on it.
-    fn after_git(&self) { self.core.refresh_branches(self.core.request_branch_refresh()); }
+    fn after_git(&self) { self.core.refresh_branches_in_background(); }
     /// The channels that use a working tree. The first list holds every channel with a saved worktree record at its
     /// path, archived or not. The second holds the active ones among them and the branch channel of the branch that the
     /// tree holds.
@@ -1120,6 +1129,16 @@ pub fn validate_name(name: &str) -> Result<String, String> {
     Ok(name)
 }
 
+/// Wait until background branch refreshes finish.
+#[cfg(test)]
+async fn settle(core: &AppCore) {
+    for _ in 0..500 {
+        if !core.branch_refresh_pending() { return; }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("a branch refresh did not finish");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1275,6 +1294,7 @@ mod tests {
         let store = Arc::new(Mutex::new(store));
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
         service.activate_project(&project.id).unwrap();
+        settle(&core).await;
         let rows: Vec<_> = core.snapshot().branches.into_iter().filter(|row| row.detached).collect();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].label, rows[1].label);
@@ -1322,6 +1342,7 @@ mod tests {
         git(&["checkout", "--detach"]);
         let nested_project = store.lock().unwrap().import_project_folder(dir.path()).unwrap();
         service.activate_project(&nested_project.id).unwrap();
+        settle(&core).await;
         let main = core.snapshot().branches.into_iter().find(|row| row.detached && row.kind == "main").unwrap();
         assert!(!main.repository.is_empty());
         let main_channel = service.open_branch(&main.key).unwrap();
@@ -1356,6 +1377,7 @@ mod tests {
         let store = Arc::new(Mutex::new(store));
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
         service.activate_project(&project.id).unwrap();
+        settle(&core).await;
         let snapshot = core.snapshot();
         assert_eq!(snapshot.repositories.len(), 2);
         let main_rows: Vec<_> = snapshot.branches.iter().filter(|row| row.label == "main").collect();
@@ -1425,6 +1447,7 @@ mod tests {
         let store = Arc::new(Mutex::new(store));
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
         service.activate_project(&project.id).unwrap();
+        settle(&core).await;
         let snapshot = core.snapshot();
         assert_eq!(snapshot.branches.iter().map(|row| row.key.as_str()).collect::<Vec<_>>(), vec!["main", "feature"]);
         assert_eq!(snapshot.channel, "general");
@@ -1437,9 +1460,11 @@ mod tests {
         assert!(core.snapshot().branches.iter().all(|row| !row.current));
         let stale = core.request_branch_refresh();
         service.activate_project(&other_project.id).unwrap();
+        settle(&core).await;
         core.refresh_branches(stale);
         assert!(core.snapshot().branches.is_empty());
         service.activate_project(&project.id).unwrap();
+        settle(&core).await;
         assert_eq!(core.snapshot().branches.len(), 2);
         assert!(core.snapshot().branches.iter().all(|row| !row.current), "the general channel does not highlight the main checkout");
         service.open_branch("feature").unwrap();
@@ -1447,6 +1472,72 @@ mod tests {
         core.select_sidebar_project(None);
         core.refresh_branches(core.request_branch_refresh());
         assert!(core.snapshot().branches.is_empty());
+    }
+
+    fn git_in(path: &std::path::Path, args: &[&str]) {
+        let output = discard_core::process::spawn_std(std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
+            .args(args).current_dir(path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output()).unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[tokio::test]
+    async fn selecting_an_existing_channel_marks_its_row_without_a_git_refresh() {
+        let repo = tempfile::tempdir().unwrap();
+        for args in [vec!["init", "-q", "-b", "main"], vec!["commit", "--allow-empty", "-m", "initial"], vec!["branch", "feature"]] { git_in(repo.path(), &args); }
+        let store = Store::open_in_memory().unwrap();
+        let project = store.import_project_folder(repo.path()).unwrap();
+        configured_agent(&store);
+        let (commands, _) = mpsc::unbounded_channel();
+        let core = Arc::new(AppCore::new(CoreInit {
+            state: UiState::new(ChannelId(String::new()), vec![]), commands,
+            project: String::new(), channel: String::new(), agent: String::new(), provider: String::new(),
+        }));
+        let store = Arc::new(Mutex::new(store));
+        let service = Channels::new(core.clone(), store, Handle::current(), launcher());
+        let general = service.activate_project(&project.id).unwrap();
+        settle(&core).await;
+        let feature = service.open_branch("feature").unwrap();
+        settle(&core).await;
+        assert_eq!(core.snapshot().branches.len(), 2);
+        // Git is unavailable now. A refresh would replace the rows with an empty list.
+        std::fs::rename(repo.path().join(".git"), repo.path().join(".git-hidden")).unwrap();
+        service.select(&general).unwrap();
+        let snapshot = core.snapshot();
+        assert_eq!(snapshot.channel_id, general);
+        assert_eq!(snapshot.branches.len(), 2, "selecting a channel keeps the rows");
+        assert!(snapshot.branches.iter().all(|row| !row.current));
+        service.select(&feature).unwrap();
+        settle(&core).await;
+        let snapshot = core.snapshot();
+        assert_eq!(snapshot.channel_id, feature);
+        assert_eq!(snapshot.branches.len(), 2, "selecting a channel does not reload the rows");
+        assert!(snapshot.branches.iter().any(|row| row.key == "feature" && row.current), "the selected row updates at once");
+        assert!(!snapshot.repositories_loading);
+    }
+
+    #[tokio::test]
+    async fn selecting_a_branch_without_a_channel_refreshes_in_the_background() {
+        let repo = tempfile::tempdir().unwrap();
+        for args in [vec!["init", "-q", "-b", "main"], vec!["commit", "--allow-empty", "-m", "initial"]] { git_in(repo.path(), &args); }
+        let store = Store::open_in_memory().unwrap();
+        let project = store.import_project_folder(repo.path()).unwrap();
+        configured_agent(&store);
+        let (commands, _) = mpsc::unbounded_channel();
+        let core = Arc::new(AppCore::new(CoreInit {
+            state: UiState::new(ChannelId(String::new()), vec![]), commands,
+            project: String::new(), channel: String::new(), agent: String::new(), provider: String::new(),
+        }));
+        let store = Arc::new(Mutex::new(store));
+        let service = Channels::new(core.clone(), store, Handle::current(), launcher());
+        service.activate_project(&project.id).unwrap();
+        settle(&core).await;
+        assert_eq!(core.snapshot().branches.len(), 1);
+        git_in(repo.path(), &["branch", "later"]);
+        service.open_branch("later").unwrap();
+        settle(&core).await;
+        let snapshot = core.snapshot();
+        assert!(snapshot.branches.iter().any(|row| row.key == "later" && row.current), "creating a channel refreshes the rows");
     }
 
     #[tokio::test]
@@ -1505,6 +1596,7 @@ mod tests {
         let core = core(&first, dir.path());
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
         service.activate_project(&project.id).unwrap();
+        settle(&core).await;
         let direct_agent = store.lock().unwrap().create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Direct".into(), provider: "codex".into(), model: Some("direct-model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         service.open_agent(&direct_agent).unwrap();
         git(&["checkout", "-b", "new"]);
@@ -2080,6 +2172,7 @@ mod navigation_action_tests {
         core.configure_read_marker(dir.path(), &general.id.0);
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launch);
         service.activate_project(&project.id).unwrap();
+        settle(&core).await;
         let workspace = GitWorkspace::new(&dir.path().join("worktrees"), store.clone());
         Rig { dir, repo, store, core, service, workspace, project, general, agent, _receivers: receivers }
     }
@@ -2188,6 +2281,7 @@ mod navigation_action_tests {
         assert!(record.owned && record.path == path && record.branch == "feature");
         assert!(std::path::Path::new(&path).join("a.txt").exists());
         let created = std::path::Path::new(&path).canonicalize().unwrap();
+        settle(&r.core).await;
         assert!(r.core.snapshot().branches.iter().any(|row| row.worktree.as_deref().is_some_and(|w| std::path::Path::new(w).canonicalize().ok().as_ref() == Some(&created))), "a branch refresh shows the new worktree");
         // The branch is checked out now, so a second request is refused.
         assert!(r.service.create_worktree(&r.workspace, &r.project.id, "", "feature", None).unwrap_err().contains("checked out"));
@@ -2342,6 +2436,7 @@ mod navigation_action_tests {
         assert_eq!(r.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "topic/new");
         assert_eq!(r.git(&["rev-parse", "HEAD"]), head);
         assert_eq!(std::fs::read_to_string(r.repo.join("a.txt")).unwrap(), "edited\n");
+        settle(&r.core).await;
         assert!(r.core.snapshot().branches.iter().any(|row| row.label == "topic/new"), "a branch refresh lists the new branch");
         assert!(r.service.create_branch(&r.project.id, "", "/not/a/worktree", "x").unwrap_err().contains("no longer available"));
     }
