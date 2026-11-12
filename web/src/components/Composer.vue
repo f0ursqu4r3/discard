@@ -6,13 +6,14 @@ import {
   chooseAttachments,
   importAttachmentFiles,
   getAgents,
+  getCommands,
   getProjectMembers,
   runCommand,
   type AgentEntry,
 } from '../bridge/api'
 import { mentionQuery, mentionToken } from './mentions'
 import AttachmentCard from './AttachmentCard.vue'
-import type { AttachmentDto } from '../bridge/types'
+import type { AttachmentDto, CommandDto } from '../bridge/types'
 import { Send, Square, AtSign, Paperclip, LoaderCircle, ChevronRight, Reply, X } from '@lucide/vue'
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from './ui/input-group'
 import { Checkbox } from './ui/checkbox'
@@ -20,7 +21,7 @@ import { Label } from './ui/label'
 import { Button } from './ui/button'
 import { messageSourceLink, type PendingReply } from './reply'
 import { maySend, mayStop } from './composer'
-import { commandLine, parseSlash } from './slash'
+import { commandLine, filterCommands, parseSlash, slashQuery } from './slash'
 const props = defineProps<{
   /** The id of the channel or thread that this composer serves. Commands run against it. */
   channelId: string
@@ -231,11 +232,32 @@ const candidates = computed(() =>
     ),
 )
 const selectable = computed(() => candidates.value.filter((agent) => !agent.ambiguous))
-const activeId = computed(() =>
-  query.value && selectable.value[selected.value]
-    ? `${listId}-${selectable.value[selected.value]!.id}`
-    : undefined,
+// The command popup opens for a draft that is `/` plus name characters. It cannot overlap the mention popup.
+const commandQuery = computed(() =>
+  props.archived || props.busy || dismissed.value ? null : slashQuery(text.value),
 )
+const commandOpen = computed(() => commandQuery.value !== null)
+const commands = ref<CommandDto[]>([])
+const commandsLoading = ref(false)
+const commandsFailed = ref(false)
+const commandRows = computed(() => filterCommands(commands.value, commandQuery.value ?? ''))
+const selectableCommands = computed(() => commandRows.value.filter((entry) => !entry.planned))
+// The text of the one disabled row that shows when there is no command row.
+const commandStatus = computed(() => {
+  if (commandRows.value.length) return ''
+  if (commandsFailed.value) return 'Could not load commands.'
+  if (commandsLoading.value) return 'Loading commands…'
+  return 'No matching command'
+})
+const activeId = computed(() => {
+  if (commandOpen.value) {
+    const entry = selectableCommands.value[selected.value]
+    return entry ? `${listId}-cmd-${entry.name}` : undefined
+  }
+  return query.value && selectable.value[selected.value]
+    ? `${listId}-${selectable.value[selected.value]!.id}`
+    : undefined
+})
 let request = 0
 async function loadAgents() {
   const token = ++request
@@ -264,6 +286,27 @@ watch(
     if (open) void loadAgents()
   },
 )
+let commandsRequest = 0
+async function loadCommands() {
+  const token = ++commandsRequest
+  commandsLoading.value = true
+  commandsFailed.value = false
+  try {
+    const entries = await getCommands()
+    if (token === commandsRequest) commands.value = entries
+  } catch {
+    if (token === commandsRequest) {
+      commands.value = []
+      commandsFailed.value = true
+    }
+  } finally {
+    if (token === commandsRequest) commandsLoading.value = false
+  }
+}
+// Read the registry each time the popup opens.
+watch(commandOpen, (open) => {
+  if (open) void loadCommands()
+})
 watch(
   () => props.projectId,
   () => {
@@ -274,7 +317,7 @@ watch(
   },
 )
 watch(
-  () => query.value?.query,
+  () => [query.value?.query, commandQuery.value],
   () => {
     selected.value = 0
   },
@@ -294,6 +337,16 @@ async function choose(agent: AgentEntry) {
   input?.focus()
   input?.setSelectionRange(match.start + token.length, match.start + token.length)
   caret.value = match.start + token.length
+}
+async function completeCommand(entry: CommandDto) {
+  if (entry.planned) return
+  const line = `/${entry.name} `
+  text.value = line
+  await nextTick()
+  const input = host.value?.querySelector('textarea')
+  input?.focus()
+  input?.setSelectionRange(line.length, line.length)
+  caret.value = line.length
 }
 async function insertMention() {
   const input = host.value?.querySelector('textarea')
@@ -376,6 +429,31 @@ function send() {
 }
 function keydown(event: KeyboardEvent) {
   if (event.isComposing) return
+  if (commandOpen.value) {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      dismissed.value = true
+      return
+    }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      const count = selectableCommands.value.length
+      if (count)
+        selected.value = (selected.value + (event.key === 'ArrowDown' ? 1 : -1) + count) % count
+      return
+    }
+    const entry = selectableCommands.value[selected.value]
+    // Enter on a full name falls through and runs the command. With no row, Enter also runs it.
+    if (
+      entry &&
+      (event.key === 'Tab' ||
+        (event.key === 'Enter' && !event.shiftKey && text.value !== `/${entry.name}`))
+    ) {
+      event.preventDefault()
+      void completeCommand(entry)
+      return
+    }
+  }
   if (query.value) {
     if (event.key === 'Escape') {
       event.preventDefault()
@@ -424,47 +502,95 @@ function keydown(event: KeyboardEvent) {
     class="relative mt-auto shrink-0 px-3 pt-2 pb-3"
   >
     <div
-      v-if="query"
+      v-if="query || commandOpen"
       class="absolute right-3 bottom-full left-3 z-20 mb-1 max-h-64 overflow-y-auto rounded-lg border bg-popover p-1 text-popover-foreground shadow-md"
     >
-      <p class="px-2 py-1 text-xs text-muted-foreground">Mention one agent</p>
-      <p v-if="loading" role="status" class="px-2 py-2 text-sm">Loading agents…</p>
-      <p v-else-if="loadError" role="status" class="px-2 py-2 text-sm">
-        {{ loadError }}
-      </p>
-      <p v-else-if="!candidates.length" role="status" class="px-2 py-2 text-sm">
-        No matching agents
-      </p>
-      <div :id="listId" role="listbox" aria-label="Agents">
-        <button
-          v-for="candidate in candidates"
-          :id="`${listId}-${candidate.id}`"
-          :key="candidate.id"
-          type="button"
-          role="option"
-          :aria-selected="activeId === `${listId}-${candidate.id}`"
-          :disabled="candidate.ambiguous"
-          :aria-disabled="candidate.ambiguous"
-          tabindex="-1"
-          class="flex w-full items-center justify-between gap-3 rounded-sm px-2 py-2 text-left text-sm hover:bg-accent disabled:opacity-50"
-          :class="
-            activeId === `${listId}-${candidate.id}` ? 'bg-accent text-accent-foreground' : ''
-          "
-          @pointerdown.prevent
-          @click="choose(candidate)"
-        >
-          <span>{{ candidate.name }}</span>
-          <span class="text-xs text-muted-foreground">
-            {{
-              candidate.ambiguous
-                ? 'Rename this agent to mention it'
-                : members.has(candidate.id)
-                  ? 'Project member'
-                  : 'Add to channel'
-            }}
-          </span>
-        </button>
-      </div>
+      <template v-if="commandOpen">
+        <p class="px-2 py-1 text-xs text-muted-foreground">Run a command</p>
+        <div :id="listId" role="listbox" aria-label="Commands">
+          <div
+            v-if="commandStatus"
+            role="option"
+            aria-disabled="true"
+            aria-selected="false"
+            class="px-2 py-2 text-sm opacity-50"
+          >
+            {{ commandStatus }}
+          </div>
+          <!-- A planned row has no click handler. -->
+          <button
+            v-for="entry in commandRows"
+            :id="`${listId}-cmd-${entry.name}`"
+            :key="entry.name"
+            type="button"
+            role="option"
+            :aria-selected="activeId === `${listId}-cmd-${entry.name}`"
+            :disabled="entry.planned"
+            :aria-disabled="entry.planned"
+            tabindex="-1"
+            class="flex w-full items-center justify-between gap-3 rounded-sm px-2 py-2 text-left text-sm hover:bg-accent disabled:opacity-50"
+            :class="
+              activeId === `${listId}-cmd-${entry.name}` ? 'bg-accent text-accent-foreground' : ''
+            "
+            @pointerdown.prevent
+            v-on="entry.planned ? {} : { click: () => completeCommand(entry) }"
+          >
+            <span class="shrink-0">
+              /{{ entry.name }}
+              <span v-if="entry.args" class="text-xs text-muted-foreground">{{ entry.args }}</span>
+            </span>
+            <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+              {{ entry.description }}
+            </span>
+            <span
+              v-if="entry.planned || entry.source !== 'builtin'"
+              class="shrink-0 text-xs text-muted-foreground"
+            >
+              {{ entry.planned ? 'Soon' : entry.source }}
+            </span>
+          </button>
+        </div>
+      </template>
+      <template v-else>
+        <p class="px-2 py-1 text-xs text-muted-foreground">Mention one agent</p>
+        <p v-if="loading" role="status" class="px-2 py-2 text-sm">Loading agents…</p>
+        <p v-else-if="loadError" role="status" class="px-2 py-2 text-sm">
+          {{ loadError }}
+        </p>
+        <p v-else-if="!candidates.length" role="status" class="px-2 py-2 text-sm">
+          No matching agents
+        </p>
+        <div :id="listId" role="listbox" aria-label="Agents">
+          <button
+            v-for="candidate in candidates"
+            :id="`${listId}-${candidate.id}`"
+            :key="candidate.id"
+            type="button"
+            role="option"
+            :aria-selected="activeId === `${listId}-${candidate.id}`"
+            :disabled="candidate.ambiguous"
+            :aria-disabled="candidate.ambiguous"
+            tabindex="-1"
+            class="flex w-full items-center justify-between gap-3 rounded-sm px-2 py-2 text-left text-sm hover:bg-accent disabled:opacity-50"
+            :class="
+              activeId === `${listId}-${candidate.id}` ? 'bg-accent text-accent-foreground' : ''
+            "
+            @pointerdown.prevent
+            @click="choose(candidate)"
+          >
+            <span>{{ candidate.name }}</span>
+            <span class="text-xs text-muted-foreground">
+              {{
+                candidate.ambiguous
+                  ? 'Rename this agent to mention it'
+                  : members.has(candidate.id)
+                    ? 'Project member'
+                    : 'Add to channel'
+              }}
+            </span>
+          </button>
+        </div>
+      </template>
     </div>
     <p v-if="attachmentError" role="alert" class="mb-2 text-sm text-destructive">
       {{ attachmentError }}
@@ -569,8 +695,8 @@ function keydown(event: KeyboardEvent) {
           :disabled="archived || busy"
           :aria-label="placeholder"
           :placeholder="placeholder"
-          :aria-expanded="!!query"
-          :aria-controls="query ? listId : undefined"
+          :aria-expanded="!!query || commandOpen"
+          :aria-controls="query || commandOpen ? listId : undefined"
           :aria-activedescendant="activeId"
           aria-autocomplete="list"
           @input="updateCaret"

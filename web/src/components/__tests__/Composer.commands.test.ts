@@ -1,7 +1,7 @@
-import { beforeEach, expect, test, vi } from 'vite-plus/test'
+import { beforeEach, describe, expect, it, test, vi } from 'vite-plus/test'
 import { flushPromises, mount } from '@vue/test-utils'
 import Composer from '../Composer.vue'
-import type { AttachmentDto } from '@/bridge/types'
+import type { AttachmentDto, CommandDto } from '@/bridge/types'
 import type { PendingReply } from '../reply'
 
 const api = vi.hoisted(() => ({
@@ -11,6 +11,7 @@ const api = vi.hoisted(() => ({
   getAgents: vi.fn(),
   getProjectMembers: vi.fn(),
   runCommand: vi.fn(),
+  getCommands: vi.fn(),
 }))
 vi.mock('@/bridge/api', () => api)
 
@@ -27,6 +28,20 @@ const reply: PendingReply = {
   author: 'Agent',
   excerpt: 'Question',
 }
+const command = (name: string, extra: Partial<CommandDto> = {}): CommandDto => ({
+  name,
+  description: `Describe ${name}`,
+  args: null,
+  source: 'builtin',
+  planned: false,
+  ...extra,
+})
+const registry = [
+  command('help'),
+  command('stop'),
+  command('model', { planned: true }),
+  command('echo', { source: 'tools', args: '<text>', description: 'Repeat' }),
+]
 const props = { channelId: 'c1', archived: false, busy: false, running: false, channel: 'general' }
 
 type View = ReturnType<typeof mount<typeof Composer>>
@@ -37,12 +52,14 @@ const type = async (view: View, text: string) => {
 }
 const enter = (view: View) => view.get('textarea').trigger('keydown', { key: 'Enter' })
 const input = (view: View) => view.get('textarea').element as HTMLTextAreaElement
+const key = (view: View, name: string) => view.get('textarea').trigger('keydown', { key: name })
 const panel = (view: View) => view.find('[data-ui-id="command-result"]')
 
 beforeEach(() => {
   vi.clearAllMocks()
   api.getAgents.mockResolvedValue([])
   api.getProjectMembers.mockResolvedValue([])
+  api.getCommands.mockResolvedValue(registry)
   api.attachmentPreview.mockResolvedValue('data:image/png;base64,aW1hZ2U=')
   w = mount(Composer, { props: { ...props, alsoPostLabel: undefined } })
 })
@@ -281,4 +298,166 @@ test('keeps the reply and the also-post box for a command', async () => {
   expect(w.emitted('cancelReply')).toBeUndefined()
   expect(w.emitted('send')).toBeUndefined()
   expect(w.get('[role="checkbox"]').attributes('aria-checked')).toBe('true')
+})
+
+describe('command popup', () => {
+  const popup = (view: View) => view.find('[aria-label="Commands"]')
+  const rows = (view: View) => view.findAll('[aria-label="Commands"] [role="option"]')
+
+  it('opens for a partial name and lists matches in registry order', async () => {
+    await type(w, '/')
+    await flushPromises()
+    const list = rows(w)
+    expect(list.map((r) => r.text())).toEqual([
+      expect.stringContaining('/help'),
+      expect.stringContaining('/stop'),
+      expect.stringContaining('/model'),
+      expect.stringContaining('/echo'),
+    ])
+    expect(list[3]!.text()).toContain('<text>')
+    expect(list[3]!.text()).toContain('Repeat')
+    expect(list[3]!.text()).toContain('tools')
+    expect(list[0]!.text()).not.toContain('builtin')
+  })
+
+  it('closes after the first space', async () => {
+    await type(w, '/echo ')
+    await flushPromises()
+    expect(popup(w).exists()).toBe(false)
+  })
+
+  it('does not open in an archived or busy composer', async () => {
+    await w.setProps({ busy: true })
+    await type(w, '/')
+    await flushPromises()
+    expect(popup(w).exists()).toBe(false)
+    expect(api.getCommands).not.toHaveBeenCalled()
+    await w.setProps({ busy: false, archived: true })
+    await type(w, '/h')
+    await flushPromises()
+    expect(popup(w).exists()).toBe(false)
+  })
+
+  it('marks a planned command as Soon and skips it', async () => {
+    await type(w, '/')
+    await flushPromises()
+    const model = rows(w)[2]!
+    expect(model.attributes('aria-disabled')).toBe('true')
+    expect(model.text()).toContain('Soon')
+    expect(model.text()).not.toContain('TODO')
+    await key(w, 'ArrowDown')
+    await key(w, 'ArrowDown') // help -> stop -> echo
+    expect(w.find('[role="option"][aria-selected="true"]').text()).toContain('/echo')
+    expect(w.get('textarea').attributes('aria-activedescendant')).toBe(
+      w.get('[role="option"][aria-selected="true"]').attributes('id'),
+    )
+  })
+
+  it('does not complete a planned command on click', async () => {
+    await type(w, '/')
+    await flushPromises()
+    await rows(w)[2]!.trigger('click')
+    expect(input(w).value).toBe('/')
+  })
+
+  it('completes with Tab', async () => {
+    await type(w, '/st')
+    await flushPromises()
+    await key(w, 'Tab')
+    expect(input(w).value).toBe('/stop ')
+    expect(input(w).selectionStart).toBe(6)
+    expect(api.runCommand).not.toHaveBeenCalled()
+  })
+
+  it('completes with a click', async () => {
+    await type(w, '/ec')
+    await flushPromises()
+    await rows(w)[0]!.trigger('click')
+    expect(input(w).value).toBe('/echo ')
+    expect(popup(w).exists()).toBe(false)
+    expect(api.runCommand).not.toHaveBeenCalled()
+  })
+
+  it('completes with Enter on a partial name and runs on an exact name', async () => {
+    api.runCommand.mockResolvedValue(null)
+    await type(w, '/he')
+    await flushPromises()
+    await enter(w)
+    expect(input(w).value).toBe('/help ')
+    expect(api.runCommand).not.toHaveBeenCalled()
+    await type(w, '/help')
+    await flushPromises()
+    await enter(w)
+    await flushPromises()
+    expect(api.runCommand).toHaveBeenCalledWith('c1', 'help', '')
+  })
+
+  it('runs on Enter before the registry loads', async () => {
+    api.getCommands.mockReturnValue(new Promise(() => {}))
+    api.runCommand.mockResolvedValue(null)
+    await type(w, '/help')
+    await enter(w)
+    await flushPromises()
+    expect(api.runCommand).toHaveBeenCalledWith('c1', 'help', '')
+  })
+
+  it('shows one disabled row for no match and still runs on Enter', async () => {
+    api.runCommand.mockRejectedValue('Unknown command: /zzz')
+    await type(w, '/zzz')
+    await flushPromises()
+    expect(popup(w).text()).toBe('No matching command')
+    expect(rows(w)[0]!.attributes('aria-disabled')).toBe('true')
+    await enter(w)
+    await flushPromises()
+    expect(w.get('[role="alert"]').text()).toBe('Unknown command: /zzz')
+  })
+
+  it('shows a load failure row and still runs on Enter', async () => {
+    api.getCommands.mockRejectedValue('x')
+    api.runCommand.mockResolvedValue(null)
+    await type(w, '/help')
+    await flushPromises()
+    expect(popup(w).text()).toBe('Could not load commands.')
+    await enter(w)
+    await flushPromises()
+    expect(api.runCommand).toHaveBeenCalledWith('c1', 'help', '')
+  })
+
+  it('closes on Escape and keeps the draft', async () => {
+    await type(w, '/he')
+    await flushPromises()
+    await key(w, 'Escape')
+    expect(popup(w).exists()).toBe(false)
+    expect(input(w).value).toBe('/he')
+  })
+
+  it('opens again on the next input after Escape', async () => {
+    await type(w, '/he')
+    await flushPromises()
+    await key(w, 'Escape')
+    await type(w, '/hel')
+    expect(popup(w).exists()).toBe(true)
+  })
+
+  it('reads the registry each time it opens', async () => {
+    await type(w, '/')
+    await flushPromises()
+    await type(w, 'x')
+    await type(w, '/')
+    await flushPromises()
+    expect(api.getCommands).toHaveBeenCalledTimes(2)
+  })
+
+  it('opens in a direct message composer', async () => {
+    await w.setProps({ directMessage: true })
+    await type(w, '/')
+    await flushPromises()
+    expect(popup(w).exists()).toBe(true)
+  })
+
+  it('does not open for escaped or non-command text', async () => {
+    await type(w, '//')
+    await type(w, '/Help')
+    expect(popup(w).exists()).toBe(false)
+  })
 })
