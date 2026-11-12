@@ -40,7 +40,7 @@ test('workspaces sorts the current project first and archived channels last', as
   expect(cards[0].get('h2').text()).toBe('Mine')
   expect(cards[0].text()).toContain('3 channels')
   expect(cards[0].text()).toContain('missing')
-  expect(cards[0].get('[title="/Users/ada/mine"]').text()).toBe('~/mine')
+  expect(cards[0].get('[title="~/mine"]').text()).toBe('~/mine')
   const names = cards[0].findAll('li').map((li) => li.get('[title]').attributes('title'))
   expect(names).toEqual(['main', 'feat', 'old'])
   expect(cards[0].findAll('li')[1].text()).toContain('~/mine-wt/feat')

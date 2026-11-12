@@ -23,6 +23,14 @@ test('shows the branch and target folder', async () => {
   expect(view.text()).toContain('Create a worktree for this branch?')
   view.unmount()
 })
+test('shows a home folder path with ~', async () => {
+  api.getWriteRequests.mockResolvedValue([{ ...pending, path: '/Users/ada/.discard/worktrees/w1' }])
+  const view = mount(WriteAccessApprovals, { props: { channelId: 'c', running: false } })
+  await flushPromises()
+  expect(view.text()).toContain('~/.discard/worktrees/w1')
+  expect(view.text()).not.toContain('/Users/ada')
+  view.unmount()
+})
 test('approve is disabled while the channel is running', async () => {
   api.getWriteRequests.mockResolvedValue([pending])
   const view = mount(WriteAccessApprovals, { props: { channelId: 'c', running: true } })

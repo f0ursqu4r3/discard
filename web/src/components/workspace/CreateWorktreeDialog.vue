@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { shortPath } from '@/settings/paths'
 import { ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { TriangleAlert } from '@lucide/vue'
@@ -48,7 +49,7 @@ async function confirm() {
       props.branch,
       plan.value.channelId,
     )
-    toast.success('Worktree created', { description: plan.value.path })
+    toast.success('Worktree created', { description: shortPath(plan.value.path) })
     open.value = false
   } catch (error) {
     // Git failed and nothing was saved. The dialog stays open, so the user can try again or cancel.
@@ -86,7 +87,7 @@ async function confirm() {
           data-ui-id="create-worktree-path"
           class="rounded-md bg-muted px-2 py-1 font-mono text-xs break-all"
         >
-          {{ plan?.path ?? '…' }}
+          {{ plan ? shortPath(plan.path) : '…' }}
         </code>
       </div>
       <Alert v-if="planError" data-ui-id="create-worktree-error" class="border-warning">
