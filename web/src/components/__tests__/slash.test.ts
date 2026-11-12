@@ -39,6 +39,14 @@ describe('slashQuery', () => {
     expect(slashQuery('/He')).toBeNull()
     expect(slashQuery('x /he')).toBeNull()
   })
+  it('opens for every name character, including a digit or dash first', () => {
+    expect(slashQuery('/1')).toBe('1')
+    expect(slashQuery('/-')).toBe('-')
+  })
+  it('returns a name longer than the limit as typed', () => {
+    const long = 'a'.repeat(33)
+    expect(slashQuery('/' + long)).toBe(long)
+  })
 })
 describe('filterCommands', () => {
   const entry = (name: string) => ({

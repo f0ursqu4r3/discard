@@ -20,8 +20,8 @@ export function unescapeSlash(text: string): string {
 
 /** The typed name part when the whole draft is `/` plus name characters; else null. */
 export function slashQuery(text: string): string | null {
-  const match = /^\/([a-z][a-z0-9_-]{0,31})?$/.exec(text)
-  return match ? (match[1] ?? '') : null
+  const match = /^\/([a-z0-9_-]*)$/.exec(text)
+  return match ? match[1]! : null
 }
 
 /** Entries whose name starts with `query`, in registry order. */
