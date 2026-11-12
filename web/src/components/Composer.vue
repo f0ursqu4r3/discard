@@ -63,7 +63,9 @@ const importing = ref(false)
 const attachmentError = ref('')
 // The last command result. It clears on a dismiss, a message, or a channel change.
 const commandResult = ref<{ line: string; output: string; error: boolean } | null>(null)
-const commandRunning = ref(false)
+// Bridge calls that have not settled. A dropped result still counts until its call settles.
+const pendingCommands = ref(0)
+const commandRunning = computed(() => pendingCommands.value > 0)
 let commandRun = 0
 let disposed = false
 onUnmounted(() => {
@@ -177,7 +179,6 @@ watch(
   () => {
     // Drop the result of a command that still runs for the old channel.
     commandRun++
-    commandRunning.value = false
     commandResult.value = null
   },
 )
@@ -334,7 +335,7 @@ async function runSlash(command: NonNullable<ReturnType<typeof parseSlash>>) {
   }
   const run = ++commandRun
   const sent = text.value
-  commandRunning.value = true
+  pendingCommands.value++
   try {
     const output = await runCommand(props.channelId, command.name, command.args)
     if (disposed || run !== commandRun) return
@@ -345,7 +346,7 @@ async function runSlash(command: NonNullable<ReturnType<typeof parseSlash>>) {
     if (disposed || run !== commandRun) return
     commandResult.value = { line, output: String(error), error: true }
   } finally {
-    if (!disposed && run === commandRun) commandRunning.value = false
+    pendingCommands.value--
   }
 }
 function send() {
@@ -364,7 +365,6 @@ function send() {
   if (props.running && !props.sendWhileRunning) return
   // A command that still runs must not show its result after this message.
   commandRun++
-  commandRunning.value = false
   commandResult.value = null
   if (props.alsoPostLabel !== undefined) {
     emit('send', text.value.trim(), [...files.value], alsoPost.value)

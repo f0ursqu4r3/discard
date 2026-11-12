@@ -185,6 +185,47 @@ test('drops a late command result after a plain message is sent', async () => {
   await flushPromises()
   expect(panel(w).exists()).toBe(false)
   expect(w.get('[data-ui-id="composer-send"]').attributes('aria-busy')).toBe('false')
+  // The composer accepts a command again after the old run settles.
+  api.runCommand.mockResolvedValue('again')
+  await type(w, '/next')
+  await enter(w)
+  await flushPromises()
+  expect(api.runCommand).toHaveBeenCalledTimes(2)
+  expect(panel(w).get('[role="status"]').text()).toBe('again')
+})
+
+test('does not run a second command after a plain message while the first still runs', async () => {
+  let finish!: (value: string) => void
+  api.runCommand.mockReturnValue(new Promise((resolve) => (finish = resolve)))
+  await type(w, '/slow')
+  await enter(w)
+  await type(w, 'hello')
+  await enter(w)
+  await type(w, '/second')
+  await enter(w)
+  expect(api.runCommand).toHaveBeenCalledTimes(1)
+  expect(w.get('[data-ui-id="composer-send"]').attributes('aria-busy')).toBe('true')
+  finish('late')
+  await flushPromises()
+  expect(w.get('[data-ui-id="composer-send"]').attributes('aria-busy')).toBe('false')
+})
+
+test('a dropped failure and a dropped result after a channel change end the busy state', async () => {
+  let fail!: (reason: string) => void
+  api.runCommand.mockReturnValue(new Promise((_, reject) => (fail = reject)))
+  await type(w, '/slow')
+  await enter(w)
+  await w.setProps({ channelId: 'c2' })
+  expect(panel(w).exists()).toBe(false)
+  fail('boom')
+  await flushPromises()
+  expect(panel(w).exists()).toBe(false)
+  expect(w.get('[data-ui-id="composer-send"]').attributes('aria-busy')).toBe('false')
+  api.runCommand.mockResolvedValue('ok')
+  await type(w, '/next')
+  await enter(w)
+  await flushPromises()
+  expect(api.runCommand).toHaveBeenLastCalledWith('c2', 'next', '')
 })
 
 test('clears the result when the channel changes', async () => {
