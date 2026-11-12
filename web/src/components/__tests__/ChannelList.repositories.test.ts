@@ -80,6 +80,20 @@ test('collapse state belongs to the project and loading is distinct from no repo
   list.unmount()
 })
 
+test('a refresh keeps the rows and their expanded state instead of showing the loading text', async () => {
+  const list = mount(ChannelList, { props })
+  await list.findAll('[data-ui-id="repository-toggle"]')[0]!.trigger('click')
+  const toggle = list.findAll('[data-ui-id="repository-toggle"]')[0]!.element
+  await list.setProps({ repositoriesLoading: true })
+  expect(list.text()).not.toContain('Scanning repositories')
+  expect(list.findAll('[data-ui-id="repository-section"]')).toHaveLength(2)
+  expect(list.findAll('[data-ui-id="repository-toggle"]')[0]!.element).toBe(toggle)
+  expect(list.findAll('[data-ui-id="repository-toggle"]')[0]!.attributes('aria-expanded')).toBe(
+    'false',
+  )
+  list.unmount()
+})
+
 test('unread branch indicators belong only to their repository', () => {
   const channel: ProjectChannelDto = {
     id: 'frontend-main',

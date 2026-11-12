@@ -536,7 +536,11 @@ const approvals = computed(
           </CollapsibleContent>
         </Collapsible>
 
-        <p v-if="repositoriesLoading" role="status" class="mt-5 px-2 text-xs text-muted-foreground">
+        <p
+          v-if="repositoriesLoading && !branches.length"
+          role="status"
+          class="mt-5 px-2 text-xs text-muted-foreground"
+        >
           Scanning repositories…
         </p>
         <p v-else-if="!repositoryGroups.length" class="mt-5 px-2 text-xs text-muted-foreground">

@@ -138,9 +138,15 @@ const workingAgents = computed(() => {
   return [...agents.values()]
 })
 let projectChannelRequest = 0
+// The project that owns `projectChannels`. A refresh keeps the list of the same project on screen.
+let projectChannelsProject: string | null = null
 async function refreshProjectChannels(projectId: string | null) {
   const request = ++projectChannelRequest
-  projectChannels.value = []
+  if (projectId !== projectChannelsProject) {
+    // Never show the channels of another project while the new list loads.
+    projectChannels.value = []
+    projectChannelsProject = projectId
+  }
   if (!projectId) return
   try {
     const channels = await getProjectChannels(projectId)
@@ -878,7 +884,6 @@ async function selectChannel(id: string) {
   try {
     await switchChannel(id)
     await store.refresh()
-    await refreshProjectChannels(store.snapshot?.projectId || null)
     navigate('conversation')
   } catch (error) {
     toast.error('Could not open channel', { description: String(error) })
