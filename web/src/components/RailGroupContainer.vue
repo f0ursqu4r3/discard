@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { FolderOpen } from '@lucide/vue'
+import { Folder } from '@lucide/vue'
 import { cn } from '@/lib/utils'
 import { Button } from './ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip'
 import GroupContextMenu from './GroupContextMenu.vue'
 import type { GroupMenuAction } from './project-menu'
-import type { RailSize } from './rail-layout'
+import { railSizes, type RailSize } from './rail-layout'
 
 defineProps<{
   groupId: string
@@ -13,6 +13,8 @@ defineProps<{
   size: RailSize
   /** CSS background of the container. Undefined keeps the neutral theme background. */
   tint?: string
+  /** CSS color of the folder icon: the solid group color. Undefined keeps the muted text color. */
+  color?: string
   /** The container is the group being dragged. */
   dragging?: boolean
   /** A drop here lands inside the group. */
@@ -32,7 +34,8 @@ const emit = defineEmits<{
       :style="tint ? { backgroundColor: tint } : undefined"
       :class="
         cn(
-          'mx-1 flex w-[calc(100%-0.5rem)] flex-col items-center gap-2 rounded-xl py-1',
+          'mx-auto flex flex-col items-center gap-1 rounded-xl p-1',
+          railSizes[size].group,
           !tint && 'bg-muted/60',
           dropInto && 'ring-2 ring-ring transition-shadow motion-reduce:transition-none',
         )
@@ -40,7 +43,7 @@ const emit = defineEmits<{
     >
       <GroupContextMenu :collapsed="false" @action="(action, arg) => emit('action', action, arg)">
         <div
-          :class="cn('flex w-full items-center justify-center', size === 'mini' ? 'h-5' : 'h-6')"
+          :class="cn('flex w-full items-center justify-center', railSizes[size].groupRow)"
           @pointerdown="emit('headerPointerdown', $event)"
         >
           <Tooltip>
@@ -50,10 +53,18 @@ const emit = defineEmits<{
                 :aria-label="label"
                 :aria-expanded="true"
                 variant="ghost"
-                class="size-6 rounded-md p-0 text-muted-foreground hover:text-foreground"
+                :class="
+                  cn(
+                    // Ghost fills an expanded trigger. The header shows the folder background instead.
+                    'rounded-lg bg-transparent p-0 hover:bg-foreground/10 aria-expanded:bg-transparent aria-expanded:hover:bg-foreground/10 dark:hover:bg-foreground/10',
+                    railSizes[size].tile,
+                    !color && 'text-muted-foreground aria-expanded:text-muted-foreground',
+                  )
+                "
+                :style="color ? { color } : undefined"
                 @click="emit('collapse')"
               >
-                <FolderOpen class="size-4" />
+                <Folder :class="railSizes[size].icon" fill="currentColor" />
               </Button>
             </TooltipTrigger>
             <TooltipContent side="right">

@@ -88,11 +88,51 @@ export interface RailGroupOption {
 }
 
 export type RailSize = 'mini' | 'compact' | 'default'
-/** Tile and row classes per rail size, and the pill height of a selected row in spacing units. */
-export const railSizes: Record<RailSize, { tile: string; row: string; pillUnits: number }> = {
-  mini: { tile: 'size-8', row: 'h-8', pillUnits: 8 },
-  compact: { tile: 'size-9', row: 'h-10', pillUnits: 10 },
-  default: { tile: 'size-12', row: 'h-12', pillUnits: 12 },
+/**
+ * Classes per rail size, and the pill height of a selected row in spacing units.
+ * An expanded group pads its tiles by one spacing unit on all four sides: `group` is the tile width
+ * plus that padding, `groupRow` is a row as high as the tile, and `groupPill` moves the selection
+ * pill from the row to the rail edge.
+ */
+export const railSizes: Record<
+  RailSize,
+  {
+    tile: string
+    row: string
+    pillUnits: number
+    group: string
+    groupRow: string
+    groupPill: string
+    icon: string
+  }
+> = {
+  mini: {
+    tile: 'size-8',
+    row: 'h-8',
+    pillUnits: 8,
+    group: 'w-10',
+    groupRow: 'h-8',
+    groupPill: '-left-2',
+    icon: 'size-4',
+  },
+  compact: {
+    tile: 'size-9',
+    row: 'h-10',
+    pillUnits: 10,
+    group: 'w-11',
+    groupRow: 'h-9',
+    groupPill: '-left-2',
+    icon: 'size-4',
+  },
+  default: {
+    tile: 'size-12',
+    row: 'h-12',
+    pillUnits: 12,
+    group: 'w-14',
+    groupRow: 'h-12',
+    groupPill: '-left-3',
+    icon: 'size-5',
+  },
 }
 
 /** A translucent tint of a group color for backgrounds. Undefined keeps the neutral theme background. */

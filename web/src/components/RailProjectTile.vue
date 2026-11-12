@@ -48,14 +48,19 @@ const focused = ref(false)
         @mouseleave="hovered = false"
         @focusin="focused = true"
         @focusout="focused = false"
-        :class="cn('group relative flex w-full items-center justify-center', railSizes[size].row)"
+        :class="
+          cn(
+            'group relative flex w-full items-center justify-center',
+            inGroup ? railSizes[size].groupRow : railSizes[size].row,
+          )
+        "
       >
         <span
           :data-ui-id="selected ? 'project-selection-pill' : `project-selection-pill-${project.id}`"
           :class="
             cn(
               'pointer-events-none absolute w-1 rounded-r-full bg-foreground transition-[height] duration-150 motion-reduce:transition-none',
-              inGroup ? '-left-1' : 'left-0',
+              inGroup ? railSizes[size].groupPill : 'left-0',
             )
           "
           :style="{

@@ -82,6 +82,7 @@ const groupApprovals = (group: RailGroupView) =>
 const tokens = computed(() => activeTheme.value?.tokens ?? {})
 const tileTint = (group: RailGroupView) => groupTint(group.color, tokens.value, 30)
 const containerTint = (group: RailGroupView) => groupTint(group.color, tokens.value, 18)
+const iconColor = (group: RailGroupView) => groupTint(group.color, tokens.value, 100)
 const directUnread = computed(
   () =>
     props.channels?.some(
@@ -279,6 +280,7 @@ const setCollapsed = (group: RailGroupView, collapsed: boolean) =>
             :label="groupLabel(item)"
             :size="size"
             :tint="containerTint(item)"
+            :color="iconColor(item)"
             :dragging="isDragged('group', item.id)"
             :drop-into="dropIntoGroup(item.id)"
             @header-pointerdown="onPointerDown($event, { kind: 'group', id: item.id })"
