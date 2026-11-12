@@ -24,6 +24,11 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 tracing.workspace = true
 uuid.workspace = true
 tauri-plugin-dialog = "2"
+portable-pty = "0.9.0"
+base64 = "0.23.1"
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }

@@ -5,6 +5,7 @@ pub mod core;
 pub mod delegation;
 pub mod dto;
 pub mod pump;
+pub mod terminal;
 pub mod threads;
 
 use core::{AppCore, CoreInit};
@@ -102,7 +103,17 @@ pub fn run(
     if config.startup_channel.is_none()
         && let Err(error) = channels.restore() { core.notice(format!("Could not restore conversation: {error}")); }
     core.refresh_branches(core.request_branch_refresh());
-    let actions = Arc::new(actions::DesktopActions { settings: settings.clone(), workspace: config.workspace.clone(), relaunch: config.relaunch, exiting: AtomicBool::new(false) });
+    let terminals = Arc::new(terminal::Terminals::default());
+    let actions = Arc::new(actions::DesktopActions { settings: settings.clone(), workspace: config.workspace.clone(), relaunch: config.relaunch, exiting: AtomicBool::new(false), terminals: terminals.clone() });
+    let sweep_terminals = terminals.clone();
+    runtime.spawn(async move {
+        // A shell must not outlive its folder: archive, removal, or a deletion by hand.
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            sweep_terminals.close_missing();
+        }
+    });
+    let exit_terminals = terminals.clone();
     let refresh_core = core.clone();
     runtime.spawn(async move {
         loop {
@@ -132,6 +143,7 @@ pub fn run(
         .manage(config.main_checkout_grants)
         .manage(config.workspace)
         .manage(actions.clone())
+        .manage(terminals)
         .manage(windows::SettingsRoute::default())
         .manage(settings::SettingsContext { home: data_dir.clone(), plugins: plugins.clone(), providers: config.providers, recheck: config.recheck, store: config.store, memory: config.memory, core: core.clone(), load_report: config.load_report, trusted_reviews: Mutex::new(std::collections::HashSet::new()), logs: Mutex::new(settings::logs::LogState::open(&data_dir)) })
         .on_menu_event(move |app, event| {
@@ -269,6 +281,7 @@ pub fn run(
             attachments::choose_attachments,
             attachments::import_attachments,
             attachments::attachment_preview,
+            terminal::terminal_open, terminal::terminal_write, terminal::terminal_resize, terminal::terminal_detach, terminal::terminal_close, terminal::terminal_status,
             commands::get_worktree_requests,
             commands::decide_worktree_removal,
             commands::decide_approval,
@@ -317,6 +330,7 @@ pub fn run(
         ])
         .build(tauri::generate_context!())?;
     app.run(move |_handle, event| {
+        if let tauri::RunEvent::Exit = event { exit_terminals.close_all(); }
         if let tauri::RunEvent::ExitRequested { api, .. } = event && !exit_actions.exiting.load(Ordering::SeqCst) {
             if let plan::Close::Ask(ending) = plan::close_plan(true, exit_core.any_running(), exit_actions.confirms()) {
                 api.prevent_exit();

@@ -270,6 +270,18 @@ export interface ThemeDto {
   protectedFg: string
   protectedBorder: string
   diffColors?: { added: string; removed: string; inlineAdded: string; inlineRemoved: string }
+  /** The integrated terminal colors. An empty palette means the web keeps its fallback. */
+  terminal?: TerminalColorsDto
+}
+export interface TerminalColorsDto {
+  /** ANSI colors 0 through 15. */
+  palette: string[]
+  background: string
+  foreground: string
+  cursor: string
+  cursorAccent: string
+  selectionBackground: string
+  selectionForeground: string | null
 }
 export interface ElementDto {
   tag: string

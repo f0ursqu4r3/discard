@@ -1,6 +1,6 @@
 # Settings, menus, and key bindings
 
-Discard has a settings file, a native menu bar, seven default key bindings, and a Settings window. Rust owns all of
+Discard has a settings file, a native menu bar, eight default key bindings, and a Settings window. Rust owns all of
 them. Plugins can add items to the Plugins menu and context menus. They cannot change Rust items, keys, or Settings pages.
 
 ## The settings file
@@ -119,6 +119,7 @@ changes. The Safe Mode check mark reflects the mode the app started in.
 | File | Cancel Turn | Cancels the running turn. Greyed when no turn runs. |
 | Edit | Undo, Redo, Cut, Copy, Paste, Select All | Standard items. The OS and the text input handle them. |
 | View | Switch Channel… | Greyed, "Soon". |
+| View | Toggle Terminal | Shows or hides the terminal panel of the main window. Key: `` Ctrl+` ``. See [The terminal](project-channel-status.md#terminal). |
 | Plugins | Review Plugins… | Opens the Settings window on the Plugins page. With waiting reviews, the label shows the count: "Review Plugins (2)…". |
 | Plugins | Plugin Errors… | Opens the Settings window on the Plugins page. |
 | Plugins | Safe Mode | Relaunches Discard with Safe Mode on or off. Has a check mark when Safe Mode is on. |
@@ -137,7 +138,7 @@ turn runs, but it has no "Soon" tag.
 
 ## Default keys
 
-Discard binds seven keys. The list is `default_keymap()` in `crates/discard-core/src/action.rs`.
+Discard binds eight keys. The list is `default_keymap()` in `crates/discard-core/src/action.rs`.
 
 | Key | Action |
 | --- | --- |
@@ -148,6 +149,7 @@ Discard binds seven keys. The list is `default_keymap()` in `crates/discard-core
 | `Cmd+H` | Hide Discard |
 | `Alt+Cmd+H` | Hide Others |
 | `Cmd+M` | Minimize |
+| `` Ctrl+` `` | Toggle Terminal |
 
 The webview adds no window or app keys of its own, so Discard binds Cmd+W, Cmd+H, and Cmd+M itself. Discard binds these keys
 before it builds the menu bar, so the menu items for them show their keys: Settings…, Hide Discard, Hide Others, Quit
@@ -156,6 +158,8 @@ carries a placeholder action with no key. Show All and Zoom have no key. An inva
 
 The edit keys Cmd+C, Cmd+V, Cmd+X, Cmd+A, and Cmd+Z stay with the OS and text inputs. They are reserved.
 Cmd+Q and Cmd+, remain reserved for Quit and Settings even if you move those actions. Cmd+W, Cmd+H, and Cmd+M are locked.
+Toggle Terminal is an optional action. The terminal does not send its key to the shell. The terminal also
+passes the Cmd keys and every shortcut that the webview handles to the app. Other keys, including `Ctrl+C`, go to the shell.
 Quit, Settings, and Cancel Turn need a shortcut. You can change other actions or unbind them. A conflict blocks the
 change and names the action. Key changes apply at the next launch. Plugins cannot register shortcuts.
 
@@ -580,6 +584,9 @@ Discard colors the windows with a Ghostty theme. A plugin theme goes on top.
 - **Plugin themes.** Plugin color tokens replace the matching Ghostty colors. `appearance.ignore_plugin_themes = true`
   turns them off. Plugins cannot change selection, caret, or diff colors. Approval cards and review screens read
   their palette from the theme you see, and keep their contrast rule.
+- **Terminal colors.** The terminal uses the 16 palette colors of the theme file, plus its background, foreground,
+  cursor, and selection colors. Plugin tokens `ansi_1` through `ansi_6` replace palette colors 1 through 6. The font is
+  the Ghostty `font-family`. The size is 13 px, scaled by `font_scale`. A change applies to an open terminal at once.
 - **Diff colors.** Added and removed lines in a plugin review use palette 2 and palette 1, through the contrast rule.
 - **A theme that fails.** A missing theme, a missing Ghostty config, or a bad value falls back to the default pair.
   A bad line in a theme file is skipped. The General page lists each problem with the file and line.
@@ -590,6 +597,8 @@ Discard colors the windows with a Ghostty theme. A plugin theme goes on top.
 Discard restores bounds that are large enough and visible on a current display. Otherwise it opens the window centered.
 Drag the dividers to resize the lists from 180 to 400 pixels. Each list defaults to 240 pixels.
 Discard saves window changes and panel widths in this file. Sidebars keep their pixel widths when the window changes size; the chat panel takes the remaining space. At narrow window sizes, navigation and profile panels use the compact layout.
+
+The terminal panel height and visibility are saved in the webview storage of the window, not in `state.toml`.
 
 The composer sends with Enter. Shift+Enter inserts a newline.
 Plugin theme tokens `font_scale` and `spacing_scale` adjust text and spacing. Ignore plugin themes disables both tokens.

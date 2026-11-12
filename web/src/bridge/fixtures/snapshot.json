@@ -67,6 +67,15 @@
       "removed": "#ffffff",
       "inlineAdded": "#ffffff",
       "inlineRemoved": "#ffffff"
+    },
+    "terminal": {
+      "palette": [],
+      "background": "",
+      "foreground": "",
+      "cursor": "",
+      "cursorAccent": "",
+      "selectionBackground": "",
+      "selectionForeground": null
     }
   }
 }

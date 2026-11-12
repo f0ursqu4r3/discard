@@ -61,3 +61,17 @@ Sandbox autorun is implemented for Claude and confirmed by a live probe on Claud
 Slice C remains planned: conversation moves, new-branch targets, and branch
 creation for detached worktrees. Native provider resume per agent is also planned.
 This does not implement multi-agent task orchestration.
+
+## Terminal
+
+Each project channel can have one shell session. Use **Toggle Terminal** in the channel header, View > Toggle Terminal, or `` Ctrl+` ``. The terminal is a panel at the bottom of the main panel. It is for the user only. Agents, MCP tools, plugins, and the plugin event stream cannot read or write it. Discard never logs terminal input or output.
+
+- **Folder.** A session starts in the worktree that the channel is bound to, if it exists. Otherwise it starts in the main checkout of the channel repository, then in the project folder. Direct messages have no terminal. The header button is disabled and gives the reason.
+- **Shell.** Discard starts `$SHELL` as a login, interactive shell (`-l -i`). It falls back to `/bin/zsh` on macOS and `/bin/sh` elsewhere. The shell gets `TERM=xterm-256color`, `COLORTERM=truecolor`, and the environment of the app. Discard removes `DISCARD_PLUGIN_PASSPHRASE` and the `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, and `TERM_SESSION_ID` variables of the program that started the app.
+- **Sessions stay.** A session keeps running when you switch channels or hide the panel. It keeps about 1 MiB of output. The panel replays that output when you return. A reload of the window does the same.
+- **Exit.** When the shell ends, the panel shows the exit code and a **Restart** button. The session keeps its output until you restart or close it. **Kill** ends the shell and its process group.
+- **Session ends.** Discard ends the session of a channel when the channel is archived, when its worktree is removed (Remove Worktree…, an approved agent request, or a folder deleted outside Discard), or when its project is removed. Discard ends all sessions when the app exits. The panel shows why a session ended.
+- **Layout.** Drag the top edge to resize the panel from 120 px up to 70% of the main panel. The arrow keys also move the edge. Height and visibility are saved for the window. Visibility is the same for every channel.
+- **Keys.** The shell gets every key except Toggle Terminal, the Cmd keys, and the shortcuts that the webview handles. `Cmd+C` copies a selection. `Cmd+V` pastes with bracketed paste. `Ctrl+C` stays with the shell.
+- **Colors and font.** The terminal follows the app theme. See Themes in [settings](settings.md).
+- **Not built.** **New Terminal Tab** is visible, disabled, and labelled Soon. One channel has one session.

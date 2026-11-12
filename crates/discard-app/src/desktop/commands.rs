@@ -149,9 +149,11 @@ pub async fn set_channel_muted(app: tauri::AppHandle, channels: State<'_, Arc<su
 
 /// Archive the channel of a row. `archived` is false when the archive needs the second confirm: call again with `force`.
 #[tauri::command]
-pub async fn archive_project_channel(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, workspace: State<'_, Arc<discard_core::workspace::GitWorkspace>>, project_id: String, channel_id: String, force: bool) -> Result<super::dto::ArchiveChannelDto, String> {
+pub async fn archive_project_channel(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, workspace: State<'_, Arc<discard_core::workspace::GitWorkspace>>, terminals: State<'_, Arc<super::terminal::Terminals>>, project_id: String, channel_id: String, force: bool) -> Result<super::dto::ArchiveChannelDto, String> {
     let (channels, workspace) = (channels.inner().clone(), workspace.inner().clone());
+    let closing = channel_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || channels.archive_channel(&workspace, &discard_core::model::ProjectId(project_id), &discard_core::model::ChannelId(channel_id), force)).await.map_err(|e| e.to_string())?;
+    if result.as_ref().is_ok_and(|archived| archived.archived) { terminals.close_channel(&closing, Some("This channel was archived. The session ended.")); }
     conversations_changed(&app);
     result
 }
@@ -215,9 +217,11 @@ pub async fn worktree_removal_info(channels: State<'_, Arc<super::channels::Chan
 
 /// Remove a linked working tree. The branch stays. Files that would be lost need `force`.
 #[tauri::command]
-pub async fn remove_git_worktree(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, repository: String, worktree: String, force: bool) -> Result<super::dto::WorktreeRemovalDto, String> {
+pub async fn remove_git_worktree(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, terminals: State<'_, Arc<super::terminal::Terminals>>, project_id: String, repository: String, worktree: String, force: bool) -> Result<super::dto::WorktreeRemovalDto, String> {
     let channels = channels.inner().clone();
+    let folder = std::path::PathBuf::from(&worktree);
     let result = tauri::async_runtime::spawn_blocking(move || channels.remove_worktree(&discard_core::model::ProjectId(project_id), &repository, &worktree, force)).await.map_err(|e| e.to_string())?;
+    if result.as_ref().is_ok_and(|removal| removal.removed) { terminals.close_inside(&folder, Some("The worktree of this terminal was removed. The session ended.")); }
     conversations_changed(&app);
     result
 }
@@ -230,6 +234,7 @@ pub fn get_worktree_requests(access: State<'_, Arc<discard_core::worktree_access
 #[tauri::command]
 pub async fn decide_worktree_removal(
     access: State<'_, Arc<discard_core::worktree_access::WorktreeAccess>>,
+    terminals: State<'_, Arc<super::terminal::Terminals>>,
     channels: State<'_, Arc<super::channels::Channels>>,
     core: State<'_, Arc<AppCore>>,
     channel_id: String, request_id: String, approve: bool,
@@ -237,12 +242,14 @@ pub async fn decide_worktree_removal(
     let access = access.inner().clone();
     let store = channels.store.clone();
     let core = core.inner().clone();
+    let terminals = terminals.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let channel = discard_core::model::ChannelId(channel_id);
         if approve { core.begin_project_change().map_err(|_| "Wait for active responses and archive operations to finish before removing a worktree.".to_string())?; }
         let decision = access.decide(&channel, &request_id, approve);
         if approve { core.end_project_change(); }
         let request = decision?;
+        if approve && request.state == "completed" { terminals.close_channel(&channel.0, Some("The worktree of this terminal was removed. The session ended.")); }
         let message = discard_core::model::Message {
             id: discard_core::model::MessageId::new(), channel_id: channel.clone(), role: discard_core::model::Role::System,
             blocks: vec![discard_core::model::Block::Markdown { text: request.result.clone().unwrap_or_else(|| request.state.clone()) }],
@@ -550,9 +557,10 @@ pub async fn set_project_main_agent(app: tauri::AppHandle, channels: State<'_, A
     Ok(())
 }
 #[tauri::command]
-pub async fn remove_project(channels: State<'_, Arc<super::channels::Channels>>, project_id: String) -> Result<(), String> {
+pub async fn remove_project(channels: State<'_, Arc<super::channels::Channels>>, terminals: State<'_, Arc<super::terminal::Terminals>>, project_id: String) -> Result<(), String> {
     let channels = channels.inner().clone(); channels.core.begin_project_change()?;
     let core = channels.core.clone();
+    let (terminals, closing) = (terminals.inner().clone(), project_id.clone());
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let id = discard_core::model::ProjectId(project_id);
         let next = channels.store.lock().unwrap_or_else(|e| e.into_inner()).visible_projects().map_err(|e| e.to_string())?.into_iter().find(|p| p.id != id);
@@ -561,7 +569,9 @@ pub async fn remove_project(channels: State<'_, Arc<super::channels::Channels>>,
         }
         channels.store.lock().unwrap_or_else(|e| e.into_inner()).hide_project(&id).map_err(|e| e.to_string())
     }).await.map_err(|e| e.to_string()).and_then(|r| r);
-    core.end_project_change(); result
+    core.end_project_change();
+    if result.is_ok() { terminals.close_project(&closing, Some("This project was removed. The session ended.")); }
+    result
 }
 #[tauri::command]
 pub async fn choose_project_folder(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, change_current: bool) -> Result<bool, String> {

@@ -68,6 +68,12 @@ import ChannelList from './components/ChannelList.vue';
 import ChannelHeader from './components/ChannelHeader.vue';
 import MessageList from './components/MessageList.vue';
 import Composer from './components/Composer.vue';
+import TerminalPanel from './components/terminal/TerminalPanel.vue';
+import {
+  terminalAvailability,
+  useTerminalVisibility,
+} from './components/terminal/terminal-state';
+import { useActionShortcut } from './bridge/terminal';
 import { unescapeSlash } from './components/slash';
 import Notices from './components/Notices.vue';
 import ApprovalCard from './components/ApprovalCard.vue';
@@ -270,6 +276,9 @@ watch(
   { immediate: true }
 );
 useWebShortcuts();
+const { visible: terminalVisible, toggle: toggleTerminalVisible } =
+  useTerminalVisibility();
+const terminalShortcut = useActionShortcut('toggle_terminal');
 const composer = ref<InstanceType<typeof Composer> | null>(null);
 const drafts = reactive<Record<string, string>>({});
 // The reply that waits for each composer. It uses the keys of `drafts`.
@@ -279,6 +288,18 @@ const attachmentDrafts = reactive<
 >({});
 const transcriptPositions = reactive<Record<string, TranscriptPosition>>({});
 const page = ref<WorkspacePage>('conversation');
+const terminalAccess = computed(() =>
+  terminalAvailability(
+    store.snapshot ? { ...store.snapshot, page: page.value } : null
+  )
+);
+const terminalShown = computed(
+  () => terminalVisible.value && terminalAccess.value.available
+);
+function toggleTerminal() {
+  if (terminalAccess.value.available) toggleTerminalVisible();
+  else toast(terminalAccess.value.reason);
+}
 const lastDirectMessageKey = 'discard:last-direct-message';
 let lastDirectMessage: string | null = null;
 try {
@@ -337,6 +358,7 @@ const navigationPage = computed<WorkspacePage>(() =>
 );
 let stopConversationOpened: UnlistenFn | undefined;
 let stopAgentProfile: UnlistenFn | undefined;
+let stopToggleTerminal: UnlistenFn | undefined;
 let disposed = false;
 onMounted(async () => {
   try {
@@ -359,8 +381,18 @@ onMounted(async () => {
     toast.error(String(error));
   }
 });
+onMounted(async () => {
+  try {
+    const stop = await listen('discard://toggle-terminal', toggleTerminal);
+    if (disposed) stop();
+    else stopToggleTerminal = stop;
+  } catch (error) {
+    toast.error(String(error));
+  }
+});
 onUnmounted(() => {
   disposed = true;
+  stopToggleTerminal?.();
   stopConversationOpened?.();
   stopAgentProfile?.();
   stopProjectCatalogue?.();
@@ -1342,6 +1374,12 @@ watch(
                 !threadActive
               "
               @toggle-members="toggleMembers"
+              :terminal-visible="terminalShown"
+              :terminal-disabled-reason="
+                terminalAccess.available ? '' : terminalAccess.reason
+              "
+              :terminal-shortcut="terminalShortcut"
+              @toggle-terminal="toggleTerminal"
               @toggle-navigation="navigationOpen = true"
             >
               <PluginElement
@@ -1648,6 +1686,12 @@ watch(
                 @stop="stop"
               />
             </template>
+            <TerminalPanel
+              v-if="terminalShown && store.snapshot.channelId"
+              :channel-id="store.snapshot.channelId"
+              :toggle-shortcut="terminalShortcut"
+              @hide="terminalVisible = false"
+            />
           </section>
         </ResizablePanel>
         <template v-if="showRightPanel">

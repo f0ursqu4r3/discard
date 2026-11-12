@@ -31,6 +31,7 @@ pub enum Plan {
     OpenAgentProfile,
     CancelTurn,
     ToggleMemberList,
+    ToggleTerminal,
     /// End the process now.
     Perform(Confirm),
     /// Show the confirm notice in the main window.
@@ -103,6 +104,7 @@ pub fn plan(
         Action::ArchiveChannel | Action::CopyMessageText | Action::CopyCode | Action::CopyChannelName | Action::CopyDiff | Action::CopyToolInput | Action::CopyToolOutput | Action::CopyAgentName | Action::CopyProjectName | Action::CopyProjectPath => return Plan::Nothing,
         Action::OpenSettings => return Plan::OpenSettings(SettingsPage::General),
         Action::ToggleMemberList => return Plan::ToggleMemberList,
+        Action::ToggleTerminal => return Plan::ToggleTerminal,
         Action::OpenAgentSettings => return Plan::OpenAgentProfile,
         Action::OpenWorkspaceSettings => return Plan::OpenSettings(SettingsPage::Workspaces),
         Action::ReviewPlugins | Action::ShowPluginErrors => {
@@ -161,6 +163,7 @@ mod tests {
         }
     }
     #[test] fn open_agent_profile_and_workspace_settings() { assert_eq!(plan(Action::OpenAgentSettings,false,true,false),Plan::OpenAgentProfile); assert_eq!(plan(Action::OpenWorkspaceSettings,false,true,false),Plan::OpenSettings(SettingsPage::Workspaces)); }
+    #[test] fn the_terminal_toggle_plans_a_toggle_even_while_a_turn_runs() { for running in [false, true] { assert_eq!(plan(Action::ToggleTerminal, running, true, false), Plan::ToggleTerminal); } }
     #[test] fn plan_targeted_copies_for_every_copy_action() { for &action in Action::all() { if action.needs_target() { assert_eq!(plan_targeted(action,true,false,false),TargetedPlan::Copy); assert_eq!(plan_targeted(action,false,false,false),TargetedPlan::Nothing); } } }
     #[test] fn the_new_copy_actions_need_a_target() { for a in [Action::CopyDiff,Action::CopyToolInput,Action::CopyToolOutput,Action::CopyAgentName,Action::CopyProjectName,Action::CopyProjectPath] { assert_eq!(plan_targeted(a,false,false,false),TargetedPlan::Nothing); assert_eq!(plan_targeted(a,true,false,false),TargetedPlan::Copy); } }
     #[test]

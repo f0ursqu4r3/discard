@@ -1,5 +1,5 @@
 //! Theme resolution without GUI dependencies.
-use super::dto::{DiffColorsDto, ThemeDto};
+use super::dto::{DiffColorsDto, TerminalColorsDto, ThemeDto};
 use discard_core::ghostty::color::Rgb as CoreRgb;
 use discard_core::ghostty::live::LiveTheme;
 use discard_core::ghostty::lookup::ThemeDirs;
@@ -148,6 +148,7 @@ impl AppearanceState {
         plugin_theme: &ThemeOverrides,
     ) -> bool {
         let old_font = self.live.resolved().mono_font.clone();
+        let old_colors = self.live.resolved().colors.clone();
         let live_changed = self.live.update(settings, system);
         let plugins_changed = *plugin_theme != self.plugin_theme
             || settings.ignore_plugin_themes != self.ignore_plugins;
@@ -160,7 +161,7 @@ impl AppearanceState {
         let (effective, radius) = compute(&self.live, &self.plugin_theme, self.ignore_plugins);
         let changed =
             effective != self.effective || radius != self.radius || old_scales != self.scales()
-                || old_font != self.live.resolved().mono_font;
+                || old_font != self.live.resolved().mono_font || old_colors != self.live.resolved().colors;
         self.effective = effective;
         self.radius = radius;
         changed
@@ -236,6 +237,23 @@ pub fn diff_palette(ui: &UiColors, on_block: bool) -> (String, String) {
     let palette = ProtectedPalette { background: to_lua(if on_block { ui.muted } else { ui.background }), foreground: to_lua(ui.foreground), border: to_lua(ui.border) };
     (protected_accent(&palette, to_lua(ui.diff_added), MIN_CONTRAST).to_hex(), protected_accent(&palette, to_lua(ui.diff_removed), MIN_CONTRAST).to_hex())
 }
+/// The terminal colors: the 16 Ghostty palette colors, with the plugin ANSI tokens on colors 1 through 6,
+/// and the effective background, foreground, caret, and selection.
+pub fn terminal_colors(state: &AppearanceState) -> TerminalColorsDto {
+    let ui = state.effective();
+    let colors = state.colors();
+    let mut palette: Vec<String> = discard_core::ghostty::map::swatches(colors).into_iter().take(16).map(|(_, color)| color.to_hex()).collect();
+    for (slot, color) in palette.iter_mut().skip(1).zip(ui.ansi) { *slot = color.to_hex(); }
+    TerminalColorsDto {
+        palette,
+        background: ui.background.to_hex(),
+        foreground: ui.foreground.to_hex(),
+        cursor: ui.caret.to_hex(),
+        cursor_accent: colors.cursor_text.unwrap_or(ui.background).to_hex(),
+        selection_background: ui.selection.to_hex(),
+        selection_foreground: colors.selection_foreground.map(|color| color.to_hex()),
+    }
+}
 pub fn theme_dto(state: &AppearanceState, _mode: Appearance) -> ThemeDto {
     let ui = state.effective();
     let overrides = as_overrides(ui);
@@ -271,6 +289,7 @@ pub fn theme_dto(state: &AppearanceState, _mode: Appearance) -> ThemeDto {
         protected_fg: palette.foreground.to_hex(),
         protected_border: palette.border.to_hex(),
         diff_colors: DiffColorsDto { added, removed, inline_added, inline_removed },
+        terminal: terminal_colors(state),
     }
 }
 #[cfg(test)]
@@ -306,6 +325,27 @@ mod tests {
             assert_eq!(layered.ansi[n], if n == 1 { CoreRgb { r: 0x12, g: 0x34, b: 0x56 } } else { base.ansi[n] });
         }
         assert_eq!(layer(&base, &plugin, true), base);
+    }
+
+    #[test]
+    fn theme_dto_carries_the_terminal_palette_and_a_bright_color_change_restyles() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("mine");
+        std::fs::write(&path, "background = #101010\nforeground = #eeeeee\ncursor-color = #00ff00\npalette = 9=#aa0000\n").unwrap();
+        let settings = AppearanceSettings { theme_source: discard_core::ghostty::resolve::ThemeSource::Custom, theme: "mine".into(), ..AppearanceSettings::default() };
+        let dirs = ThemeDirs { yours: Some(root.path().to_path_buf()), ghostty: Vec::new() };
+        let live = LiveTheme::new(dirs, Vec::new(), &settings, Appearance::Dark);
+        let mut state = AppearanceState::new(live, &settings, plugin("ansi_2", "#123456"));
+        let terminal = theme_dto(&state, Appearance::Dark).terminal;
+        assert_eq!(terminal.palette.len(), 16);
+        assert_eq!(terminal.palette[9], "#aa0000");
+        assert_eq!(terminal.palette[2], "#123456", "a plugin ANSI token wins on colors 1 through 6");
+        assert_eq!((terminal.background.as_str(), terminal.foreground.as_str(), terminal.cursor.as_str()), ("#101010", "#eeeeee", "#00ff00"));
+        let json = serde_json::to_value(theme_dto(&state, Appearance::Dark)).unwrap();
+        assert_eq!(json["terminal"]["selectionBackground"], terminal.selection_background);
+        std::fs::write(&path, "# changed\nbackground = #101010\nforeground = #eeeeee\ncursor-color = #00ff00\npalette = 9=#bb0000\n").unwrap();
+        assert!(state.update(&settings, Appearance::Dark, &plugin("ansi_2", "#123456")), "a palette 9 change reaches the window");
+        assert_eq!(theme_dto(&state, Appearance::Dark).terminal.palette[9], "#bb0000");
     }
 
     #[test]

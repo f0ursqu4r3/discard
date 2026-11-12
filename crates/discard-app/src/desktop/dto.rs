@@ -323,6 +323,19 @@ pub struct DiffColorsDto {
     pub inline_added: String,
     pub inline_removed: String,
 }
+/// The colors the integrated terminal draws with. An empty palette means the webview keeps its own fallback.
+#[derive(Serialize, Clone, PartialEq, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalColorsDto {
+    /// ANSI colors 0 through 15.
+    pub palette: Vec<String>,
+    pub background: String,
+    pub foreground: String,
+    pub cursor: String,
+    pub cursor_accent: String,
+    pub selection_background: String,
+    pub selection_foreground: Option<String>,
+}
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ThemeDto {
@@ -336,6 +349,7 @@ pub struct ThemeDto {
     pub protected_fg: String,
     pub protected_border: String,
     pub diff_colors: DiffColorsDto,
+    pub terminal: TerminalColorsDto,
 }
 #[derive(Serialize, Clone, PartialEq, Debug)]
 pub struct SlotDto {
@@ -532,6 +546,7 @@ fn sample_snapshot() -> SnapshotDto {
             protected_fg: "#ffffff".into(),
             protected_border: "#ffffff".into(),
             diff_colors: DiffColorsDto { added: "#ffffff".into(), removed: "#ffffff".into(), inline_added: "#ffffff".into(), inline_removed: "#ffffff".into() },
+            terminal: TerminalColorsDto::default(),
         },
     }
 }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { PanelRight, PanelLeft, Hash, AtSign, UserRound, Search } from '@lucide/vue'
+import { PanelRight, PanelLeft, Hash, AtSign, UserRound, Search, SquareTerminal } from '@lucide/vue'
 import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from './ui/input-group'
 import { Button } from './ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
@@ -17,6 +17,11 @@ const props = withDefaults(
     agentName?: string
     agentId?: string
     sidebarAvailable?: boolean
+    terminalVisible?: boolean
+    /** Why the terminal is unavailable now. A reason disables the button. */
+    terminalDisabledReason?: string
+    /** The shown shortcut of Toggle Terminal. */
+    terminalShortcut?: string
     /** Every thread of the channel, followed or not, latest activity first. */
     threads?: ThreadChipDto[]
   }>(),
@@ -24,6 +29,7 @@ const props = withDefaults(
 )
 const emit = defineEmits<{
   toggleMembers: []
+  toggleTerminal: []
   toggleNavigation: []
   search: [query: string]
   openThread: [threadId: string]
@@ -43,6 +49,20 @@ const label = computed(() =>
     : props.memberListVisible
       ? 'Hide project context'
       : 'Show project context',
+)
+const terminalLabel = computed(() =>
+  props.terminalDisabledReason
+    ? `Terminal unavailable. ${props.terminalDisabledReason}`
+    : props.terminalVisible
+      ? 'Hide terminal'
+      : 'Show terminal',
+)
+const terminalTooltip = computed(() =>
+  props.terminalDisabledReason
+    ? props.terminalDisabledReason
+    : props.terminalShortcut
+      ? `${terminalLabel.value} (${props.terminalShortcut})`
+      : terminalLabel.value,
 )
 function search() {
   if (query.value.trim()) emit('search', query.value.trim())
@@ -88,6 +108,26 @@ function search() {
     </div>
     <div class="flex items-center px-2">
       <ThreadsPopover v-if="conversation" :threads="threads" @open="emit('openThread', $event)" />
+      <TooltipProvider v-if="conversation">
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <span class="inline-flex" :tabindex="terminalDisabledReason ? 0 : undefined">
+              <Button
+                data-testid="terminal-toggle"
+                variant="ghost"
+                size="icon-sm"
+                :aria-label="terminalLabel"
+                :aria-pressed="!!terminalVisible"
+                :disabled="!!terminalDisabledReason"
+                @click="emit('toggleTerminal')"
+              >
+                <SquareTerminal />
+              </Button>
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>{{ terminalTooltip }}</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
       <TooltipProvider v-if="sidebarAvailable !== false">
         <Tooltip>
           <TooltipTrigger as-child>

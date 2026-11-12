@@ -23,6 +23,7 @@ pub struct DesktopActions {
     pub workspace: Arc<GitWorkspace>,
     pub relaunch: Relaunch,
     pub exiting: AtomicBool,
+    pub terminals: Arc<super::terminal::Terminals>,
 }
 impl DesktopActions {
     pub fn confirms(&self) -> bool { self.settings.lock().unwrap_or_else(|e| e.into_inner()).settings().general.confirm_while_working }
@@ -45,9 +46,12 @@ pub fn archive(core: Arc<AppCore>, actions: &DesktopActions, force: bool) {
 fn archive_for(core: Arc<AppCore>, actions: &DesktopActions, force: bool, channel: Option<&str>) {
     if !core.archive_started_for(channel) { return; }
     let workspace = actions.workspace.clone();
+    let terminals = actions.terminals.clone();
     let channel_id = ChannelId(core.active_channel_id());
     tauri::async_runtime::spawn_blocking(move || {
-        core.archive_finished(plan::archive_step(workspace.archive(&channel_id, force)));
+        let outcome = workspace.archive(&channel_id, force);
+        if matches!(outcome, Ok(discard_core::workspace::ArchiveOutcome::Archived { .. })) { terminals.close_channel(&channel_id.0, Some("This channel was archived. The session ended.")); }
+        core.archive_finished(plan::archive_step(outcome));
     });
 }
 /// Run a core action. Copy results return to the webview for the Web Clipboard API.
@@ -80,6 +84,7 @@ pub fn run(app: &AppHandle, core: &Arc<AppCore>, actions: &DesktopActions, actio
             }
         }
         Plan::CancelTurn => core.cancel_in(channel),
+        Plan::ToggleTerminal => if let Some(window) = app.get_webview_window("main") { let _ = window.emit("discard://toggle-terminal", ()); },
         Plan::ToggleMemberList => { let _ = core.set_member_list_visible(!core.snapshot().member_list_visible); }
         Plan::Ask(ending) => core.ask(ending),
         Plan::Perform(ending) => perform(app, core, actions, ending),

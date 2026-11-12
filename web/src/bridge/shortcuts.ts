@@ -1,8 +1,14 @@
-import { onMounted, onUnmounted } from 'vue'
+import { onMounted, onUnmounted, shallowRef } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { runAction } from './api'
 type Binding = [string, string]
+/** The shortcuts the webview handles itself. A focused terminal lets these keys through to the app. */
+export const webShortcutBindings = shallowRef<Binding[]>([])
+export function isWebShortcut(event: KeyboardEvent): boolean {
+  const mac = /mac/i.test(navigator.platform)
+  return webShortcutBindings.value.some(([, chord]) => matchesChord(chord, event, mac))
+}
 /** Match a core chord to a browser keyboard event. */
 export function matchesChord(chord: string, event: KeyboardEvent, mac: boolean): boolean {
   const minus = chord.endsWith('--')
@@ -49,9 +55,13 @@ export function useWebShortcuts() {
       unlisten = await listen<Binding[]>('discard://shortcuts', (event) => {
         changed = true
         bindings = event.payload
+        webShortcutBindings.value = bindings
       })
       const initial = await invoke<Binding[]>('web_shortcuts')
-      if (!changed) bindings = initial
+      if (!changed) {
+        bindings = initial
+        webShortcutBindings.value = bindings
+      }
     } catch {
       /* The bridge may be absent in a browser preview. */
     }

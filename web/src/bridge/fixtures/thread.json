@@ -192,6 +192,15 @@
       "protectedFg": "#ffffff",
       "radius": null,
       "spacingScale": 1.0,
+      "terminal": {
+        "background": "",
+        "cursor": "",
+        "cursorAccent": "",
+        "foreground": "",
+        "palette": [],
+        "selectionBackground": "",
+        "selectionForeground": null
+      },
       "tokens": {}
     },
     "threadApprovals": [],

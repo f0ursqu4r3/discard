@@ -365,6 +365,7 @@ impl AppCore {
                     protected_fg: "#f0f0f0".into(),
                     protected_border: "#ffaa00".into(),
                     diff_colors: DiffColorsDto { added: "#77cc88".into(), removed: "#ff7777".into(), inline_added: "#77cc88".into(), inline_removed: "#ff7777".into() },
+                    terminal: Default::default(),
                 },
             }),
             plugins: Mutex::new(None),

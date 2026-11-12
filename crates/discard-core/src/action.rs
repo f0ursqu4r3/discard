@@ -10,6 +10,8 @@ pub enum Action {
     CopyChannelName,
     OpenSettings,
     ToggleMemberList,
+    /// Show or hide the integrated terminal panel.
+    ToggleTerminal,
     Quit,
     CancelTurn,
     ReviewPlugins,
@@ -47,6 +49,7 @@ impl Action {
             Action::CopyChannelName => "copy_channel_name",
             Action::OpenSettings => "open_settings",
             Action::ToggleMemberList => "toggle_member_list",
+            Action::ToggleTerminal => "toggle_terminal",
             Action::Quit => "quit",
             Action::CancelTurn => "cancel_turn",
             Action::ReviewPlugins => "review_plugins",
@@ -78,6 +81,7 @@ impl Action {
             Self::CopyChannelName => "Copy Channel Name",
             Self::OpenSettings => "Settings",
             Self::ToggleMemberList => "Toggle Member List",
+            Self::ToggleTerminal => "Toggle Terminal",
             Self::Quit => "Quit",
             Self::CancelTurn => "Cancel Turn",
             Self::ReviewPlugins => "Review Plugins",
@@ -112,6 +116,7 @@ impl Action {
             Action::CopyChannelName,
             Action::OpenSettings,
             Action::ToggleMemberList,
+            Action::ToggleTerminal,
             Action::Quit,
             Action::CancelTurn,
             Action::ReviewPlugins,
@@ -278,7 +283,7 @@ pub fn menu_bar(ctx: &MenuContext) -> Vec<MenuSpec> {
                 MenuEntry::Standard(StandardItem::SelectAll),
             ],
         },
-        MenuSpec { title: "View", entries: vec![future("Switch Channel…"), action("Toggle Member List", Action::ToggleMemberList)] },
+        MenuSpec { title: "View", entries: vec![future("Switch Channel…"), action("Toggle Member List", Action::ToggleMemberList), action("Toggle Terminal", Action::ToggleTerminal)] },
         MenuSpec {
             title: "Plugins",
             entries: vec![
@@ -320,6 +325,7 @@ pub fn default_keymap() -> &'static [(Action, &'static str)] {
         (Action::HideOthers, "alt-cmd-h"),
         (Action::Minimize, "cmd-m"),
         (Action::CloseWindow, "cmd-w"),
+        (Action::ToggleTerminal, "ctrl-`"),
     ]
 }
 
@@ -456,6 +462,16 @@ mod tests {
         assert!(default_keymap().contains(&(Action::HideOthers, "alt-cmd-h")));
         assert!(default_keymap().contains(&(Action::Minimize, "cmd-m")));
         assert!(default_keymap().contains(&(Action::CloseWindow, "cmd-w")));
+        assert!(default_keymap().contains(&(Action::ToggleTerminal, "ctrl-`")));
+    }
+
+    #[test]
+    fn the_terminal_toggle_has_an_optional_default_key_that_parses() {
+        use crate::keymap::{KeyRule, Keymap, parse_chord, rule};
+        assert_eq!(rule(Action::ToggleTerminal), Some(KeyRule::Optional));
+        assert_eq!(Keymap::defaults().chord(Action::ToggleTerminal), Some(&parse_chord("ctrl-`").unwrap()));
+        assert_eq!(Action::ToggleTerminal.id(), "toggle_terminal");
+        assert_eq!(Action::ToggleTerminal.label(), "Toggle Terminal");
     }
 
     fn actions_in(title: &str) -> Vec<(String, Action)> {
@@ -497,7 +513,10 @@ mod tests {
 
     #[test]
     fn view_menu_contains_the_member_list_toggle() {
-        assert_eq!(actions_in("View"), [("Toggle Member List".to_string(), Action::ToggleMemberList)]);
+        assert_eq!(
+            actions_in("View"),
+            [("Toggle Member List".to_string(), Action::ToggleMemberList), ("Toggle Terminal".to_string(), Action::ToggleTerminal)]
+        );
     }
 
     #[test]
