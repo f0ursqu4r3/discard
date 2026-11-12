@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { shortPath } from '@/settings/paths'
 import { computed, ref } from 'vue'
 import { useAppearance } from '@/bridge/appearance'
 import { serverPillHeight } from './layout'
@@ -168,7 +169,9 @@ const emit = defineEmits<{
                     </Badge>
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent side="right">{{ entry.name }} · {{ entry.path }}</TooltipContent>
+                <TooltipContent side="right">
+                  {{ entry.name }}
+                </TooltipContent>
               </Tooltip>
             </div>
           </ProjectContextMenu>

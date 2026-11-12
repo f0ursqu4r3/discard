@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { shortPath } from '@/settings/paths'
 defineOptions({ name: 'SettingsWorkspaces' })
 import { computed, onMounted, reactive, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
@@ -108,7 +109,7 @@ onMounted(async () => {
             >
               <!-- prettier-ignore -->
               <span class="sr-only">{{ channel.name }} · {{ channel.mode }}{{ channel.archived ? ' · Archived' : ''
-              }}{{ channel.current ? ' · Current' : '' }}{{ channel.worktree ? ` · ${channel.worktree.branch} · ${channel.worktree.path}` : ''
+              }}{{ channel.current ? ' · Current' : '' }}{{ channel.worktree ? ` · ${channel.worktree.branch} · ${shortPath(channel.worktree.path)}` : ''
               }}{{ channel.worktree && !channel.worktree.exists ? ' · Missing' : '' }}</span>
               <span aria-hidden="true" class="flex min-w-0 items-baseline gap-2">
                 <span class="truncate" :title="channel.name">{{ channel.name }}</span>

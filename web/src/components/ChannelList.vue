@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { shortPath } from '@/settings/paths'
 import { computed, reactive, ref, watch } from 'vue'
 import {
   BellOff,
@@ -338,9 +339,9 @@ const approvals = computed(
             </span>
             <span
               class="block truncate font-mono text-xs text-muted-foreground"
-              :title="projectPath"
+              :title="projectPath && shortPath(projectPath)"
             >
-              {{ projectDisplayPath ?? projectPath }}
+              {{ projectDisplayPath ?? (projectPath && shortPath(projectPath)) }}
             </span>
           </span>
           <ChevronDown class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -562,7 +563,7 @@ const approvals = computed(
             <button
               type="button"
               data-ui-id="repository-toggle"
-              :title="repository.path"
+              :title="shortPath(repository.path)"
               class="section-label flex h-7 w-full min-w-0 items-center px-1 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
               <component

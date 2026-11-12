@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { shortPath } from '@/settings/paths'
 import { computed, ref, watch } from 'vue'
 import { GitBranch, ShieldCheck } from '@lucide/vue'
 import type { ProjectChannelDto, SnapshotDto } from '@/bridge/types'
@@ -115,7 +116,7 @@ const generalRunning = computed(() =>
               <div class="flex items-baseline font-mono text-xs">
                 <dt class="text-muted-foreground">repository</dt>
                 <span aria-hidden="true" class="kv-leader" />
-                <dd class="text-right min-w-0 truncate" :title="snapshot.projectPath">
+                <dd class="text-right min-w-0 truncate" :title="shortPath(snapshot.projectPath)">
                   {{ snapshot.project }}
                 </dd>
               </div>

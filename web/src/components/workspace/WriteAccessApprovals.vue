@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { shortPath } from '@/settings/paths'
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { getWriteRequests, decideWriteRequest, type WriteRequest } from '@/bridge/api'
 import { Button } from '../ui/button'
@@ -82,7 +83,7 @@ onUnmounted(() => {
       </p>
       <dl class="grid min-w-0 gap-1">
         <dt class="font-medium">Path</dt>
-        <dd class="break-all font-mono">{{ request.path }}</dd>
+        <dd class="break-all font-mono">{{ shortPath(request.path) }}</dd>
         <dt class="mt-2 font-medium">Branch</dt>
         <dd class="break-all font-mono">{{ request.branch }}</dd>
       </dl>

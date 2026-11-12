@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { shortPath } from '@/settings/paths'
 import { computed, ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { TriangleAlert } from '@lucide/vue'
@@ -116,7 +117,7 @@ async function confirm() {
         data-ui-id="remove-worktree-path"
         class="rounded-md bg-muted px-2 py-1 font-mono text-xs break-all"
       >
-        {{ worktree }}
+        {{ shortPath(worktree) }}
       </code>
       <Alert v-if="refusal" data-ui-id="remove-worktree-refusal" class="border-warning">
         <TriangleAlert aria-hidden="true" />

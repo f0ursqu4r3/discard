@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { shortPath } from '@/settings/paths'
 import { Monitor, ExternalLink } from '@lucide/vue'
 import BrailleSpinner from './BrailleSpinner.vue'
 import type { BranchRowDto } from '../bridge/types'
@@ -49,7 +50,7 @@ const emit = defineEmits<{ open: [key: string]; createBranch: []; removeWorktree
         :data-ui-id="`worktrees-row-${row.key}`"
         :aria-current="selected ? 'page' : undefined"
         :disabled="busy"
-        :title="`${row.worktree || 'Worktree path unavailable'}${row.detached ? ` — detached HEAD ${row.label}` : ''}`"
+        :title="`${row.worktree ? shortPath(row.worktree) : 'Worktree path unavailable'}${row.detached ? ` — detached HEAD ${row.label}` : ''}`"
         class="flex h-8 min-w-0 flex-1 justify-start items-center gap-2 rounded-md px-1 text-left text-xs outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"
         :class="
           selected
