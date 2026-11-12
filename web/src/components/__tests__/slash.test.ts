@@ -23,12 +23,14 @@ describe('parseSlash', () => {
   ])('does not treat %j as a command', (text) => expect(parseSlash(text)).toBeNull())
 })
 describe('unescapeSlash', () => {
-  it('removes one slash from a double slash', () => {
+  it('removes the first slash when the rest has the command form', () => {
     expect(unescapeSlash('//help me')).toBe('/help me')
-    expect(unescapeSlash('///x')).toBe('//x')
-    expect(unescapeSlash('/usr/bin')).toBe('/usr/bin')
-    expect(unescapeSlash('a // b')).toBe('a // b')
+    expect(unescapeSlash('//help')).toBe('/help')
   })
+  it.each(['// this fails', '///x', '//usr/bin', '/usr/bin', 'a // b'])(
+    'leaves %j unchanged',
+    (text) => expect(unescapeSlash(text)).toBe(text),
+  )
 })
 describe('slashQuery', () => {
   it('matches only a draft that is a partial command name', () => {

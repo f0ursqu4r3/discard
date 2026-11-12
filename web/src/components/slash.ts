@@ -13,9 +13,9 @@ export function parseSlash(text: string): SlashCommand | null {
   return { name: match[1]!, args: text.slice(1 + match[1]!.length).trim() }
 }
 
-/** `//x` becomes `/x`. Other text is unchanged. */
+/** `//help` becomes `/help`. Other text, such as `// note`, is unchanged. */
 export function unescapeSlash(text: string): string {
-  return text.startsWith('//') ? text.slice(1) : text
+  return text.startsWith('//') && parseSlash(text.slice(1)) ? text.slice(1) : text
 }
 
 /** The typed name part when the whole draft is `/` plus name characters; else null. */

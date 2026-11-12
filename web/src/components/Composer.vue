@@ -293,7 +293,10 @@ async function loadCommands() {
   commandsFailed.value = false
   try {
     const entries = await getCommands()
-    if (token === commandsRequest) commands.value = entries
+    if (token === commandsRequest) {
+      commands.value = entries
+      resetSelection()
+    }
   } catch {
     if (token === commandsRequest) {
       commands.value = []
@@ -316,12 +319,14 @@ watch(
     if (query.value) void loadAgents()
   },
 )
-watch(
-  () => [query.value?.query, commandQuery.value],
-  () => {
-    selected.value = 0
-  },
-)
+// Start on the row that matches the typed name, so Enter runs it.
+function resetSelection() {
+  const exact = commandOpen.value
+    ? selectableCommands.value.findIndex((entry) => text.value === `/${entry.name}`)
+    : -1
+  selected.value = Math.max(exact, 0)
+}
+watch([() => query.value?.query, commandQuery], resetSelection)
 function updateCaret(event: Event) {
   caret.value = (event.target as HTMLTextAreaElement).selectionStart
   dismissed.value = false

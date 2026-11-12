@@ -392,6 +392,27 @@ describe('command popup', () => {
     expect(api.runCommand).toHaveBeenCalledWith('c1', 'help', '')
   })
 
+  it('runs a plugin command whose name starts a built-in name', async () => {
+    api.getCommands.mockResolvedValue([command('archive'), command('arch', { source: 'tools' })])
+    api.runCommand.mockResolvedValue(null)
+    await type(w, '/arch')
+    await flushPromises()
+    expect(w.get('[role="option"][aria-selected="true"]').text()).toContain('/arch')
+    expect(w.get('[role="option"][aria-selected="true"]').text()).not.toContain('/archive')
+    await enter(w)
+    await flushPromises()
+    expect(api.runCommand).toHaveBeenCalledWith('c1', 'arch', '')
+  })
+
+  it('completes a shorter prefix to the first row on Enter', async () => {
+    api.getCommands.mockResolvedValue([command('archive'), command('arch', { source: 'tools' })])
+    await type(w, '/ar')
+    await flushPromises()
+    await enter(w)
+    expect(input(w).value).toBe('/archive ')
+    expect(api.runCommand).not.toHaveBeenCalled()
+  })
+
   it('runs on Enter before the registry loads', async () => {
     api.getCommands.mockReturnValue(new Promise(() => {}))
     api.runCommand.mockResolvedValue(null)

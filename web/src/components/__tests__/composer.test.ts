@@ -186,6 +186,19 @@ test('filters names, supports Tab, and quotes names with spaces', async () => {
   expect(composer.emitted('send')).toBeUndefined()
 })
 
+test('keeps the selected mention when the caret moves and the query stays', async () => {
+  const composer = mentionComposer()
+  const input = composer.get('textarea')
+  await input.setValue('@Jo\n@Jo')
+  await flushPromises()
+  await input.trigger('keydown', { key: 'ArrowDown' })
+  const selected = () => composer.get('[role="option"][aria-selected="true"]').text()
+  expect(selected()).toContain('Jordan Lee')
+  input.element.setSelectionRange(3, 3)
+  await input.trigger('click')
+  expect(selected()).toContain('Jordan Lee')
+})
+
 test('mention button opens suggestions and Escape closes them', async () => {
   const composer = mentionComposer()
   await composer.get('[aria-label="Mention an agent"]').trigger('click')

@@ -55,7 +55,7 @@ The owner approved the feature and left all design decisions to the designer. Ea
 1. Composer text is a command message when it matches `^/([a-z][a-z0-9_-]{0,31})(\s|$)`. The match is on the text as typed, from the first character. Leading whitespace makes the text a normal message.
 2. The command name is capture group 1. The arguments are the remaining text, trimmed. The arguments can have more than one line.
 3. Text such as `/usr/bin/env` does not match, because `/` follows the name. It is a normal message.
-4. Text that starts with `//` is a normal message. Discard removes the first `/` before the send. This is the escape for a literal message that has the command form.
+4. Text that starts with `//` is a normal message. When the text after the first `/` has the command form, Discard removes that first `/` before the send. This is the escape for a literal message that has the command form. Other text that starts with `//`, such as a code comment, is sent unchanged.
 5. The name match is exact and lowercase. `/Help` does not have the command form, and it is a normal message.
 
 ### Registry
