@@ -437,6 +437,59 @@ pub fn set_project_show_archived(app: tauri::AppHandle, context: State<'_, super
     Ok(())
 }
 #[tauri::command]
+pub fn get_rail_layout(context: State<'_, super::settings::SettingsContext>) -> Result<serde_json::Value, String> {
+    use discard_core::store::RailItem;
+    let layout = context.store.lock().unwrap_or_else(|e| e.into_inner()).rail_layout().map_err(|e| e.to_string())?;
+    let items: Vec<_> = layout.items.into_iter().map(|item| match item {
+        RailItem::Project(id) => serde_json::json!({"kind":"project","projectId":id.0}),
+        RailItem::Group(g) => serde_json::json!({"kind":"group","id":g.id,"name":g.name,"color":g.color,"collapsed":g.collapsed,"projectIds":g.project_ids.into_iter().map(|id| id.0).collect::<Vec<_>>()}),
+    }).collect();
+    Ok(serde_json::json!({"items":items}))
+}
+/// Run one rail mutation on the store and tell the web to reload the projects.
+fn change_rail<T>(app: &tauri::AppHandle, context: &super::settings::SettingsContext, change: impl FnOnce(&discard_core::store::Store) -> discard_core::store::Result<T>) -> Result<T, String> {
+    let out = change(&context.store.lock().unwrap_or_else(|e| e.into_inner())).map_err(|e| e.to_string())?;
+    use tauri::Emitter;
+    let _ = app.emit("discard://projects", ());
+    Ok(out)
+}
+/// Move a project into a group (`group_id` set) or to the top level (`group_id` empty). `index` counts the list without the project.
+#[tauri::command]
+pub fn move_rail_project(app: tauri::AppHandle, context: State<'_, super::settings::SettingsContext>, project_id: String, group_id: Option<String>, index: usize) -> Result<(), String> {
+    let target = group_id.map_or(discard_core::store::RailTarget::TopLevel, discard_core::store::RailTarget::Group);
+    change_rail(&app, &context, |store| store.rail_move_project(&discard_core::model::ProjectId(project_id), &target, index))
+}
+/// Drop `dragged_id` onto the ungrouped project `target_id`. Returns the new group ID.
+#[tauri::command]
+pub fn group_rail_projects(app: tauri::AppHandle, context: State<'_, super::settings::SettingsContext>, dragged_id: String, target_id: String) -> Result<String, String> {
+    change_rail(&app, &context, |store| store.rail_group_projects(&discard_core::model::ProjectId(dragged_id), &discard_core::model::ProjectId(target_id)))
+}
+/// Put one project in a new group. Returns the new group ID.
+#[tauri::command]
+pub fn create_rail_group(app: tauri::AppHandle, context: State<'_, super::settings::SettingsContext>, project_id: String) -> Result<String, String> {
+    change_rail(&app, &context, |store| store.rail_group_project(&discard_core::model::ProjectId(project_id)))
+}
+#[tauri::command]
+pub fn move_rail_group(app: tauri::AppHandle, context: State<'_, super::settings::SettingsContext>, group_id: String, index: usize) -> Result<(), String> {
+    change_rail(&app, &context, |store| store.rail_move_group(&group_id, index))
+}
+#[tauri::command]
+pub fn rename_rail_group(app: tauri::AppHandle, context: State<'_, super::settings::SettingsContext>, group_id: String, name: String) -> Result<(), String> {
+    change_rail(&app, &context, |store| store.rail_rename_group(&group_id, &name))
+}
+#[tauri::command]
+pub fn set_rail_group_color(app: tauri::AppHandle, context: State<'_, super::settings::SettingsContext>, group_id: String, color: Option<String>) -> Result<(), String> {
+    change_rail(&app, &context, |store| store.rail_set_group_color(&group_id, color.as_deref()))
+}
+#[tauri::command]
+pub fn set_rail_group_collapsed(app: tauri::AppHandle, context: State<'_, super::settings::SettingsContext>, group_id: String, collapsed: bool) -> Result<(), String> {
+    change_rail(&app, &context, |store| store.rail_set_group_collapsed(&group_id, collapsed))
+}
+#[tauri::command]
+pub fn ungroup_rail_group(app: tauri::AppHandle, context: State<'_, super::settings::SettingsContext>, group_id: String) -> Result<(), String> {
+    change_rail(&app, &context, |store| store.rail_ungroup(&group_id))
+}
+#[tauri::command]
 pub async fn select_project(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String) -> Result<String, String> {
     let channels = channels.inner().clone();
     channels.core.begin_project_navigation()?;

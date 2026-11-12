@@ -4,13 +4,15 @@ import type { ProjectChannelDto } from '@/bridge/types'
 import type { WorkspacePage } from './types'
 import ServerRail from '../ServerRail.vue'
 import type { ProjectMenuAction } from '../project-menu'
-import type { ProjectEntry } from '@/bridge/api'
+import type { ProjectEntry, RailLayoutDto } from '@/bridge/api'
+import type { RailChange } from '../rail-layout'
 import ChannelList from '../ChannelList.vue'
 import UserBar from './UserBar.vue'
 import DirectMessageSidebar from './DirectMessageSidebar.vue'
 import { channelApprovals } from '../threads'
 defineProps<{
   projects?: import('@/bridge/api').ProjectEntry[]
+  railLayout?: RailLayoutDto | null
   snapshot: SnapshotDto
   projectChannels?: ProjectChannelDto[]
   page: WorkspacePage
@@ -28,6 +30,7 @@ const emit = defineEmits<{
   selectThread: [threadId: string]
   leaveThread: [threadId: string]
   projectAction: [action: ProjectMenuAction, project: ProjectEntry]
+  railChange: [change: RailChange]
 }>()
 </script>
 <template>
@@ -38,9 +41,11 @@ const emit = defineEmits<{
     <div class="flex min-h-0 flex-1">
       <ServerRail
         :projects="projects"
+        :layout="railLayout"
         :channels="snapshot.channels"
         :busy="busy || snapshot.archiveBusy || snapshot.channels.some((channel) => channel.running)"
         @project-action="(action, project) => emit('projectAction', action, project)"
+        @rail-change="(change) => emit('railChange', change)"
         :project-id="snapshot.projectId"
         :compact="compact"
         :project="snapshot.project"

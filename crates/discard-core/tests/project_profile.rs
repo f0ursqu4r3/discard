@@ -43,7 +43,7 @@ fn version_five_projects_gain_optional_appearance_without_losing_data() {
             DROP TABLE always_allow_rules; PRAGMA user_version=5;").unwrap();
     }
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 14);
+    assert_eq!(store.schema_version().unwrap(), 15);
     assert_eq!(store.list_projects().unwrap(), vec![project.clone()]);
     assert_eq!(store.project_avatar(&project.id).unwrap(), None);
 }

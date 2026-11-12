@@ -32,6 +32,15 @@ import {
   openBranchChannel,
   chooseProjectFolder,
   getProjects,
+  getRailLayout,
+  moveRailProject,
+  groupRailProjects,
+  createRailGroup,
+  moveRailGroup,
+  renameRailGroup,
+  setRailGroupColor,
+  setRailGroupCollapsed,
+  ungroupRailGroup,
   getProjectChannels,
   getConversations,
   selectProject,
@@ -40,6 +49,7 @@ import {
   restoreConversation,
   openAgentChat,
   type ProjectEntry,
+  type RailLayoutDto,
   type HistoryMatch,
 } from './bridge/api';
 import {
@@ -105,7 +115,6 @@ import ContextPanel from './components/workspace/ContextPanel.vue';
 import ThreadPanel from './components/workspace/ThreadPanel.vue';
 import ThreadActionDialogs from './components/workspace/ThreadActionDialogs.vue';
 import WorkspacePageView from './components/workspace/WorkspacePage.vue';
-import BrandMark from './components/workspace/BrandMark.vue';
 import UiInspector from './components/workspace/UiInspector.vue';
 import FriendsList from './components/agents/FriendsList.vue';
 import AddAgentDialog from './components/agents/AddAgentDialog.vue';
@@ -117,6 +126,7 @@ import {
 } from './components/agents/useAgentAvatar';
 import type { WorkspacePage } from './components/workspace/types';
 import type { ProjectMenuAction } from './components/project-menu';
+import type { RailChange } from './components/rail-layout';
 import type { TranscriptPosition } from './components/workspace/transcript';
 // Match the macOS overlay in tauri.conf.json; browser previews keep their normal inset.
 const integratedTitlebar = isTauri() && /mac/i.test(navigator.platform);
@@ -155,6 +165,7 @@ const workingChannels = computed(() =>
   )
 );
 const projects = ref<ProjectEntry[]>([]);
+const railLayout = ref<RailLayoutDto | null>(null);
 const projectChannels = ref<ProjectChannelDto[]>([]);
 const statusBranch = computed(() =>
   store.snapshot ? channelBranch(store.snapshot, projectChannels.value) : null
@@ -212,8 +223,20 @@ async function refreshProjectContext() {
   await refreshProjects();
   await refreshProjectChannels(store.snapshot?.projectId || null);
 }
+async function loadRailLayout() {
+  try {
+    return (await getRailLayout()) ?? null;
+  } catch (error) {
+    toast.error('Could not load the project rail', {
+      description: String(error),
+    });
+    return null;
+  }
+}
 async function refreshProjects() {
-  projects.value = await getProjects();
+  const [list, layout] = await Promise.all([getProjects(), loadRailLayout()]);
+  projects.value = list;
+  railLayout.value = layout;
 }
 watch(
   () => store.snapshot?.projectId,
@@ -634,6 +657,30 @@ async function projectAction(id: ProjectMenuAction, project: ProjectEntry) {
     });
   } finally {
     switching.value = false;
+  }
+}
+// The backend emits `discard://projects` after each change, which reloads the rail.
+async function railChange(change: RailChange) {
+  try {
+    if (change.type === 'move-project')
+      await moveRailProject(change.projectId, change.groupId, change.index);
+    else if (change.type === 'group-projects')
+      await groupRailProjects(change.draggedId, change.targetId);
+    else if (change.type === 'create-group')
+      change.created?.(await createRailGroup(change.projectId));
+    else if (change.type === 'move-group')
+      await moveRailGroup(change.groupId, change.index);
+    else if (change.type === 'rename-group')
+      await renameRailGroup(change.groupId, change.name);
+    else if (change.type === 'color-group')
+      await setRailGroupColor(change.groupId, change.color);
+    else if (change.type === 'collapse-group')
+      await setRailGroupCollapsed(change.groupId, change.collapsed);
+    else await ungroupRailGroup(change.groupId);
+  } catch (error) {
+    toast.error('Could not update the project rail', {
+      description: String(error),
+    });
   }
 }
 async function searchHistory(query: string) {
@@ -1189,7 +1236,9 @@ watch(
     >
       <NavigationPanel
         @project-action="projectAction"
+        @rail-change="railChange"
         :projects="projects"
+        :rail-layout="railLayout"
         v-if="isCompact"
         class="shrink-0"
         compact
@@ -1224,7 +1273,9 @@ watch(
           >
             <NavigationPanel
               @project-action="projectAction"
+              @rail-change="railChange"
               :projects="projects"
+              :rail-layout="railLayout"
               :snapshot="store.snapshot"
               :project-channels="projectChannels"
               :page="navigationPage"

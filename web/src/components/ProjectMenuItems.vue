@@ -10,9 +10,12 @@ import {
   ContextMenuRadioGroup,
   ContextMenuRadioItem,
 } from './ui/context-menu'
-import type { ProjectMenuEntry, ProjectMenuAction } from './project-menu'
+import { activeTheme } from '@/bridge/theme'
+import { resolveColor } from './agents/agent-icon'
+import type { ProjectMenuEntry, MenuAction } from './project-menu'
 defineProps<{ entries: ProjectMenuEntry[] }>()
-const emit = defineEmits<{ action: [action: ProjectMenuAction] }>()
+const emit = defineEmits<{ action: [action: MenuAction, arg?: string] }>()
+const swatchColor = (slot: string) => resolveColor(slot, activeTheme.value?.tokens ?? {})
 </script>
 <template>
   <template v-for="(entry, index) in entries" :key="index">
@@ -24,7 +27,10 @@ const emit = defineEmits<{ action: [action: ProjectMenuAction] }>()
           class="min-w-56 max-h-(--reka-context-menu-content-available-height) overflow-y-auto"
           :collision-padding="8"
         >
-          <ProjectMenuItems :entries="entry.children" @action="emit('action', $event)" />
+          <ProjectMenuItems
+            :entries="entry.children"
+            @action="(action, arg) => emit('action', action, arg)"
+          />
         </ContextMenuSubContent>
       </ContextMenuPortal>
     </ContextMenuSub>
@@ -49,8 +55,15 @@ const emit = defineEmits<{ action: [action: ProjectMenuAction] }>()
       v-else
       :disabled="entry.disabled"
       :variant="entry.destructive ? 'destructive' : 'default'"
-      @select="!entry.disabled && emit('action', entry.action)"
+      @select="!entry.disabled && emit('action', entry.action, entry.arg)"
     >
+      <span
+        v-if="entry.swatch"
+        data-testid="menu-swatch"
+        class="size-3 shrink-0 rounded-full border border-border"
+        :style="{ backgroundColor: swatchColor(entry.swatch) }"
+        aria-hidden="true"
+      />
       {{ entry.label }}
     </ContextMenuItem>
   </template>

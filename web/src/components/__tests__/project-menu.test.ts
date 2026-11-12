@@ -1,7 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, expect, test, vi } from 'vite-plus/test'
 import { nextTick } from 'vue'
-import { projectMenu, type ProjectMenuEntry } from '../project-menu'
+import { groupMenu, projectMenu, type ProjectMenuEntry } from '../project-menu'
 import ProjectContextMenu from '../ProjectContextMenu.vue'
 import ProjectMenuItems from '../ProjectMenuItems.vue'
 import ServerRail from '../ServerRail.vue'
@@ -36,7 +36,11 @@ test('all planned entries lack executable actions, including nested notification
   )
   expect(planned.length).toBeGreaterThan(20)
   for (const entry of planned) expect(entry).not.toHaveProperty('action')
-  expect(entries).toContainEqual({ kind: 'planned', label: 'New Group…', control: undefined })
+  expect(entries).toContainEqual({
+    kind: 'planned',
+    label: 'Mark Project as Read',
+    control: undefined,
+  })
   expect(entries).toContainEqual({ kind: 'planned', label: 'New Channel…', control: undefined })
   expect(entries).toContainEqual({
     kind: 'planned-radio',
@@ -46,12 +50,17 @@ test('all planned entries lack executable actions, including nested notification
 
 test('busy projects block navigation and removal but retain copy and reveal', () => {
   const actions = flatten(projectMenu(true)).filter((entry) => entry.kind === 'action')
+  // `group-none` is blocked by state: the project has no group.
   expect(actions.filter((entry) => entry.disabled).map((entry) => entry.action)).toEqual([
     'settings',
+    'group-none',
     'remove',
   ])
   expect(actions.filter((entry) => !entry.disabled).map((entry) => entry.action)).toEqual([
     'reveal',
+    'group-new',
+    'move-first',
+    'move-last',
     'copy-name',
     'copy-path',
     'copy-id',
@@ -163,6 +172,94 @@ test('Shift+F10 opens a focused project menu and nested groups remain inspectabl
   const create = [...document.querySelectorAll('[role="menuitem"]')].find((item) =>
     item.textContent?.includes('New Group'),
   )
-  expect(create?.getAttribute('aria-disabled')).toBe('true')
+  expect(create?.getAttribute('aria-disabled')).toBeNull()
+  expect(create?.textContent).not.toContain('Soon')
+  const none = [...document.querySelectorAll('[role="menuitem"]')].find(
+    (item) => item.textContent?.trim() === 'No Group',
+  )
+  expect(none?.getAttribute('aria-disabled')).toBe('true')
+  expect(none?.textContent).not.toContain('Soon')
   expect(wrapper.emitted('action')).toBeUndefined()
+})
+
+const labels = (entries: ProjectMenuEntry[]) =>
+  entries.map((entry) => ('label' in entry ? entry.label : entry.kind))
+const groupSubmenu = (entries: ProjectMenuEntry[]) => {
+  const move = entries.find((entry) => entry.kind === 'submenu' && entry.label === 'Move to…')
+  const group =
+    move?.kind === 'submenu'
+      ? move.children.find((entry) => entry.kind === 'submenu' && entry.label === 'Group')
+      : undefined
+  return group?.kind === 'submenu' ? group.children : []
+}
+
+test('an ungrouped project cannot leave a group, and no group items show without groups', () => {
+  const children = groupSubmenu(projectMenu(false))
+  expect(labels(children)).toEqual(['No Group', 'separator', 'New Group…'])
+  expect(children[0]).toMatchObject({ action: 'group-none', disabled: true })
+  expect(children[2]).toMatchObject({ action: 'group-new' })
+  expect(children[2]).not.toHaveProperty('disabled')
+})
+
+test('the group submenu lists each group, blocks the current one, and enables No Group', () => {
+  const rail = {
+    groups: [
+      { id: 'g1', label: 'Work' },
+      { id: 'g2', label: 'Play' },
+    ],
+    groupId: 'g2',
+  }
+  const children = groupSubmenu(projectMenu(false, rail))
+  expect(labels(children)).toEqual([
+    'No Group',
+    'separator',
+    'Work',
+    'Play',
+    'separator',
+    'New Group…',
+  ])
+  expect(children[0]).toMatchObject({ action: 'group-none', disabled: false })
+  expect(children[2]).toMatchObject({ action: 'group-join', arg: 'g1', disabled: false })
+  expect(children[3]).toMatchObject({ action: 'group-join', arg: 'g2', disabled: true })
+})
+
+test('First and Last in Group are real actions', () => {
+  const move = flatten(projectMenu(false)).filter(
+    (entry) => entry.kind === 'action' && ['move-first', 'move-last'].includes(entry.action),
+  )
+  expect(move.map((entry) => entry.kind === 'action' && entry.label)).toEqual([
+    'First in Group',
+    'Last in Group',
+  ])
+})
+
+test('the group menu has real actions, a planned Mark Group as Read, and swatches', () => {
+  const entries = flatten(groupMenu(false))
+  expect(entries).toContainEqual({
+    kind: 'planned',
+    label: 'Mark Group as Read',
+    control: undefined,
+  })
+  expect(entries.find((entry) => entry.kind === 'planned')).not.toHaveProperty('action')
+  expect(
+    entries.filter((entry) => entry.kind === 'action').map((entry) => [entry.label, entry.action]),
+  ).toEqual([
+    ['Rename Group…', 'group-rename'],
+    ['Default', 'group-color'],
+    ['Red', 'group-color'],
+    ['Green', 'group-color'],
+    ['Yellow', 'group-color'],
+    ['Blue', 'group-color'],
+    ['Magenta', 'group-color'],
+    ['Cyan', 'group-color'],
+    ['Collapse', 'group-toggle'],
+    ['Ungroup', 'group-ungroup'],
+  ])
+  expect(entries).toContainEqual(
+    expect.objectContaining({ label: 'Blue', arg: 'ansi-4', swatch: 'ansi-4' }),
+  )
+  expect(entries).toContainEqual(
+    expect.not.objectContaining({ label: 'Default', arg: expect.anything() }),
+  )
+  expect(labels(groupMenu(true))).toContain('Expand')
 })

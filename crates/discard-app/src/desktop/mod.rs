@@ -255,7 +255,7 @@ pub fn run(
             commands::get_write_requests, commands::decide_write_request,
             commands::get_agent_requests, commands::decide_agent_request,
             commands::get_always_allow_rules, commands::revoke_always_allow_rule,
-            commands::get_snapshot, commands::choose_project_folder, commands::get_projects, commands::update_project_profile, commands::set_project_show_archived, commands::select_project, commands::remove_project,
+            commands::get_snapshot, commands::choose_project_folder, commands::get_projects, commands::update_project_profile, commands::set_project_show_archived, commands::get_rail_layout, commands::move_rail_project, commands::group_rail_projects, commands::create_rail_group, commands::move_rail_group, commands::rename_rail_group, commands::set_rail_group_color, commands::set_rail_group_collapsed, commands::ungroup_rail_group, commands::select_project, commands::remove_project,
             commands::get_project_channels, commands::get_project_members, commands::get_channel_details, commands::update_channel_topic, commands::set_project_main_agent,
             commands::invite_channel_member, commands::select_canonical_branch, commands::select_canonical_project_channel,
             commands::search_agent_history, commands::restore_conversation, commands::get_conversations, commands::create_conversation, commands::open_agent_chat,

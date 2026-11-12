@@ -242,6 +242,39 @@ export const setProjectShowArchived = (projectId: string, show: boolean) =>
 export const updateProjectProfile = (projectId: string, name: string, avatar: string | null) =>
   invoke<void>('update_project_profile', { projectId, name, avatar })
 export const getProjects = () => invoke<ProjectEntry[]>('get_projects')
+/** One top-level item of the project rail. A group lists its member projects in order. */
+export type RailItemDto =
+  | { kind: 'project'; projectId: string }
+  | {
+      kind: 'group'
+      id: string
+      /** May be empty. The rail then builds a label from the member names. */
+      name: string
+      /** An `ansi-1` to `ansi-6` theme slot or `#rrggbb`. Null means the default tint. */
+      color: string | null
+      collapsed: boolean
+      projectIds: string[]
+    }
+export interface RailLayoutDto {
+  items: RailItemDto[]
+}
+export const getRailLayout = () => invoke<RailLayoutDto>('get_rail_layout')
+/** `index` counts the target list without the moved project. A null group is the top level. */
+export const moveRailProject = (projectId: string, groupId: string | null, index: number) =>
+  invoke<void>('move_rail_project', { projectId, groupId, index })
+export const groupRailProjects = (draggedId: string, targetId: string) =>
+  invoke<string>('group_rail_projects', { draggedId, targetId })
+export const createRailGroup = (projectId: string) =>
+  invoke<string>('create_rail_group', { projectId })
+export const moveRailGroup = (groupId: string, index: number) =>
+  invoke<void>('move_rail_group', { groupId, index })
+export const renameRailGroup = (groupId: string, name: string) =>
+  invoke<void>('rename_rail_group', { groupId, name })
+export const setRailGroupColor = (groupId: string, color: string | null) =>
+  invoke<void>('set_rail_group_color', { groupId, color })
+export const setRailGroupCollapsed = (groupId: string, collapsed: boolean) =>
+  invoke<void>('set_rail_group_collapsed', { groupId, collapsed })
+export const ungroupRailGroup = (groupId: string) => invoke<void>('ungroup_rail_group', { groupId })
 export const selectProject = (projectId: string) => invoke<string>('select_project', { projectId })
 export const removeProject = (projectId: string) => invoke<void>('remove_project', { projectId })
 export const revealProject = (path: string) => invoke<void>('settings_reveal_workspace', { path })

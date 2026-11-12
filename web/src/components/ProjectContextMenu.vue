@@ -21,14 +21,31 @@ import {
 } from './ui/dialog'
 import { Button } from './ui/button'
 import ProjectMenuItems from './ProjectMenuItems.vue'
-import { projectMenu, type ProjectMenuAction } from './project-menu'
-const props = defineProps<{ project: ProjectEntry; busy?: boolean }>()
-const emit = defineEmits<{ action: [action: ProjectMenuAction, project: ProjectEntry] }>()
+import {
+  projectMenu,
+  type MenuAction,
+  type ProjectMenuAction,
+  type ProjectRailContext,
+  type RailMenuAction,
+} from './project-menu'
+import { openContextMenuFromKeyboard } from './context-menu-keyboard'
+const props = defineProps<{ project: ProjectEntry; busy?: boolean; rail?: ProjectRailContext }>()
+const emit = defineEmits<{
+  action: [action: ProjectMenuAction, project: ProjectEntry]
+  rail: [action: RailMenuAction, project: ProjectEntry, arg?: string]
+}>()
+const railActions: MenuAction[] = [
+  'group-none',
+  'group-join',
+  'group-new',
+  'move-first',
+  'move-last',
+]
 type PluginEntry = Extract<MenuEntryDto, { kind: 'plugin' }>
 const plugins = ref<PluginEntry[]>([])
 const confirmRemove = ref(false)
 const target = computed(() => ({ type: 'server' as const, ...props.project }))
-const entries = computed(() => projectMenu(!!props.busy))
+const entries = computed(() => projectMenu(!!props.busy, props.rail))
 let request = 0
 async function openChanged(open: boolean) {
   const id = ++request
@@ -43,25 +60,11 @@ async function openChanged(open: boolean) {
     if (id === request) toast.error('Could not load plugin actions', { description: String(error) })
   }
 }
-function select(action: ProjectMenuAction) {
-  if (props.busy && ['settings', 'remove'].includes(action)) return
-  if (action === 'remove') confirmRemove.value = true
-  else emit('action', action, props.project)
-}
-function openFromKeyboard(event: KeyboardEvent) {
-  if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
-  event.preventDefault()
-  const element = event.currentTarget as HTMLElement
-  const bounds = element.getBoundingClientRect()
-  element.dispatchEvent(
-    new MouseEvent('contextmenu', {
-      bubbles: true,
-      cancelable: true,
-      button: 2,
-      clientX: bounds.right,
-      clientY: bounds.top,
-    }),
-  )
+function select(action: MenuAction, arg?: string) {
+  if (railActions.includes(action)) emit('rail', action as RailMenuAction, props.project, arg)
+  else if (props.busy && ['settings', 'remove'].includes(action)) return
+  else if (action === 'remove') confirmRemove.value = true
+  else emit('action', action as ProjectMenuAction, props.project)
 }
 async function runPlugin(entry: PluginEntry) {
   try {
@@ -73,7 +76,9 @@ async function runPlugin(entry: PluginEntry) {
 </script>
 <template>
   <ContextMenu @update:open="openChanged">
-    <ContextMenuTrigger as-child @keydown="openFromKeyboard"><slot /></ContextMenuTrigger>
+    <ContextMenuTrigger as-child @keydown="openContextMenuFromKeyboard">
+      <slot />
+    </ContextMenuTrigger>
     <ContextMenuContent class="min-w-64" :collision-padding="8">
       <ProjectMenuItems :entries="entries" @action="select" />
       <ContextMenuSeparator v-if="plugins.length" />

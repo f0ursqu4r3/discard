@@ -10,4 +10,4 @@ Use existing Reka context menu primitives for focus, keyboard navigation, submen
 
 Approaches: expanding the Rust action enum for frontend navigation would couple it to dialogs and pages. A dedicated project menu can reuse existing backend commands and the existing plugin menu contract. Choose the dedicated menu; leave other context menus unchanged.
 
-Rail grouping and persistent DMs do not exist yet. Show grouping actions as planned; do not create fake groups or DM actions.
+Persistent DMs do not exist yet. Do not create DM actions. Rail grouping now exists (schema 15); see `docs/project-channel-status.md`. Group actions of the project menu are real. Group read markers remain planned.

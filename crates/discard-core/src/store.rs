@@ -15,6 +15,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+mod rail;
+pub use rail::{RailGroup, RailItem, RailLayout, RailTarget};
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("sqlite: {0}")]
@@ -601,6 +604,13 @@ impl Store {
             // A muted channel shows no unread marker. The flag is off for every saved channel.
             if !has_column("channels", "muted")? { tx.execute_batch("ALTER TABLE channels ADD COLUMN muted INTEGER NOT NULL DEFAULT 0;")?; }
             tx.pragma_update(None, "user_version", 14)?;
+            tx.commit()?;
+        }
+        if self.schema_version()? < 15 {
+            let tx = self.conn.unchecked_transaction()?;
+            // Saved rail order and groups. Projects without a saved row keep their `visible_projects` order.
+            tx.execute_batch(rail::RAIL_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 15)?;
             tx.commit()?;
         }
         self.conn.execute_batch("CREATE TABLE IF NOT EXISTS direct_message_list (agent_id TEXT PRIMARY KEY REFERENCES agents(id));")?;
@@ -1302,6 +1312,8 @@ impl Store {
             "DELETE FROM project_selection WHERE project_id=?1",
             params![id.0],
         )?;
+        // A hidden project leaves its rail group. A group without members is deleted.
+        self.rail_normalize()?;
         Ok(())
     }
     pub fn selected_project(&self) -> Result<Option<Project>> {
@@ -3045,7 +3057,7 @@ mod tests {
         let f = fixture();
         f.store.conn.execute_batch("DROP TABLE always_allow_rules; PRAGMA user_version=8;").unwrap();
         f.store.migrate().unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 14);
+        assert_eq!(f.store.schema_version().unwrap(), 15);
         assert!(f.store.always_allow_rules(&f.project.id).unwrap().is_empty());
     }
 
@@ -3058,7 +3070,7 @@ mod tests {
             store.conn.execute_batch("DROP TABLE autorun_responses; PRAGMA user_version=9;").unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 14);
+        assert_eq!(store.schema_version().unwrap(), 15);
         let columns: Vec<String> = store.conn.prepare("PRAGMA table_info(autorun_responses)").unwrap()
             .query_map([], |r| r.get::<_, String>(1)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
         assert_eq!(columns, ["response_id", "channel_id", "agent_id", "provider", "root", "created_at"]);
@@ -3240,7 +3252,7 @@ mod tests {
         let v1 = Store::open(&path).unwrap().schema_version().unwrap();
         let v2 = Store::open(&path).unwrap().schema_version().unwrap();
         assert!(v1 >= 2);
-        assert_eq!(v1, 14);
+        assert_eq!(v1, 15);
         assert_eq!(v1, v2);
     }
 
@@ -3284,7 +3296,7 @@ mod tests {
             conn.execute("INSERT INTO channels (id, project_id, name, agent_id, workspace_mode) VALUES ('c', 'p', 'general', 'a', 'main_checkout')", []).unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 14);
+        assert_eq!(store.schema_version().unwrap(), 15);
         let channels = store.channels_for_project(&ProjectId("p".into())).unwrap();
         assert_eq!(channels.len(), 1);
         assert_eq!(
@@ -3450,11 +3462,11 @@ mod tests {
         let f = fixture(); let turn = Turn::new(f.session.clone()); f.store.insert_turn(&turn).unwrap();
         let a = Approval::new(turn.id, "Bash", json!({})); f.store.save_approval(&a).unwrap();
         f.store.conn.execute_batch("ALTER TABLE approvals DROP COLUMN kind; DROP TABLE agent_commits; DROP TABLE always_allow_rules;").unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 14);
+        assert_eq!(f.store.schema_version().unwrap(), 15);
         f.store.migrate().unwrap();
         assert_eq!(f.store.load_approval(&a.id).unwrap().kind, crate::approval::ApprovalKind::ProviderTool);
         f.store.migrate().unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 14);
+        assert_eq!(f.store.schema_version().unwrap(), 15);
     }
 
     #[test]
@@ -3802,7 +3814,7 @@ mod tests {
             (f.channel, message)
         };
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 14);
+        assert_eq!(store.schema_version().unwrap(), 15);
         assert_eq!(columns(&store, "channels"), fresh_channels, "an upgraded database matches a fresh one");
         assert_eq!(columns(&store, "messages"), fresh_messages);
         assert_eq!(texts(&store.messages_for_channel(&channel.id).unwrap()), ["old"]);
@@ -3810,7 +3822,7 @@ mod tests {
         let thread = store.create_thread(&channel.id, &message, "old", &channel.agent_id).unwrap();
         assert!(store.thread_info(&thread.id).unwrap().unwrap().followed);
         store.migrate().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 14);
+        assert_eq!(store.schema_version().unwrap(), 15);
     }
 
     #[test]
@@ -3831,7 +3843,7 @@ mod tests {
             (f.channel, answer)
         };
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 14);
+        assert_eq!(store.schema_version().unwrap(), 15);
         assert_eq!(columns(&store, "channels"), fresh, "an upgraded database matches a fresh one");
         let question = store.thread_for_anchor(&answer).unwrap().unwrap();
         assert_eq!((question.kind, question.state, question.followed), (ThreadKind::Question, None, true), "old threads are question threads");
@@ -5367,7 +5379,7 @@ mod text_channel_tests {
             (project, general, branch)
         };
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 14);
+        assert_eq!(store.schema_version().unwrap(), 15);
         assert!(!store.project_show_archived(&project.id).unwrap(), "the new column defaults to off");
         let general_metadata = store.project_channel_metadata(&general.id).unwrap().unwrap();
         assert_eq!((general_metadata.kind, general_metadata.project_id.clone()), (ProjectChannelKind::General, project.id.clone()));
@@ -5383,7 +5395,7 @@ mod text_channel_tests {
         assert!(store.conn.execute("INSERT INTO project_channels(channel_id,project_id,kind,branch_name,repository) VALUES(?1,?2,'branch','feature','/p/sub')", params![other.id.0, project.id.0]).is_err(), "the branch index still holds");
         assert!(store.conn.execute("INSERT INTO project_channels(channel_id,project_id,kind) VALUES(?1,?2,'general')", params![other.id.0, project.id.0]).is_err(), "the general index still holds");
         store.migrate().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 14);
+        assert_eq!(store.schema_version().unwrap(), 15);
     }
 
     #[test]
@@ -5479,6 +5491,28 @@ mod navigation_action_tests {
     }
 
     #[test]
+    fn migration_15_adds_the_rail_layout_and_keeps_the_project_order_of_a_version_14_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v14.db");
+        let ids = ["first", "second", "third"].map(|id| ProjectId(id.into()));
+        {
+            let store = Store::open(&path).unwrap();
+            for id in &ids {
+                store.insert_project(&Project { id: id.clone(), name: id.0.clone(), path: format!("/{}", id.0) }).unwrap();
+            }
+            store.rail_group_projects(&ids[2], &ids[0]).unwrap();
+            store.conn.execute_batch("DROP TABLE rail_projects; DROP TABLE rail_groups; PRAGMA user_version=14;").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 15);
+        let layout = store.rail_layout().unwrap();
+        assert_eq!(layout.items, ids.iter().cloned().map(RailItem::Project).collect::<Vec<_>>(), "no saved order keeps the visible_projects order");
+        let group = store.rail_group_projects(&ids[1], &ids[0]).unwrap();
+        assert!(matches!(&store.rail_layout().unwrap().items[0], RailItem::Group(g) if g.id == group && g.project_ids == [ids[0].clone(), ids[1].clone()]));
+        assert!(Store::open(&path).unwrap().rail_layout().unwrap().items.len() == 2, "the layout survives a reopen");
+    }
+
+    #[test]
     fn a_thread_and_an_unknown_channel_cannot_be_muted() {
         let f = fixture();
         let general = f.store.ensure_project_general_channel(&f.project.id, &f.agent).unwrap();
@@ -5511,7 +5545,7 @@ mod navigation_action_tests {
             (project, general)
         };
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 14);
+        assert_eq!(store.schema_version().unwrap(), 15);
         assert!(!store.channel_muted(&general.id).unwrap(), "the new column defaults to off");
         assert_eq!(store.load_channel(&general.id).unwrap().project_id, Some(project.id));
         store.set_channel_muted(&general.id, true).unwrap();

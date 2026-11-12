@@ -1,3 +1,6 @@
+import { paletteSlots } from './agents/agent-icon'
+import type { RailGroupOption } from './rail-layout'
+
 export type ProjectMenuAction =
   | 'settings'
   | 'remove'
@@ -5,6 +8,11 @@ export type ProjectMenuAction =
   | 'copy-name'
   | 'copy-path'
   | 'copy-id'
+/** Rail actions of a project. `group-join` carries the group ID as `arg`. The rail applies them. */
+export type RailMenuAction = 'group-none' | 'group-join' | 'group-new' | 'move-first' | 'move-last'
+/** Actions of a group menu. `group-color` carries the color as `arg`, or none for the default. */
+export type GroupMenuAction = 'group-rename' | 'group-color' | 'group-toggle' | 'group-ungroup'
+export type MenuAction = ProjectMenuAction | RailMenuAction | GroupMenuAction
 
 export type PlannedMenuEntry =
   | { kind: 'planned'; label: string; control?: 'checkbox' }
@@ -16,9 +24,13 @@ export type ProjectMenuEntry =
   | {
       kind: 'action'
       label: string
-      action: ProjectMenuAction
+      action: MenuAction
+      /** Passed with the action, for example the target group. */
+      arg?: string
       disabled?: boolean
       destructive?: boolean
+      /** A theme color slot, drawn as a dot before the label. */
+      swatch?: string
     }
   | PlannedMenuEntry
 
@@ -32,7 +44,16 @@ export const planned = (
   control,
 })
 
-export function projectMenu(busy: boolean): ProjectMenuEntry[] {
+/** The rail groups a project can join, and the group that holds it now. */
+export interface ProjectRailContext {
+  groups: RailGroupOption[]
+  groupId: string | null
+}
+
+export function projectMenu(
+  busy: boolean,
+  rail: ProjectRailContext = { groups: [], groupId: null },
+): ProjectMenuEntry[] {
   return [
     // TODO: Persist read markers for all channels in the target project.
     planned('Mark Project as Read'),
@@ -98,15 +119,28 @@ export function projectMenu(busy: boolean): ProjectMenuEntry[] {
           kind: 'submenu',
           label: 'Group',
           children: [
-            // TODO: Persist rail groups and move projects without changing disk folders.
-            planned('No Group'),
-            planned('New Group…'),
+            // A project with no group has nothing to leave. The state blocks the action; it is not planned.
+            {
+              kind: 'action',
+              label: 'No Group',
+              action: 'group-none',
+              disabled: rail.groupId === null,
+            },
+            ...(rail.groups.length ? [separator] : []),
+            ...rail.groups.map((group): ProjectMenuEntry => ({
+              kind: 'action',
+              label: group.label,
+              action: 'group-join',
+              arg: group.id,
+              disabled: group.id === rail.groupId,
+            })),
+            separator,
+            { kind: 'action', label: 'New Group…', action: 'group-new' },
           ],
         },
         separator,
-        // TODO: Persist project order within rail groups and the ungrouped rail.
-        planned('First in Group'),
-        planned('Last in Group'),
+        { kind: 'action', label: 'First in Group', action: 'move-first' },
+        { kind: 'action', label: 'Last in Group', action: 'move-last' },
       ],
     },
     separator,
@@ -129,5 +163,32 @@ export function projectMenu(busy: boolean): ProjectMenuEntry[] {
         planned('Project Icon Image Link'),
       ],
     },
+  ]
+}
+
+export function groupMenu(collapsed: boolean): ProjectMenuEntry[] {
+  return [
+    // TODO: Persist read markers for all channels of the projects in the group.
+    planned('Mark Group as Read'),
+    separator,
+    { kind: 'action', label: 'Rename Group…', action: 'group-rename' },
+    {
+      kind: 'submenu',
+      label: 'Group Color',
+      children: [
+        { kind: 'action', label: 'Default', action: 'group-color' },
+        separator,
+        ...paletteSlots.map(({ slot, label }): ProjectMenuEntry => ({
+          kind: 'action',
+          label,
+          action: 'group-color',
+          arg: `ansi-${slot}`,
+          swatch: `ansi-${slot}`,
+        })),
+      ],
+    },
+    separator,
+    { kind: 'action', label: collapsed ? 'Expand' : 'Collapse', action: 'group-toggle' },
+    { kind: 'action', label: 'Ungroup', action: 'group-ungroup' },
   ]
 }
