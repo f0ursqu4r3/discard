@@ -117,6 +117,19 @@ export default defineConfig({
     ],
   },
   plugins: lazyPlugins(() => [vue(), tailwindcss()]),
-  resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
+  resolve: {
+    alias: {
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
+      '@app-icons': fileURLToPath(new URL('../crates/discard-app/icons', import.meta.url)),
+    },
+  },
+  server: {
+    fs: {
+      allow: [
+        fileURLToPath(new URL('.', import.meta.url)),
+        fileURLToPath(new URL('../crates/discard-app/icons', import.meta.url)),
+      ],
+    },
+  },
   test: { environment: 'jsdom', css: { include: [/tokens\.css\?raw$/] } },
 })

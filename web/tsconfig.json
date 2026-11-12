@@ -10,7 +10,8 @@
   ],
   "compilerOptions": {
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@app-icons/*": ["../crates/discard-app/icons/*"]
     }
   }
 }

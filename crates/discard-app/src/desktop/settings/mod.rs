@@ -55,6 +55,7 @@ pub struct AppearancePatch {
     pub mini_project_rail: Option<bool>,
     pub message_density: Option<String>,
     pub show_message_avatars: Option<bool>,
+    pub app_icon: Option<String>,
 }
 
 #[tauri::command]
@@ -103,6 +104,10 @@ pub fn settings_set_appearance(app: tauri::AppHandle, actions: tauri::State<'_, 
         changes.push(Change::MessageDensity(discard_core::settings::MessageDensity::from_setting(&value)
             .ok_or_else(|| "invalid message density".to_string())?));
     }
+    if let Some(value) = patch.app_icon {
+        changes.push(Change::AppIcon(discard_core::settings::AppIcon::from_setting(&value)
+            .ok_or_else(|| "invalid app icon".to_string())?));
+    }
     apply_one(&mut actions.settings.lock().unwrap_or_else(|e| e.into_inner()), changes)?;
     let _ = app.emit("discard://settings", ());
     Ok(())
@@ -136,7 +141,7 @@ fn appearance_data(app: &tauri::AppHandle, context: &SettingsContext, settings: 
     let config = configs.into_iter().find(|p| p.is_file()).map_or_else(|| "No Ghostty config found".into(), |p| p.display().to_string());
     let names: Vec<_> = dirs.list().into_iter().map(|(name, origin)| (name, match origin { Origin::Yours => "Yours", Origin::Ghostty => "Ghostty", Origin::Bundled => "Bundled" })).collect();
     let palette: Vec<_> = swatches(&resolved.colors).into_iter().map(|(name, color)| (name, color.to_hex())).collect();
-    serde_json::json!({"miniProjectRail": settings.mini_project_rail, "messageDensity": settings.message_density.as_str(), "showMessageAvatars": settings.show_message_avatars, "themeSource": settings.theme_source.as_str(), "theme": settings.theme, "ignorePluginThemes": settings.ignore_plugin_themes, "single": matches!(spec, ThemeSpec::Single(_)), "light": spec.name_for(Appearance::Light), "dark": spec.name_for(Appearance::Dark), "activeName": resolved.theme_name, "origin": origin, "file": file, "config": config, "themes": names, "swatches": palette, "problems": super::problems::theme_problem_lines(&resolved.problems), "overrides": context.plugins.theme_sources() })
+    serde_json::json!({"miniProjectRail": settings.mini_project_rail, "messageDensity": settings.message_density.as_str(), "showMessageAvatars": settings.show_message_avatars, "appIcon": settings.app_icon.as_str(), "appIcons": discard_core::settings::AppIcon::ALL.map(|icon| icon.as_str()), "themeSource": settings.theme_source.as_str(), "theme": settings.theme, "ignorePluginThemes": settings.ignore_plugin_themes, "single": matches!(spec, ThemeSpec::Single(_)), "light": spec.name_for(Appearance::Light), "dark": spec.name_for(Appearance::Dark), "activeName": resolved.theme_name, "origin": origin, "file": file, "config": config, "themes": names, "swatches": palette, "problems": super::problems::theme_problem_lines(&resolved.problems), "overrides": context.plugins.theme_sources() })
 }
 
 #[tauri::command]

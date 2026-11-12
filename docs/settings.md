@@ -21,6 +21,7 @@ ignore_plugin_themes = false      # true: plugin theme tokens have no effect
 mini_project_rail = false         # true: 48 px rail at the default scale
 message_density = "comfortable"  # comfortable or compact
 show_message_avatars = true       # false: remove the avatar column
+app_icon = "classic"              # classic, landscape, graffiti, manga, cyberpunk, matrix, or synthwave
 
 [keybindings]
 zoom = "cmd-shift-k"
@@ -37,6 +38,7 @@ zoom = "cmd-shift-k"
 | `appearance.mini_project_rail` | `true` or `false` | `false` |
 | `appearance.message_density` | `"comfortable"` or `"compact"` | `"comfortable"` |
 | `appearance.show_message_avatars` | `true` or `false` | `true` |
+| `appearance.app_icon` | `"classic"`, `"landscape"`, `"graffiti"`, `"manga"`, `"cyberpunk"`, `"matrix"`, or `"synthwave"` | `"classic"` |
 | `keybindings.<action>` | Shortcut string, or an empty string to unbind an optional action | Action default |
 
 Discard never creates the file at startup. It creates the file on the first change you make in the Settings window.
@@ -194,6 +196,9 @@ From top to bottom:
   streaming replies, and system notes.
 - **Show message avatars.** On by default. Turn it off to remove the avatar column. Author names remain
   at the start of every message, on the same line as its text.
+- **App icon.** A card below Theme shows seven icons: Classic, Landscape, Graffiti, Manga, Cyberpunk,
+  Matrix, and Synthwave. Select one to change the icon in the Dock or taskbar at once. Hand edits to
+  `appearance.app_icon` also apply without a restart.
 - **Live preview.** A sample rail and conversation use the same components as the main window. The preview
   reflects all three preferences and the active theme. Preview controls do not perform actions.
 

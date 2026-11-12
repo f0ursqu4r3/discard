@@ -29,6 +29,45 @@ pub struct AppearanceSettings {
     pub mini_project_rail: bool,
     pub message_density: MessageDensity,
     pub show_message_avatars: bool,
+    pub app_icon: AppIcon,
+}
+
+/// The icon shown for the app in the Dock or taskbar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppIcon {
+    Classic,
+    Landscape,
+    Graffiti,
+    Manga,
+    Cyberpunk,
+    Matrix,
+    Synthwave,
+}
+impl AppIcon {
+    /// Every icon, in the order the picker shows them.
+    pub const ALL: [AppIcon; 7] = [
+        Self::Classic,
+        Self::Landscape,
+        Self::Graffiti,
+        Self::Manga,
+        Self::Cyberpunk,
+        Self::Matrix,
+        Self::Synthwave,
+    ];
+    pub fn from_setting(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|icon| icon.as_str() == value)
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::Landscape => "landscape",
+            Self::Graffiti => "graffiti",
+            Self::Manga => "manga",
+            Self::Cyberpunk => "cyberpunk",
+            Self::Matrix => "matrix",
+            Self::Synthwave => "synthwave",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +100,7 @@ impl Default for AppearanceSettings {
             mini_project_rail: false,
             message_density: MessageDensity::Comfortable,
             show_message_avatars: true,
+            app_icon: AppIcon::Classic,
         }
     }
 }
@@ -102,6 +142,7 @@ pub enum Change {
     MiniProjectRail(bool),
     MessageDensity(MessageDensity),
     ShowMessageAvatars(bool),
+    AppIcon(AppIcon),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -442,6 +483,15 @@ fn evaluate(doc: &DocumentMut) -> (Settings, Vec<SettingsIssue>) {
                         None => issue("appearance.message_density", "must be \"comfortable\" or \"compact\"".to_string()),
                     }
                 }
+                if let Some(item) = appearance.get("app_icon") {
+                    match item.as_str().and_then(AppIcon::from_setting) {
+                        Some(icon) => settings.appearance.app_icon = icon,
+                        None => issue(
+                            "appearance.app_icon",
+                            "must be \"classic\", \"landscape\", \"graffiti\", \"manga\", \"cyberpunk\", \"matrix\", or \"synthwave\"".to_string(),
+                        ),
+                    }
+                }
                 if let Some(item) = appearance.get("ignore_plugin_themes") {
                     match item.as_bool() {
                         Some(on) => settings.appearance.ignore_plugin_themes = on,
@@ -503,6 +553,7 @@ fn edit_doc(doc: &mut DocumentMut, change: Change) {
         Change::MiniProjectRail(on) => ("appearance", "mini_project_rail", Value::from(on)),
         Change::MessageDensity(density) => ("appearance", "message_density", Value::from(density.as_str())),
         Change::ShowMessageAvatars(on) => ("appearance", "show_message_avatars", Value::from(on)),
+        Change::AppIcon(icon) => ("appearance", "app_icon", Value::from(icon.as_str())),
     };
     set_in_table(doc, table, key, new_value);
 }
@@ -805,6 +856,49 @@ mod tests {
         assert_eq!(a.theme, "Nord");
         assert_eq!(store.issues().len(), 3);
         assert_eq!(MessageDensity::from_setting("tiny"), None);
+    }
+
+    #[test]
+    fn app_icon_defaults_to_classic_and_survives_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        fs::write(&path, "[appearance]\ntheme = \"Nord\" # keep\n").unwrap();
+        let mut store = SettingsStore::open(&path);
+        assert_eq!(store.settings().appearance.app_icon, AppIcon::Classic);
+
+        for icon in AppIcon::ALL {
+            store.apply(Change::AppIcon(icon)).unwrap();
+            let reopened = SettingsStore::open(&path);
+            assert_eq!(reopened.settings().appearance.app_icon, icon);
+            assert!(reopened.issues().is_empty());
+        }
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("app_icon = \"synthwave\""));
+        assert!(text.contains("# keep"));
+        assert_eq!(SettingsStore::open(&path).settings().appearance.theme, "Nord");
+    }
+
+    #[test]
+    fn invalid_app_icon_reports_an_issue_and_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        fs::write(&path, "[appearance]\napp_icon = \"neon\"\ntheme = \"Nord\"\n").unwrap();
+        let store = SettingsStore::open(&path);
+        let a = &store.settings().appearance;
+        assert_eq!(a.app_icon, AppIcon::Classic);
+        assert_eq!(a.theme, "Nord");
+        assert_eq!(store.issues().len(), 1);
+        assert_eq!(store.issues()[0].key, "appearance.app_icon");
+        assert_eq!(AppIcon::from_setting("neon"), None);
+    }
+
+    #[test]
+    fn app_icon_ids_round_trip_in_order() {
+        let ids: Vec<_> = AppIcon::ALL.iter().map(|icon| icon.as_str()).collect();
+        assert_eq!(ids, ["classic", "landscape", "graffiti", "manga", "cyberpunk", "matrix", "synthwave"]);
+        for icon in AppIcon::ALL {
+            assert_eq!(AppIcon::from_setting(icon.as_str()), Some(icon));
+        }
     }
 
     #[test]
