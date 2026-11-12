@@ -13,6 +13,7 @@ import SettingsNotice from '../ui/SettingsNotice.vue'
 import SettingsRow from '../ui/SettingsRow.vue'
 import SettingsCard from '../ui/SettingsCard.vue'
 import PathText from '../ui/PathText.vue'
+import { appIcons } from '../app-icons'
 import {
   Select,
   SelectContent,
@@ -27,6 +28,8 @@ type Appearance = AppearancePreferences & {
   themeSource: string
   theme: string
   ignorePluginThemes: boolean
+  appIcon: string
+  appIcons: string[]
   single: boolean
   light: string
   dark: string
@@ -212,6 +215,26 @@ onUnmounted(() => stop?.())
           <KeyValue label="ghostty config"><PathText :path="value.config" /></KeyValue>
         </dl>
       </div>
+    </SettingsCard>
+    <SettingsCard title="App icon">
+      <div role="radiogroup" aria-label="App icon" class="flex flex-wrap gap-3">
+        <template v-for="id in value.appIcons ?? []" :key="id">
+          <button
+            v-if="appIcons[id]"
+            type="button"
+            role="radio"
+            :aria-checked="value.appIcon === id"
+            :disabled="saving"
+            class="flex flex-col items-center gap-1.5 rounded-md border p-2 text-sm outline-none hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+            :class="value.appIcon === id ? 'border-primary ring-2 ring-ring' : 'border-border'"
+            @click="patch({ appIcon: id })"
+          >
+            <img :src="appIcons[id].src" alt="" class="size-16" />
+            <span>{{ appIcons[id].label }}</span>
+          </button>
+        </template>
+      </div>
+      <p class="pt-2 text-sm text-muted-foreground">The icon in the Dock. Changes apply at once.</p>
     </SettingsCard>
     <SettingsCard title="Layout and messages" aria-label="Layout and messages" flush>
       <AppearancePreview :preferences="value" />

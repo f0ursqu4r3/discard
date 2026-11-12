@@ -203,6 +203,9 @@ pub fn run(
                 plugin_theme,
             );
             core.set_theme(theme::theme_dto(&theme_state, mode));
+            let mut applied_icon = appearance.app_icon;
+            app_icon::apply(app.handle(), applied_icon);
+            let icon_app = app.handle().clone();
             let theme_core = core.clone();
             let emitter_settings = settings.clone();
             let settings_events = app.handle().clone();
@@ -226,6 +229,10 @@ pub fn run(
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .theme();
+                    if appearance.app_icon != applied_icon {
+                        applied_icon = appearance.app_icon;
+                        app_icon::apply(&icon_app, applied_icon);
+                    }
                     if theme_state.update(&appearance, mode, &plugin_theme) {
                         theme_core.set_theme(theme::theme_dto(&theme_state, mode));
                     }
@@ -332,6 +339,8 @@ pub mod plan;
 pub mod menu;
 
 pub mod actions;
+
+pub mod app_icon;
 
 mod slash;
 

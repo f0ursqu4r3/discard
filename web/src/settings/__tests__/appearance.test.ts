@@ -128,3 +128,37 @@ test('updates the real rail and live message from settings events and cleans up 
   view.unmount()
   expect(stop).toHaveBeenCalledOnce()
 })
+
+test('picks the app icon from a radio group', async () => {
+  const ids = ['classic', 'landscape', 'graffiti', 'manga', 'cyberpunk', 'matrix', 'synthwave']
+  Object.assign(saved, { appIcon: 'manga', appIcons: [...ids, 'unknown'] })
+  const view = mount(Appearance)
+  await flushPromises()
+  const group = view.get('[role="radiogroup"][aria-label="App icon"]')
+  const radios = group.findAll('[role="radio"]')
+  expect(radios).toHaveLength(ids.length)
+  expect(radios.map((radio) => radio.text())).toEqual([
+    'Classic',
+    'Landscape',
+    'Graffiti',
+    'Manga',
+    'Cyberpunk',
+    'Matrix',
+    'Synthwave',
+  ])
+  expect(radios.map((radio) => radio.attributes('aria-checked'))).toEqual(
+    ids.map((id) => String(id === 'manga')),
+  )
+  expect(radios[0].get('img').attributes('alt')).toBe('')
+  expect(view.text()).toContain('The icon in the Dock. Changes apply at once.')
+
+  await radios[4].trigger('click')
+  await flushPromises()
+  expect(invoke).toHaveBeenCalledWith('settings_set_appearance', {
+    patch: { appIcon: 'cyberpunk' },
+  })
+  const after = view.get('[role="radiogroup"]').findAll('[role="radio"]')
+  expect(after[4].attributes('aria-checked')).toBe('true')
+  expect(after[3].attributes('aria-checked')).toBe('false')
+  view.unmount()
+})
