@@ -158,7 +158,33 @@ test('drops a result that arrives after the channel changed', async () => {
   finish('late')
   await flushPromises()
   expect(panel(w).exists()).toBe(false)
-  expect(w.emitted('update:draft')?.at(-1)).not.toEqual([''])
+  expect((w.emitted('update:draft') ?? []).filter(([value]) => value === '')).toEqual([])
+})
+
+test('keeps a draft typed while a command runs and still shows the result', async () => {
+  let finish!: (value: string) => void
+  api.runCommand.mockReturnValue(new Promise((resolve) => (finish = resolve)))
+  await type(w, '/slow')
+  await enter(w)
+  await type(w, 'new text')
+  finish('done')
+  await flushPromises()
+  expect(input(w).value).toBe('new text')
+  expect(panel(w).get('[role="status"]').text()).toBe('done')
+})
+
+test('drops a late command result after a plain message is sent', async () => {
+  let finish!: (value: string) => void
+  api.runCommand.mockReturnValue(new Promise((resolve) => (finish = resolve)))
+  await type(w, '/slow')
+  await enter(w)
+  await type(w, 'hello')
+  await enter(w)
+  expect(w.emitted('send')?.[0]?.[0]).toBe('hello')
+  finish('late')
+  await flushPromises()
+  expect(panel(w).exists()).toBe(false)
+  expect(w.get('[data-ui-id="composer-send"]').attributes('aria-busy')).toBe('false')
 })
 
 test('clears the result when the channel changes', async () => {

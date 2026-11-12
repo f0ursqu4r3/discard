@@ -333,11 +333,13 @@ async function runSlash(command: NonNullable<ReturnType<typeof parseSlash>>) {
     return
   }
   const run = ++commandRun
+  const sent = text.value
   commandRunning.value = true
   try {
     const output = await runCommand(props.channelId, command.name, command.args)
     if (disposed || run !== commandRun) return
-    text.value = ''
+    // Keep a draft that the user typed while the command ran.
+    if (text.value === sent) text.value = ''
     commandResult.value = output ? { line, output, error: false } : null
   } catch (error) {
     if (disposed || run !== commandRun) return
@@ -360,6 +362,9 @@ function send() {
     return
   }
   if (props.running && !props.sendWhileRunning) return
+  // A command that still runs must not show its result after this message.
+  commandRun++
+  commandRunning.value = false
   commandResult.value = null
   if (props.alsoPostLabel !== undefined) {
     emit('send', text.value.trim(), [...files.value], alsoPost.value)
