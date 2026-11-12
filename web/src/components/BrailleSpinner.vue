@@ -4,7 +4,13 @@ import { useAgentIdentity } from './agents/useAgentIdentity'
 import { agentAvatars } from './agents/useAgentAvatar'
 
 const props = withDefaults(
-  defineProps<{ label?: string; agentId?: string; avatar?: string | null }>(),
+  defineProps<{
+    label?: string
+    agentId?: string
+    avatar?: string | null
+    /** A ready color. It wins over the agent color. */
+    color?: string
+  }>(),
   { label: 'Working' },
 )
 const frame = useSpinnerFrame()
@@ -18,7 +24,7 @@ const identity = useAgentIdentity(
     role="img"
     :aria-label="label"
     class="font-mono text-agent"
-    :style="agentId ? { '--agent-color': identity.mark } : undefined"
+    :style="color || agentId ? { '--agent-color': color ?? identity.mark } : undefined"
   >
     {{ frame }}
   </span>

@@ -54,7 +54,7 @@ import BrailleSpinner from './components/BrailleSpinner.vue'
 import StatusLine from './components/StatusLine.vue'
 import { channelBranch } from './components/workspace/channel-branch'
 import { useAgentIdentity } from './components/agents/useAgentIdentity'
-import { agentIdentity } from './components/agents/agent-icon'
+import { agentIdentity, mixedAgentMark } from './components/agents/agent-icon'
 import { activeTheme } from './bridge/theme'
 import { thinkingLine } from './components/messages'
 import { selectedChannelApprovals } from './components/threads'
@@ -99,6 +99,11 @@ const activeAgent = computed(
 const activeAgentIdentity = useAgentIdentity(
   () => activeAgent.value.agentId,
   () => activeAgent.value.avatar,
+)
+// The agents named in the thinking line of the open channel. The spinner color is a mix of their colors.
+const thinkingAgents = computed(() => (store.snapshot?.turnRunning ? [activeAgent.value] : []))
+const thinkingColor = computed(() =>
+  mixedAgentMark(thinkingAgents.value, activeTheme.value?.tokens ?? {}),
 )
 const workingChannels = computed(() =>
   (store.snapshot?.channels ?? []).map((channel) =>
@@ -1348,18 +1353,16 @@ watch(
             </div>
             <template v-if="page === 'conversation' && store.snapshot.channelId">
               <p
-                v-if="
-                  thinkingLine(store.snapshot.turnRunning, [
-                    store.snapshot.responder?.name ?? store.snapshot.agent,
-                  ])
-                "
+                v-if="thinkingAgents.length"
+                data-ui-id="thinking-line"
                 class="flex items-center gap-2 px-5 py-1 text-xs text-muted-foreground"
               >
-                <BrailleSpinner />
+                <BrailleSpinner :color="thinkingColor" />
                 {{
-                  thinkingLine(store.snapshot.turnRunning, [
-                    store.snapshot.responder?.name ?? store.snapshot.agent,
-                  ])
+                  thinkingLine(
+                    true,
+                    thinkingAgents.map((agent) => agent.name),
+                  )
                 }}
               </p>
               <Composer
