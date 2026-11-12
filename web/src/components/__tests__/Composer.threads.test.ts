@@ -2,7 +2,7 @@ import { expect, test } from 'vite-plus/test'
 import { mount } from '@vue/test-utils'
 import Composer from '../Composer.vue'
 
-const props = { archived: false, busy: false, running: false, channel: 'general' }
+const props = { channelId: 'c1', archived: false, busy: false, running: false, channel: 'general' }
 const box = (view: ReturnType<typeof mount>) => view.get('[data-ui-id="composer-also-post"]')
 
 test('a channel composer has no Also post box and sends as before', async () => {

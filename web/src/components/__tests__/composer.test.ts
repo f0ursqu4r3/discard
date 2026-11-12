@@ -10,7 +10,7 @@ test('maySend rejects archived and blank messages', () => {
 })
 test('Enter sends and Shift+Enter does not', async () => {
   const composer = mount(Composer, {
-    props: { archived: false, busy: false, running: false, channel: 'general' },
+    props: { channelId: 'c1', archived: false, busy: false, running: false, channel: 'general' },
   })
   const input = composer.get('textarea')
   await input.setValue('hello')
@@ -23,12 +23,14 @@ test.each([
   { archived: true, busy: false },
   { archived: false, busy: true },
 ])('composer is disabled for %o', (state) => {
-  const composer = mount(Composer, { props: { ...state, running: false, channel: 'general' } })
+  const composer = mount(Composer, {
+    props: { ...state, channelId: 'c1', running: false, channel: 'general' },
+  })
   expect(composer.get('textarea').attributes('disabled')).toBeDefined()
 })
 test('stop replaces send while running', () => {
   const composer = mount(Composer, {
-    props: { archived: false, busy: false, running: true, channel: 'general' },
+    props: { channelId: 'c1', archived: false, busy: false, running: true, channel: 'general' },
   })
   expect(composer.text()).toContain('Stop')
   expect(composer.text()).not.toContain('Send')
@@ -37,6 +39,7 @@ test('stop replaces send while running', () => {
 test('send stays next to stop while running when the composer allows it', async () => {
   const composer = mount(Composer, {
     props: {
+      channelId: 'c1',
       archived: false,
       busy: false,
       running: true,
@@ -52,7 +55,7 @@ test('send stays next to stop while running when the composer allows it', async 
   expect(composer.emitted('send')?.[0]).toEqual(['steer'])
   // Without the prop a running turn blocks Enter as before.
   const plain = mount(Composer, {
-    props: { archived: false, busy: false, running: true, channel: 'general' },
+    props: { channelId: 'c1', archived: false, busy: false, running: true, channel: 'general' },
   })
   await plain.get('textarea').setValue('steer')
   await plain.get('textarea').trigger('keydown', { key: 'Enter' })
@@ -78,6 +81,7 @@ test('focusEnd places the cursor after an inserted draft without sending', async
   const composer = mount(Composer, {
     attachTo: document.body,
     props: {
+      channelId: 'c1',
       archived: false,
       busy: false,
       running: false,
@@ -99,7 +103,7 @@ test('focusEnd places the cursor after an inserted draft without sending', async
 
 test('IME confirmation does not send a message', async () => {
   const composer = mount(Composer, {
-    props: { archived: false, busy: false, running: false, channel: 'general' },
+    props: { channelId: 'c1', archived: false, busy: false, running: false, channel: 'general' },
   })
   await composer.get('textarea').setValue('Draft')
   await composer.get('textarea').trigger('keydown', { key: 'Enter', isComposing: true })
@@ -109,6 +113,7 @@ test('IME confirmation does not send a message', async () => {
 test('DM composer names the agent and has no channel labels or footer', () => {
   const composer = mount(Composer, {
     props: {
+      channelId: 'c1',
       archived: false,
       busy: false,
       running: false,
@@ -143,6 +148,7 @@ function mentionComposer() {
   api.getProjectMembers.mockResolvedValue([{ id: 'jordan' }])
   return mount(Composer, {
     props: {
+      channelId: 'c1',
       archived: false,
       busy: false,
       running: false,
@@ -178,6 +184,19 @@ test('filters names, supports Tab, and quotes names with spaces', async () => {
   await input.trigger('keydown', { key: 'Tab' })
   expect(input.element.value).toBe('@"Jordan Lee" ')
   expect(composer.emitted('send')).toBeUndefined()
+})
+
+test('keeps the selected mention when the caret moves and the query stays', async () => {
+  const composer = mentionComposer()
+  const input = composer.get('textarea')
+  await input.setValue('@Jo\n@Jo')
+  await flushPromises()
+  await input.trigger('keydown', { key: 'ArrowDown' })
+  const selected = () => composer.get('[role="option"][aria-selected="true"]').text()
+  expect(selected()).toContain('Jordan Lee')
+  input.element.setSelectionRange(3, 3)
+  await input.trigger('click')
+  expect(selected()).toContain('Jordan Lee')
 })
 
 test('mention button opens suggestions and Escape closes them', async () => {
@@ -217,7 +236,7 @@ test('duplicate names are disabled and unmatched Enter does not send', async () 
 
 test('the placeholder and typed message prose stay sans', () => {
   const composer = mount(Composer, {
-    props: { archived: false, busy: false, running: false, channel: 'general' },
+    props: { channelId: 'c1', archived: false, busy: false, running: false, channel: 'general' },
   })
   expect(composer.get('textarea').classes()).not.toContain('placeholder:font-mono')
   expect(composer.get('textarea').classes()).not.toContain('font-mono')

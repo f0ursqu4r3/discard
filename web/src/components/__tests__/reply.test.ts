@@ -230,6 +230,7 @@ test('replying from the context menu closes the menu before focusing the compose
           }),
           h(Composer, {
             ref: composer,
+            channelId: 'channel',
             archived: false,
             busy: false,
             running: false,
@@ -269,7 +270,14 @@ test('replying from the context menu closes the menu before focusing the compose
 test('the reply chip links to the source and Cancel reply clears it', async () => {
   const pending = createReply(message, 'channel', 'Agent')!
   const composer = mount(Composer, {
-    props: { archived: false, busy: false, running: false, channel: 'general', reply: pending },
+    props: {
+      channelId: 'c1',
+      archived: false,
+      busy: false,
+      running: false,
+      channel: 'general',
+      reply: pending,
+    },
   })
   const chip = composer.get('[data-ui-id="reply-chip"]')
   expect(chip.text()).toContain('Replying to Quinn [test]')
@@ -290,6 +298,7 @@ test('the reply chip links to the source and Cancel reply clears it', async () =
 test('a reply with an empty draft cannot send', async () => {
   const composer = mount(Composer, {
     props: {
+      channelId: 'channel',
       archived: false,
       busy: false,
       running: false,

@@ -3,6 +3,7 @@
 
 pub mod attachments;
 pub mod action;
+pub mod slash;
 pub mod context_menu;
 pub mod provider_page;
 pub mod agent_edit;

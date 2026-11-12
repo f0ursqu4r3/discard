@@ -3,7 +3,7 @@
 
 use crate::element::Element;
 use crate::host::Host;
-use crate::runtime::{HookResult, LoadedInfo, MenuItemInfo, PluginError, PluginHandle, PluginLimits, Status};
+use crate::runtime::{CommandInfo, HookResult, LoadedInfo, MenuItemInfo, PluginError, PluginHandle, PluginLimits, Status};
 use crate::snapshot::Snapshot;
 use crate::theme::ThemeOverrides;
 use std::collections::BTreeMap;
@@ -162,9 +162,14 @@ impl PluginManager {
         result
     }
 
+    /// Commands of every plugin with the status `Running`, in load order. `(plugin name, command)`.
+    pub fn commands(&self) -> Vec<(String, CommandInfo)> {
+        self.plugins.iter().filter(|entry| entry.handle.status() == Status::Running).flat_map(|entry| entry.info.commands.iter().map(|command| (entry.info.manifest.name.clone(), command.clone()))).collect()
+    }
+
     /// Run a slash command. The first plugin that registered it handles it.
     pub fn run_command(&mut self, name: &str, args: &str) -> Option<Result<Option<String>, PluginError>> {
-        let entry = self.plugins.iter_mut().find(|e| e.info.commands.iter().any(|c| c == name))?;
+        let entry = self.plugins.iter_mut().find(|e| e.handle.status() == Status::Running && e.info.commands.iter().any(|c| c.name == name))?;
         let result = entry.handle.run_command(name, args);
         match &result {
             Ok(_) => entry.succeeded(),
@@ -448,6 +453,27 @@ mod tests {
         m.load(plugin("b", UI, "discard.command(\"hi\", function() return \"b\" end)")).unwrap();
         assert_eq!(m.run_command("hi", "").unwrap().unwrap().as_deref(), Some("a"));
         assert!(m.run_command("nope", "").is_none());
+    }
+
+    #[test]
+    fn commands_lists_only_running_plugins_in_load_order() {
+        let mut m = manager();
+        m.load(plugin("b", UI, "discard.command(\"two\", function() end, { description = \"Second\" }) discard.command(\"one\", function() end)")).unwrap();
+        m.load(plugin("a", UI, "discard.command(\"spin\", function() while true do end end)")).unwrap();
+        let names = |m: &PluginManager| m.commands().iter().map(|(p, c)| (p.clone(), c.name.clone())).collect::<Vec<_>>();
+        assert_eq!(names(&m), [("b".to_string(), "one".to_string()), ("b".to_string(), "two".to_string()), ("a".to_string(), "spin".to_string())]);
+        assert_eq!(m.commands()[1].1.description.as_deref(), Some("Second"));
+        assert!(m.run_command("spin", "").unwrap().is_err());
+        assert_eq!(names(&m), [("b".to_string(), "one".to_string()), ("b".to_string(), "two".to_string())]);
+    }
+
+    #[test]
+    fn a_terminated_plugin_does_not_run_commands() {
+        let mut m = manager();
+        m.load(plugin("a", UI, "discard.command(\"spin\", function() while true do end end) discard.command(\"hi\", function() return \"a\" end)")).unwrap();
+        m.load(plugin("b", UI, "discard.command(\"hi\", function() return \"b\" end)")).unwrap();
+        assert!(m.run_command("spin", "").unwrap().is_err());
+        assert_eq!(m.run_command("hi", "").unwrap().unwrap().as_deref(), Some("b"));
     }
 
     #[test]

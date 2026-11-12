@@ -375,3 +375,12 @@ export interface ArchiveChannelDto {
   archived: boolean
   items: string[]
 }
+
+/** One slash command in the registry. `args` is a hint for the arguments. `planned` commands do nothing yet. */
+export interface CommandDto {
+  name: string
+  description: string
+  args: string | null
+  source: string
+  planned: boolean
+}

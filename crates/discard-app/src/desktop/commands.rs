@@ -320,6 +320,48 @@ pub fn plugin_menu_action(core: State<'_, Arc<AppCore>>, plugin: String, index: 
     }
 }
 
+/// The slash commands: built-ins first, then plugin commands.
+#[tauri::command]
+pub async fn list_commands(core: State<'_, Arc<AppCore>>) -> Result<Vec<super::dto::CommandDto>, String> {
+    Ok(discard_core::slash::registry(&core.plugin_commands()).0.into_iter().map(Into::into).collect())
+}
+
+/// Run a slash command in a channel. Returns the text to show, if any.
+#[tauri::command]
+pub async fn run_command(app: tauri::AppHandle, core: State<'_, Arc<AppCore>>, actions: State<'_, Arc<super::actions::DesktopActions>>, channel_id: String, name: String, args: String) -> Result<Option<String>, String> {
+    use discard_core::{action::Action, context_menu::ContextTarget, slash::{self, Builtin}};
+    use super::slash::{Step, builtin_step};
+    if !slash::valid_name(&name) { return Err(format!("Unknown command: /{name}")); }
+    let channel = core.command_channel(&channel_id).ok_or("The channel is not open.")?;
+    if channel.archived { return Err("The channel is archived.".into()); }
+    let (entries, shadowed) = slash::registry(&core.plugin_commands());
+    for lost in &shadowed { tracing::warn!(plugin = %lost.plugin, command = %lost.name, by = %lost.by, "plugin command shadowed"); }
+    if let Some(builtin) = Builtin::from_name(&name) {
+        return match builtin_step(builtin, &channel, &entries) {
+            Step::Output(text) => Ok(Some(slash::truncate_output(text))),
+            Step::Error(text) => Err(text),
+            Step::Dispatch(action) => {
+                // Stop and archive act on the channel. The other actions are app-wide, and a channel target would drop them in a thread.
+                let target = matches!(action, Action::CancelTurn | Action::ArchiveChannel).then(|| ContextTarget::Channel { id: channel_id });
+                super::actions::run(&app, core.inner(), &actions, action, target);
+                Ok(None)
+            }
+        };
+    }
+    let owner = entries.iter().find(|entry| entry.name == name).map(|entry| entry.source.clone());
+    let run_core = core.inner().clone();
+    let (run_name, run_args) = (name.clone(), args);
+    let result = tauri::async_runtime::spawn_blocking(move || run_core.run_plugin_command(&channel_id, &run_name, &run_args)).await.map_err(|e| e.to_string())?;
+    match result {
+        Some(Ok(text)) => Ok(text.map(slash::truncate_output)),
+        Some(Err(error)) => {
+            if let Some(plugin) = owner { core.plugin_failure(&plugin, &error); }
+            Err(slash::truncate_output(error))
+        }
+        None => Err(format!("Unknown command: /{name}")),
+    }
+}
+
 #[tauri::command]
 pub fn plugin_action(core: State<'_, Arc<AppCore>>, plugin: String, action: String) -> Result<(), String> {
     core.plugin_action(&plugin, &action)

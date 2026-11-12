@@ -2,7 +2,7 @@
 
 use discard_lua::element::{Node, Prop, Tag};
 use discard_lua::snapshot::Snapshot;
-use discard_lua::{PluginError, PluginHandle, PluginLimits, Status, Violation};
+use discard_lua::{CommandInfo, PluginError, PluginHandle, PluginLimits, Status, Violation};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -89,7 +89,7 @@ fn loading_reports_what_the_plugin_registered() {
     );
     assert_eq!(info.manifest.name, "t");
     assert_eq!(info.slots, ["channel_header"]);
-    assert_eq!(info.commands, ["hello"]);
+    assert_eq!(info.commands, [CommandInfo { name: "hello".into(), description: None, args: None }]);
     assert_eq!(info.actions, ["go"]);
     assert_eq!(info.events, ["message_sent"]);
     assert_eq!(info.theme.color("primary").unwrap().to_hex(), "#112233");
@@ -249,6 +249,63 @@ fn commands_return_text_and_unknown_commands_error() {
     assert_eq!(h.run_command("echo", "hi").unwrap().as_deref(), Some("you said hi"));
     assert_eq!(h.run_command("quiet", "").unwrap(), None);
     assert_eq!(h.run_command("zzz", ""), Err(PluginError::NotRegistered { kind: "command", name: "zzz".into() }));
+}
+
+#[test]
+fn command_registration_keeps_description_and_args() {
+    let (h, info) = ok(
+        UI,
+        r#"
+        discard.command("echo", function(a) return a end, { description = "Repeat", args = "<text>" })
+        discard.command("bare", function() end)
+    "#,
+    );
+    assert_eq!(
+        info.commands,
+        [
+            CommandInfo { name: "bare".into(), description: None, args: None },
+            CommandInfo { name: "echo".into(), description: Some("Repeat".into()), args: Some("<text>".into()) },
+        ]
+    );
+    assert_eq!(h.run_command("echo", "hi").unwrap().as_deref(), Some("hi"));
+}
+
+#[test]
+fn command_registration_truncates_long_opts_and_flattens_newlines() {
+    let (_h, info) = ok(UI, &format!(r#"discard.command("x", function() end, {{ description = "{}", args = "{}" }})"#, "d".repeat(200), "a".repeat(80)));
+    let c = &info.commands[0];
+    assert_eq!(c.description.as_ref().unwrap().chars().count(), 120);
+    assert_eq!(c.args.as_ref().unwrap().chars().count(), 40);
+    let (_h, info) = ok(UI, r#"discard.command("y", function() end, { description = "one\ntwo\r\nthree", args = "<a>\n<b>" })"#);
+    assert_eq!(info.commands[0].description.as_deref(), Some("one two  three"));
+    assert_eq!(info.commands[0].args.as_deref(), Some("<a> <b>"));
+}
+
+#[test]
+fn command_registration_counts_characters_not_bytes() {
+    let (_h, info) = ok(UI, &format!(r#"discard.command("x", function() end, {{ description = "{}" }})"#, "é".repeat(200)));
+    assert_eq!(info.commands[0].description.as_ref().unwrap().chars().count(), 120);
+}
+
+#[test]
+fn command_registration_refuses_an_invalid_name() {
+    for name in ["Bad", "1x", "a b", ""] {
+        let error = load(UI, &format!(r#"discard.command("{name}", function() end)"#)).unwrap_err().to_string();
+        assert!(error.contains("command name"), "{error}");
+    }
+}
+
+#[test]
+fn a_second_registration_of_a_command_replaces_the_first() {
+    let (h, info) = ok(
+        UI,
+        r#"
+        discard.command("c", function() return "one" end, { description = "first" })
+        discard.command("c", function() return "two" end, { args = "<x>" })
+    "#,
+    );
+    assert_eq!(info.commands, [CommandInfo { name: "c".into(), description: None, args: Some("<x>".into()) }]);
+    assert_eq!(h.run_command("c", "").unwrap().as_deref(), Some("two"));
 }
 
 #[test]

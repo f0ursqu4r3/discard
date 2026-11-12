@@ -60,6 +60,10 @@ fn prompt_dtos(ui: &UiState) -> Vec<PromptDto> {
         .collect()
 }
 
+/// The state of a channel a command can target: the active channel or a loaded thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandChannel { pub turn_running: bool, pub archived: bool, pub is_thread: bool }
+
 fn channel_state<'a>(s: &'a State, id: &str) -> Option<&'a ChannelState> {
     if s.active.channel_id == id { Some(&s.active) } else { s.parked.get(id) }
 }
@@ -988,6 +992,34 @@ impl AppCore {
         self.clear_slots();
         result
     }
+    /// The slash commands of the running plugins, in load order. Empty when plugins are unavailable.
+    pub fn plugin_commands(&self) -> Vec<discard_core::slash::PluginCommand> {
+        let plugins = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(plugins) = plugins.as_ref() else { return Vec::new() };
+        let text = |value: Option<String>| value.filter(|text| !text.trim().is_empty());
+        let commands = plugins.manager().lock().unwrap_or_else(|e| e.into_inner()).commands();
+        commands.into_iter().map(|(plugin, info)| discard_core::slash::PluginCommand { plugin, name: info.name, description: text(info.description), args: text(info.args) }).collect()
+    }
+    /// The state of a channel a command can target: the active channel or a loaded thread.
+    pub fn command_channel(&self, channel_id: &str) -> Option<CommandChannel> {
+        if channel_id.is_empty() { return None; }
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.active.channel_id == channel_id {
+            return Some(CommandChannel { turn_running: s.active.ui.turn_running(), archived: s.active.archived || s.active.read_only, is_thread: false });
+        }
+        let thread = s.parked.get(channel_id).filter(|c| c.thread_parent.is_some())?;
+        Some(CommandChannel { turn_running: thread.ui.turn_running(), archived: thread_blocked(&s, thread), is_thread: true })
+    }
+    /// Run a plugin command in the memory context (agent, project) of `channel_id`. `None` when no running plugin has the command.
+    pub fn run_plugin_command(&self, channel_id: &str, name: &str, args: &str) -> Option<Result<Option<String>, String>> {
+        let context = { let s = self.state.lock().unwrap_or_else(|e| e.into_inner()); channel_state(&s, channel_id).map(|c| (AgentId(c.agent_id.clone()), c.project_id.clone())) };
+        let plugins = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
+        let plugins = plugins.as_ref()?;
+        let Some((agent, project)) = context else { return Some(Err("The channel is not open.".into())) };
+        let result = PluginMemory::for_context(agent, project, || plugins.manager().lock().unwrap_or_else(|e| e.into_inner()).run_command(name, args));
+        self.clear_slots();
+        result.map(|result| result.map_err(|e| e.to_string()))
+    }
     /// Discard the plugin trees after plugin state changes.
     pub fn clear_slots(&self) {
         self.slot_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -1656,6 +1688,37 @@ mod read_tests {
             },
         })));
         AppCore::new(CoreInit { state: ui, commands, project: "P".into(), channel: "C".into(), agent: "A".into(), provider: "fake".into() }).snapshot().prompts.remove(0)
+    }
+    fn core_with_plugin(init: &str) -> (AppCore, tempfile::TempDir) {
+        use discard_lua::{PluginLimits, PluginManager, keystore::StaticKeyStore, ledger::Ledger, snapshot::Snapshot};
+        let manifest = "name = \"notes\"\nversion = \"1\"\napi = \"1\"\n[capabilities]\nui = true\n";
+        let snapshot = Snapshot::from_files([("plugin.toml".to_string(), manifest.as_bytes().to_vec()), ("init.lua".to_string(), init.as_bytes().to_vec())].into());
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(Mutex::new(PluginManager::new(PluginLimits::default())));
+        manager.lock().unwrap().load(snapshot).unwrap();
+        let ledger = Ledger::open(&dir.path().join("plugins.db"), Arc::new(StaticKeyStore([5; 32]))).unwrap();
+        let service = PluginService::new(dir.path(), ledger, manager, false).unwrap();
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let core = AppCore::new(CoreInit { state: UiState::new(ChannelId::new(), vec![]), commands, project: "P".into(), channel: "C".into(), agent: "A".into(), provider: "fake".into() });
+        core.set_plugins(Arc::new(service));
+        (core, dir)
+    }
+    #[test]
+    fn plugin_commands_list_and_run_in_the_active_channel() {
+        let (core, _dir) = core_with_plugin(r#"discard.command("echo", function(args) return "got " .. args end, { description = "  ", args = "<text>" })"#);
+        let commands = core.plugin_commands();
+        assert_eq!(commands, vec![discard_core::slash::PluginCommand { plugin: "notes".into(), name: "echo".into(), description: None, args: Some("<text>".into()) }]);
+        let id = core.active_channel_id();
+        assert_eq!(core.run_plugin_command(&id, "echo", "hi"), Some(Ok(Some("got hi".into()))));
+        assert_eq!(core.run_plugin_command(&id, "nope", ""), None);
+        assert_eq!(core.run_plugin_command("missing", "echo", "hi"), Some(Err("The channel is not open.".into())));
+    }
+    #[test]
+    fn command_channel_covers_the_active_channel_only_when_it_is_known() {
+        let (core, _dir) = core_with_plugin("");
+        assert_eq!(core.command_channel(&core.active_channel_id()), Some(CommandChannel { turn_running: false, archived: false, is_thread: false }));
+        assert_eq!(core.command_channel("missing"), None);
+        assert_eq!(core.command_channel(""), None);
     }
     #[test]
     fn read_only_approvals_have_no_always_allow_controls() {
