@@ -2,6 +2,7 @@
 //! Limits: CPU budget per call, memory cap, bounded queue. A violation terminates the plugin.
 
 use crate::element::{self, Element, ElementError};
+use discard_core::slash;
 use crate::host::{FsAccess, Host, MAX_SEARCH_HITS};
 use crate::manifest::{API_VERSION, Capabilities, Manifest};
 use crate::queue::{BoundedQueue, Kind, PushOutcome};
@@ -69,10 +70,19 @@ pub struct LoadedInfo {
     pub hash: String,
     pub theme: ThemeOverrides,
     pub slots: Vec<String>,
-    pub commands: Vec<String>,
+    /// Sorted by name.
+    pub commands: Vec<CommandInfo>,
     pub actions: Vec<String>,
     pub events: Vec<String>,
     pub menu_items: Vec<MenuItemInfo>,
+}
+
+/// A slash command a plugin registered, with its optional help text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandInfo {
+    pub name: String,
+    pub description: Option<String>,
+    pub args: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -237,6 +247,7 @@ struct Vm {
     lua: Lua,
     slots: Table,
     commands: Table,
+    command_info: Arc<Mutex<Vec<CommandInfo>>>,
     actions: Table,
     menu_items: Table,
     menu_info: Arc<Mutex<Vec<MenuItemInfo>>>,
@@ -561,6 +572,7 @@ fn build(
         (lua.create_table().map_err(load_err)?, lua.create_table().map_err(load_err)?, lua.create_table().map_err(load_err)?, lua.create_table().map_err(load_err)?);
     let menu_items = lua.create_table().map_err(load_err)?;
     let menu_info = Arc::new(Mutex::new(Vec::<MenuItemInfo>::new()));
+    let command_info = Arc::new(Mutex::new(Vec::<CommandInfo>::new()));
 
     let api = lua.create_table().map_err(load_err)?;
     let setup = || -> mlua::Result<()> {
@@ -610,7 +622,19 @@ fn build(
         })?)?;
 
         let commands_t = commands.clone();
-        api.set("command", lua.create_function(move |_, (name, f): (String, Function)| commands_t.raw_set(name, f))?)?;
+        let command_info_t = Arc::clone(&command_info);
+        api.set("command", lua.create_function(move |_, (name, f, opts): (String, Function, Option<Table>)| {
+            if !slash::valid_name(&name) {
+                return Err(mlua::Error::runtime(format!("invalid command name \"{name}\": use a-z, 0-9, _ and -, start with a letter, 32 characters at most")));
+            }
+            let description = command_text(opts.as_ref(), "description", slash::DESCRIPTION_LIMIT)?;
+            let args = command_text(opts.as_ref(), "args", slash::ARGS_LIMIT)?;
+            commands_t.raw_set(name.as_str(), f)?;
+            let mut info = command_info_t.lock().unwrap_or_else(|p| p.into_inner());
+            info.retain(|c| c.name != name);
+            info.push(CommandInfo { name, description, args });
+            Ok(())
+        })?)?;
         let actions_t = actions.clone();
         api.set("action", lua.create_function(move |_, (name, f): (String, Function)| actions_t.raw_set(name, f))?)?;
         let events_t = events.clone();
@@ -631,13 +655,20 @@ fn build(
     };
     setup().map_err(load_err)?;
 
-    let vm = Vm { lua, slots, commands, actions, menu_items, menu_info, events, deadline, base, budget: limits.call_budget };
+    let vm = Vm { lua, slots, commands, command_info, actions, menu_items, menu_info, events, deadline, base, budget: limits.call_budget };
     let source = snapshot.entry_source().map_err(|e| PluginError::Load(e.to_string()))?;
     vm.budgeted(|| vm.lua.load(source).set_name("=init.lua").exec()).map_err(|e| match e {
         PluginError::Runtime(msg) => PluginError::Load(msg),
         other => other,
     })?;
     Ok((vm, theme))
+}
+
+/// Read an optional text field of the `discard.command` options. Newlines become spaces. The text is cut to `limit` characters.
+fn command_text(opts: Option<&Table>, key: &str, limit: usize) -> mlua::Result<Option<String>> {
+    let Some(opts) = opts else { return Ok(None) };
+    let Some(text) = opts.get::<Option<String>>(key)? else { return Ok(None) };
+    Ok(Some(text.chars().map(|c| if matches!(c, '\n' | '\r') { ' ' } else { c }).take(limit).collect()))
 }
 
 fn names(table: &Table) -> Vec<String> {
@@ -668,7 +699,11 @@ fn worker(
         hash: snapshot.hash(),
         theme: theme.lock().unwrap_or_else(|p| p.into_inner()).clone(),
         slots: names(&vm.slots),
-        commands: names(&vm.commands),
+        commands: {
+            let mut commands = vm.command_info.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            commands.sort_by(|a, b| a.name.cmp(&b.name));
+            commands
+        },
         actions: names(&vm.actions),
         events: names(&vm.events),
         menu_items: vm.menu_info.lock().unwrap_or_else(|p| p.into_inner()).clone(),

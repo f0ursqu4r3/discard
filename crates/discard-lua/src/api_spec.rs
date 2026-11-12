@@ -30,7 +30,7 @@ pub const FUNCTIONS: &[ApiFn] = &[
         doc: "Change theme tokens. Colors are `#rrggbb`. Numbers: `radius` (0 to 24), `spacing_scale` (0.5 to 2), `font_scale` (0.8 to 1.5).",
         capability: Some("ui"),
     },
-    ApiFn { name: "command", signature: "(name: string, run: (args: string) -> string?) -> ()", doc: "Register a slash command. The returned text is shown to the user.", capability: None },
+    ApiFn { name: "command", signature: "(name: string, run: (args: string) -> string?, opts: { description: string?, args: string? }?) -> ()", doc: "Register a slash command. The user runs it with /name in a composer. The name uses a-z, 0-9, _ and -, and starts with a letter. The returned text is shown to the user.", capability: None },
     ApiFn { name: "action", signature: "(id: string, run: () -> ()) -> ()", doc: "Register a handler for a button's `on_click` id.", capability: None },
     ApiFn {
         name: "on",

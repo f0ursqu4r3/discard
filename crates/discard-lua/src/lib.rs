@@ -7,7 +7,7 @@ pub mod theme;
 pub mod queue;
 pub mod runtime;
 
-pub use runtime::{HookResult, LoadedInfo, PluginError, PluginHandle, PluginLimits, Status, Violation};
+pub use runtime::{CommandInfo, HookResult, LoadedInfo, PluginError, PluginHandle, PluginLimits, Status, Violation};
 pub mod host;
 pub mod manager;
 

@@ -204,7 +204,7 @@ impl PluginService {
             };
             slots.push((slot.clone(), result));
         }
-        Ok(TestReport { loaded: true, error: None, slots, commands: info.commands.clone(), theme_tokens: info.theme.token_names(), capabilities })
+        Ok(TestReport { loaded: true, error: None, slots, commands: info.commands.iter().map(|c| c.name.clone()).collect(), theme_tokens: info.theme.token_names(), capabilities })
     }
 
     /// Start (or restart) a draft from the installed version of a plugin.
