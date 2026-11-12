@@ -135,3 +135,26 @@ export function agentIdentity(
     avatarMark: readableOn(mark, mixColor(bg, mark, 0.15), fg, 3),
   }
 }
+
+/** One mark color for a group of agents: the average of their colors, kept readable on the background. */
+export function mixedAgentMark(
+  agents: { agentId: string; avatar?: string | null }[],
+  tokens: Record<string, string>,
+): string | undefined {
+  if (!agents.length) return undefined
+  const colors = agents.map((agent) =>
+    channels(agentIdentity(agent.avatar, agent.agentId, tokens).color),
+  )
+  const mixed =
+    '#' +
+    [0, 1, 2]
+      .map((i) =>
+        Math.round(colors.reduce((sum, color) => sum + color[i]!, 0) / colors.length)
+          .toString(16)
+          .padStart(2, '0'),
+      )
+      .join('')
+  const bg = tokens.background ?? fallbackTokens.background!
+  const fg = tokens.foreground ?? fallbackTokens.foreground!
+  return readableOn(mixed, bg, fg, 3)
+}

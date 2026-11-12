@@ -187,3 +187,18 @@ test('avatar marks keep three-to-one contrast on their final tinted surface', ()
   // Fifteen percent of this mark over white rounds to #eeeeee.
   expect(contrastRatio(identity.avatarMark, '#eeeeee')).toBeGreaterThanOrEqual(3)
 })
+
+test('a group of agents gets one mixed mark color', async () => {
+  const { mixedAgentMark, agentIdentity } = await import('../agent-icon')
+  const tokens = { background: '#000000', foreground: '#ffffff' }
+  const red = { agentId: 'a', avatar: 'lucide:bot:#ff0000' }
+  const blue = { agentId: 'b', avatar: 'lucide:bot:#0000ff' }
+  expect(mixedAgentMark([], tokens)).toBeUndefined()
+  // One agent: the mark of that agent.
+  expect(mixedAgentMark([red], tokens)).toBe(agentIdentity(red.avatar, red.agentId, tokens).mark)
+  // Two agents: the average, then made readable on the background.
+  const mixed = mixedAgentMark([red, blue], tokens)!
+  expect(mixed).not.toBe(mixedAgentMark([red], tokens))
+  expect(mixed).not.toBe(mixedAgentMark([blue], tokens))
+  expect(mixed).toMatch(/^#[0-9a-f]{6}$/)
+})
