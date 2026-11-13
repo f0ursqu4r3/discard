@@ -27,18 +27,38 @@ pub fn rule(action: Action) -> Option<KeyRule> {
         _ => KeyRule::Optional,
     })
 }
-pub const RESERVED: &[(&str, Option<Action>)] = &[
-    ("cmd-q", Some(Action::Quit)),
-    ("cmd-,", Some(Action::OpenSettings)),
-    ("cmd-w", Some(Action::CloseWindow)),
-    ("cmd-h", Some(Action::HideApp)),
-    ("cmd-m", Some(Action::Minimize)),
-    ("cmd-c", None),
-    ("cmd-v", None),
-    ("cmd-x", None),
-    ("cmd-a", None),
-    ("cmd-z", None),
-];
+/// Chords the user cannot give to another action, with the action that owns each one, on this platform.
+pub fn reserved() -> &'static [(&'static str, Option<Action>)] {
+    reserved_on(cfg!(target_os = "macos"))
+}
+/// See [`reserved`]. Off macOS the window keys follow `default_keymap_on`.
+pub fn reserved_on(macos: bool) -> &'static [(&'static str, Option<Action>)] {
+    if macos {
+        &[
+            ("cmd-q", Some(Action::Quit)),
+            ("cmd-,", Some(Action::OpenSettings)),
+            ("cmd-w", Some(Action::CloseWindow)),
+            ("cmd-h", Some(Action::HideApp)),
+            ("cmd-m", Some(Action::Minimize)),
+            ("cmd-c", None),
+            ("cmd-v", None),
+            ("cmd-x", None),
+            ("cmd-a", None),
+            ("cmd-z", None),
+        ]
+    } else {
+        &[
+            ("cmd-q", Some(Action::Quit)),
+            ("cmd-,", Some(Action::OpenSettings)),
+            ("shift-cmd-w", Some(Action::CloseWindow)),
+            ("cmd-c", None),
+            ("cmd-v", None),
+            ("cmd-x", None),
+            ("cmd-a", None),
+            ("cmd-z", None),
+        ]
+    }
+}
 const NAMED_KEYS: &[&str] = &[
     "enter",
     "escape",
@@ -119,7 +139,12 @@ pub fn parse_chord(text: &str) -> Result<Chord, KeymapError> {
     parts.push(key);
     Ok(Chord(parts.join("-")))
 }
+/// The label of `chord` on this platform.
 pub fn display_chord(chord: &Chord) -> String {
+    display_chord_on(chord, cfg!(target_os = "macos"))
+}
+/// The label of `chord`. `cmd` is the Command key on macOS and the Control key elsewhere.
+pub fn display_chord_on(chord: &Chord, macos: bool) -> String {
     let s = chord.as_str();
     let (prefix, key) = if let Some(p) = s.strip_suffix("--") {
         (p, "-")
@@ -144,8 +169,12 @@ pub fn display_chord(chord: &Chord) -> String {
             .collect()
     };
     if let Some(index) = parts.iter().position(|p| p == "Cmd") {
-        let cmd = parts.remove(index);
-        parts.insert(0, cmd);
+        parts.remove(index);
+        if macos {
+            parts.insert(0, "Cmd".into());
+        } else if !parts.iter().any(|p| p == "Ctrl") {
+            parts.insert(0, "Ctrl".into());
+        }
     }
     parts.push(key.to_uppercase());
     parts.join("+")
@@ -214,7 +243,7 @@ pub fn check_change(
         return Ok(None);
     };
     let chord = parse_chord(text)?;
-    if let Some((_, owner)) = RESERVED
+    if let Some((_, owner)) = reserved()
         .iter()
         .find(|(s, owner)| *s == chord.as_str() && *owner != Some(action))
     {
@@ -366,7 +395,9 @@ mod tests {
     }
     #[test]
     fn display_chord_joins_capitalized_parts_with_plus() {
-        assert_eq!(keymap::display_chord(&chord("cmd-shift-p")), "Cmd+Shift+P");
+        assert_eq!(keymap::display_chord_on(&chord("cmd-shift-p"), true), "Cmd+Shift+P");
+        assert_eq!(keymap::display_chord_on(&chord("cmd-shift-p"), false), "Ctrl+Shift+P");
+        assert_eq!(keymap::display_chord_on(&chord("ctrl-cmd-p"), false), "Ctrl+P");
     }
     #[test]
     fn every_action_has_a_rule_and_the_copy_actions_have_none() {
@@ -380,9 +411,17 @@ mod tests {
         for &(a, s) in default_keymap() {
             assert_eq!(map.chord(a), Some(&chord(s)));
         }
-        for &(s, owner) in keymap::RESERVED {
+        for &(s, owner) in keymap::reserved() {
             if let Some(a) = owner {
                 assert_eq!(map.chord(a), Some(&chord(s)));
+            }
+        }
+        for macos in [true, false] {
+            for &(s, owner) in keymap::reserved_on(macos) {
+                assert_eq!(chord(s).as_str(), s, "reserved chords are in the stored form");
+                if let Some(a) = owner {
+                    assert!(crate::action::default_keymap_on(macos).contains(&(a, s)), "{s}");
+                }
             }
         }
     }
@@ -459,7 +498,8 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(err.to_string(), "Cmd+K is already used by Zoom");
+        let key = if cfg!(target_os = "macos") { "Cmd+K" } else { "Ctrl+K" };
+        assert_eq!(err.to_string(), format!("{key} is already used by Zoom"));
     }
     #[test]
     fn check_change_allows_moving_quit_but_cmd_q_stays_reserved() {
@@ -487,11 +527,11 @@ mod tests {
     #[test]
     fn restored_default_displaces_a_custom_chord() {
         let (map, issues) = keymap::resolve(&[
-            ("review_plugins".into(), "alt-cmd-h".into()),
-            ("hide_others".into(), "cmd-k".into()),
+            ("review_plugins".into(), "ctrl-`".into()),
+            ("toggle_terminal".into(), "cmd-k".into()),
             ("open_settings".into(), "cmd-k".into()),
         ]);
-        assert_eq!(map.chord(Action::HideOthers), Some(&chord("alt-cmd-h")));
+        assert_eq!(map.chord(Action::ToggleTerminal), Some(&chord("ctrl-`")));
         assert_eq!(map.chord(Action::ReviewPlugins), None);
         assert_eq!(issues.len(), 2);
     }
@@ -509,10 +549,10 @@ mod tests {
     }
     #[test]
     fn rows_show_a_removed_optional_chord_as_none() {
-        let (map, _) = keymap::resolve(&[("hide_others".into(), "".into())]);
+        let (map, _) = keymap::resolve(&[("toggle_terminal".into(), "".into())]);
         let row = keymap::rows(&map)
             .into_iter()
-            .find(|r| r.action == Action::HideOthers)
+            .find(|r| r.action == Action::ToggleTerminal)
             .unwrap();
         assert_eq!(row.chord, None);
         assert!(row.default.is_some());

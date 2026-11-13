@@ -87,10 +87,11 @@ pub fn choose(passphrase: Option<&str>, data_dir: &Path, system: Arc<dyn KeyStor
     }
 }
 
-#[cfg(target_os = "macos")]
+/// The macOS Keychain, or the Secret Service on Linux.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 struct Keychain;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl SecretBackend for Keychain {
     fn get(&self) -> Result<Option<String>, String> {
         let entry = keyring::Entry::new("Discard", "plugin-approval-key").map_err(|e| e.to_string())?;
@@ -110,11 +111,11 @@ impl SecretBackend for Keychain {
 
 /// The operating system's secret store, if this platform has one that Discard supports.
 pub fn system_store() -> Arc<dyn KeyStore> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         Arc::new(BackendKeyStore::new(Keychain))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         Arc::new(UnavailableKeyStore("this platform has no supported secret store yet; set DISCARD_PLUGIN_PASSPHRASE".into()))
     }

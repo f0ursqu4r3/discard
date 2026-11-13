@@ -252,7 +252,14 @@ impl Session {
         if let Some(pid) = self.pid.and_then(|pid| i32::try_from(pid).ok()) {
             use nix::{sys::signal::{Signal, killpg}, unistd::Pid};
             // The child is a session leader, so its process group ID is its process ID.
-            let _ = killpg(Pid::from_raw(pid), if kill { Signal::SIGKILL } else { Signal::SIGHUP });
+            let signal = if kill { Signal::SIGKILL } else { Signal::SIGHUP };
+            let _ = killpg(Pid::from_raw(pid), signal);
+            // An interactive shell puts each background job in its own process group. Some shells, such as
+            // dash, do not pass the hang-up on, so signal the rest of the session too.
+            #[cfg(target_os = "linux")]
+            for member in session_members(pid) {
+                let _ = nix::sys::signal::kill(Pid::from_raw(member), signal);
+            }
             return;
         }
         let _ = kill;
@@ -260,9 +267,33 @@ impl Session {
     }
 }
 
+/// The session ID in the text of `/proc/<pid>/stat`. The command name can hold spaces and brackets,
+/// so the fields are counted from the last `)`.
+#[cfg(any(target_os = "linux", test))]
+fn stat_session(stat: &str) -> Option<i32> {
+    stat.rsplit_once(')')?.1.split_whitespace().nth(3)?.parse().ok()
+}
+
+/// The processes in the session that `leader` leads.
+#[cfg(target_os = "linux")]
+fn session_members(leader: i32) -> Vec<i32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else { return Vec::new() };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|pid| std::fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|stat| stat_session(&stat)) == Some(leader))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_session_id_is_read_after_the_command_name() {
+        assert_eq!(stat_session("4242 (a) b) c) S 1 4242 77 34816 4242 4194304"), Some(77));
+        assert_eq!(stat_session("no fields"), None);
+    }
 
     #[test]
     fn size_never_has_a_zero_side() {

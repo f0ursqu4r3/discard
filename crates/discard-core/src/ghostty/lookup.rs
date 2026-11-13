@@ -54,7 +54,7 @@ impl ThemeDirs {
         if let Some(resources) = ghostty_resources_dir {
             ghostty.push(resources.join("themes"));
         }
-        ghostty.push(PathBuf::from(GHOSTTY_APP_THEMES));
+        ghostty.extend(GHOSTTY_SYSTEM_THEMES.iter().map(PathBuf::from));
         ThemeDirs {
             yours: Some(discard_home.join("themes")),
             ghostty,
@@ -123,7 +123,12 @@ impl ThemeDirs {
     }
 }
 
-const GHOSTTY_APP_THEMES: &str = "/Applications/Ghostty.app/Contents/Resources/ghostty/themes";
+/// Where a Ghostty install keeps its themes: the macOS app bundle, then the Linux package folders.
+const GHOSTTY_SYSTEM_THEMES: &[&str] = &[
+    "/Applications/Ghostty.app/Contents/Resources/ghostty/themes",
+    "/usr/share/ghostty/themes",
+    "/usr/local/share/ghostty/themes",
+];
 
 /// A name with no path separators, so it stays inside the theme folder.
 fn is_plain_name(name: &str) -> bool {
@@ -252,6 +257,8 @@ mod tests {
                 PathBuf::from("/h/.config/ghostty/themes"),
                 PathBuf::from("/h/Library/Application Support/com.mitchellh.ghostty/themes"),
                 PathBuf::from("/Applications/Ghostty.app/Contents/Resources/ghostty/themes"),
+                PathBuf::from("/usr/share/ghostty/themes"),
+                PathBuf::from("/usr/local/share/ghostty/themes"),
             ]
         );
         let dirs = ThemeDirs::standard(discard, home, Some(Path::new("/x")), Some(Path::new("/res")));
@@ -262,6 +269,8 @@ mod tests {
                 PathBuf::from("/h/Library/Application Support/com.mitchellh.ghostty/themes"),
                 PathBuf::from("/res/themes"),
                 PathBuf::from("/Applications/Ghostty.app/Contents/Resources/ghostty/themes"),
+                PathBuf::from("/usr/share/ghostty/themes"),
+                PathBuf::from("/usr/local/share/ghostty/themes"),
             ]
         );
     }

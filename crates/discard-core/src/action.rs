@@ -314,19 +314,38 @@ pub fn menu_bar(ctx: &MenuContext) -> Vec<MenuSpec> {
     menus
 }
 
+/// Default key bindings on this platform.
+pub fn default_keymap() -> &'static [(Action, &'static str)] {
+    default_keymap_on(cfg!(target_os = "macos"))
+}
+
 /// Default key bindings. The webview adds no window or app keys of its own, so Cmd+W, Cmd+H, and Cmd+M are listed here.
 /// The edit keys (Cmd+C and so on) stay with the OS and the text inputs and are not listed.
-pub fn default_keymap() -> &'static [(Action, &'static str)] {
-    &[
-        (Action::OpenSettings, "cmd-,"),
-        (Action::Quit, "cmd-q"),
-        (Action::CancelTurn, "cmd-."),
-        (Action::HideApp, "cmd-h"),
-        (Action::HideOthers, "alt-cmd-h"),
-        (Action::Minimize, "cmd-m"),
-        (Action::CloseWindow, "cmd-w"),
-        (Action::ToggleTerminal, "ctrl-`"),
-    ]
+///
+/// Off macOS, `cmd` is the Control key, and the shell in the terminal needs Ctrl+W (delete a word), Ctrl+M (Enter),
+/// and Ctrl+H (Backspace). So Close Window moves to Ctrl+Shift+W and Minimize has no key. The Hide actions exist
+/// on macOS only.
+pub fn default_keymap_on(macos: bool) -> &'static [(Action, &'static str)] {
+    if macos {
+        &[
+            (Action::OpenSettings, "cmd-,"),
+            (Action::Quit, "cmd-q"),
+            (Action::CancelTurn, "cmd-."),
+            (Action::HideApp, "cmd-h"),
+            (Action::HideOthers, "alt-cmd-h"),
+            (Action::Minimize, "cmd-m"),
+            (Action::CloseWindow, "cmd-w"),
+            (Action::ToggleTerminal, "ctrl-`"),
+        ]
+    } else {
+        &[
+            (Action::OpenSettings, "cmd-,"),
+            (Action::Quit, "cmd-q"),
+            (Action::CancelTurn, "cmd-."),
+            (Action::CloseWindow, "shift-cmd-w"),
+            (Action::ToggleTerminal, "ctrl-`"),
+        ]
+    }
 }
 
 /// Whether to ask the user before running `action`.
@@ -453,16 +472,30 @@ mod tests {
 
     #[test]
     fn keymap_has_no_duplicate_keys() {
-        let keys: HashSet<_> = default_keymap().iter().map(|(_, k)| *k).collect();
-        assert_eq!(keys.len(), default_keymap().len());
-        assert!(default_keymap().contains(&(Action::OpenSettings, "cmd-,")));
-        assert!(default_keymap().contains(&(Action::Quit, "cmd-q")));
-        assert!(default_keymap().contains(&(Action::CancelTurn, "cmd-.")));
-        assert!(default_keymap().contains(&(Action::HideApp, "cmd-h")));
-        assert!(default_keymap().contains(&(Action::HideOthers, "alt-cmd-h")));
-        assert!(default_keymap().contains(&(Action::Minimize, "cmd-m")));
-        assert!(default_keymap().contains(&(Action::CloseWindow, "cmd-w")));
-        assert!(default_keymap().contains(&(Action::ToggleTerminal, "ctrl-`")));
+        for macos in [true, false] {
+            let keymap = default_keymap_on(macos);
+            let keys: HashSet<_> = keymap.iter().map(|(_, k)| *k).collect();
+            assert_eq!(keys.len(), keymap.len());
+            assert!(keymap.contains(&(Action::OpenSettings, "cmd-,")));
+            assert!(keymap.contains(&(Action::Quit, "cmd-q")));
+            assert!(keymap.contains(&(Action::CancelTurn, "cmd-.")));
+            assert!(keymap.contains(&(Action::ToggleTerminal, "ctrl-`")));
+        }
+        let mac = default_keymap_on(true);
+        assert!(mac.contains(&(Action::HideApp, "cmd-h")));
+        assert!(mac.contains(&(Action::HideOthers, "alt-cmd-h")));
+        assert!(mac.contains(&(Action::Minimize, "cmd-m")));
+        assert!(mac.contains(&(Action::CloseWindow, "cmd-w")));
+    }
+
+    #[test]
+    fn other_platforms_leave_the_shell_keys_free() {
+        let keymap = default_keymap_on(false);
+        assert!(keymap.contains(&(Action::CloseWindow, "shift-cmd-w")));
+        for (action, key) in keymap {
+            assert!(!["cmd-w", "cmd-m", "cmd-h"].contains(key), "{key}");
+            assert!(!matches!(action, Action::HideApp | Action::HideOthers | Action::Minimize));
+        }
     }
 
     #[test]

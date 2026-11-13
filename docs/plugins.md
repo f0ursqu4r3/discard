@@ -49,7 +49,7 @@ agent with **Allow plugin writes** on. A chat agent tells you to start a builder
 - **Load-time check.** At startup Discard reads each plugin's files into memory once, hashes those bytes, and loads
   those same bytes only if the hash matches a signed approval. A plugin edited on disk, or dropped in without
   review, is disabled and listed as "modified outside review". A forged database row does not verify.
-- **Signing key.** The key lives in the macOS Keychain. If you set `DISCARD_PLUGIN_PASSPHRASE`, a key is derived from
+- **Signing key.** The key lives in the macOS Keychain, or in the Secret Service on Linux. If you set `DISCARD_PLUGIN_PASSPHRASE`, a key is derived from
   it instead. With no key at all, Discard loads no user plugins and says why.
 - **Failures revert.** A plugin that fails three times in a row, or breaks a CPU or memory limit once, goes back to
   its previous approved version. A plugin with no earlier version is removed.
@@ -124,7 +124,7 @@ secrets. The three tool events are sent only if the provider shows tool calls.
 - Events are observe-only. A handler can read an event, but a `{ block = true }` result changes nothing yet. Blocking a
   message or a tool call is not built.
 - The Keychain may ask for your permission the first time, and again after a rebuild of an unsigned binary.
-- Linux and Windows secret stores are not wired. Use `DISCARD_PLUGIN_PASSPHRASE` there.
+- The Windows secret store is not wired. Use `DISCARD_PLUGIN_PASSPHRASE` there, and on Linux with no Secret Service.
 - The review screen was built and logic-tested but not checked visually in this milestone.
 
 ## Menu items
