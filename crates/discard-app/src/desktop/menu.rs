@@ -36,12 +36,33 @@ pub fn web_shortcuts(keymap: &Keymap) -> Vec<(String, String)> {
         !actions.contains(action) || !native
     }).map(|(action, chord)| (action.id().to_string(), chord.as_str().to_string())).collect()
 }
+/// Whether this platform can carry out `action`. Hide Others and Show All exist on macOS only.
+/// Hide Discard is also left out elsewhere: with no Dock, nothing brings a hidden window back.
+pub fn platform_action(action: Action, macos: bool) -> bool {
+    macos || !matches!(action, Action::HideApp | Action::HideOthers | Action::ShowAll)
+}
+/// The entries this platform can carry out. Services is a macOS menu. The GTK menu has no Undo or
+/// Redo item; the text inputs handle those keys themselves.
+pub fn platform_entries(entries: Vec<MenuEntry>, macos: bool) -> Vec<MenuEntry> {
+    if macos { return entries; }
+    let mut kept: Vec<MenuEntry> = Vec::new();
+    for entry in entries {
+        match entry {
+            MenuEntry::Services | MenuEntry::Standard(StandardItem::Undo | StandardItem::Redo) => {}
+            MenuEntry::Action { action, .. } if !platform_action(action, macos) => {}
+            MenuEntry::Separator if kept.last().is_none_or(|last| *last == MenuEntry::Separator) => {}
+            entry => kept.push(entry),
+        }
+    }
+    if kept.last() == Some(&MenuEntry::Separator) { kept.pop(); }
+    kept
+}
 /// Build the native menu from the current core state and keymap.
 pub fn build_menu<R: Runtime>(app: &AppHandle<R>, ctx: &MenuContext, keymap: &Keymap) -> tauri::Result<Menu<R>> {
     let menu = Menu::new(app)?;
     for spec in menu_bar(ctx) {
         let submenu = Submenu::new(app, spec.title, true)?;
-        for entry in spec.entries {
+        for entry in platform_entries(spec.entries, cfg!(target_os = "macos")) {
             match entry {
                 MenuEntry::Action { label, action, checked, enabled } => {
                     let shortcut = keymap.chord(action).map(accelerator);
@@ -75,7 +96,7 @@ pub fn build_menu<R: Runtime>(app: &AppHandle<R>, ctx: &MenuContext, keymap: &Ke
 #[cfg(test)]
 mod tests {
     use super::*;
-    use discard_core::action::{Action, MenuContext, MenuEntry, MenuTarget, PluginMenuItem, FUTURE_ITEMS};
+    use discard_core::action::{Action, MenuContext, MenuEntry, MenuTarget, PluginMenuItem, StandardItem, FUTURE_ITEMS};
     use discard_core::keymap::parse_chord;
 
     #[test]
@@ -100,6 +121,15 @@ mod tests {
         assert!(issues.is_empty());
         assert!(web_shortcuts(&keymap).contains(&("open_agent_settings".into(), "cmd-k".into())));
         assert!(!web_shortcuts(&keymap).iter().any(|(id, _)| id == "quit"));
+    }
+    #[test]
+    fn other_platforms_drop_the_macos_only_app_entries() {
+        let app = menu_bar(&MenuContext::default()).remove(0).entries;
+        assert_eq!(platform_entries(app.clone(), true), app);
+        let labels: Vec<String> = platform_entries(app, false).iter().map(|entry| match entry { MenuEntry::Separator => "-".into(), other => describe_entry(other).label }).collect();
+        assert_eq!(labels, ["Settings…", "-", "Quit Discard"]);
+        let edit = menu_bar(&MenuContext::default()).remove(2).entries;
+        assert_eq!(platform_entries(edit, false), [StandardItem::Cut, StandardItem::Copy, StandardItem::Paste, StandardItem::SelectAll].map(MenuEntry::Standard));
     }
     #[test]
     fn chord_converts_to_a_tauri_accelerator() {

@@ -158,6 +158,9 @@ carries a placeholder action with no key. Show All and Zoom have no key. An inva
 
 The edit keys Cmd+C, Cmd+V, Cmd+X, Cmd+A, and Cmd+Z stay with the OS and text inputs. They are reserved.
 Cmd+Q and Cmd+, remain reserved for Quit and Settings even if you move those actions. Cmd+W, Cmd+H, and Cmd+M are locked.
+
+On Linux, `Cmd` is the Control key. Close Window is Ctrl+Shift+W and Minimize has no key, so the shell in the terminal
+keeps Ctrl+W, Ctrl+M, and Ctrl+H. The Hide actions exist on macOS only.
 Toggle Terminal is an optional action. The terminal does not send its key to the shell. The terminal also
 passes the Cmd keys and every shortcut that the webview handles to the app. Other keys, including `Ctrl+C`, go to the shell.
 Quit, Settings, and Cancel Turn need a shortcut. You can change other actions or unbind them. A conflict blocks the

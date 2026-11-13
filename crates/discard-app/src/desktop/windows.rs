@@ -37,7 +37,9 @@ pub fn should_clear_confirm(running: bool, pending: bool) -> bool { !running && 
 pub fn window_geometry<R: tauri::Runtime>(window: &tauri::Window<R>) -> Option<(Bounds, Vec<Bounds>)> {
     let scale = window.scale_factor().ok()? as f32;
     let pos = window.outer_position().ok()?;
-    let size = window.outer_size().ok()?;
+    // The restore sets the inner size. On Linux the outer size adds the frame, so a saved outer size
+    // makes the window grow at each start.
+    let size = window.inner_size().ok()?;
     let bounds = Bounds { x: pos.x as f32 / scale, y: pos.y as f32 / scale, width: size.width as f32 / scale, height: size.height as f32 / scale };
     let screens = window.available_monitors().ok()?.iter().map(|m| {
         let scale = m.scale_factor() as f32;

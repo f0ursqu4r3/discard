@@ -20,7 +20,7 @@ pub fn set_key(store: &mut SettingsStore, action: Action, chord: Option<String>)
 #[tauri::command]
 pub fn settings_keymap_rows(actions: tauri::State<'_, std::sync::Arc<super::super::actions::DesktopActions>>) -> Vec<serde_json::Value> {
     let store = actions.settings.lock().unwrap_or_else(|e| e.into_inner());
-    keymap::rows(&store.settings().keymap).into_iter().map(|row| serde_json::json!({"id": row.action.id(), "label": row.action.label(), "chord": row.chord.as_ref().map(keymap::display_chord).unwrap_or_else(|| "Not set".into()), "bound": row.chord.is_some(), "custom": row.custom, "rule": match row.rule { KeyRule::Locked => "locked", KeyRule::Required => "required", KeyRule::Optional => "optional" }})).collect()
+    keymap::rows(&store.settings().keymap).into_iter().filter(|row| super::super::menu::platform_action(row.action, cfg!(target_os = "macos"))).map(|row| serde_json::json!({"id": row.action.id(), "label": row.action.label(), "chord": row.chord.as_ref().map(keymap::display_chord).unwrap_or_else(|| "Not set".into()), "bound": row.chord.is_some(), "custom": row.custom, "rule": match row.rule { KeyRule::Locked => "locked", KeyRule::Required => "required", KeyRule::Optional => "optional" }})).collect()
 }
 #[tauri::command]
 pub fn settings_keymap_set(app: tauri::AppHandle, core: tauri::State<'_, std::sync::Arc<super::super::core::AppCore>>, actions: tauri::State<'_, std::sync::Arc<super::super::actions::DesktopActions>>, action_id: String, chord: Option<String>, reset: bool) -> Result<(), String> {
