@@ -41,7 +41,7 @@ const preview = computed(() => props.group.projects.slice(0, 4))
         @mouseleave="hovered = false"
         @focusin="focused = true"
         @focusout="focused = false"
-        :class="cn('group relative flex w-full items-center justify-center', railSizes[size].row)"
+        class="group relative flex w-full items-center justify-center"
       >
         <span
           :data-ui-id="selected ? 'project-selection-pill' : `group-selection-pill-${group.id}`"
@@ -62,8 +62,8 @@ const preview = computed(() => props.group.projects.slice(0, 4))
               :style="tint ? { backgroundColor: tint } : undefined"
               :class="
                 cn(
-                  'relative rounded-lg border-0 p-0 hover:brightness-110',
-                  railSizes[size].tile,
+                  'relative rounded-xl border-0 p-0 hover:brightness-110',
+                  railSizes[size].groupTile,
                   !tint && 'bg-muted',
                   dropInto &&
                     'ring-2 ring-ring ring-offset-1 ring-offset-canvas transition-shadow motion-reduce:transition-none',
@@ -73,19 +73,14 @@ const preview = computed(() => props.group.projects.slice(0, 4))
             >
               <span
                 data-testid="group-preview"
-                :class="
-                  cn(
-                    'grid size-full grid-cols-2 grid-rows-2 content-center justify-items-center',
-                    size === 'mini' ? 'gap-px p-0.5' : 'gap-0.5 p-1',
-                  )
-                "
+                class="grid size-full grid-cols-2 grid-rows-2 content-center justify-items-center gap-1 p-1"
               >
                 <ProjectAvatar
                   v-for="project in preview"
                   :key="project.id"
                   :name="project.name"
                   :avatar="project.avatar"
-                  class="size-full rounded-[4px] text-[7px]"
+                  class="size-full rounded-lg text-[7px]"
                 />
               </span>
               <Badge

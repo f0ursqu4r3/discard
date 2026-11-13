@@ -91,7 +91,7 @@ export type RailSize = 'mini' | 'compact' | 'default'
 /**
  * Classes per rail size, and the pill height of a selected row in spacing units.
  * An expanded group pads its tiles by one spacing unit on all four sides: `group` is the tile width
- * plus that padding, `groupRow` is a row as high as the tile, and `groupPill` moves the selection
+ * plus that padding, `groupTile` is a collapsed group as wide as an expanded one, `groupRow` is a row as high as the tile, and `groupPill` moves the selection
  * pill from the row to the rail edge.
  */
 export const railSizes: Record<
@@ -101,6 +101,7 @@ export const railSizes: Record<
     row: string
     pillUnits: number
     group: string
+    groupTile: string
     groupRow: string
     groupPill: string
     icon: string
@@ -111,6 +112,7 @@ export const railSizes: Record<
     row: 'h-8',
     pillUnits: 8,
     group: 'w-10',
+    groupTile: 'size-10',
     groupRow: 'h-8',
     groupPill: '-left-2',
     icon: 'size-4',
@@ -120,6 +122,7 @@ export const railSizes: Record<
     row: 'h-10',
     pillUnits: 10,
     group: 'w-11',
+    groupTile: 'size-11',
     groupRow: 'h-9',
     groupPill: '-left-2',
     icon: 'size-4',
@@ -129,6 +132,7 @@ export const railSizes: Record<
     row: 'h-12',
     pillUnits: 12,
     group: 'w-14',
+    groupTile: 'size-14',
     groupRow: 'h-12',
     groupPill: '-left-3',
     icon: 'size-5',

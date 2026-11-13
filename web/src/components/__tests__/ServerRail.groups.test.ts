@@ -90,15 +90,17 @@ test('a collapsed group is one tile with up to four member avatars and its name 
   expect(wrapper.find('[aria-label="Alpha"]').exists()).toBe(false)
 })
 
-test('a collapsed tile has the size of a project tile in every rail size', () => {
+test('a collapsed group is as wide as an expanded group in every rail size', () => {
   const layout = { items: [group('g', ['a', 'b']), { kind: 'project' as const, projectId: 'c' }] }
-  for (const [compact, size] of [
-    [false, 'size-12'],
-    [true, 'size-9'],
+  for (const [compact, tile, folder, width] of [
+    [false, 'size-12', 'size-14', 'w-14'],
+    [true, 'size-9', 'size-11', 'w-11'],
   ] as const) {
     const wrapper = mountRail(layout, { compact })
-    expect(wrapper.get('[data-ui-id="rail-group-g"]').classes()).toContain(size)
-    expect(wrapper.get('[aria-label="Gamma"]').classes()).toContain(size)
+    expect(wrapper.get('[data-ui-id="rail-group-g"]').classes()).toContain(folder)
+    expect(wrapper.get('[aria-label="Gamma"]').classes()).toContain(tile)
+    const open = mountRail({ items: [group('g', ['a', 'b'], { collapsed: false })] }, { compact })
+    expect(open.get('[data-ui-id="rail-group-container-g"]').classes()).toContain(width)
   }
 })
 
