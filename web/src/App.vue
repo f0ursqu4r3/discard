@@ -472,6 +472,13 @@ const archivedLegacy = computed(
       (channel) => channel.id === store.snapshot?.channelId
     )?.kind === 'archived_legacy'
 );
+// A general or text channel has no branch. Its agent works in the main checkout.
+const branchless = computed(() => {
+  const kind = projectChannels.value.find(
+    (channel) => channel.id === store.snapshot?.channelId
+  )?.kind;
+  return kind === 'general' || kind === 'text';
+});
 const appearance = useAppearanceSettings((error) => {
   store.error = error;
 });
@@ -500,6 +507,13 @@ const heading = computed(() =>
         }[page.value]
 );
 const changes = computed(() => changeEntries(store.history));
+const showChangesTab = computed(
+  () => !branchless.value || changes.value.length > 0
+);
+watch(showChangesTab, (shown) => {
+  if (!shown && conversationTab.value === 'changes')
+    conversationTab.value = 'conversation';
+});
 const tools = computed(() => {
   const rows = [
     ...store.history.map((message) => ({
@@ -1394,7 +1408,7 @@ watch(
               >
                 <TabsList variant="line" class="*:after:bg-primary">
                   <TabsTrigger value="conversation">Conversation</TabsTrigger>
-                  <TabsTrigger value="changes">
+                  <TabsTrigger v-if="showChangesTab" value="changes">
                     Changes
                     <Badge
                       v-if="changes.length"
@@ -1464,6 +1478,7 @@ watch(
                 :channel-id="store.snapshot.channelId"
                 :history="store.history"
                 :turn-running="!!store.snapshot.turnRunning"
+                :branchless="branchless"
               />
               <div
                 v-else-if="conversationTab === 'run'"

@@ -1,6 +1,7 @@
 /** Keys of the small preferences of the Changes tab. They stay in the webview. */
 export const preferenceKeys = {
   scope: 'discard:changes-scope',
+  textScope: 'discard:changes-text-scope',
   layout: 'discard:changes-layout',
   files: 'discard:changes-files',
 } as const
