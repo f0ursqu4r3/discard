@@ -8,7 +8,7 @@ use discard_core::ghostty::resolve::{ThemeProblem, ghostty_config_paths};
 use discard_core::ghostty::spec::Appearance;
 use discard_core::settings::AppearanceSettings;
 use discard_lua::theme::{
-    ProtectedPalette, Rgb, ThemeOverrides, contrast_ratio, protected_palette, protected_accent, MIN_CONTRAST,
+    ProtectedPalette, Rgb, ThemeOverrides, contrast_ratio, protected_palette, MIN_CONTRAST,
 };
 use std::path::{Path, PathBuf};
 const TOKENS: [&str; 20] = [
@@ -233,9 +233,17 @@ pub fn contrast_ok(fg: Rgb, bg: Rgb) -> bool {
     contrast_ratio(fg, bg) >= 4.5
 }
 /// Diff colors use the Ghostty palette and remain readable on their background.
+/// An unreadable color moves toward the foreground until it is readable, so it keeps its hue.
 pub fn diff_palette(ui: &UiColors, on_block: bool) -> (String, String) {
-    let palette = ProtectedPalette { background: to_lua(if on_block { ui.muted } else { ui.background }), foreground: to_lua(ui.foreground), border: to_lua(ui.border) };
-    (protected_accent(&palette, to_lua(ui.diff_added), MIN_CONTRAST).to_hex(), protected_accent(&palette, to_lua(ui.diff_removed), MIN_CONTRAST).to_hex())
+    let background = if on_block { ui.muted } else { ui.background };
+    let readable = |color: CoreRgb| {
+        (0..=20)
+            .map(|step| color.mix(ui.foreground, f64::from(step) / 20.0))
+            .find(|mixed| contrast_ratio(to_lua(*mixed), to_lua(background)) >= MIN_CONTRAST)
+            .unwrap_or(ui.foreground)
+            .to_hex()
+    };
+    (readable(ui.diff_added), readable(ui.diff_removed))
 }
 /// The terminal colors: the 16 Ghostty palette colors, with the plugin ANSI tokens on colors 1 through 6,
 /// and the effective background, foreground, caret, and selection.
@@ -307,13 +315,24 @@ mod tests {
     const DARK: &str = "background = #101010\nforeground = #f0f0f0\npalette = 1=#ff0000\npalette = 2=#00ff00\npalette = 3=#ffff00\npalette = 4=#0000ff\n";
 
     #[test]
-    fn diff_colors_use_ghostty_palette_and_fall_back_when_unreadable() {
+    fn diff_colors_use_ghostty_palette_and_stay_readable() {
         let mut colors = ui(DARK);
         colors.muted = colors.background;
         colors.diff_added = colors.background;
         let (added, removed) = diff_palette(&colors, true);
-        assert_eq!(added, to_lua(colors.foreground).to_hex());
+        assert!(contrast_ratio(Rgb::parse(&added).unwrap(), to_lua(colors.background)) >= MIN_CONTRAST);
         assert_eq!(removed, to_lua(colors.diff_removed).to_hex());
+    }
+
+    #[test]
+    fn an_unreadable_diff_color_keeps_its_hue() {
+        let mut colors = ui(DARK);
+        colors.muted = colors.background;
+        colors.diff_removed = CoreRgb { r: 0xb0, g: 0x20, b: 0x20 };
+        let (_, removed) = diff_palette(&colors, true);
+        let Rgb(r, g, b) = Rgb::parse(&removed).unwrap();
+        assert!(contrast_ratio(Rgb(r, g, b), to_lua(colors.background)) >= MIN_CONTRAST);
+        assert!(r > g && r > b, "{removed} is still red");
     }
 
     #[test]
