@@ -1,4 +1,4 @@
-import type { BlockDto, MessageDto } from '../bridge/types'
+import type { BlockDto, MessageDto, PromptDto } from '../bridge/types'
 
 /** Display times and date boundaries in the viewer's local time zone. */
 export function messageTime(message: MessageDto): Date | null {
@@ -171,13 +171,36 @@ export function parseDiff(text: string): {
   }
 }
 
-export type ToolCallItem = { block: Extract<BlockDto, { type: 'tool_call' }>; index: number }
+export type ApprovalBlock = Extract<BlockDto, { type: 'approval' }>
+export type ToolCallItem = {
+  block: Extract<BlockDto, { type: 'tool_call' }>
+  index: number
+  approval?: ApprovalBlock
+}
 export type BlockSegment =
-  | { kind: 'block'; block: BlockDto; index: number }
+  | { kind: 'block'; block: BlockDto; index: number; approval?: ApprovalBlock }
   | { kind: 'tools'; items: ToolCallItem[] }
 
-/** Group consecutive calls without changing their stored block indexes. */
+/** Group consecutive calls without changing their stored block indexes. An approval joins the call with the same ID. */
 export function groupBlocks(blocks: BlockDto[]): BlockSegment[] {
+  // The approval block follows its call in saved replies. Match both orders to be safe.
+  const callAt = new Map<string, number>()
+  blocks.forEach((block, index) => {
+    if (block.type === 'tool_call' && !callAt.has(block.call_id)) callAt.set(block.call_id, index)
+  })
+  const attached = new Map<number, ApprovalBlock>()
+  const joined = new Set<number>()
+  blocks.forEach((block, index) => {
+    if (block.type !== 'approval') return
+    let call = block.call_id ? callAt.get(block.call_id) : undefined
+    // An old record has no call ID. Its approval block directly follows the call of the same tool.
+    const before = blocks[index - 1]
+    if (!block.call_id && before?.type === 'tool_call' && before.name === block.tool)
+      call = index - 1
+    if (call === undefined || attached.has(call)) return
+    attached.set(call, block)
+    joined.add(index)
+  })
   const segments: BlockSegment[] = []
   let calls: ToolCallItem[] = []
   function flush() {
@@ -186,14 +209,58 @@ export function groupBlocks(blocks: BlockDto[]): BlockSegment[] {
     calls = []
   }
   blocks.forEach((block, index) => {
-    if (block.type === 'tool_call') calls.push({ block, index })
-    else {
+    if (joined.has(index)) return
+    if (block.type === 'tool_call') {
+      const approval = attached.get(index)
+      calls.push(approval ? { block, index, approval } : { block, index })
+    } else {
       flush()
       segments.push({ kind: 'block', block, index })
     }
   })
   flush()
   return segments
+}
+
+export type ApprovalStatus =
+  | 'pending'
+  | 'approved'
+  | 'auto_approved'
+  | 'denied'
+  | 'stale'
+  | 'answered'
+
+/** The live prompt wins. Otherwise the saved state. A record with neither is answered, outcome unknown. */
+export function approvalStatus(
+  block: ApprovalBlock | undefined,
+  prompts: PromptDto[] | undefined,
+): ApprovalStatus | undefined {
+  if (!block) return undefined
+  const view = prompts?.find((prompt) => prompt.approvalId === block.approval_id)?.view
+  const state = view ?? block.state
+  if (state === 'pending' || state === 'denied' || state === 'stale') return state
+  if (state === 'approved') return block.decided_by === 'policy' ? 'auto_approved' : 'approved'
+  return 'answered'
+}
+
+/** The text mark for an approval status. Old records have no mark. */
+export function approvalMark(
+  status: ApprovalStatus | undefined,
+): { text: string; label: string; pending: boolean } | null {
+  switch (status) {
+    case 'pending':
+      return { text: 'Needs approval', label: 'Approval needed', pending: true }
+    case 'approved':
+      return { text: 'Approved', label: 'Approved by you', pending: false }
+    case 'auto_approved':
+      return { text: 'Auto-approved', label: 'Approved by policy', pending: false }
+    case 'denied':
+      return { text: 'Denied', label: 'Denied', pending: false }
+    case 'stale':
+      return { text: 'Expired', label: 'Approval expired', pending: false }
+    default:
+      return null
+  }
 }
 
 export function toolCallLabel(name: string): string {

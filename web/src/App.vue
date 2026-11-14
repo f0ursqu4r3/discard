@@ -76,7 +76,7 @@ import {
 import { useActionShortcut } from './bridge/terminal';
 import { unescapeSlash } from './components/slash';
 import Notices from './components/Notices.vue';
-import ApprovalCard from './components/ApprovalCard.vue';
+import ApprovalDock from './components/ApprovalDock.vue';
 import DiffBlock from './components/DiffBlock.vue';
 import ToolCallBlock from './components/ToolCallBlock.vue';
 import BrailleSpinner from './components/BrailleSpinner.vue';
@@ -1495,9 +1495,11 @@ watch(
                 data-ui-id="run-view"
                 class="min-h-0 flex-1 overflow-auto overscroll-contain p-5"
               >
-                <div v-if="tools.length" class="flex flex-col gap-4">
-                  <h2 class="text-lg font-semibold">Tool activity</h2>
+                <div v-if="tools.length" class="flex flex-col gap-1">
+                  <h2 class="mb-3 text-lg font-semibold">Tool activity</h2>
+                  <!-- A dense log. The bar keeps the agent color, because no message row names the agent here. -->
                   <ToolCallBlock
+                    class="my-0! border-agent!"
                     v-for="(tool, index) in tools"
                     :key="index"
                     :name="tool.name"
@@ -1558,22 +1560,10 @@ watch(
               data-ui-id="protected-notices"
               class="max-h-64 shrink-0 overflow-auto overscroll-contain"
             >
-              <template
-                v-if="
-                  page !== 'conversation' ||
-                  (store.snapshot.activeProjectId &&
-                    conversationTab !== 'conversation')
-                "
-              >
-                <ApprovalCard
-                  :channel-id="store.snapshot.channelId"
-                  v-for="prompt in store.snapshot.prompts.filter(
-                    (p) => p.view === 'pending'
-                  )"
-                  :key="prompt.approvalId"
-                  :prompt="prompt"
-                />
-              </template>
+              <ApprovalDock
+                :channel-id="store.snapshot.channelId"
+                :prompts="store.snapshot.prompts"
+              />
               <div
                 v-if="
                   store.snapshot.notice &&

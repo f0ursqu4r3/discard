@@ -6,10 +6,12 @@ import DiffBlock from './DiffBlock.vue'
 defineProps<{ block: Extract<BlockDto, { type: 'changes' }> }>()
 </script>
 <template>
+  <!-- A report, not a request: Discard draws it, so it stays a protected surface, but it uses the plain card colors.
+       The protected colors are for requests that need a decision. -->
   <div
     data-ui-id="changes-card"
     data-protected="true"
-    class="space-y-2 rounded-md border border-[var(--protected-border)] bg-[var(--protected-bg)] p-3 text-[var(--protected-fg)]"
+    class="my-3 space-y-2 rounded-md border border-border bg-card p-3 text-card-foreground"
   >
     <div class="flex items-center gap-2">
       <p class="font-semibold">
@@ -28,7 +30,7 @@ defineProps<{ block: Extract<BlockDto, { type: 'changes' }> }>()
     </ul>
     <Collapsible v-for="file in block.files" :key="file.path" class="space-y-1">
       <CollapsibleTrigger
-        class="w-full text-left text-sm focus-visible:outline focus-visible:outline-[var(--protected-border)]"
+        class="w-full rounded-sm text-left font-mono text-xs text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
       >
         {{ file.status }} {{ file.path }}
       </CollapsibleTrigger>

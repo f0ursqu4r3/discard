@@ -44,7 +44,7 @@ test('escape describes full access and has no Always allow', () => {
   expect(view.text()).not.toContain('Always allow')
 })
 
-test('saved escape cards retain the full-access warning after live prompts clear', async () => {
+test('a saved escape approval shows as a compact row, not a card', async () => {
   const { default: BlockView } = await import('../BlockView.vue')
   const view = mount(BlockView, {
     props: {
@@ -58,7 +58,9 @@ test('saved escape cards retain the full-access warning after live prompts clear
       },
     },
   })
-  expect(view.text()).toContain('Runs outside the sandbox: full access as you')
+  expect(view.find('[data-ui-id="approval-card"]').exists()).toBe(false)
+  expect(view.get('[data-protected="true"]').text()).toContain('file_change')
+  expect(view.text()).toContain('/outside')
   expect(view.text()).not.toContain('Always allow')
 })
 

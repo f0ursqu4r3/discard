@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn message_text_joins_text_blocks_and_skips_tool_calls_and_approvals() {
-        let blocks = vec![Block::Markdown { text: "hello".into() }, Block::Code { language: None, text: "code".into() }, Block::Diff { text: "diff".into() }, Block::ToolCall { call_id: "c".into(), name: "n".into(), input: serde_json::Value::Null, output: None, is_error: None, sandboxed: None }, Block::Approval { kind: crate::approval::ApprovalKind::ProviderTool, approval_id: "a".into(), tool: "t".into(), summary: "s".into() }];
+        let blocks = vec![Block::Markdown { text: "hello".into() }, Block::Code { language: None, text: "code".into() }, Block::Diff { text: "diff".into() }, Block::ToolCall { call_id: "c".into(), name: "n".into(), input: serde_json::Value::Null, output: None, is_error: None, sandboxed: None }, Block::Approval { kind: crate::approval::ApprovalKind::ProviderTool, approval_id: "a".into(), tool: "t".into(), summary: "s".into(), call_id: None, state: None, decided_by: None }];
         assert_eq!(message_text(&blocks), "hello\n\ncode\n\ndiff");
     }
 

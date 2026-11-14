@@ -6,15 +6,18 @@ import AttachmentCard from './AttachmentCard.vue'
 import CodeBlock from './CodeBlock.vue'
 import DiffBlock from './DiffBlock.vue'
 import ToolCallBlock from './ToolCallBlock.vue'
-import ApprovalCard from './ApprovalCard.vue'
+import ApprovalMark from './ApprovalMark.vue'
 import ChangesCard from './ChangesCard.vue'
 import ContextMenuHost from './ContextMenuHost.vue'
 import type { ContextTargetDto } from '../bridge/types'
 import type { PromptDto } from '../bridge/types'
+import { approvalStatus, type ApprovalBlock } from './messages'
 const props = defineProps<{
   channelId: string
   block: BlockDto
   prompts?: PromptDto[]
+  /** The approval block that belongs to this tool call. */
+  approvalBlock?: ApprovalBlock
   messageId?: string
   index?: number
   inline?: boolean
@@ -36,19 +39,12 @@ const target = computed<ContextTargetDto | null>(() => {
     }
   return null
 })
-const approval = computed(() => {
+const status = computed(() => approvalStatus(props.approvalBlock, props.prompts))
+// An approval block without a matching call shows as its own row. Its status comes from its own block.
+const standalone = computed(() => {
   const block = props.block
   if (block.type !== 'approval') return null
-  return (
-    props.prompts?.find((p) => p.approvalId === block.approval_id) ?? {
-      approvalId: block.approval_id,
-      tool: block.tool,
-      summary: block.summary,
-      view: 'answered',
-      kind: block.kind ?? 'provider_tool',
-      alwaysAllow: 'unavailable',
-    }
-  )
+  return { block, status: approvalStatus(block, props.prompts) }
 })
 </script>
 <template>
@@ -78,7 +74,27 @@ const approval = computed(() => {
       :is-error="block.is_error"
       :sandboxed="block.sandboxed"
       :running="running"
+      :approval="status"
     />
-    <ApprovalCard :channel-id="channelId" v-else-if="approval" :prompt="approval" />
+    <div
+      v-else-if="standalone"
+      data-protected="true"
+      class="tool-call my-3 flex min-h-7 min-w-0 items-center gap-2 rounded-none border-l-2 border-border px-2 py-1 font-mono text-xs text-muted-foreground"
+    >
+      <span aria-hidden="true" class="opacity-60">$</span>
+      <span class="min-w-0 truncate text-foreground/80" :title="standalone.block.tool">
+        {{ standalone.block.tool }}
+      </span>
+      <span
+        v-if="standalone.block.summary"
+        class="min-w-0 flex-1 truncate"
+        :title="standalone.block.summary"
+      >
+        {{ standalone.block.summary }}
+      </span>
+      <span class="ml-auto shrink-0 pl-2 text-xs">
+        <ApprovalMark :status="standalone.status" />
+      </span>
+    </div>
   </ContextMenuHost>
 </template>

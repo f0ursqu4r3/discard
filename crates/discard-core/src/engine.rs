@@ -3,7 +3,7 @@
 use crate::approval::{ApprovalState, Decider, Decision};
 use crate::capability::{ApprovalPolicy, HookKind, HookMode};
 use crate::driver::{DecisionMsg, TurnContext, TurnInputs, run_turn_with_images};
-use crate::event::{EventKind, Sequencer, SessionId};
+use crate::event::{ApprovalId, EventKind, Sequencer, SessionId};
 use crate::observer::{self, EventObserver};
 use crate::model::{AgentId, Block, ChannelId, Message, MessageId, ProjectId, Role, WorkspaceMode};
 use crate::provider::{Provider, ProviderError, SessionMode, SessionSpec, SetupStatus};
@@ -957,8 +957,8 @@ impl Engine {
                                 decider: Decider::Policy(policy),
                             });
                             let state = ApprovalState::Decided(Decision::Approve);
-                            timeline.mark_approval(&approval_id, state);
-                            send(updates, Update::ApprovalState { approval_id, state });
+                            timeline.mark_approval(&approval_id, state, Some(crate::model::DecidedBy::Policy));
+                            send(updates, Update::ApprovalState { approval_id, state, decided_by: crate::model::DecidedBy::Policy });
                         }
                     }
                     command = commands.recv(), if commands_open => match command {
@@ -997,8 +997,8 @@ impl Engine {
                             });
                             if pending {
                                 let state = ApprovalState::Decided(decision);
-                                timeline.mark_approval(&approval_id, state);
-                                send(updates, Update::ApprovalState { approval_id, state });
+                                timeline.mark_approval(&approval_id, state, Some(crate::model::DecidedBy::User));
+                                send(updates, Update::ApprovalState { approval_id, state, decided_by: crate::model::DecidedBy::User });
                             }
                         }
                         Some(Command::Cancel) => {
@@ -1047,6 +1047,9 @@ impl Engine {
             (_, Err(e)) => { send(updates, Update::Error(e)); vec![] },
             _ => vec![],
         };
+        // The turn is over. A request that nobody answered can no longer be. The saved block records that.
+        let unanswered: Vec<ApprovalId> = timeline.prompts().iter().filter(|p| p.view == ApprovalView::Pending).map(|p| p.approval_id.clone()).collect();
+        for id in unanswered { timeline.mark_approval(&id, ApprovalState::Stale, None); }
         let mut response_blocks = timeline.blocks().to_vec();
         if let Some(start) = &start_snapshot {
             let state = match &result { Ok((_, crate::driver::TurnOutcome::Completed)) => crate::workspace_changes::ChangesState::Completed, Ok((_, crate::driver::TurnOutcome::Cancelled)) => crate::workspace_changes::ChangesState::Stopped, _ => crate::workspace_changes::ChangesState::Failed };

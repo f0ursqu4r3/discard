@@ -3513,6 +3513,9 @@ mod tests {
                     approval_id: "a1".into(),
                     tool: "Bash".into(),
                     summary: "touch x".into(),
+                    call_id: Some("c1".into()),
+                    state: None,
+                    decided_by: None,
                 },
             ],
         };

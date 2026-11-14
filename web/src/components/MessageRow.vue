@@ -274,6 +274,7 @@ async function copy() {
             v-else
             :channel-id="channelId"
             :block="segment.block"
+            :approval-block="segment.approval"
             :inline="segment.index === 0"
             :running="message.id === 'live' && showCursor"
             :prompts="prompts"

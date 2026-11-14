@@ -4,7 +4,13 @@ import { ref, computed } from 'vue'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './ui/collapsible'
 import DiffBlock from './DiffBlock.vue'
 import BrailleSpinner from './BrailleSpinner.vue'
-import { looksLikeUnifiedDiff, toolCallLabel, toolCallSummary } from './messages'
+import ApprovalMark from './ApprovalMark.vue'
+import {
+  looksLikeUnifiedDiff,
+  toolCallLabel,
+  toolCallSummary,
+  type ApprovalStatus,
+} from './messages'
 
 const props = withDefaults(
   defineProps<{
@@ -14,6 +20,8 @@ const props = withDefaults(
     isError?: boolean
     running?: boolean
     sandboxed?: boolean
+    /** The approval status of this call. Absent when the call needed none. */
+    approval?: ApprovalStatus
   }>(),
   { isError: undefined },
 )
@@ -29,22 +37,22 @@ const isDiff = computed(() => !!props.output && looksLikeUnifiedDiff(props.outpu
 <template>
   <Collapsible
     v-model:open="expanded"
-    class="tool-call my-1 min-w-0 border-l-2 border-agent rounded-none font-mono text-sm"
-    style="background: color-mix(in srgb, var(--canvas) 55%, var(--background))"
+    class="tool-call my-3 min-w-0 border-l-2 border-border rounded-none font-mono text-xs"
   >
     <CollapsibleTrigger
-      class="group flex min-h-9 w-full min-w-0 items-center gap-2 rounded-none px-2 py-1.5 text-left text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+      class="group flex min-h-7 w-full min-w-0 items-center gap-2 rounded-none px-2 py-1 text-left text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       :aria-label="`${expanded ? 'Hide' : 'Show'} details for ${label}`"
     >
       <ChevronRight
         aria-hidden="true"
         class="size-3.5 shrink-0 transition-transform duration-150 group-data-[state=open]:rotate-90"
       />
-      <span aria-hidden="true" class="text-agent">$</span>
-      <span class="min-w-0 truncate font-medium" :title="name">{{ label }}</span>
+      <span aria-hidden="true" class="opacity-60">$</span>
+      <span class="min-w-0 truncate text-foreground/80" :title="name">{{ label }}</span>
       <span v-if="summary" class="min-w-0 flex-1 truncate" :title="summary">{{ summary }}</span>
       <span class="ml-auto flex shrink-0 items-center gap-1.5 pl-2 text-xs">
         <span v-if="sandboxed" class="text-muted-foreground">Ran in sandbox</span>
+        <ApprovalMark :status="approval" />
         <BrailleSpinner v-if="output === null && running" label="Running" />
         <Clock3
           v-else-if="output === null"

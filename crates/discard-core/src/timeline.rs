@@ -3,7 +3,7 @@
 
 use crate::approval::{ApprovalState, Decision};
 use crate::event::{AgentStatus, ApprovalId, EventKind};
-use crate::model::{Block, ChannelId, Message, MessageId, Role};
+use crate::model::{ApprovalOutcome, Block, ChannelId, DecidedBy, Message, MessageId, Role};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalView {
@@ -123,6 +123,9 @@ impl Timeline {
                     approval_id: approval_id.to_string(),
                     tool: tool.clone(),
                     summary: summary.clone(),
+                    call_id: (!call_id.is_empty()).then(|| call_id.clone()),
+                    state: None,
+                    decided_by: None,
                 });
                 self.prompts.push(ApprovalPrompt {
                     rule_words: if *kind == crate::approval::ApprovalKind::ProviderTool && matches!(tool.as_str(), "Bash" | "command") { input.get("command").and_then(|v| v.as_str()).and_then(crate::always_allow::command_words) } else { None },
@@ -144,7 +147,8 @@ impl Timeline {
     }
 
     /// Reflect a decision or a state change that did not come from the provider.
-    pub fn mark_approval(&mut self, id: &ApprovalId, state: ApprovalState) {
+    /// The saved block records the outcome. `decided_by` applies to decisions only.
+    pub fn mark_approval(&mut self, id: &ApprovalId, state: ApprovalState, decided_by: Option<DecidedBy>) {
         let view = match state {
             ApprovalState::Pending => ApprovalView::Pending,
             ApprovalState::Stale => ApprovalView::Stale,
@@ -153,6 +157,21 @@ impl Timeline {
         };
         if let Some(prompt) = self.prompts.iter_mut().find(|p| &p.approval_id == id) {
             prompt.view = view;
+        }
+        let outcome = match view {
+            ApprovalView::Pending => None,
+            ApprovalView::Approved => Some(ApprovalOutcome::Approved),
+            ApprovalView::Denied => Some(ApprovalOutcome::Denied),
+            ApprovalView::Stale => Some(ApprovalOutcome::Stale),
+        };
+        let wanted = id.to_string();
+        for block in &mut self.blocks {
+            if let Block::Approval { approval_id, state, decided_by: by, .. } = block
+                && *approval_id == wanted
+            {
+                *state = outcome;
+                *by = if outcome == Some(ApprovalOutcome::Stale) { None } else { decided_by };
+            }
         }
     }
 
@@ -356,12 +375,69 @@ mod tests {
         for id in [&a, &b, &c] {
             t.apply(&approval(id));
         }
-        t.mark_approval(&a, ApprovalState::Decided(Decision::Approve));
-        t.mark_approval(&b, ApprovalState::Decided(Decision::Deny));
-        t.mark_approval(&c, ApprovalState::Stale);
+        t.mark_approval(&a, ApprovalState::Decided(Decision::Approve), Some(DecidedBy::User));
+        t.mark_approval(&b, ApprovalState::Decided(Decision::Deny), Some(DecidedBy::User));
+        t.mark_approval(&c, ApprovalState::Stale, None);
         let views: Vec<_> = t.prompts().iter().map(|p| p.view).collect();
         assert_eq!(views, vec![ApprovalView::Approved, ApprovalView::Denied, ApprovalView::Stale]);
         assert_eq!(t.pending_approvals(), 0);
+    }
+
+    fn approval_block(t: &Timeline, index: usize) -> serde_json::Value {
+        serde_json::to_value(&t.blocks()[index]).unwrap()
+    }
+
+    #[test]
+    fn the_approval_block_carries_the_call_id_and_no_outcome_while_pending() {
+        let mut t = Timeline::new();
+        t.apply(&approval_for("call-7", &ApprovalId::new()));
+        assert!(matches!(&t.blocks()[0], Block::Approval { call_id: Some(id), state: None, decided_by: None, .. } if id == "call-7"));
+        let saved = approval_block(&t, 0);
+        assert_eq!(saved["call_id"], "call-7");
+        assert!(saved.get("state").is_none());
+        assert!(saved.get("decided_by").is_none());
+    }
+
+    #[test]
+    fn a_user_decision_lands_in_the_saved_block() {
+        let mut t = Timeline::new();
+        let (a, b) = (ApprovalId::new(), ApprovalId::new());
+        t.apply(&approval_for("c1", &a));
+        t.apply(&approval_for("c2", &b));
+        t.mark_approval(&a, ApprovalState::Decided(Decision::Approve), Some(DecidedBy::User));
+        t.mark_approval(&b, ApprovalState::Decided(Decision::Deny), Some(DecidedBy::User));
+        let (first, second) = (approval_block(&t, 0), approval_block(&t, 1));
+        assert_eq!((first["state"].as_str(), first["decided_by"].as_str()), (Some("approved"), Some("user")));
+        assert_eq!((second["state"].as_str(), second["decided_by"].as_str()), (Some("denied"), Some("user")));
+    }
+
+    #[test]
+    fn a_policy_decision_lands_in_the_saved_block() {
+        let mut t = Timeline::new();
+        let id = ApprovalId::new();
+        t.apply(&approval(&id));
+        t.mark_approval(&id, ApprovalState::Decided(Decision::Approve), Some(DecidedBy::Policy));
+        let saved = approval_block(&t, 0);
+        assert_eq!((saved["state"].as_str(), saved["decided_by"].as_str()), (Some("approved"), Some("policy")));
+    }
+
+    #[test]
+    fn a_stale_approval_lands_in_the_saved_block_without_a_decider() {
+        let mut t = Timeline::new();
+        let id = ApprovalId::new();
+        t.apply(&approval(&id));
+        t.mark_approval(&id, ApprovalState::Stale, None);
+        let saved = approval_block(&t, 0);
+        assert_eq!(saved["state"], "stale");
+        assert!(saved.get("decided_by").is_none());
+    }
+
+    #[test]
+    fn an_old_approval_record_without_the_new_fields_still_loads() {
+        let old: Block = serde_json::from_value(json!({"type":"approval","kind":"provider_tool","approval_id":"old","tool":"Bash","summary":"run"})).unwrap();
+        assert!(matches!(&old, Block::Approval { call_id: None, state: None, decided_by: None, .. }));
+        let saved = serde_json::to_value(&old).unwrap();
+        assert!(saved.get("call_id").is_none() && saved.get("state").is_none() && saved.get("decided_by").is_none());
     }
 
     #[test]
@@ -369,7 +445,7 @@ mod tests {
         let mut t = Timeline::new();
         let id = ApprovalId::new();
         t.apply(&approval(&id));
-        t.mark_approval(&id, ApprovalState::Decided(Decision::AlwaysAllow));
+        t.mark_approval(&id, ApprovalState::Decided(Decision::AlwaysAllow), Some(DecidedBy::User));
         assert_eq!(t.prompts()[0].view, ApprovalView::Approved);
     }
 
@@ -377,7 +453,7 @@ mod tests {
     fn marking_an_unknown_approval_changes_nothing() {
         let mut t = Timeline::new();
         t.apply(&approval(&ApprovalId::new()));
-        t.mark_approval(&ApprovalId::new(), ApprovalState::Stale);
+        t.mark_approval(&ApprovalId::new(), ApprovalState::Stale, None);
         assert_eq!(t.pending_approvals(), 1);
     }
 

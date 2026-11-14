@@ -32,7 +32,18 @@ export type BlockDto =
       is_error?: boolean
       sandboxed?: boolean
     }
-  | { type: 'approval'; kind?: string; approval_id: string; tool: string; summary: string }
+  | {
+      type: 'approval'
+      kind?: string
+      approval_id: string
+      tool: string
+      summary: string
+      /** The tool call this request belongs to. Absent in old records. */
+      call_id?: string
+      /** Absent while pending and in old records. */
+      state?: 'approved' | 'denied' | 'stale'
+      decided_by?: 'user' | 'policy'
+    }
 export interface MessageAuthorDto {
   agentId: string
   name: string

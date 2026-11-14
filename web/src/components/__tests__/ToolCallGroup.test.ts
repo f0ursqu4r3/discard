@@ -89,3 +89,52 @@ test('a live group does not mark an earlier pending call as awaiting', () => {
   expect(view.find('[aria-label="Awaiting result"]').exists()).toBe(false)
   expect(view.find('[aria-label="All succeeded"]').exists()).toBe(false)
 })
+
+const approvalFor = (callId: string): BlockDto => ({
+  type: 'approval',
+  approval_id: `approval-${callId}`,
+  call_id: callId,
+  tool: 'Bash',
+  summary: 'ls',
+})
+const prompt = (callId: string, view: string) => ({
+  kind: 'provider_tool',
+  alwaysAllow: 'unavailable',
+  approvalId: `approval-${callId}`,
+  tool: 'Bash',
+  summary: 'ls',
+  view,
+})
+function approvalRow(blocks: BlockDto[], prompts: ReturnType<typeof prompt>[]) {
+  const view = mount(MessageRow, {
+    props: {
+      channelId: 'channel',
+      prompts,
+      message: { id: 'saved', role: 'agent', continuesGroup: false, blocks },
+    },
+  })
+  views.push(view)
+  return view
+}
+
+test('an approval between two calls keeps one group and counts the pending ones', () => {
+  const view = approvalRow(
+    [call('a'), approvalFor('a'), call('b'), approvalFor('b'), call('c')],
+    [prompt('a', 'pending'), prompt('b', 'pending')],
+  )
+  expect(view.findAll('.tool-call-group')).toHaveLength(1)
+  expect(view.get('[data-ui-id="approval-count"]').text()).toBe('2 need approval')
+})
+
+test('the group header uses the singular for one pending approval', () => {
+  const view = approvalRow(
+    [call('a'), approvalFor('a'), call('b'), approvalFor('b')],
+    [prompt('a', 'approved'), prompt('b', 'pending')],
+  )
+  expect(view.get('[data-ui-id="approval-count"]').text()).toBe('1 needs approval')
+})
+
+test('the group header shows no count when nothing is pending', () => {
+  const view = approvalRow([call('a'), approvalFor('a'), call('b')], [prompt('a', 'approved')])
+  expect(view.find('[data-ui-id="approval-count"]').exists()).toBe(false)
+})

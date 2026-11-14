@@ -60,7 +60,7 @@ pub enum Command {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Update {
     Event(Box<Event>),
-    ApprovalState { approval_id: ApprovalId, state: ApprovalState },
+    ApprovalState { approval_id: ApprovalId, state: ApprovalState, decided_by: crate::model::DecidedBy },
     TurnFinished(TurnOutcome),
     /// The provider CLI needs setup. The text names the exact command the user must run.
     SetupNeeded(String),
@@ -185,7 +185,7 @@ impl UiState {
                 self.notice = None;
             }
             Update::Event(event) => self.live.apply(&event.kind),
-            Update::ApprovalState { approval_id, state } => self.live.mark_approval(&approval_id, state),
+            Update::ApprovalState { approval_id, state, decided_by } => self.live.mark_approval(&approval_id, state, Some(decided_by)),
             Update::TurnFinished(_) => self.finish_turn(),
             Update::SetupNeeded(text) => {
                 self.finish_turn();
@@ -205,7 +205,7 @@ impl UiState {
             .map(|p| p.approval_id.clone())
             .collect();
         for id in unanswered {
-            self.live.mark_approval(&id, ApprovalState::Stale);
+            self.live.mark_approval(&id, ApprovalState::Stale, None);
         }
         if self.response_save_failed { self.turn_running = false; return; }
         let live = std::mem::take(&mut self.live);
@@ -498,7 +498,7 @@ mod tests {
             input: serde_json::json!({"command": "ls"}),
         }));
         assert_eq!(s.pending_approvals(), 1);
-        s.apply(Update::ApprovalState { approval_id: id, state: ApprovalState::Decided(Decision::Approve) });
+        s.apply(Update::ApprovalState { approval_id: id, state: ApprovalState::Decided(Decision::Approve), decided_by: crate::model::DecidedBy::User });
         assert_eq!(s.pending_approvals(), 0);
     }
 
