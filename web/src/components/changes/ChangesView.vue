@@ -14,7 +14,16 @@ import { preferenceKeys, readChoice, saveChoice } from './preferences'
 import SegmentedControl from './SegmentedControl.vue'
 import { treeOrder } from './tree'
 
-const props = defineProps<{ channelId: string; history: MessageDto[]; turnRunning: boolean }>()
+const props = withDefaults(
+  defineProps<{
+    channelId: string
+    history: MessageDto[]
+    turnRunning: boolean
+    /** The channel has no branch. Its agent works in the main checkout. */
+    branchless?: boolean
+  }>(),
+  { branchless: false },
+)
 
 /** With more files than this, or more diff text than `LARGE_DIFF`, sections after the first `OPEN_FILES` start closed. */
 const MANY_FILES = 50
@@ -22,12 +31,25 @@ const LARGE_DIFF = 256 * 1024
 const OPEN_FILES = 20
 
 const scopes = ['uncommitted', 'branch', 'responses'] as const
+const textScopes = ['responses', 'uncommitted'] as const
 const layouts = ['split', 'inline'] as const
 const fileModes = ['all', 'selected'] as const
-const scope = ref(readChoice(preferenceKeys.scope, scopes, 'uncommitted'))
+/** A branchless channel keeps its scope apart. A saved Branch scope never applies there. */
+function readScope(): (typeof scopes)[number] {
+  return props.branchless
+    ? readChoice(preferenceKeys.textScope, textScopes, 'responses')
+    : readChoice(preferenceKeys.scope, scopes, 'uncommitted')
+}
+const scope = ref(readScope())
 const layout = ref(readChoice(preferenceKeys.layout, layouts, 'inline'))
 const fileMode = ref(readChoice(preferenceKeys.files, fileModes, 'all'))
-watch(scope, (value) => saveChoice(preferenceKeys.scope, value))
+watch(scope, (value) =>
+  saveChoice(props.branchless ? preferenceKeys.textScope : preferenceKeys.scope, value),
+)
+watch(
+  () => props.branchless,
+  () => (scope.value = readScope()),
+)
 watch(layout, (value) => saveChoice(preferenceKeys.layout, value))
 watch(fileMode, (value) => saveChoice(preferenceKeys.files, value))
 
@@ -127,14 +149,25 @@ async function select(path: string) {
 }
 
 const compared = computed(() => {
-  if (scope.value === 'uncommitted') return 'The working tree matches the last commit.'
+  if (scope.value === 'uncommitted') {
+    return props.branchless
+      ? 'The main checkout matches the last commit.'
+      : 'The working tree matches the last commit.'
+  }
   return `The working tree matches the base commit${data.value?.base ? ` (${data.value.base})` : ''}.`
 })
-const scopeOptions = [
-  { value: 'uncommitted', label: 'Uncommitted' },
-  { value: 'branch', label: 'Branch' },
-  { value: 'responses', label: 'Responses' },
-] as const
+const scopeOptions = computed(() =>
+  props.branchless
+    ? ([
+        { value: 'responses', label: 'Responses' },
+        { value: 'uncommitted', label: 'Main checkout' },
+      ] as const)
+    : ([
+        { value: 'uncommitted', label: 'Uncommitted' },
+        { value: 'branch', label: 'Branch' },
+        { value: 'responses', label: 'Responses' },
+      ] as const),
+)
 const layoutOptions = [
   { value: 'split', label: 'Split' },
   { value: 'inline', label: 'Inline' },

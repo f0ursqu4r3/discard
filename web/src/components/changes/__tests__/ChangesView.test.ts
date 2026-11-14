@@ -59,7 +59,7 @@ const history: MessageDto[] = [
 const views: VueWrapper[] = []
 async function open(
   load: (scope: ChangesScope) => Promise<ChannelChangesDto> | ChannelChangesDto,
-  props: { turnRunning?: boolean; history?: MessageDto[] } = {},
+  props: { turnRunning?: boolean; history?: MessageDto[]; branchless?: boolean } = {},
 ) {
   vi.mocked(invoke).mockImplementation(async (name, args) => {
     if (name !== 'channel_changes') throw new Error(`unexpected ${name}`)
@@ -71,6 +71,7 @@ async function open(
       channelId: 'c1',
       history: props.history ?? [],
       turnRunning: props.turnRunning ?? false,
+      ...(props.branchless === undefined ? {} : { branchless: props.branchless }),
     },
   })
   views.push(view)
@@ -355,4 +356,68 @@ test('loads again for another channel', async () => {
   await view.setProps({ channelId: 'c2' })
   await flushPromises()
   expect(calls().at(-1)).toEqual(['channel_changes', { channelId: 'c2', scope: 'uncommitted' }])
+})
+
+const labels = (view: VueWrapper) =>
+  view
+    .get('[role="group"][aria-label="Compare"]')
+    .findAll('button')
+    .map((item) => item.text())
+
+test('a branchless channel offers Responses and Main checkout, and opens on Responses', async () => {
+  const view = await open(() => result([file('a.ts')]), { branchless: true, history })
+  expect(labels(view)).toEqual(['Responses', 'Main checkout'])
+  expect(calls()).toHaveLength(0)
+  expect(view.find('[data-ui-id="changes-responses"]').exists()).toBe(true)
+  await press(view, 'Main checkout')
+  expect(calls()).toEqual([['channel_changes', { channelId: 'c1', scope: 'uncommitted' }]])
+})
+
+test('a branchless channel saves the scope under its own key', async () => {
+  localStorage.setItem('discard:changes-scope', 'branch')
+  const view = await open(() => result([file('a.ts')]), { branchless: true })
+  expect(view.find('[data-ui-id="changes-responses"]').exists()).toBe(true)
+  await press(view, 'Main checkout')
+  expect(localStorage.getItem('discard:changes-text-scope')).toBe('uncommitted')
+  expect(localStorage.getItem('discard:changes-scope')).toBe('branch')
+  view.unmount()
+  await open(() => result([file('a.ts')]), { branchless: true })
+  expect(calls().at(-1)).toEqual(['channel_changes', { channelId: 'c1', scope: 'uncommitted' }])
+})
+
+test('a branchless channel ignores a saved branch scope in its own key', async () => {
+  localStorage.setItem('discard:changes-text-scope', 'branch')
+  const view = await open(() => result([file('a.ts')]), { branchless: true })
+  expect(view.find('[data-ui-id="changes-responses"]').exists()).toBe(true)
+  expect(calls()).toHaveLength(0)
+})
+
+test('a clean main checkout says what it compares', async () => {
+  const view = await open(() => result([]), { branchless: true })
+  await press(view, 'Main checkout')
+  expect(view.text()).toContain('The main checkout matches the last commit.')
+})
+
+test('a change of the branchless prop reads the scope from the matching key', async () => {
+  localStorage.setItem('discard:changes-scope', 'branch')
+  localStorage.setItem('discard:changes-text-scope', 'uncommitted')
+  const view = await open((scope) => result([file('a.ts')], { scope }), { branchless: false })
+  expect(calls().at(-1)).toEqual(['channel_changes', { channelId: 'c1', scope: 'branch' }])
+  await view.setProps({ branchless: true })
+  await flushPromises()
+  expect(labels(view)).toEqual(['Responses', 'Main checkout'])
+  expect(calls().at(-1)).toEqual(['channel_changes', { channelId: 'c1', scope: 'uncommitted' }])
+  expect(localStorage.getItem('discard:changes-scope')).toBe('branch')
+  await view.setProps({ branchless: false })
+  await flushPromises()
+  expect(labels(view)).toEqual(['Uncommitted', 'Branch', 'Responses'])
+  expect(calls().at(-1)).toEqual(['channel_changes', { channelId: 'c1', scope: 'branch' }])
+  expect(localStorage.getItem('discard:changes-text-scope')).toBe('uncommitted')
+})
+
+test('a channel that is not branchless keeps the three scopes and the old default', async () => {
+  const view = await open(() => result([]), { branchless: false })
+  expect(labels(view)).toEqual(['Uncommitted', 'Branch', 'Responses'])
+  expect(calls()[0]![1]).toMatchObject({ scope: 'uncommitted' })
+  expect(view.text()).toContain('The working tree matches the last commit.')
 })
