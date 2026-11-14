@@ -334,6 +334,22 @@ test('parseDiff numbers lines and reads the path', async () => {
     ['context', 16],
   ])
 })
+test('parseDiff keeps the old and the new line number apart', async () => {
+  const { parseDiff } = await import('../messages')
+  const d = parseDiff(
+    '--- a/f\n+++ b/f\n@@ -10,3 +10,4 @@\n keep\n-gone\n+new\n+more\n tail\n\\ No newline at end of file',
+  )
+  expect(d.lines.map((line) => [line.kind, line.oldNumber, line.newNumber])).toEqual([
+    ['hunk', null, null],
+    ['context', 10, 10],
+    ['removed', 11, null],
+    ['added', null, 11],
+    ['added', null, 12],
+    ['context', 12, 13],
+    ['context', null, null],
+  ])
+})
+
 test('parseDiff handles new files, deleted files, and diffs without hunks', async () => {
   const { parseDiff } = await import('../messages')
   expect(parseDiff('--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hi').path).toBe('new.txt')
@@ -597,5 +613,34 @@ test('groupBlocks attaches an old approval with no call ID to the call of the sa
         { block: b, index: 2, approval: y },
       ],
     },
+  ])
+})
+
+test('changeEntries lists file changes and posted diffs, and skips empty change reports', async () => {
+  const { changeEntries } = await import('../messages')
+  const report = (files: number) => ({
+    type: 'changes' as const,
+    root: '/r',
+    state: 'completed' as const,
+    commits: [],
+    files: Array.from({ length: files }, (_, i) => ({
+      path: `f${i}`,
+      status: '.M',
+      diff: '',
+      truncated: false,
+      preexisting: false,
+    })),
+    truncated: false,
+  })
+  const [empty, changed] = [report(0), report(2)]
+  const diff = { type: 'diff' as const, text: '--- a' }
+  const patch = { type: 'code' as const, language: 'patch', text: '--- a' }
+  const rust = { type: 'code' as const, language: 'rust', text: 'fn main() {}' }
+  const text = { type: 'markdown' as const, text: 'hi' }
+  const message = (blocks: unknown[]) => ({ id: 'm', role: 'agent', blocks }) as never
+  expect(changeEntries([message([text, empty, changed]), message([diff, rust, patch])])).toEqual([
+    changed,
+    diff,
+    patch,
   ])
 })

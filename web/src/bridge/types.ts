@@ -407,3 +407,30 @@ export interface CommandDto {
   source: string
   planned: boolean
 }
+/** One file of the live changes of a channel folder. `status` is `A`, `M`, `D`, `R`, or `?` for an untracked file. */
+export interface ChangeFileDto {
+  path: string
+  /** The path before a rename. Null for any other change. */
+  oldPath: string | null
+  status: string
+  additions: number
+  deletions: number
+  binary: boolean
+  /** Unified diff text. Empty for a binary file. */
+  diff: string
+  /** The diff of this file is cut. */
+  truncated: boolean
+}
+/** What the working tree is compared with. */
+export type ChangesScope = 'uncommitted' | 'branch'
+/** The live changes of a channel folder. `base` is null and `reason` is set when the scope has no result. */
+export interface ChannelChangesDto {
+  root: string
+  scope: ChangesScope
+  /** The short id of the commit that the working tree is compared with. */
+  base: string | null
+  reason: string | null
+  files: ChangeFileDto[]
+  /** Some files or some of their diffs are not included. */
+  truncated: boolean
+}

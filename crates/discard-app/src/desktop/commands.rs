@@ -715,3 +715,19 @@ pub async fn decide_agent_request(
     let _ = app.emit("discard://conversations", ());
     result.map(Into::into)
 }
+
+/// The changes of the folder of a channel, for the Changes tab. `scope` is `uncommitted` or `branch`.
+/// It reads Git only, and it runs off the main thread.
+#[tauri::command]
+pub async fn channel_changes(channels: State<'_, Arc<super::channels::Channels>>, channel_id: String, scope: String) -> Result<super::dto::ChannelChangesDto, String> {
+    let channels = channels.inner().clone();
+    let scope = discard_core::workspace_diff::Scope::parse(&scope)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (folder, _) = super::terminal::cwd::for_channel(&channels.store, &discard_core::model::ChannelId(channel_id)).map_err(|error| {
+            if error == super::terminal::cwd::NO_PROJECT { "Direct messages have no project, so they have no changes.".to_owned() } else { error }
+        })?;
+        discard_core::workspace_diff::channel_changes(&folder, scope)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}

@@ -77,7 +77,7 @@ import { useActionShortcut } from './bridge/terminal';
 import { unescapeSlash } from './components/slash';
 import Notices from './components/Notices.vue';
 import ApprovalDock from './components/ApprovalDock.vue';
-import DiffBlock from './components/DiffBlock.vue';
+import ChangesView from './components/changes/ChangesView.vue';
 import ToolCallBlock from './components/ToolCallBlock.vue';
 import BrailleSpinner from './components/BrailleSpinner.vue';
 import StatusLine from './components/StatusLine.vue';
@@ -85,7 +85,7 @@ import { channelBranch } from './components/workspace/channel-branch';
 import { useAgentIdentity } from './components/agents/useAgentIdentity';
 import { agentIdentity, mixedAgentMark } from './components/agents/agent-icon';
 import { activeTheme } from './bridge/theme';
-import { thinkingLine } from './components/messages';
+import { changeEntries, thinkingLine } from './components/messages';
 import { selectedChannelApprovals } from './components/threads';
 import {
   navigationWidth,
@@ -499,16 +499,7 @@ const heading = computed(() =>
           'project-settings': 'Project settings',
         }[page.value]
 );
-const changes = computed(() =>
-  store.history.flatMap((message) =>
-    message.blocks.filter(
-      (block) =>
-        block.type === 'diff' ||
-        (block.type === 'code' &&
-          ['diff', 'patch'].includes(block.language || ''))
-    )
-  )
-);
+const changes = computed(() => changeEntries(store.history));
 const tools = computed(() => {
   const rows = [
     ...store.history.map((message) => ({
@@ -1468,28 +1459,12 @@ watch(
                 :agent-avatar="agentAvatar"
                 :prompts="store.snapshot.prompts"
               />
-              <div
+              <ChangesView
                 v-else-if="conversationTab === 'changes'"
-                data-ui-id="changes-view"
-                class="min-h-0 flex-1 overflow-auto overscroll-contain p-5"
-              >
-                <div v-if="changes.length" class="flex flex-col gap-4">
-                  <DiffBlock
-                    v-for="(block, index) in changes"
-                    :key="index"
-                    :text="'text' in block ? block.text : ''"
-                  />
-                </div>
-                <Empty v-else>
-                  <EmptyHeader>
-                    <EmptyMedia variant="icon"><GitPullRequest /></EmptyMedia>
-                    <EmptyTitle>No changes to display</EmptyTitle>
-                    <EmptyDescription>
-                      Diffs shared in this conversation appear here.
-                    </EmptyDescription>
-                  </EmptyHeader>
-                </Empty>
-              </div>
+                :channel-id="store.snapshot.channelId"
+                :history="store.history"
+                :turn-running="!!store.snapshot.turnRunning"
+              />
               <div
                 v-else-if="conversationTab === 'run'"
                 data-ui-id="run-view"

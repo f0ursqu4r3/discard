@@ -86,7 +86,16 @@ export function parseDiff(text: string): {
   path: string | null
   added: number
   removed: number
-  lines: { text: string; kind: 'added' | 'removed' | 'hunk' | 'context'; number: number | null }[]
+  lines: {
+    text: string
+    kind: 'added' | 'removed' | 'hunk' | 'context'
+    /** The new number of an added or context line, the old number of a removed line. */
+    number: number | null
+    /** The line number in the old file. Null for an added line and for a line outside a hunk body. */
+    oldNumber: number | null
+    /** The line number in the new file. Null for a removed line and for a line outside a hunk body. */
+    newNumber: number | null
+  }[]
 } {
   let path: string | null = null
   let oldPath: string | null = null
@@ -110,7 +119,13 @@ export function parseDiff(text: string): {
     }
     if (!inHunk && textLine.startsWith('index ')) continue
     if (!inHunk && (textLine.startsWith('--- ') || textLine.startsWith('+++ '))) {
-      const header = { text: textLine, kind: 'context' as const, number: null }
+      const header = {
+        text: textLine,
+        kind: 'context' as const,
+        number: null,
+        oldNumber: null,
+        newNumber: null,
+      }
       headers.add(header)
       lines.push(header)
       if (textLine.startsWith('--- ')) {
@@ -145,7 +160,14 @@ export function parseDiff(text: string): {
         : kind === 'removed'
           ? oldNumber
           : newNumber
-    lines.push({ text: textLine, kind, number })
+    const body = kind === 'added' || kind === 'removed' || (kind === 'context' && number !== null)
+    lines.push({
+      text: textLine,
+      kind,
+      number,
+      oldNumber: body && kind !== 'added' ? oldNumber : null,
+      newNumber: body && kind !== 'removed' ? newNumber : null,
+    })
     if (kind === 'added') {
       added++
       if (newNumber !== null) newNumber++
@@ -280,4 +302,18 @@ export function toolCallSummary(input: unknown): string {
     if (typeof fields.query === 'string') return summarizeInput({ pattern: fields.query })
   }
   return summarizeInput(input)
+}
+
+export type ChangeEntry = Extract<BlockDto, { type: 'changes' | 'diff' | 'code' }>
+
+/** What the Changes tab lists: the file changes each response made, and the diffs agents posted. */
+export function changeEntries(history: MessageDto[]): ChangeEntry[] {
+  return history.flatMap((message) =>
+    message.blocks.filter(
+      (block): block is ChangeEntry =>
+        (block.type === 'changes' && block.files.length + block.commits.length > 0) ||
+        block.type === 'diff' ||
+        (block.type === 'code' && ['diff', 'patch'].includes(block.language || '')),
+    ),
+  )
 }

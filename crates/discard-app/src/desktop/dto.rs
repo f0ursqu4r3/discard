@@ -195,6 +195,9 @@ pub struct WorktreePlanDto { pub path: String, pub channel_id: String }
 #[serde(rename_all = "camelCase")]
 pub struct BranchDeletionDto { pub deleted: bool, pub unmerged: usize }
 
+/// The live changes of a channel folder. The core type has the webview field names.
+pub type ChannelChangesDto = discard_core::workspace_diff::ChannelChanges;
+
 /// Files that live only in a worktree directory: the first `LISTED_FILES`, and the count of the rest.
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]

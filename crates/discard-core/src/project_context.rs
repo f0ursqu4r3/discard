@@ -8,6 +8,7 @@ use std::{
 };
 
 mod git;
+pub(crate) use git::default_branch;
 
 const FILE_LIMIT: usize = 256 * 1024;
 const RESULT_LIMIT: usize = 8 * 1024;
