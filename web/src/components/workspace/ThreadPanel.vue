@@ -8,6 +8,7 @@ import { thinkingLine } from '../messages'
 import { threadActionLabels, threadDeleteBlock } from '../thread-menu'
 import { requestAction } from '../thread-actions'
 import BrailleSpinner from '../BrailleSpinner.vue'
+import ApprovalDock from '../ApprovalDock.vue'
 import Composer from '../Composer.vue'
 import ThreadStateMark from '../ThreadStateMark.vue'
 import MessageList from '../MessageList.vue'
@@ -264,6 +265,12 @@ defineExpose({ focusComposer: () => composer.value?.focusEnd?.() })
       {{ thread.readOnlyNote }}
     </p>
     <p v-if="disabled" class="px-5 py-2 text-xs text-muted-foreground">Read only.</p>
+    <ApprovalDock
+      v-if="thread?.prompts?.length"
+      :channel-id="thread.channelId"
+      :prompts="thread.prompts"
+      class="mx-4 mb-2"
+    />
     <Composer
       ref="composer"
       :key="key"

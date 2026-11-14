@@ -77,3 +77,85 @@ test('does not label tool calls that were not sandboxed', () => {
   views.push(view)
   expect(view.text()).not.toContain('Ran in sandbox')
 })
+
+for (const [status, text, label] of [
+  ['pending', 'Needs approval', 'Approval needed'],
+  ['approved', 'Approved', 'Approved by you'],
+  ['auto_approved', 'Auto-approved', 'Approved by policy'],
+  ['denied', 'Denied', 'Denied'],
+  ['stale', 'Expired', 'Approval expired'],
+] as const) {
+  test(`shows the ${text} approval mark before the result mark`, () => {
+    const view = mount(ToolCallBlock, {
+      props: {
+        name: 'Bash',
+        input: { command: 'ls' },
+        output: 'ok',
+        isError: false,
+        approval: status,
+      },
+    })
+    views.push(view)
+    const mark = view.get(`[aria-label="${label}"]`)
+    expect(mark.text()).toBe(text)
+    expect(mark.classes().includes('text-muted-foreground')).toBe(status !== 'pending')
+    expect(mark.attributes('style') ?? '').toContain(status === 'pending' ? '--protected-fg' : '')
+    const area = view.get('[data-ui-id="approval-mark"]').element.parentElement!
+    expect(area.children[0]).toBe(mark.element)
+  })
+}
+for (const approval of [undefined, 'answered'] as const) {
+  test(`shows no approval mark for ${approval ?? 'a call without an approval'}`, () => {
+    const view = mount(ToolCallBlock, {
+      props: { name: 'Bash', input: {}, output: 'ok', isError: false, approval },
+    })
+    views.push(view)
+    expect(view.find('[data-ui-id="approval-mark"]').exists()).toBe(false)
+  })
+}
+test('an approval block with no call shows as a protected row with its status', () => {
+  const view = mount(BlockView, {
+    props: {
+      channelId: 'channel',
+      block: {
+        type: 'approval',
+        approval_id: 'a',
+        tool: 'Bash',
+        summary: 'rm x',
+        state: 'denied',
+        decided_by: 'user',
+      },
+    },
+  })
+  views.push(view)
+  expect(view.get('[data-protected="true"]').text()).toContain('Bash')
+  expect(view.text()).toContain('rm x')
+  expect(view.get('[aria-label="Denied"]').text()).toBe('Denied')
+})
+test('a live prompt overrides the saved state on an attached call', () => {
+  const view = mount(BlockView, {
+    props: {
+      channelId: 'channel',
+      block: { type: 'tool_call', call_id: 'c', name: 'Bash', input: {}, output: null },
+      approvalBlock: {
+        type: 'approval',
+        approval_id: 'a',
+        call_id: 'c',
+        tool: 'Bash',
+        summary: 's',
+      },
+      prompts: [
+        {
+          kind: 'provider_tool',
+          alwaysAllow: 'unavailable',
+          approvalId: 'a',
+          tool: 'Bash',
+          summary: 's',
+          view: 'pending',
+        },
+      ],
+    },
+  })
+  views.push(view)
+  expect(view.get('[aria-label="Approval needed"]').text()).toBe('Needs approval')
+})

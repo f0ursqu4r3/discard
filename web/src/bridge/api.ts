@@ -3,6 +3,8 @@ import type {
   ArchiveChannelDto,
   AttachmentDto,
   BranchDeletionDto,
+  ChangesScope,
+  ChannelChangesDto,
   ChannelDetailsDto,
   ChannelMemberDto,
   ChannelTopicDto,
@@ -430,3 +432,11 @@ export const getCommands = () => invoke<CommandDto[]>('list_commands')
 /** Runs `/name args` in the channel. Returns the text to show, or null when the command shows none. */
 export const runCommand = (channelId: string, name: string, args: string) =>
   invoke<string | null>('run_command', { channelId, name, args })
+
+/**
+ * The live changes of the folder of a channel: the working tree against `HEAD` (`uncommitted`) or against the
+ * point where the branch left the default branch (`branch`). Rejects for a direct message and for a folder that is
+ * not a Git repository.
+ */
+export const channelChanges = (channelId: string, scope: ChangesScope) =>
+  invoke<ChannelChangesDto>('channel_changes', { channelId, scope })

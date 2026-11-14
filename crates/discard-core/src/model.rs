@@ -251,7 +251,33 @@ pub enum Block {
         approval_id: String,
         tool: String,
         summary: String,
+        /// The tool call this request belongs to. Absent in old records.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        /// The outcome. Absent while the request is pending and in old records.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<ApprovalOutcome>,
+        /// Who decided. Absent while pending, when stale, and in old records.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decided_by: Option<DecidedBy>,
     },
+}
+
+/// The saved outcome of an approval request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalOutcome {
+    Approved,
+    Denied,
+    Stale,
+}
+
+/// Who answered an approval request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecidedBy {
+    User,
+    Policy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

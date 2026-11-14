@@ -119,7 +119,7 @@ One response at a time holds a canonical worktree path. Other responses wait and
 
 Workspace tokens expose `worktree_commit` with a commit message and optional relative paths. The tool rechecks the agent, channel, worktree binding, and response lock. It runs outside the provider sandbox with hooks disabled. It preserves the user’s Git identity and signing settings. It rejects main checkouts without an active grant, detached HEAD, traversal, and paths outside the root. Selected-path commits exclude unrelated staged files. Commit audit records link to the saved response. Conversation and summary tokens do not expose this tool.
 
-Each Workspace response ends with a protected changes card, including stopped and failed responses. The card lists commits and changed files with expandable, bounded diffs. It excludes unchanged pre-existing dirty files and labels pre-existing files that changed. A collection failure saves a visible notice and releases the lock.
+Each Workspace response ends with a protected changes card, including stopped and failed responses. Discard draws the card, so plugins cannot change it, but it uses the plain card colors: it reports and asks for nothing. The Changes tab of the channel lists the same cards. The card lists commits and changed files with expandable, bounded diffs. It excludes unchanged pre-existing dirty files and labels pre-existing files that changed. A collection failure saves a visible notice and releases the lock.
 
 Slice B is implemented. An opted-in agent with policy Ask can call
 `worktree_request_creation` in an unbound branch channel. The card shows the branch

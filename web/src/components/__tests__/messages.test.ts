@@ -334,6 +334,22 @@ test('parseDiff numbers lines and reads the path', async () => {
     ['context', 16],
   ])
 })
+test('parseDiff keeps the old and the new line number apart', async () => {
+  const { parseDiff } = await import('../messages')
+  const d = parseDiff(
+    '--- a/f\n+++ b/f\n@@ -10,3 +10,4 @@\n keep\n-gone\n+new\n+more\n tail\n\\ No newline at end of file',
+  )
+  expect(d.lines.map((line) => [line.kind, line.oldNumber, line.newNumber])).toEqual([
+    ['hunk', null, null],
+    ['context', 10, 10],
+    ['removed', 11, null],
+    ['added', null, 11],
+    ['added', null, 12],
+    ['context', 12, 13],
+    ['context', null, null],
+  ])
+})
+
 test('parseDiff handles new files, deleted files, and diffs without hunks', async () => {
   const { parseDiff } = await import('../messages')
   expect(parseDiff('--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hi').path).toBe('new.txt')
@@ -443,7 +459,12 @@ test('groupBlocks preserves singleton calls, boundaries, and original indexes', 
   const { groupBlocks } = await import('../messages')
   const call = { type: 'tool_call' as const, call_id: 'c', name: 'test', input: {}, output: null }
   const markdown = { type: 'markdown' as const, text: 'Between' }
-  const approval = { type: 'approval' as const, approval_id: 'a', tool: 'test', summary: 'Approve' }
+  const approval = {
+    type: 'approval' as const,
+    approval_id: 'a',
+    tool: 'other',
+    summary: 'Approve',
+  }
   expect(groupBlocks([])).toEqual([])
   expect(groupBlocks([call])).toEqual([{ kind: 'block', block: call, index: 0 }])
   expect(groupBlocks([call, call, markdown, call, approval, call, call, call])).toEqual([
@@ -465,5 +486,161 @@ test('groupBlocks preserves singleton calls, boundaries, and original indexes', 
         { block: call, index: 7 },
       ],
     },
+  ])
+})
+
+test('groupBlocks attaches an approval to its call and keeps the run grouped', async () => {
+  const { groupBlocks } = await import('../messages')
+  const call = (id: string) => ({
+    type: 'tool_call' as const,
+    call_id: id,
+    name: 'Bash',
+    input: {},
+    output: null,
+  })
+  const approval = (id: string, callId: string) => ({
+    type: 'approval' as const,
+    approval_id: id,
+    call_id: callId,
+    tool: 'Bash',
+    summary: 'ls',
+  })
+  const [a, b, c] = [call('a'), call('b'), call('c')]
+  const [ap, bp] = [approval('ap', 'a'), approval('bp', 'b')]
+  // The approval follows its call.
+  expect(groupBlocks([a, ap, b, bp, c])).toEqual([
+    {
+      kind: 'tools',
+      items: [
+        { block: a, index: 0, approval: ap },
+        { block: b, index: 2, approval: bp },
+        { block: c, index: 4 },
+      ],
+    },
+  ])
+  // The approval comes first.
+  expect(groupBlocks([ap, a, b])).toEqual([
+    {
+      kind: 'tools',
+      items: [
+        { block: a, index: 1, approval: ap },
+        { block: b, index: 2 },
+      ],
+    },
+  ])
+  // A single call keeps its approval on its own segment.
+  expect(groupBlocks([a, ap])).toEqual([{ kind: 'block', block: a, index: 0, approval: ap }])
+  // A second approval for the same call stays visible.
+  const extra = approval('extra', 'a')
+  expect(groupBlocks([a, ap, extra])).toEqual([
+    { kind: 'block', block: a, index: 0, approval: ap },
+    { kind: 'block', block: extra, index: 2 },
+  ])
+})
+
+test('groupBlocks keeps an approval with no matching call as its own segment', async () => {
+  const { groupBlocks } = await import('../messages')
+  const call = { type: 'tool_call' as const, call_id: 'a', name: 'Bash', input: {}, output: null }
+  const other = {
+    type: 'approval' as const,
+    approval_id: 'x',
+    call_id: 'zzz',
+    tool: 'T',
+    summary: 's',
+  }
+  const old = { type: 'approval' as const, approval_id: 'y', tool: 'T', summary: 's' }
+  expect(groupBlocks([call, other, call, old])).toEqual([
+    { kind: 'block', block: call, index: 0 },
+    { kind: 'block', block: other, index: 1 },
+    { kind: 'block', block: call, index: 2 },
+    { kind: 'block', block: old, index: 3 },
+  ])
+})
+
+test('approvalStatus prefers the live prompt, then the saved state, then answered', async () => {
+  const { approvalStatus } = await import('../messages')
+  const block = (extra = {}) => ({
+    type: 'approval' as const,
+    approval_id: 'a',
+    call_id: 'c',
+    tool: 'T',
+    summary: 's',
+    ...extra,
+  })
+  const prompt = (view: string) => ({
+    kind: 'provider_tool',
+    alwaysAllow: 'unavailable',
+    approvalId: 'a',
+    tool: 'T',
+    summary: 's',
+    view,
+  })
+  expect(approvalStatus(undefined, [])).toBeUndefined()
+  expect(approvalStatus(block({ state: 'denied' }), [prompt('pending')])).toBe('pending')
+  expect(approvalStatus(block({ state: 'approved' }), [prompt('approved')])).toBe('approved')
+  expect(approvalStatus(block(), [{ ...prompt('pending'), approvalId: 'other' }])).toBe('answered')
+  expect(approvalStatus(block({ state: 'approved', decided_by: 'user' }), [])).toBe('approved')
+  expect(approvalStatus(block({ state: 'approved', decided_by: 'policy' }), undefined)).toBe(
+    'auto_approved',
+  )
+  expect(approvalStatus(block({ state: 'denied', decided_by: 'user' }), [])).toBe('denied')
+  expect(approvalStatus(block({ state: 'stale' }), [])).toBe('stale')
+  expect(approvalStatus(block(), undefined)).toBe('answered')
+})
+
+test('groupBlocks attaches an old approval with no call ID to the call of the same tool before it', async () => {
+  const { groupBlocks } = await import('../messages')
+  const edit = (id: string) => ({
+    type: 'tool_call' as const,
+    call_id: id,
+    name: 'Edit',
+    input: {},
+    output: '',
+  })
+  const old = (id: string) => ({
+    type: 'approval' as const,
+    approval_id: id,
+    tool: 'Edit',
+    summary: 's',
+  })
+  const [a, b] = [edit('a'), edit('b')]
+  const [x, y] = [old('x'), old('y')]
+  expect(groupBlocks([a, x, b, y])).toEqual([
+    {
+      kind: 'tools',
+      items: [
+        { block: a, index: 0, approval: x },
+        { block: b, index: 2, approval: y },
+      ],
+    },
+  ])
+})
+
+test('changeEntries lists file changes and posted diffs, and skips empty change reports', async () => {
+  const { changeEntries } = await import('../messages')
+  const report = (files: number) => ({
+    type: 'changes' as const,
+    root: '/r',
+    state: 'completed' as const,
+    commits: [],
+    files: Array.from({ length: files }, (_, i) => ({
+      path: `f${i}`,
+      status: '.M',
+      diff: '',
+      truncated: false,
+      preexisting: false,
+    })),
+    truncated: false,
+  })
+  const [empty, changed] = [report(0), report(2)]
+  const diff = { type: 'diff' as const, text: '--- a' }
+  const patch = { type: 'code' as const, language: 'patch', text: '--- a' }
+  const rust = { type: 'code' as const, language: 'rust', text: 'fn main() {}' }
+  const text = { type: 'markdown' as const, text: 'hi' }
+  const message = (blocks: unknown[]) => ({ id: 'm', role: 'agent', blocks }) as never
+  expect(changeEntries([message([text, empty, changed]), message([diff, rust, patch])])).toEqual([
+    changed,
+    diff,
+    patch,
   ])
 })

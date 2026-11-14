@@ -54,6 +54,7 @@ pub mod sandbox_reads;
 pub mod workspace_commit;
 pub mod workspace_lock;
 pub mod workspace_changes;
+pub mod workspace_diff;
 
 pub mod always_allow;
 

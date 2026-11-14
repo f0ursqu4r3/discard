@@ -197,7 +197,7 @@ async fn approvals_flow_through_commands_and_report_the_decision() {
     };
     rig.commands.send(Command::Decide { rule_cut: None, approval_id: approval_id.clone(), decision: Decision::Approve }).unwrap();
     seen.extend(rig.until_finished().await);
-    assert!(seen.contains(&Update::ApprovalState { approval_id: approval_id.clone(), state: ApprovalState::Decided(Decision::Approve) }));
+    assert!(seen.contains(&Update::ApprovalState { approval_id: approval_id.clone(), state: ApprovalState::Decided(Decision::Approve), decided_by: discard_core::model::DecidedBy::User }));
     assert!(matches!(seen.last(), Some(Update::TurnFinished(TurnOutcome::Completed))));
     assert_eq!(rig.probe.responses.lock().unwrap().as_slice(), [(approval_id, Decision::Approve)]);
 }
@@ -220,6 +220,49 @@ async fn a_second_decision_for_the_same_approval_is_not_reported_again() {
     let states = updates.iter().filter(|u| matches!(u, Update::ApprovalState { .. })).count();
     assert_eq!(states, 1);
     assert_eq!(rig.probe.responses.lock().unwrap().len(), 1);
+}
+
+fn saved_approval(rig: &Rig) -> serde_json::Value {
+    let messages = rig.messages();
+    let agent = messages.iter().rev().find(|m| m.role == Role::Agent).expect("a saved agent reply");
+    let block = agent.blocks.iter().find(|b| matches!(b, discard_core::model::Block::Approval { .. })).expect("a saved approval block");
+    serde_json::to_value(block).unwrap()
+}
+
+#[tokio::test]
+async fn a_user_decision_is_saved_with_the_approval_block() {
+    let mut rig = start(FakeProvider::new(vec![Step::working(), bash(), Step::text("done"), Step::idle()]), ApprovalPolicy::Ask);
+    rig.commands.send(Command::Send("go".into())).unwrap();
+    let approval_id = loop {
+        if let Update::Event(e) = rig.next().await
+            && let EventKind::ApprovalRequest { approval_id, .. } = e.kind
+        {
+            break approval_id;
+        }
+    };
+    rig.commands.send(Command::Decide { rule_cut: None, approval_id, decision: Decision::Deny }).unwrap();
+    rig.until_finished().await;
+    let saved = saved_approval(&rig);
+    assert_eq!((saved["state"].as_str(), saved["decided_by"].as_str()), (Some("denied"), Some("user")));
+    assert!(saved["call_id"].as_str().is_some_and(|id| !id.is_empty()));
+}
+
+#[tokio::test]
+async fn an_approval_left_pending_at_the_end_of_the_turn_is_saved_as_stale() {
+    let mut rig = start(FakeProvider::new(vec![Step::working(), bash(), Step::Hang]), ApprovalPolicy::Ask);
+    rig.commands.send(Command::Send("go".into())).unwrap();
+    loop {
+        if let Update::Event(e) = rig.next().await
+            && matches!(e.kind, EventKind::ApprovalRequest { .. })
+        {
+            break;
+        }
+    }
+    rig.commands.send(Command::Cancel).unwrap();
+    rig.until_finished().await;
+    let saved = saved_approval(&rig);
+    assert_eq!(saved["state"], "stale");
+    assert!(saved.get("decided_by").is_none());
 }
 
 #[tokio::test]

@@ -5,7 +5,7 @@ import type { PromptDto } from '../bridge/types'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './ui/collapsible'
 import BlockView from './BlockView.vue'
 import BrailleSpinner from './BrailleSpinner.vue'
-import { toolCallLabel, toolCallSummary, type ToolCallItem } from './messages'
+import { approvalStatus, toolCallLabel, toolCallSummary, type ToolCallItem } from './messages'
 
 const props = defineProps<{
   channelId: string
@@ -21,6 +21,11 @@ const active = computed(() => {
 })
 const awaiting = computed(
   () => !props.running && props.items.some(({ block }) => block.output === null),
+)
+const needApproval = computed(
+  () =>
+    props.items.filter(({ approval }) => approvalStatus(approval, props.prompts) === 'pending')
+      .length,
 )
 const failures = computed(() => props.items.filter(({ block }) => block.is_error === true).length)
 const succeeded = computed(() => props.items.every(({ block }) => block.is_error === false))
@@ -41,20 +46,27 @@ const detail = computed(() => {
 <template>
   <Collapsible
     v-model:open="expanded"
-    class="tool-call-group my-1 min-w-0 border-l-2 border-agent rounded-none font-mono text-sm"
-    style="background: color-mix(in srgb, var(--canvas) 55%, var(--background))"
+    class="tool-call-group my-3 min-w-0 border-l-2 border-border rounded-none font-mono text-xs"
   >
     <CollapsibleTrigger
-      class="group flex min-h-9 w-full min-w-0 items-center gap-2 rounded-none px-2 py-1.5 text-left text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+      class="group flex min-h-7 w-full min-w-0 items-center gap-2 rounded-none px-2 py-1 text-left text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       :aria-label="`${expanded ? 'Hide' : 'Show'} ${items.length} tool calls`"
     >
       <ChevronRight
         aria-hidden="true"
         class="size-3.5 shrink-0 transition-transform duration-150 group-data-[state=open]:rotate-90"
       />
-      <span class="shrink-0 font-medium">{{ items.length }} tool calls</span>
+      <span class="shrink-0 text-foreground/80">{{ items.length }} tool calls</span>
       <span class="min-w-0 flex-1 truncate" :title="detail">{{ detail }}</span>
       <span class="ml-auto flex shrink-0 items-center gap-1.5 pl-2 text-xs">
+        <span
+          v-if="needApproval"
+          data-ui-id="approval-count"
+          class="font-medium"
+          :style="{ color: 'var(--protected-fg)' }"
+        >
+          {{ needApproval === 1 ? '1 needs approval' : `${needApproval} need approval` }}
+        </span>
         <BrailleSpinner v-if="active" label="Running" />
         <Clock3 v-else-if="awaiting" role="img" aria-label="Awaiting result" class="size-3" />
         <span v-if="failures" :aria-label="`${failures} failed`" class="text-destructive">
@@ -71,12 +83,13 @@ const detail = computed(() => {
       </span>
     </CollapsibleTrigger>
     <!-- The group border marks the whole run. Nested rows do not repeat it. -->
-    <CollapsibleContent class="pl-3 [&_.tool-call]:border-l-0">
+    <CollapsibleContent class="pl-3 [&_.tool-call]:my-0 [&_.tool-call]:border-l-0">
       <BlockView
-        v-for="{ block, index } in items"
+        v-for="{ block, index, approval } in items"
         :key="index"
         :channel-id="channelId"
         :block="block"
+        :approval-block="approval"
         :inline="index === 0"
         :running="running"
         :prompts="prompts"

@@ -80,9 +80,16 @@ test('approval buttons use the protected border for focus', () => {
     expect(button.classes()).toContain('focus-visible:ring-[var(--protected-border)]')
 })
 
-test('approval decisions in a live transcript include the originating channel', async () => {
+test('a live transcript shows a pending approval as a row. The dock holds the buttons', async () => {
   const { default: MessageList } = await import('../MessageList.vue')
-  const { decideApproval } = await import('../../bridge/api')
+  const prompt = {
+    kind: 'provider_tool',
+    alwaysAllow: 'available',
+    approvalId: 'approval-2',
+    tool: 'shell',
+    summary: 'Run tests',
+    view: 'pending',
+  }
   const list = mount(MessageList, {
     props: {
       conversationId: 'second-channel',
@@ -90,6 +97,20 @@ test('approval decisions in a live transcript include the originating channel', 
       live: [{ type: 'approval', approval_id: 'approval-2', tool: 'shell', summary: 'Run tests' }],
       running: true,
       newAnchorId: null,
+      prompts: [prompt],
+    },
+  })
+  expect(list.find('[data-ui-id="approval-card"]').exists()).toBe(false)
+  expect(list.findAll('button').some((button) => button.text() === 'Approve')).toBe(false)
+  expect(list.get('[aria-label="Approval needed"]').text()).toBe('Needs approval')
+})
+
+test('approval decisions in the dock include the originating channel', async () => {
+  const { default: ApprovalDock } = await import('../ApprovalDock.vue')
+  const { decideApproval } = await import('../../bridge/api')
+  const dock = mount(ApprovalDock, {
+    props: {
+      channelId: 'second-channel',
       prompts: [
         {
           kind: 'provider_tool',
@@ -102,7 +123,7 @@ test('approval decisions in a live transcript include the originating channel', 
       ],
     },
   })
-  const approve = list.findAll('button').find((button) => button.text() === 'Approve')!
+  const approve = dock.findAll('button').find((button) => button.text() === 'Approve')!
   await approve.trigger('click')
   expect(decideApproval).toHaveBeenCalledWith('second-channel', 'approval-2', 'approve')
 })
@@ -119,7 +140,7 @@ test('long notices wrap inside their inset alert and preserve the full error', (
   expect(description.classes()).toContain('[overflow-wrap:anywhere]')
 })
 
-test('changes cards retain the protected surface', async () => {
+test('changes cards stay a protected surface and use the plain card colors', async () => {
   const { default: ChangesCard } = await import('../ChangesCard.vue')
   const view = mount(ChangesCard, {
     props: {
@@ -135,5 +156,7 @@ test('changes cards retain the protected surface', async () => {
   })
   const card = view.get('[data-ui-id="changes-card"]')
   expect(card.attributes('data-protected')).toBe('true')
-  expect(card.classes()).toContain('bg-[var(--protected-bg)]')
+  // A report needs no decision. The protected colors are for requests.
+  expect(card.classes()).toContain('bg-card')
+  expect(card.classes()).not.toContain('bg-[var(--protected-bg)]')
 })

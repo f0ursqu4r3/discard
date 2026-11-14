@@ -146,6 +146,24 @@ fn checkouts(root: &Path) -> Result<Vec<Checkout>, String> {
         .collect())
 }
 
+/// The default branch: the branch that `origin/HEAD` names, else `main`, else `master` (each must exist as a local
+/// branch), else the branch of the main checkout. `None` when none of them exists.
+fn default_from(root: &Path, checkouts: &[Checkout]) -> Option<String> {
+    let origin = git(root, &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
+        .ok()
+        .and_then(|name| name.strip_prefix("refs/remotes/origin/").map(str::to_owned));
+    origin
+        .into_iter()
+        .chain(["main".into(), "master".into()])
+        .find(|name| git(root, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{name}")]).is_ok())
+        .or_else(|| checkouts.first().and_then(|checkout| checkout.branch.clone()))
+}
+
+/// The default branch of the repository at `root`. Shared with the Changes view, so one rule decides it.
+pub(crate) fn default_branch(root: &Path) -> Option<String> {
+    default_from(root, &checkouts(root).ok()?)
+}
+
 impl ProjectContext {
     fn git_root(&self) -> Result<PathBuf, String> {
         let error = "This project is not a Git repository.";
@@ -161,32 +179,7 @@ impl ProjectContext {
         let root = self.git_root()?;
         let checkouts = checkouts(&root)?;
         let current = git(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
-        let origin = git(
-            &root,
-            &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
-        )
-        .ok()
-        .and_then(|name| name.strip_prefix("refs/remotes/origin/").map(str::to_owned));
-        let default = origin
-            .into_iter()
-            .chain(["main".into(), "master".into()])
-            .find(|name| {
-                git(
-                    &root,
-                    &[
-                        "show-ref",
-                        "--verify",
-                        "--quiet",
-                        &format!("refs/heads/{name}"),
-                    ],
-                )
-                .is_ok()
-            })
-            .or_else(|| {
-                checkouts
-                    .first()
-                    .and_then(|checkout| checkout.branch.clone())
-            });
+        let default = default_from(&root, &checkouts);
         let default_id = default
             .as_ref()
             .map(|name| commit_id(&root, &format!("refs/heads/{name}")))
