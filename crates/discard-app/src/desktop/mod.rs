@@ -357,17 +357,14 @@ pub fn run(
         if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event && windows::reopen_shows_main(has_visible_windows, windows::visible_app_windows(handle)) {
             windows::show_main_window(handle);
         }
-        if let tauri::RunEvent::ExitRequested { api, code, .. } = event && !exit_actions.exiting.load(Ordering::SeqCst) {
-            // No code means that the last window is gone. In background mode that does not end the app. An exit request
-            // with a code is a quit, so the Quit rule decides.
-            match plan::exit_plan(code.is_none(), windows::background_enabled(handle, &exit_actions), exit_core.any_running(), exit_actions.confirms()) {
-                plan::Exit::Prevent => api.prevent_exit(),
-                plan::Exit::Ask(ending) => {
-                    api.prevent_exit();
-                    windows::ask_visibly(handle, &exit_core, ending);
-                }
-                plan::Exit::Allow => if exit_core.any_running() { exit_core.cancel_all(); },
-            }
+        if let tauri::RunEvent::ExitRequested { api, .. } = event && !exit_actions.exiting.load(Ordering::SeqCst) {
+            // Tauri raises this event with code `None` when every window is destroyed, and with a code after `app.exit`.
+            // The close of a window never gets here: the main window hides. So the Quit rule decides, with no other app
+            // window and no background mode.
+            if let plan::Close::Ask(ending) = plan::close_plan(plan::WindowKind::Main, 0, false, exit_core.any_running(), exit_actions.confirms()) {
+                api.prevent_exit();
+                windows::ask_visibly(handle, &exit_core, ending);
+            } else if exit_core.any_running() { exit_core.cancel_all(); }
         }
     });
     Ok(())
