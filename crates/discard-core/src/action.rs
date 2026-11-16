@@ -27,8 +27,10 @@ pub enum Action {
     Minimize,
     /// Zoom the focused window.
     Zoom,
-    /// Close the focused window (Cmd+W). Closing the main window ends the app, so it can need a confirm.
+    /// Close the focused window (Cmd+W). The last app window follows the Quit rule.
     CloseWindow,
+    /// Show and focus the main window. It opens again when it is closed.
+    ShowMainWindow,
     CopyDiff,
     CopyToolInput,
     CopyToolOutput,
@@ -61,6 +63,7 @@ impl Action {
             Action::Minimize => "minimize",
             Action::Zoom => "zoom",
             Action::CloseWindow => "close_window",
+            Action::ShowMainWindow => "show_main_window",
             Action::CopyDiff => "copy_diff",
             Action::CopyToolInput => "copy_tool_input",
             Action::CopyToolOutput => "copy_tool_output",
@@ -93,6 +96,7 @@ impl Action {
             Self::Minimize => "Minimize",
             Self::Zoom => "Zoom",
             Self::CloseWindow => "Close Window",
+            Self::ShowMainWindow => "Main Window",
             Self::CopyDiff => "Copy Diff",
             Self::CopyToolInput => "Copy Tool Input",
             Self::CopyToolOutput => "Copy Tool Output",
@@ -128,6 +132,7 @@ impl Action {
             Action::Minimize,
             Action::Zoom,
             Action::CloseWindow,
+            Action::ShowMainWindow,
             Action::CopyDiff,
             Action::CopyToolInput,
             Action::CopyToolOutput,
@@ -305,7 +310,7 @@ pub fn menu_bar(ctx: &MenuContext) -> Vec<MenuSpec> {
         },
         MenuSpec {
             title: "Window",
-            entries: vec![action("Minimize", Action::Minimize), action("Zoom", Action::Zoom)],
+            entries: vec![action("Minimize", Action::Minimize), action("Zoom", Action::Zoom), MenuEntry::Separator, action("Main Window", Action::ShowMainWindow)],
         },
         MenuSpec { title: "Help", entries: vec![future("Discard Documentation")] },
     ];
@@ -557,8 +562,27 @@ mod tests {
         assert!(actions_in("File").contains(&("Close Window".to_string(), Action::CloseWindow)));
         assert_eq!(
             actions_in("Window"),
-            [("Minimize".to_string(), Action::Minimize), ("Zoom".to_string(), Action::Zoom)]
+            [("Minimize".to_string(), Action::Minimize), ("Zoom".to_string(), Action::Zoom), ("Main Window".to_string(), Action::ShowMainWindow)]
         );
+    }
+
+    #[test]
+    fn the_window_menu_has_main_window() {
+        let window = menu_bar(&MenuContext::default()).into_iter().find(|m| m.title == "Window").unwrap();
+        assert!(window.entries.iter().any(|e| matches!(e, MenuEntry::Action { action: Action::ShowMainWindow, label, enabled: true, .. } if label == "Main Window")));
+        assert_eq!(Action::from_id("show_main_window"), Some(Action::ShowMainWindow));
+        assert_eq!(Action::ShowMainWindow.label(), "Main Window");
+        // A separator comes before the item, and the item follows Zoom.
+        let zoom = window.entries.iter().position(|e| matches!(e, MenuEntry::Action { action: Action::Zoom, .. })).unwrap();
+        assert_eq!(window.entries[zoom + 1], MenuEntry::Separator);
+        assert!(matches!(window.entries[zoom + 2], MenuEntry::Action { action: Action::ShowMainWindow, .. }));
+    }
+
+    #[test]
+    fn main_window_has_no_default_chord() {
+        for macos in [true, false] {
+            assert!(default_keymap_on(macos).iter().all(|(action, _)| *action != Action::ShowMainWindow));
+        }
     }
 
     #[test]

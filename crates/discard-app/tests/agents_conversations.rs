@@ -655,7 +655,7 @@ async fn folder_reload_preserves_unsaved_replies_and_only_restarts_affected_tran
         ));
     }
     assert!(
-        channels.reload_project(&ViewId::main(), &project.id).is_err(),
+        channels.reload_project(&project.id).is_err(),
         "reload needs the lifecycle guard"
     );
     core.begin_project_change().unwrap();
@@ -669,7 +669,7 @@ async fn folder_reload_preserves_unsaved_replies_and_only_restarts_affected_tran
         .change_project_folder(&project.id, replacement.path())
         .unwrap();
     channels.activate_project(&ViewId::main(), &project.id).unwrap();
-    channels.reload_project(&ViewId::main(), &project.id).unwrap();
+    channels.reload_project(&project.id).unwrap();
     assert_eq!(core.active_channel_id(&ViewId::main()), affected.id.0);
     core.end_project_change();
     for (id, before, history, old_generation) in retained {
@@ -711,7 +711,7 @@ async fn folder_reload_preserves_unsaved_replies_and_only_restarts_affected_tran
     core.begin_project_change().unwrap();
     assert!(
         channels
-            .reload_project(&ViewId::main(), &project.id)
+            .reload_project(&project.id)
             .unwrap_err()
             .contains("test replacement")
     );

@@ -165,12 +165,13 @@ impl Channels {
         self.open_thread_inner(&view, &thread.channel_id)?;
         Ok(view)
     }
-    /// Select the parent channel of a thread and open the thread beside it. Returns the parent channel ID.
-    pub fn select_thread(&self, view: &ViewId, thread: &ChannelId) -> Result<String, String> {
+    /// Select the parent channel of a thread and open the thread beside it. Returns the view that changed and the parent
+    /// channel ID.
+    pub fn select_thread(&self, view: &ViewId, thread: &ChannelId) -> Result<(ViewId, String), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let info = self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(thread).map_err(|e| e.to_string())?.ok_or("This thread is unavailable.")?;
-        self.select_thread_inner(view, &info)?;
-        Ok(info.parent_channel_id.0)
+        let changed = self.select_thread_inner(view, &info)?;
+        Ok((changed, info.parent_channel_id.0))
     }
     /// Show a thread of the selected channel beside it, loading its session first.
     pub fn open_thread(&self, view: &ViewId, thread: &ChannelId) -> Result<(), String> {
@@ -604,8 +605,8 @@ impl Channels {
         Ok(view.clone())
     }
     /// Restart the loaded channels of a project after a folder change. Every view of the project gets the new path and
-    /// branch source, not only the view that ran the change. `_view` is the view that ran it.
-    pub fn reload_project(&self, _view: &ViewId, id: &ProjectId) -> Result<(), String> {
+    /// branch source, not only the view that ran the change.
+    pub fn reload_project(&self, id: &ProjectId) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let channels: Vec<_> = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -2680,7 +2681,7 @@ mod navigation_action_tests {
         let anchor = { let store = r.store.lock().unwrap(); let message = Message { id: MessageId::new(), channel_id: q_general.id.clone(), role: Role::Agent, blocks: vec![Block::Markdown { text: "answer".into() }] }; store.insert_message(&message).unwrap(); message.id };
         let thread = r.store.lock().unwrap().create_thread(&q_general.id, &anchor, "Why", &r.agent).unwrap();
         r.service.select(&ViewId::main(), &r.general.id.0).unwrap();
-        assert_eq!(r.service.select_thread(&p_view, &thread.id).unwrap(), q_general.id.0);
+        assert_eq!(r.service.select_thread(&p_view, &thread.id).unwrap(), (ViewId::main(), q_general.id.0.clone()));
         assert_eq!(r.core.active_channel_id(&ViewId::main()), q_general.id.0);
         assert_eq!(r.core.open_thread_id(&ViewId::main()), Some(thread.id.0.clone()));
         assert_eq!(r.core.open_thread_id(&p_view), None);
@@ -2882,7 +2883,7 @@ mod navigation_action_tests {
     }
 
     #[test]
-    fn a_view_that_does_not_exist_after_the_open_is_an_error() {
+    fn view_after_open_accepts_an_added_or_existing_view_and_refuses_a_vanished_one() {
         let view = ViewId::project(&discard_core::model::ProjectId("p".into()));
         assert_eq!(view_after_open(view.clone(), true, true), Ok(view.clone()));
         // Another open made the view first: it is there, so it is returned.
@@ -2935,7 +2936,7 @@ mod navigation_action_tests {
         assert_ne!(path, r.repo.to_string_lossy());
         // The main view calls, as `choose_project_folder` does from the main window.
         r.core.begin_project_change().unwrap();
-        let reloaded = r.service.reload_project(&ViewId::main(), &p);
+        let reloaded = r.service.reload_project(&p);
         r.core.end_project_change();
         reloaded.unwrap();
         for view in [&ViewId::main(), &p_view] { settle_view(&r.core, view).await; }

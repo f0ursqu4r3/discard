@@ -80,10 +80,11 @@ pub fn close_thread(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>)
 pub async fn select_thread(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, thread_id: String) -> Result<String, String> {
     let channels = channels.inner().clone();
     let view = view_of(&window, &channels.core)?;
-    let parent = tauri::async_runtime::spawn_blocking(move || channels.select_thread(&view, &discard_core::model::ChannelId(thread_id))).await.map_err(|e| e.to_string())??;
+    let (changed, parent) = tauri::async_runtime::spawn_blocking(move || channels.select_thread(&view, &discard_core::model::ChannelId(thread_id))).await.map_err(|e| e.to_string())??;
     use tauri::Emitter;
     let _ = app.emit("discard://conversations", ());
-    super::windows::show_conversation(&app);
+    // The view that changed is the main view when the thread is outside the project of a project window.
+    super::windows::show_conversation(&app, &changed);
     Ok(parent)
 }
 
@@ -435,25 +436,27 @@ pub async fn create_channel(window: tauri::WebviewWindow, channels: State<'_, Ar
 pub async fn switch_channel(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, channel_id: String) -> Result<(), String> {
     let channels = channels.inner().clone();
     let view = view_of(&window, &channels.core)?;
-    let in_project = tauri::async_runtime::spawn_blocking(move || channels.select(&view, &channel_id).map(|_| channels.in_project(&channel_id))).await.map_err(|e| e.to_string())??;
+    let (changed, in_project) = tauri::async_runtime::spawn_blocking(move || channels.select(&view, &channel_id).map(|changed| (changed, channels.in_project(&channel_id)))).await.map_err(|e| e.to_string())??;
     // A project channel is in the lists already. Only a direct message can change the catalogs.
     if !in_project {
         use tauri::Emitter;
         let _ = app.emit("discard://conversations", ());
     }
-    super::windows::show_conversation(&app);
+    // The view that changed gets the event. It is the main view when a project window asked for a target outside its project.
+    super::windows::show_conversation(&app, &changed);
     Ok(())
 }
 #[tauri::command]
 pub async fn create_text_channel(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, name: String) -> Result<String, String> {
     let channels = channels.inner().clone();
     let view = view_of(&window, &channels.core)?;
-    let result = tauri::async_runtime::spawn_blocking(move || channels.create_text_channel(&view, &discard_core::model::ProjectId(project_id), &name)).await.map_err(|e| e.to_string())?;
+    let selecting = view.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || channels.create_text_channel(&selecting, &discard_core::model::ProjectId(project_id), &name)).await.map_err(|e| e.to_string())?;
     // Creation can persist before runtime selection fails. Refresh every catalog in either case.
     use tauri::Emitter;
     let _ = app.emit("discard://conversations", ());
     // The new channel is open. Show the conversation page.
-    if let Ok(id) = &result { let _ = app.emit("discard://conversation-opened", id.clone()); }
+    if let Ok(id) = &result { let _ = app.emit_to(view.label(), "discard://conversation-opened", id.clone()); }
     result
 }
 #[tauri::command]
@@ -549,17 +552,21 @@ pub fn ungroup_rail_group(app: tauri::AppHandle, context: State<'_, super::setti
 #[tauri::command]
 pub async fn select_project(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, project_id: String) -> Result<String, String> {
     let channels = channels.inner().clone();
-    let view = view_of(&window, &channels.core)?;
+    let caller = view_of(&window, &channels.core)?;
+    let project = discard_core::model::ProjectId(project_id);
+    // A project view that asks for another project changes the main view, so the guard belongs to that view.
+    let view = channels.core.route(&caller, Some(&project));
     channels.core.begin_project_navigation(&view)?;
     let core = channels.core.clone();
     let navigating = view.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || channels.activate_project(&navigating, &discard_core::model::ProjectId(project_id))).await.map_err(|e| e.to_string()).and_then(|r| r);
+    let result = tauri::async_runtime::spawn_blocking(move || channels.activate_project(&navigating, &project)).await.map_err(|e| e.to_string()).and_then(|r| r);
     core.end_project_navigation(&view);
-    // The first value is the view that changed. A project view that asks for another project changes the main view.
-    let (_, channel_id) = result?;
+    // The first value is the view that changed.
+    let (changed, channel_id) = result?;
     use tauri::Emitter;
-    let _ = app.emit("discard://conversation-opened", channel_id.clone());
+    let _ = app.emit_to(changed.label(), "discard://conversation-opened", channel_id.clone());
     let _ = app.emit("discard://conversations", ());
+    super::windows::reveal_changed_view(&app, &caller, &changed);
     Ok(channel_id)
 }
 
@@ -617,6 +624,13 @@ pub async fn open_project_window(app: tauri::AppHandle, channels: State<'_, Arc<
     // An async command, so the window is not built on the thread of the event loop. The view opens on a blocking thread.
     tauri::async_runtime::spawn_blocking(move || super::windows::open_project_window(&app, &channels, &discard_core::model::ProjectId(project_id))).await.map_err(|e| e.to_string())?
 }
+/// Show and focus the main window. With `page`, the main window also gets `discard://navigate` with the page.
+#[tauri::command]
+pub fn show_main_window(app: tauri::AppHandle, page: Option<String>) {
+    use tauri::Emitter;
+    super::windows::show_main_window(&app);
+    if let Some(page) = page { let _ = app.emit_to(super::view::ViewId::main().label(), "discard://navigate", page); }
+}
 #[tauri::command]
 pub async fn remove_project(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, terminals: State<'_, Arc<super::terminal::Terminals>>, project_id: String) -> Result<(), String> {
     let channels = channels.inner().clone();
@@ -659,7 +673,7 @@ pub async fn choose_project_folder(app: tauri::AppHandle, window: tauri::Webview
             } else { store.import_project_folder(&path).map_err(|e| e.to_string())? }
         };
         channels.activate_project(&view, &project.id)?;
-        if change_current { channels.reload_project(&view, &project.id)?; }
+        if change_current { channels.reload_project(&project.id)?; }
         Ok(true)
     }).await.map_err(|e| e.to_string()).and_then(|r| r);
     core.end_project_change(); result
@@ -693,10 +707,15 @@ pub async fn search_agent_history(context: State<'_, super::settings::SettingsCo
 pub async fn create_conversation(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, agent_id: String, project_id: Option<String>, name: String) -> Result<String, String> {
     let channels = channels.inner().clone();
     let view = view_of(&window, &channels.core)?;
-    let result = tauri::async_runtime::spawn_blocking(move || channels.create_conversation(&view, &discard_core::model::AgentId(agent_id), project_id.map(discard_core::model::ProjectId).as_ref(), &name)).await.map_err(|e| e.to_string())?;
+    let project = project_id.map(discard_core::model::ProjectId);
+    // The view that selects the conversation: a project view fixed to another project leads to the main view.
+    let changed = channels.core.route(&view, project.as_ref());
+    let selecting = view.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || channels.create_conversation(&selecting, &discard_core::model::AgentId(agent_id), project.as_ref(), &name)).await.map_err(|e| e.to_string())?;
     // Creation can persist before runtime selection fails. Refresh every catalog in either case.
     use tauri::Emitter;
     let _ = app.emit("discard://conversations", ());
+    if result.is_ok() && super::windows::view_to_reveal(&view, &changed).is_some() { super::windows::show_conversation(&app, &changed); }
     result
 }
 #[tauri::command]
@@ -704,8 +723,12 @@ pub async fn open_agent_chat(app: tauri::AppHandle, window: tauri::WebviewWindow
     use tauri::Emitter;
     let channels = channels.inner().clone();
     let view = view_of(&window, &channels.core)?;
-    let id = tauri::async_runtime::spawn_blocking(move || channels.open_agent(&view, &discard_core::model::AgentId(agent_id))).await.map_err(|e| e.to_string())??;
+    // A direct message has no project: a project view leads to the main view.
+    let changed = channels.core.route(&view, None);
+    let selecting = view.clone();
+    let id = tauri::async_runtime::spawn_blocking(move || channels.open_agent(&selecting, &discard_core::model::AgentId(agent_id))).await.map_err(|e| e.to_string())??;
     let _ = app.emit("discard://conversations", ());
+    if super::windows::view_to_reveal(&view, &changed).is_some() { super::windows::show_conversation(&app, &changed); }
     Ok(id)
 }
 

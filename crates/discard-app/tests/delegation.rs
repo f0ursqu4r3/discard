@@ -291,7 +291,7 @@ async fn a_parent_in_the_background_still_gets_its_sub_agents_and_shows_them_whe
     // From another channel, selecting the unanchored thread selects its parent and opens the panel.
     w.channels.select(&ViewId::main(), &other.id.0).unwrap();
     assert!(w.core.snapshot(&ViewId::main()).open_thread.is_none());
-    assert_eq!(w.channels.select_thread(&ViewId::main(), &results[1].thread_channel_id).unwrap(), w.parent.id.0);
+    assert_eq!(w.channels.select_thread(&ViewId::main(), &results[1].thread_channel_id).unwrap(), (ViewId::main(), w.parent.id.0.clone()));
     let snapshot = w.core.snapshot(&ViewId::main());
     assert_eq!((snapshot.channel_id.as_str(), snapshot.open_thread.map(|t| t.channel_id)), (w.parent.id.0.as_str(), Some(results[1].thread_channel_id.0.clone())));
 }

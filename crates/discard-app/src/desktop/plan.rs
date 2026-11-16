@@ -34,15 +34,17 @@ pub enum Plan {
     ToggleTerminal,
     /// End the process now.
     Perform(Confirm),
-    /// Show the confirm notice in the main window.
+    /// Show the confirm notice in the focused window.
     Ask(Confirm),
     HideApp,
     HideOthers,
     ShowAll,
     Minimize,
     Zoom,
-    /// Close the focused window. `close_plan` decides whether the main window may close.
+    /// Close the window of the view. The close request goes through `close_plan`.
     CloseWindow,
+    /// Show and focus the main window.
+    ShowMainWindow,
     Nothing,
 }
 
@@ -51,8 +53,36 @@ pub enum Plan {
 pub enum Close {
     /// Close the window.
     Allow,
+    /// Keep the window and hide it. The main window hides, so its view and its place stay.
+    Hide,
+    /// End the app now. This is the last app window, and the Quit rule needs no question.
+    Quit,
     /// Keep the window open and show the confirm notice.
     Ask(Confirm),
+}
+
+/// The kind of a window that asks to close.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowKind {
+    Main,
+    Project,
+    /// Any other window, such as Settings.
+    Other,
+}
+
+/// The kind of the window with this label.
+pub fn window_kind(label: &str) -> WindowKind {
+    match super::view::ViewId::from_label(label) {
+        Some(view) if view.is_main() => WindowKind::Main,
+        Some(_) => WindowKind::Project,
+        None => WindowKind::Other,
+    }
+}
+
+/// How many app windows stay open when the window with label `closing` closes. `visible` lists the labels of the
+/// visible windows. A label that is not an app window, such as Settings, does not count.
+pub fn other_app_windows(visible: &[String], closing: &str) -> usize {
+    visible.iter().filter(|label| label.as_str() != closing && super::view::ViewId::from_label(label).is_some()).count()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,14 +113,16 @@ pub fn archive_step(result: Result<ArchiveOutcome, String>) -> ArchiveStep {
     }
 }
 
-/// Decide whether a window may close. Closing the main window ends the app, so it follows the Quit rule.
+/// Decide what a request to close a window does. A window that is not the last app window closes alone: the main
+/// window hides and a project window closes. The last app window follows the Quit rule, unless the app runs in the
+/// background: then it closes alone too. `other_app_windows` counts the visible app windows besides this one.
 /// Pure, so the rule is testable without a window.
-pub fn close_plan(is_main: bool, turn_running: bool, confirm_while_working: bool) -> Close {
-    if is_main && needs_confirm(Action::Quit, turn_running, confirm_while_working) {
-        Close::Ask(Confirm::Quit)
-    } else {
-        Close::Allow
+pub fn close_plan(kind: WindowKind, other_app_windows: usize, background: bool, turn_running: bool, confirm_while_working: bool) -> Close {
+    if kind == WindowKind::Other { return Close::Allow; }
+    if other_app_windows > 0 || background {
+        return if kind == WindowKind::Main { Close::Hide } else { Close::Allow };
     }
+    if needs_confirm(Action::Quit, turn_running, confirm_while_working) { Close::Ask(Confirm::Quit) } else { Close::Quit }
 }
 
 /// Decide what to do. Pure, so the rules are testable without a window.
@@ -118,6 +150,7 @@ pub fn plan(
         Action::Minimize => return Plan::Minimize,
         Action::Zoom => return Plan::Zoom,
         Action::CloseWindow => return Plan::CloseWindow,
+        Action::ShowMainWindow => return Plan::ShowMainWindow,
         Action::Quit => Confirm::Quit,
         Action::ToggleSafeMode => Confirm::Relaunch {
             safe_mode: !safe_mode,
@@ -148,7 +181,7 @@ pub fn plugin_item_notice(plugin: &str, error: &str) -> String { format!("{plugi
 
 #[cfg(test)]
 mod tests {
-    use super::{ArchiveStep, Close, Confirm, Plan, TargetedPlan, archive_step, channel_target_allowed, close_plan, plan, plan_targeted, prepare_exit};
+    use super::{ArchiveStep, Close, Confirm, Plan, TargetedPlan, WindowKind, archive_step, channel_target_allowed, close_plan, other_app_windows, plan, plan_targeted, prepare_exit, window_kind};
     use discard_core::workspace::ArchiveOutcome;
     use discard_core::action::Action;
     use discard_core::settings_page::SettingsPage;
@@ -264,20 +297,100 @@ mod tests {
     }
 
     #[test]
-    fn closing_the_main_window_asks_only_while_working_with_confirm_on() {
-        assert_eq!(close_plan(true, true, true), Close::Ask(Confirm::Quit));
-        assert_eq!(close_plan(true, true, false), Close::Allow);
-        assert_eq!(close_plan(true, false, true), Close::Allow);
-        assert_eq!(close_plan(true, false, false), Close::Allow);
+    fn a_window_that_is_not_the_last_closes_alone() {
+        assert_eq!(close_plan(WindowKind::Main, 1, false, true, true), Close::Hide);
+        assert_eq!(close_plan(WindowKind::Project, 1, false, true, true), Close::Allow);
+        assert_eq!(close_plan(WindowKind::Other, 0, false, true, true), Close::Allow);
     }
 
     #[test]
-    fn closing_another_window_never_asks() {
-        for running in [false, true] {
-            for confirm in [false, true] {
-                assert_eq!(close_plan(false, running, confirm), Close::Allow);
+    fn the_last_app_window_follows_the_quit_rule() {
+        for kind in [WindowKind::Main, WindowKind::Project] {
+            assert_eq!(close_plan(kind, 0, false, true, true), Close::Ask(Confirm::Quit));
+            assert_eq!(close_plan(kind, 0, false, true, false), Close::Quit);
+            assert_eq!(close_plan(kind, 0, false, false, true), Close::Quit);
+            assert_eq!(close_plan(kind, 0, false, false, false), Close::Quit);
+        }
+    }
+
+    #[test]
+    fn the_last_app_window_closes_alone_in_background_mode() {
+        assert_eq!(close_plan(WindowKind::Main, 0, true, true, true), Close::Hide);
+        assert_eq!(close_plan(WindowKind::Project, 0, true, true, true), Close::Allow);
+    }
+
+    #[test]
+    fn a_window_that_closes_alone_asks_nothing_and_stops_no_turn() {
+        for kind in [WindowKind::Main, WindowKind::Project] {
+            for (others, background) in [(1, false), (2, false), (0, true), (1, true)] {
+                for running in [false, true] {
+                    for confirm in [false, true] {
+                        let close = close_plan(kind, others, background, running, confirm);
+                        assert!(matches!(close, Close::Hide | Close::Allow), "{kind:?} {others} {background} {running} {confirm}: {close:?}");
+                    }
+                }
             }
         }
+    }
+
+    #[test]
+    fn a_window_that_is_not_an_app_window_closes_in_every_case() {
+        for others in [0, 1] {
+            for background in [false, true] {
+                for running in [false, true] {
+                    for confirm in [false, true] {
+                        assert_eq!(close_plan(WindowKind::Other, others, background, running, confirm), Close::Allow);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_window_kind_follows_the_label() {
+        assert_eq!(window_kind("main"), WindowKind::Main);
+        assert_eq!(window_kind("project-p-1"), WindowKind::Project);
+        assert_eq!(window_kind("settings"), WindowKind::Other);
+        assert_eq!(window_kind("project-"), WindowKind::Other);
+        assert_eq!(window_kind(""), WindowKind::Other);
+    }
+
+    #[test]
+    fn the_windows_that_count_for_a_close_are_the_visible_app_windows_besides_the_closing_one() {
+        let labels = |items: &[&str]| items.iter().map(|label| (*label).to_owned()).collect::<Vec<_>>();
+        assert_eq!(other_app_windows(&labels(&["main", "project-a"]), "main"), 1);
+        assert_eq!(other_app_windows(&labels(&["main"]), "main"), 0);
+        assert_eq!(other_app_windows(&labels(&["project-a"]), "main"), 1, "a hidden main window is not in the list, and a project window counts");
+        assert_eq!(other_app_windows(&labels(&["main", "settings", "other"]), "main"), 0, "Settings is not an app window");
+        assert_eq!(other_app_windows(&labels(&["main", "project-a", "project-b"]), "project-a"), 2);
+        assert_eq!(other_app_windows(&[], "project-a"), 0);
+    }
+
+    #[test]
+    fn the_main_window_action_needs_no_confirm() {
+        for running in [false, true] {
+            for confirm in [false, true] {
+                assert_eq!(plan(Action::ShowMainWindow, running, confirm, false), Plan::ShowMainWindow);
+            }
+        }
+    }
+
+    #[test]
+    fn the_close_window_action_closes_the_window_and_the_close_request_decides() {
+        // The action asks no quit confirmation: a window that closes alone must not ask it.
+        for running in [false, true] {
+            for confirm in [false, true] {
+                assert_eq!(plan(Action::CloseWindow, running, confirm, false), Plan::CloseWindow);
+            }
+        }
+    }
+
+    #[test]
+    fn the_exit_request_follows_the_quit_rule_for_the_last_window() {
+        // The same inputs as the exit request: no other app window and no background mode.
+        assert_eq!(close_plan(WindowKind::Main, 0, false, true, true), Close::Ask(Confirm::Quit));
+        assert_eq!(close_plan(WindowKind::Main, 0, false, true, false), Close::Quit);
+        assert_eq!(close_plan(WindowKind::Main, 0, false, false, true), Close::Quit);
     }
 
     #[test]

@@ -71,28 +71,28 @@ pub fn run(app: &AppHandle, core: &Arc<AppCore>, actions: &DesktopActions, view:
         plan::TargetedPlan::ArchiveBlocked => { core.notice(view, "Stop the turn before archiving the channel".into()); return None; }
         plan::TargetedPlan::Nothing => {}
     }
-    match plan::plan(action, if matches!(action, Action::Quit | Action::ToggleSafeMode | Action::CloseWindow) { core.any_running() } else { turn_running }, actions.confirms(), ctx.safe_mode) {
+    match plan::plan(action, if matches!(action, Action::Quit | Action::ToggleSafeMode) { core.any_running() } else { turn_running }, actions.confirms(), ctx.safe_mode) {
         Plan::OpenSettings(page) => if let Err(error) = super::windows::open_settings(app, page) { core.notice(view, format!("Cannot open Settings: {error}")); },
         Plan::OpenAgentProfile => {
             let id = match &target {
                 Some(ContextTarget::Agent { id, .. }) => id.clone(),
                 _ => core.snapshot(view).agent_id,
             };
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.emit("discard://agent-profile", id);
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            // The window of the view shows the profile.
+            let _ = app.emit_to(view.label(), "discard://agent-profile", id);
+            super::windows::show_view_window(app, view);
         }
         Plan::CancelTurn => match channel { Some(id) => core.cancel_in(Some(id)), None => core.cancel(view) },
-        Plan::ToggleTerminal => if let Some(window) = app.get_webview_window("main") { let _ = window.emit("discard://toggle-terminal", ()); },
+        Plan::ToggleTerminal => { let _ = app.emit_to(view.label(), "discard://toggle-terminal", ()); }
         Plan::ToggleMemberList => { let _ = core.set_member_list_visible(view, !core.snapshot(view).member_list_visible); }
         Plan::Ask(ending) => core.ask(ending),
         Plan::Perform(ending) => perform(app, core, actions, ending),
-        Plan::Minimize => if let Some(window) = app.get_webview_window("main") { let _ = window.minimize(); },
-        Plan::Zoom => if let Some(window) = app.get_webview_window("main") { if window.is_maximized().unwrap_or(false) { let _ = window.unmaximize(); } else { let _ = window.maximize(); } },
-        Plan::CloseWindow => if let Some(window) = app.get_webview_window("main") { let _ = window.close(); },
-        Plan::HideApp => { #[cfg(target_os = "macos")] let _ = app.hide(); #[cfg(not(target_os = "macos"))] if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); } },
+        Plan::Minimize => if let Some(window) = app.get_webview_window(view.label()) { let _ = window.minimize(); },
+        Plan::Zoom => if let Some(window) = app.get_webview_window(view.label()) { if window.is_maximized().unwrap_or(false) { let _ = window.unmaximize(); } else { let _ = window.maximize(); } },
+        // The close request decides: a window that is not the last closes alone, and the last one follows the Quit rule.
+        Plan::CloseWindow => if let Some(window) = app.get_webview_window(view.label()) { let _ = window.close(); },
+        Plan::ShowMainWindow => super::windows::show_main_window(app),
+        Plan::HideApp => { #[cfg(target_os = "macos")] let _ = app.hide(); #[cfg(not(target_os = "macos"))] if let Some(window) = app.get_webview_window(view.label()) { let _ = window.hide(); } },
         Plan::HideOthers => other_apps(app, false),
         Plan::ShowAll => other_apps(app, true),
         Plan::Nothing => {},

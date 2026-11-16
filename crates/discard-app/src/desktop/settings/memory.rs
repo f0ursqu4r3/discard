@@ -458,7 +458,7 @@ pub async fn memory_fresh_conversation(
     .map_err(|e| e.to_string())?;
     let _ = app.emit("discard://conversations", ());
     if result.is_ok() {
-        super::super::windows::show_conversation(&app);
+        super::super::windows::show_conversation(&app, &super::super::view::ViewId::main());
     }
     result
 }

@@ -52,8 +52,8 @@ impl WebEmit {
 // A view event goes to the window of the view. The web store listens with the label of its window as the target.
 impl Emit for WebEmit {
     fn snapshot(&self, view: &view::ViewId, value: &SnapshotDto) {
-        // The native menu follows the main view until the app tracks the focused window.
-        if view.is_main() { self.update_menu(view); }
+        // The native menu follows the focused view. Each tick sends every view its snapshot, so a change of focus reaches it.
+        if *view == self.core.focused_view() { self.update_menu(view); }
         let _ = self.app.emit_to(view.label(), "discard://snapshot", value);
     }
     fn history(&self, view: &view::ViewId, value: &HistoryDto) {
@@ -158,6 +158,7 @@ pub fn run(
         .manage(actions.clone())
         .manage(terminals)
         .manage(windows::SettingsRoute::default())
+        .manage(windows::ProjectWindows::default())
         .manage(settings::SettingsContext { home: data_dir.clone(), plugins: plugins.clone(), providers: config.providers, recheck: config.recheck, store: config.store, memory: config.memory, core: core.clone(), load_report: config.load_report, trusted_reviews: Mutex::new(std::collections::HashSet::new()), logs: Mutex::new(settings::logs::LogState::open(&data_dir)) })
         .on_menu_event(move |app, event| {
             let id = event.id().as_ref();
@@ -173,14 +174,12 @@ pub fn run(
             if let tauri::WindowEvent::ThemeChanged(value) = event {
                 event_dark.store(*value == tauri::Theme::Dark, Ordering::Relaxed);
             }
-            // The window of a project is gone: its view goes with it. The main view stays.
-            if let tauri::WindowEvent::Destroyed = event && let Some(view) = windows::view_of_closed_window(window.label()) {
-                event_core.drop_view(&view);
+            // The last app window that had focus decides the view of the menu, the quit question, and the plugins.
+            if let tauri::WindowEvent::Focused(true) = event && let Some(view) = view::ViewId::from_label(window.label()) {
+                event_core.set_focused_view(&view);
             }
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if windows::request_main_close(&event_core, window.label() == "main", event_actions.confirms()) {
-                    api.prevent_close();
-                } else if window.label() == "main" && event_core.any_running() { event_core.cancel_all(); }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event && windows::on_close_requested(window, &event_core, &event_actions) {
+                api.prevent_close();
             }
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)) {
                 let generation = geometry_generation.fetch_add(1, Ordering::Relaxed) + 1;
@@ -284,7 +283,7 @@ pub fn run(
             commands::get_write_requests, commands::decide_write_request,
             commands::get_agent_requests, commands::decide_agent_request,
             commands::get_always_allow_rules, commands::revoke_always_allow_rule,
-            commands::get_snapshot, commands::choose_project_folder, commands::get_projects, commands::update_project_profile, commands::set_project_show_archived, commands::get_rail_layout, commands::move_rail_project, commands::group_rail_projects, commands::create_rail_group, commands::move_rail_group, commands::rename_rail_group, commands::set_rail_group_color, commands::set_rail_group_collapsed, commands::ungroup_rail_group, commands::select_project, commands::remove_project, commands::open_project_window,
+            commands::get_snapshot, commands::choose_project_folder, commands::get_projects, commands::update_project_profile, commands::set_project_show_archived, commands::get_rail_layout, commands::move_rail_project, commands::group_rail_projects, commands::create_rail_group, commands::move_rail_group, commands::rename_rail_group, commands::set_rail_group_color, commands::set_rail_group_collapsed, commands::ungroup_rail_group, commands::select_project, commands::remove_project, commands::open_project_window, commands::show_main_window,
             commands::get_project_channels, commands::get_project_members, commands::get_channel_details, commands::update_channel_topic, commands::set_project_main_agent,
             commands::invite_channel_member, commands::select_canonical_branch, commands::select_canonical_project_channel,
             commands::search_agent_history, commands::restore_conversation, commands::get_conversations, commands::create_conversation, commands::open_agent_chat,
@@ -346,10 +345,18 @@ pub fn run(
             settings::logs::settings_logs
         ])
         .build(tauri::generate_context!())?;
-    app.run(move |_handle, event| {
+    app.run(move |handle, event| {
+        #[cfg(not(target_os = "macos"))]
+        let _ = handle;
         if let tauri::RunEvent::Exit = event { exit_terminals.close_all(); }
+        // A click on the Dock icon brings the main window back when no app window shows.
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event && windows::reopen_shows_main(has_visible_windows, windows::visible_app_windows(handle)) {
+            windows::show_main_window(handle);
+        }
         if let tauri::RunEvent::ExitRequested { api, .. } = event && !exit_actions.exiting.load(Ordering::SeqCst) {
-            if let plan::Close::Ask(ending) = plan::close_plan(true, exit_core.any_running(), exit_actions.confirms()) {
+            // An exit request is a quit, so the Quit rule decides, with no other app window and no background mode.
+            if let plan::Close::Ask(ending) = plan::close_plan(plan::WindowKind::Main, 0, false, exit_core.any_running(), exit_actions.confirms()) {
                 api.prevent_exit();
                 exit_core.ask(ending);
             } else if exit_core.any_running() { exit_core.cancel_all(); }

@@ -493,7 +493,7 @@ async fn selecting_a_thread_selects_its_parent_and_opens_the_panel_after_a_resta
     w.channels.select(&ViewId::main(), &other.id.0).unwrap();
     assert_eq!(w.core.snapshot(&ViewId::main()).channel_id, other.id.0);
     assert!(w.core.snapshot(&ViewId::main()).open_thread.is_none());
-    assert_eq!(w.channels.select_thread(&ViewId::main(), &ChannelId(thread.clone())).unwrap(), w.parent.id.0);
+    assert_eq!(w.channels.select_thread(&ViewId::main(), &ChannelId(thread.clone())).unwrap(), (ViewId::main(), w.parent.id.0.clone()));
     assert_eq!(w.core.snapshot(&ViewId::main()).channel_id, w.parent.id.0);
     assert_eq!(w.core.snapshot(&ViewId::main()).open_thread.unwrap().channel_id, thread);
     // switch_channel with a thread id does the same, and a thread can never become the selected channel.

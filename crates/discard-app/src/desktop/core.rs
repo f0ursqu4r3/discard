@@ -399,6 +399,10 @@ impl View {
         }
     }
 }
+/// The focused view, or the main view when the focused view is gone.
+fn focused_view_of(state: &State) -> ViewId {
+    if state.views.contains_key(&state.focused) { state.focused.clone() } else { ViewId::main() }
+}
 struct State {
     /// The app-wide guard of changes that touch shared data: a project change, a write approval.
     busy: bool,
@@ -410,6 +414,8 @@ struct State {
     channels: BTreeMap<String, ChannelState>,
     /// The views by window label.
     views: BTreeMap<ViewId, View>,
+    /// The view of the app window that had focus last. Read it through `focused_view_of`.
+    focused: ViewId,
     rev: u64,
     history_rev: u64,
     memory_rev: u64,
@@ -454,6 +460,7 @@ impl AppCore {
                 runtime_generation: 0,
                 channels,
                 views: BTreeMap::from([(ViewId::main(), main)]),
+                focused: ViewId::main(),
                 window: StateStore::open(Path::new("")),
                 confirm: None,
                 plugin_notice: None,
@@ -513,7 +520,12 @@ impl AppCore {
     pub fn drop_view(&self, view: &ViewId) {
         if view.is_main() { return; }
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if s.views.remove(view).is_some() { s.rev += 1; self.changed.notify_one(); }
+        if s.views.remove(view).is_some() {
+            // The main view takes the focus back. The system focuses another window and sends its focus event.
+            if s.focused == *view { s.focused = ViewId::main(); }
+            s.rev += 1;
+            self.changed.notify_one();
+        }
     }
     /// The views that select `channel`, in order. No view selects the empty ID.
     pub fn views_selecting(&self, channel: &str) -> Vec<ViewId> {
@@ -526,9 +538,17 @@ impl AppCore {
     pub fn route(&self, view: &ViewId, target_project: Option<&discard_core::model::ProjectId>) -> ViewId {
         if view.is_main() || view.project_id().as_ref() == target_project { view.clone() } else { ViewId::main() }
     }
-    /// The view of the window that the user used last.
-    // TODO: track the focused window. Until then the main view stands in.
-    pub fn focused_view(&self) -> ViewId { ViewId::main() }
+    /// The view of the window that the user used last, while that view exists. The main view otherwise.
+    pub fn focused_view(&self) -> ViewId { focused_view_of(&self.state.lock().unwrap_or_else(|e| e.into_inner())) }
+    /// Record that the window of `view` took focus. The menu and the quit confirmation follow it, so the pump wakes. A
+    /// view that does not exist takes no focus.
+    pub fn set_focused_view(&self, view: &ViewId) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !s.views.contains_key(view) || s.focused == *view { return; }
+        s.focused = view.clone();
+        s.rev += 1;
+        self.changed.notify_one();
+    }
     pub fn clear_project(&self, view: &ViewId) {
         if !self.has_view(view) { return; }
         let (commands, _) = tokio::sync::mpsc::unbounded_channel();
@@ -752,6 +772,8 @@ impl AppCore {
         s.busy = true; s.rev += 1; self.changed.notify_one(); Ok(())
     }
 
+    /// Whether a project change holds the app-wide guard.
+    pub fn project_change_running(&self) -> bool { self.state.lock().unwrap_or_else(|e| e.into_inner()).busy }
     /// Take the app-wide guard. Refused while any view navigates, because a project change reloads shared sessions.
     pub fn begin_project_change(&self) -> Result<(), String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -861,7 +883,7 @@ impl AppCore {
     pub fn closed_snapshot(&self) -> SnapshotDto { closed_snapshot(&self.state.lock().unwrap_or_else(|e| e.into_inner())) }
     /// The state of one view for its window. A view that does not exist gives a minimal state that selects nothing.
     pub fn snapshot(&self, view_id: &ViewId) -> SnapshotDto {
-        let (mut snapshot, slot_state, context, slot_cache) = {
+        let (mut snapshot, slot_state, context, slot_cache, focused) = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let Some(view) = state.views.get(view_id) else { return closed_snapshot(&state) };
             let active = current_of(&state, view);
@@ -946,18 +968,21 @@ impl AppCore {
                     review_count: 0,
                     review_names: vec![],
                     problem_lines: state.plugin_notice.iter().cloned().collect(),
-                    confirm: state.confirm.map(|item| item.message().to_string()),
+                    // The confirmation is app-wide. Only the focused window shows it.
+                    confirm: state.confirm.filter(|_| focused_view_of(&state) == *view_id).map(|item| item.message().to_string()),
                     archive: active.archive.clone().map(|message| ArchiveNoticeDto { message }),
                     safe_mode: false,
                 },
                 theme,
             };
-            (snapshot, slot_state, (AgentId(active.agent_id.clone()), active.project_id.clone()), view.slots.clone())
+            let focused = focused_view_of(&state) == *view_id;
+            (snapshot, slot_state, (AgentId(active.agent_id.clone()), active.project_id.clone()), view.slots.clone(), focused)
         };
         let plugins = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
         let mut slots = BTreeMap::new();
         if let Some(plugins) = plugins.as_ref() {
-            plugins.set_ui_state(slot_state.clone());
+            // The plugins read one UI state: the state of the focused view.
+            if focused { plugins.set_ui_state(slot_state.clone()); }
             let mut manager = plugins.manager().lock().unwrap_or_else(|e| e.into_inner());
             slots = slot_cache.lock().unwrap_or_else(|e| e.into_inner())
                 .get_or_render(&slot_state, || { let (agent, project) = context; PluginMemory::for_context(agent, project, || super::slots::render_slots(&mut manager, &slot_state)) });
@@ -2291,10 +2316,53 @@ mod read_tests {
         assert_eq!((generation(&main()), generation(&on_a), generation(&on_b)), (before.0 + 1, before.1 + 1, before.2), "the view of another channel is left alone");
     }
     #[test]
-    fn the_focused_view_is_the_main_view_until_focus_is_tracked() {
+    fn the_focused_view_is_the_main_view_until_a_window_takes_focus() {
         let core = core_with_project_channels("p", &["a"]);
         add_view(&core, "project-p", "a");
         assert_eq!(core.focused_view(), main());
+    }
+    #[test]
+    fn the_confirmation_shows_in_the_focused_view_only() {
+        let core = core_with_project_channels("p", &["a"]);
+        let p_view = add_view(&core, "project-p", "a");
+        core.set_focused_view(&p_view);
+        assert_eq!(core.focused_view(), p_view);
+        core.ask(super::super::plan::Confirm::Quit);
+        assert!(core.snapshot(&p_view).banners.confirm.is_some());
+        assert!(core.snapshot(&main()).banners.confirm.is_none());
+        // The question follows the focus.
+        core.set_focused_view(&main());
+        assert!(core.snapshot(&p_view).banners.confirm.is_none());
+        assert!(core.snapshot(&main()).banners.confirm.is_some());
+        // A view that closes gives the focus back to the main view.
+        core.set_focused_view(&p_view);
+        core.drop_view(&p_view);
+        assert_eq!(core.focused_view(), main());
+        assert!(core.snapshot(&main()).banners.confirm.is_some());
+    }
+    #[test]
+    fn a_view_that_does_not_exist_takes_no_focus() {
+        let core = core_with_project_channels("p", &["a"]);
+        let gone = ViewId::from_label("project-gone").unwrap();
+        core.set_focused_view(&gone);
+        assert_eq!(core.focused_view(), main());
+        // A closed view that opens again with the same label does not inherit the old focus.
+        let p_view = add_view(&core, "project-p", "a");
+        core.set_focused_view(&p_view);
+        core.drop_view(&p_view);
+        add_view(&core, "project-p", "a");
+        assert_eq!(core.focused_view(), main());
+    }
+    #[test]
+    fn a_change_of_focus_wakes_the_pump_and_a_repeat_does_not() {
+        let core = core_with_project_channels("p", &["a"]);
+        let p_view = add_view(&core, "project-p", "a");
+        let rev = || core.state.lock().unwrap().rev;
+        let before = rev();
+        core.set_focused_view(&p_view);
+        assert_eq!(rev(), before + 1);
+        core.set_focused_view(&p_view);
+        assert_eq!(rev(), before + 1);
     }
     #[test]
     fn a_decision_in_one_view_clears_the_prompt_in_the_other() { // Review Focus 1
