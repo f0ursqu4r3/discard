@@ -8,6 +8,7 @@ import DiffBlock from '../DiffBlock.vue'
 import { changeEntries } from '../messages'
 import { Button } from '../ui/button'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '../ui/empty'
+import { activeFilePath } from './activeFile'
 import ChangesTree from './ChangesTree.vue'
 import FileDiff from './FileDiff.vue'
 import { preferenceKeys, readChoice, saveChoice } from './preferences'
@@ -52,9 +53,19 @@ watch(
 )
 watch(layout, (value) => saveChoice(preferenceKeys.layout, value))
 watch(fileMode, (value) => saveChoice(preferenceKeys.files, value))
+watch(fileMode, async (value) => {
+  if (value !== 'all') return
+  pinnedTop = null
+  await nextTick()
+  trackActive()
+})
 
 const data = ref<ChannelChangesDto | null>(null)
 const selectedPath = ref<string | null>(null)
+/** The file at the top of the diff pane in All files mode. */
+const activePath = ref<string | null>(null)
+/** The pane scroll position after a click on a file. The clicked file stays active until the user scrolls. */
+let pinnedTop: number | null = null
 /** The sections that the user opened or closed. The others follow the default. */
 const overrides = ref<Record<string, boolean>>({})
 const loading = ref(false)
@@ -95,6 +106,8 @@ watch([scope, () => props.channelId], () => {
   loading.value = false
   overrides.value = {}
   selectedPath.value = null
+  activePath.value = null
+  pinnedTop = null
   void load()
 })
 watch(
@@ -116,10 +129,12 @@ const shown = computed(() => {
   const chosen = files.value.find((file) => file.path === selectedPath.value)
   return chosen ?? files.value[0]
 })
-// All files mode marks only a file that the user chose. Selected file mode always has a file.
-const highlighted = computed(() =>
-  fileMode.value === 'selected' ? (shown.value?.path ?? null) : selectedPath.value,
-)
+// Selected file mode marks the shown file. All files mode marks the file at the top of the pane, else the first file.
+const highlighted = computed(() => {
+  if (fileMode.value === 'selected') return shown.value?.path ?? null
+  const active = files.value.find((file) => file.path === activePath.value)
+  return active?.path ?? files.value[0]?.path ?? null
+})
 const visible = computed(() =>
   fileMode.value === 'selected' ? (shown.value ? [shown.value] : []) : files.value,
 )
@@ -146,6 +161,21 @@ async function select(path: string) {
     (element) => element.dataset.filePath === path,
   )
   section?.scrollIntoView?.({ block: 'start' })
+  activePath.value = path
+  pinnedTop = pane.value?.scrollTop ?? null
+}
+
+/** Find the file at the top of the pane. A clicked file stays active until the user scrolls. */
+function trackActive() {
+  const element = pane.value
+  if (!element || fileMode.value !== 'all') return
+  if (pinnedTop !== null && Math.abs(element.scrollTop - pinnedTop) < 1) return
+  pinnedTop = null
+  const found = [...element.querySelectorAll<HTMLElement>('[data-file-path]')].map((section) => ({
+    path: section.dataset.filePath ?? '',
+    top: section.getBoundingClientRect().top,
+  }))
+  activePath.value = activeFilePath(element.getBoundingClientRect().top, found)
 }
 
 const compared = computed(() => {
@@ -301,21 +331,24 @@ const fileOptions = [
       <div
         ref="pane"
         data-ui-id="changes-diffs"
-        class="min-w-0 flex-1 overflow-auto overscroll-contain p-3"
+        class="min-w-0 flex-1 overflow-auto overscroll-contain px-3"
+        @scroll.passive="trackActive"
       >
-        <p v-if="data.truncated" class="mb-3 text-xs text-muted-foreground">
-          Some changes are not shown.
-        </p>
-        <div class="flex flex-col gap-3">
-          <FileDiff
-            v-for="file in visible"
-            :key="file.path"
-            :file="file"
-            :layout="layout"
-            :open="isOpen(file.path)"
-            :selected="highlighted === file.path"
-            @update:open="overrides = { ...overrides, [file.path]: $event }"
-          />
+        <div class="py-3">
+          <p v-if="data.truncated" class="mb-3 text-xs text-muted-foreground">
+            Some changes are not shown.
+          </p>
+          <div class="flex flex-col gap-3">
+            <FileDiff
+              v-for="file in visible"
+              :key="file.path"
+              :file="file"
+              :layout="layout"
+              :open="isOpen(file.path)"
+              :selected="highlighted === file.path"
+              @update:open="overrides = { ...overrides, [file.path]: $event }"
+            />
+          </div>
         </div>
       </div>
     </div>

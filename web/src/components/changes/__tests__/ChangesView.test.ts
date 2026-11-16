@@ -143,7 +143,7 @@ test('a click on a file scrolls its section into view in All files mode', async 
   const scrolled: (string | undefined)[] = []
   const original = Element.prototype.scrollIntoView
   Element.prototype.scrollIntoView = function (this: HTMLElement) {
-    scrolled.push(this.dataset.filePath)
+    if (this.dataset.filePath !== undefined) scrolled.push(this.dataset.filePath)
   }
   try {
     const view = await open(() => result([file('a.ts'), file('b.ts')]))
@@ -153,6 +153,29 @@ test('a click on a file scrolls its section into view in All files mode', async 
     expect(view.get('[data-file-path="b.ts"]').attributes('data-selected')).toBe('true')
   } finally {
     Element.prototype.scrollIntoView = original
+  }
+})
+
+test('the first file is marked in the tree in All files mode before any click', async () => {
+  const view = await open(() => result([file('a.ts'), file('b.ts')]))
+  expect(view.get('[data-path="a.ts"]').attributes('aria-current')).toBe('true')
+  expect(view.get('[data-path="b.ts"]').attributes('aria-current')).toBeUndefined()
+})
+
+test('a scroll marks the file at the top of the pane in the tree', async () => {
+  const view = await open(() => result([file('a.ts'), file('b.ts')]))
+  const tops: Record<string, number> = { 'a.ts': -200, 'b.ts': 5 }
+  const original = Element.prototype.getBoundingClientRect
+  Element.prototype.getBoundingClientRect = function (this: HTMLElement) {
+    const top = this.dataset.filePath ? (tops[this.dataset.filePath] ?? 0) : 0
+    return { top } as DOMRect
+  }
+  try {
+    await view.get('[data-ui-id="changes-diffs"]').trigger('scroll')
+    expect(view.get('[data-path="b.ts"]').attributes('aria-current')).toBe('true')
+    expect(view.get('[data-path="a.ts"]').attributes('aria-current')).toBeUndefined()
+  } finally {
+    Element.prototype.getBoundingClientRect = original
   }
 })
 
