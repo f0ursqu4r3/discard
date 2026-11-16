@@ -279,6 +279,11 @@ export const setRailGroupCollapsed = (groupId: string, collapsed: boolean) =>
 export const ungroupRailGroup = (groupId: string) => invoke<void>('ungroup_rail_group', { groupId })
 export const selectProject = (projectId: string) => invoke<string>('select_project', { projectId })
 export const removeProject = (projectId: string) => invoke<void>('remove_project', { projectId })
+/** Opens the project window of a project, or focuses it if it is open. */
+export const openProjectWindow = (projectId: string) =>
+  invoke<void>('open_project_window', { projectId })
+/** Shows and focuses the main window. With `page`, the main window also navigates to that page. */
+export const showMainWindow = (page?: string) => invoke<void>('show_main_window', { page })
 export const revealProject = (path: string) => invoke<void>('settings_reveal_workspace', { path })
 
 export interface ReasoningOption {

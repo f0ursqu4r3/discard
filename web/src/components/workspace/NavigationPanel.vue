@@ -10,15 +10,20 @@ import ChannelList from '../ChannelList.vue'
 import UserBar from './UserBar.vue'
 import DirectMessageSidebar from './DirectMessageSidebar.vue'
 import { channelApprovals } from '../threads'
-defineProps<{
-  projects?: import('@/bridge/api').ProjectEntry[]
-  railLayout?: RailLayoutDto | null
-  snapshot: SnapshotDto
-  projectChannels?: ProjectChannelDto[]
-  page: WorkspacePage
-  compact?: boolean
-  busy?: boolean
-}>()
+withDefaults(
+  defineProps<{
+    projects?: import('@/bridge/api').ProjectEntry[]
+    railLayout?: RailLayoutDto | null
+    snapshot: SnapshotDto
+    projectChannels?: ProjectChannelDto[]
+    page: WorkspacePage
+    compact?: boolean
+    busy?: boolean
+    /** A project window has no project rail: no project switch, direct messages entry, or Add Project control. */
+    rail?: boolean
+  }>(),
+  { rail: true },
+)
 const emit = defineEmits<{
   navigate: [page: WorkspacePage]
   action: [id: string]
@@ -40,6 +45,7 @@ const emit = defineEmits<{
   >
     <div class="flex min-h-0 flex-1">
       <ServerRail
+        v-if="rail"
         :projects="projects"
         :layout="railLayout"
         :channels="snapshot.channels"

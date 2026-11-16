@@ -3,6 +3,7 @@ import type { RailGroupOption } from './rail-layout'
 
 export type ProjectMenuAction =
   | 'settings'
+  | 'open-window'
   | 'remove'
   | 'reveal'
   | 'copy-name'
@@ -110,6 +111,7 @@ export function projectMenu(
     // TODO: Create scheduled agent tasks with their own execution and notification model.
     planned('Schedule Task…'),
     separator,
+    { kind: 'action', label: 'Open in New Window', action: 'open-window' },
     { kind: 'action', label: 'Reveal in Finder', action: 'reveal' },
     {
       kind: 'submenu',
