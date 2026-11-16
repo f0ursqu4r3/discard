@@ -7,6 +7,7 @@ pub mod dto;
 pub mod pump;
 pub mod terminal;
 pub mod threads;
+pub mod view;
 
 use core::{AppCore, CoreInit};
 use discard_core::ghostty::{live::LiveTheme, spec::Appearance};
@@ -33,7 +34,7 @@ struct WebEmit {
 }
 impl Emit for WebEmit {
     fn snapshot(&self, value: &SnapshotDto) {
-        let ctx = self.core.menu_context();
+        let ctx = self.core.menu_context(&view::ViewId::main());
         let map = self.settings.lock().unwrap_or_else(|e| e.into_inner()).settings().keymap.clone();
         let mut previous = self.menu_state.lock().unwrap_or_else(|e| e.into_inner());
         if previous.as_ref() != Some(&(ctx.clone(), map.clone())) {
@@ -89,20 +90,21 @@ pub fn run(
     core.set_plugins(plugins.clone());
     core.set_load_report(config.load_report.clone());
     let project_dir: PathBuf = config.sidebar_project.as_ref().map(|p| p.path.clone().into()).unwrap_or_default();
-    core.configure_window(&data_dir, &project_dir, None);
-    core.select_sidebar_project(config.sidebar_project.as_ref());
+    let main = view::ViewId::main();
+    core.configure_window(&main, &data_dir, &project_dir, None);
+    core.select_sidebar_project(&main, config.sidebar_project.as_ref());
     if let Some(channel) = &config.startup_channel {
-        core.configure_targets(channel.project_id.as_ref().map(|p| p.0.clone()).unwrap_or_default(), &project_dir, channel.agent_id.0.clone());
-        core.configure_read_marker(&data_dir, &channel.id.0);
-        if channel.project_id.is_some() { core.configure_branch_source(config.store.clone(), channel.id.clone(), channel.workspace_mode, project_dir.clone()); }
+        core.configure_targets(&main, channel.project_id.as_ref().map(|p| p.0.clone()).unwrap_or_default(), &project_dir, channel.agent_id.0.clone());
+        core.configure_read_marker(&main, &data_dir, &channel.id.0);
+        if channel.project_id.is_some() { core.configure_branch_source(&main, config.store.clone(), channel.id.clone(), channel.workspace_mode, project_dir.clone()); }
     }
     (config.on_ready)(&core);
     let channels = Arc::new(channels::Channels::new(core.clone(), config.store.clone(), runtime.clone(), config.launcher));
     config.delegation.delegator.install(Arc::new(delegation::AppDelegator::new(Arc::downgrade(&channels))));
-    if let Some(channel) = &config.startup_channel && let Err(error) = channels.refresh_threads(&channel.id) { core.notice(format!("Could not load threads: {error}")); }
+    if let Some(channel) = &config.startup_channel && let Err(error) = channels.refresh_threads(&channel.id) { core.notice(&main, format!("Could not load threads: {error}")); }
     if config.startup_channel.is_none()
-        && let Err(error) = channels.restore() { core.notice(format!("Could not restore conversation: {error}")); }
-    core.refresh_branches(core.request_branch_refresh());
+        && let Err(error) = channels.restore() { core.notice(&main, format!("Could not restore conversation: {error}")); }
+    core.refresh_branches(&main, core.request_branch_refresh(&main));
     let terminals = Arc::new(terminal::Terminals::default());
     let actions = Arc::new(actions::DesktopActions { settings: settings.clone(), workspace: config.workspace.clone(), relaunch: config.relaunch, exiting: AtomicBool::new(false), terminals: terminals.clone() });
     let sweep_terminals = terminals.clone();
@@ -115,12 +117,14 @@ pub fn run(
     });
     let exit_terminals = terminals.clone();
     let refresh_core = core.clone();
+    let refresh_view = main.clone();
     runtime.spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             let core = refresh_core.clone();
-            let generation = core.request_branch_refresh();
-            let _ = tokio::task::spawn_blocking(move || core.refresh_branches(generation)).await;
+            let view = refresh_view.clone();
+            let generation = core.request_branch_refresh(&view);
+            let _ = tokio::task::spawn_blocking(move || core.refresh_branches(&view, generation)).await;
         }
     });
     let event_actions = actions.clone();
@@ -153,7 +157,7 @@ pub fn run(
             } else if let Some(rest) = id.strip_prefix("plugin:")
                 && let Some((index, plugin)) = rest.split_once(':')
                 && let Ok(index) = index.parse()
-                && let Err(error) = menu_core.run_plugin_menu(plugin, index, None)
+                && let Err(error) = menu_core.run_plugin_menu(&view::ViewId::main(), plugin, index, None)
             { menu_core.plugin_failure(plugin, &error); }
         })
         .on_window_event(move |window, event| {

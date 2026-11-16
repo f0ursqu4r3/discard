@@ -2,6 +2,7 @@
 use discard_core::model::{AgentId, MessageId};
 use super::core::{AppCore, CoreInit};
 use super::threads::ThreadRecord;
+use super::view::ViewId;
 use discard_core::{model::{Channel, ChannelId, ProjectId, WorkspaceMode}, store::{Store, WorktreeRecord}, ui_state::Update, worktree::{list_branch_tree, WorktreeManager}};
 use std::{path::PathBuf, sync::{Arc, Mutex}};
 use tokio::{runtime::Handle, sync::mpsc::UnboundedReceiver};
@@ -20,11 +21,11 @@ impl Channels {
     pub fn new(core: Arc<AppCore>, store: Arc<Mutex<Store>>, runtime: Handle, launch: Launcher) -> Self {
         Self { core, store, runtime, launch, operation: Mutex::new(()) }
     }
-    fn project_dir(&self) -> PathBuf { self.core.current_project().path.into() }
+    fn project_dir(&self) -> PathBuf { self.core.current_project(&ViewId::main()).path.into() }
     /// Caller holds the project-change guard. Prepare runtimes before replacing visible state.
     pub fn activate_project(&self, id: &ProjectId) -> Result<String, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        self.core.can_switch_for_project()?;
+        self.core.can_switch_for_project(&ViewId::main())?;
         let (project, channel) = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
             let project = store.visible_projects().map_err(|e| e.to_string())?.into_iter().find(|p| p.id == *id).ok_or("Project unavailable")?;
@@ -40,10 +41,10 @@ impl Channels {
             let channel = store.project_channel_or_fallback(id, &main).map_err(|e| e.to_string())?;
             (project, channel)
         };
-        self.core.select_sidebar_project(Some(&project));
+        self.core.select_sidebar_project(&ViewId::main(), Some(&project));
         self.select_inner_mode(&channel.id.0, true)?;
         self.store.lock().unwrap_or_else(|e| e.into_inner()).select_project_channel(id, &channel.id).map_err(|e| e.to_string())?;
-        self.core.refresh_branches_in_background();
+        self.core.refresh_branches_in_background(&ViewId::main());
         Ok(channel.id.0)
     }
     pub fn restore(&self) -> Result<(), String> {
@@ -85,9 +86,9 @@ impl Channels {
         self.runtime.spawn(async move {
             while let Some(update) = updates.recv().await {
                 if core.apply_runtime(&id, Some(generation), update) {
-                    let generation = core.request_branch_refresh();
+                    let generation = core.request_branch_refresh(&ViewId::main());
                     let core = core.clone();
-                    tokio::task::spawn_blocking(move || core.refresh_branches(generation));
+                    tokio::task::spawn_blocking(move || core.refresh_branches(&ViewId::main(), generation));
                 }
             }
             // The engine of a sub-agent thread ended without a final state: the task fails.
@@ -107,7 +108,7 @@ impl Channels {
         self.select_inner(id)
     }
     fn select_thread_inner(&self, thread: &discard_core::model::ThreadInfo) -> Result<(), String> {
-        if self.core.active_channel_id() != thread.parent_channel_id.0 { self.select_inner(&thread.parent_channel_id.0)?; }
+        if self.core.active_channel_id(&ViewId::main()) != thread.parent_channel_id.0 { self.select_inner(&thread.parent_channel_id.0)?; }
         self.open_thread_inner(&thread.channel_id)
     }
     /// Select the parent channel of a thread and open the thread beside it. Returns the parent channel ID.
@@ -124,7 +125,7 @@ impl Channels {
     }
     fn open_thread_inner(&self, thread: &ChannelId) -> Result<(), String> {
         self.load_thread(thread)?;
-        self.core.open_thread(&thread.0)
+        self.core.open_thread(&ViewId::main(), &thread.0)
     }
     /// Start or restart the session of a thread when it has none that works.
     fn load_thread(&self, thread: &ChannelId) -> Result<(), String> {
@@ -209,7 +210,7 @@ impl Channels {
             let _ = self.store.lock().unwrap_or_else(|e| e.into_inner()).discard_empty_thread(&thread.id);
             return Err(error);
         }
-        self.core.open_thread(&thread.id.0)?;
+        self.core.open_thread(&ViewId::main(), &thread.id.0)?;
         Ok(thread.id.0)
     }
     /// Show a thread message in the thread's parent channel. Posting again changes nothing. Returns the ID of the
@@ -350,11 +351,11 @@ impl Channels {
                 && previous.id != target.id { self.core.channel_read_only(&previous.id.0, true, true); }
             if self.core.has_channel(&updated.id.0) && self.core.channel_session_closed(&updated.id.0) { self.start_mode(&updated, true)?; }
             else { self.refresh_channel_access(&updated)?; }
-            if previous.as_ref().is_some_and(|old| old.id != target.id && self.core.active_channel_id() == old.id.0) {
+            if previous.as_ref().is_some_and(|old| old.id != target.id && self.core.active_channel_id(&ViewId::main()) == old.id.0) {
                 if !self.core.has_channel(&updated.id.0) { self.start(&updated)?; }
                 self.select_inner(&updated.id.0)?;
             }
-            self.core.refresh_branches_in_background();
+            self.core.refresh_branches_in_background(&ViewId::main());
             Ok(())
         })();
         for id in begun { self.core.end_channel_change(&id); }
@@ -395,10 +396,10 @@ impl Channels {
                 }
             } else { self.start(&updated)?; }
             self.refresh_channel_access(&updated)?;
-            if previous.as_ref().is_some_and(|old| old.id != updated.id && self.core.active_channel_id() == old.id.0) {
+            if previous.as_ref().is_some_and(|old| old.id != updated.id && self.core.active_channel_id(&ViewId::main()) == old.id.0) {
                 self.select_inner(&updated.id.0)?;
             }
-            self.core.refresh_branches_in_background();
+            self.core.refresh_branches_in_background(&ViewId::main());
             Ok(())
         })();
         for id in begun { self.core.end_channel_change(&id); }
@@ -495,7 +496,7 @@ impl Channels {
     }
     fn select_inner(&self, id: &str) -> Result<(), String> { self.select_inner_mode(id, false) }
     fn select_inner_mode(&self, id: &str, project_change: bool) -> Result<(), String> {
-        if project_change { self.core.can_switch_for_project()?; } else { self.core.can_switch()?; }
+        if project_change { self.core.can_switch_for_project(&ViewId::main())?; } else { self.core.can_switch(&ViewId::main())?; }
         let (channel, project) = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
             let channel = store.load_channel(&ChannelId(id.to_owned())).map_err(|e| e.to_string())?;
@@ -504,14 +505,14 @@ impl Channels {
         };
         let restart = self.core.has_channel(id) && self.core.channel_session_closed(id);
         if !self.core.has_channel(id) { self.start(&channel)?; }
-        if project_change { self.core.switch_channel_for_project(id)?; } else { self.core.switch_channel(id)?; }
+        if project_change { self.core.switch_channel_for_project(&ViewId::main(), id)?; } else { self.core.switch_channel(&ViewId::main(), id)?; }
         self.sync_muted(&channel.id);
-        if let Some(project) = project { self.core.configure_branch_source(self.store.clone(), channel.id.clone(), channel.workspace_mode, project.path.into()); }
-        else { self.core.clear_branch_source(); }
+        if let Some(project) = project { self.core.configure_branch_source(&ViewId::main(), self.store.clone(), channel.id.clone(), channel.workspace_mode, project.path.into()); }
+        else { self.core.clear_branch_source(&ViewId::main()); }
         self.refresh_threads(&channel.id)?;
         self.core.clear_slots();
         // The rows are in state already. Mark the selected row from them. Git runs only in a refresh.
-        self.core.reselect_current_branch();
+        self.core.reselect_current_branch(&ViewId::main());
         if channel.project_id.is_none() {
             if let Err(error) = self.store.lock().unwrap_or_else(|e| e.into_inner()).add_direct_message(&channel.agent_id) {
                 self.core.append_channel_notice(id, format!("Chat opened, but could not save it to Direct Messages: {error}"));
@@ -542,8 +543,8 @@ impl Channels {
         };
         self.core.invalidate_project_channels(id)?;
         for channel in channels { self.start_mode(&channel, true)?; }
-        if self.core.active_context().1.as_ref() == Some(id) {
-            self.select_inner_mode(&self.core.active_channel_id(), true)?;
+        if self.core.active_context(&ViewId::main()).1.as_ref() == Some(id) {
+            self.select_inner_mode(&self.core.active_channel_id(&ViewId::main()), true)?;
         }
         Ok(())
     }
@@ -569,7 +570,7 @@ impl Channels {
                 failures.push(format!("{id}: {error}"));
             }
         }
-        self.core.refresh_branches_in_background();
+        self.core.refresh_branches_in_background(&ViewId::main());
         if failures.is_empty() { Ok(()) } else { Err(failures.join("; ")) }
     }
     pub fn restore_conversation(&self, id: &str) -> Result<(), String> {
@@ -623,32 +624,32 @@ impl Channels {
             self.select_inner(&channel.id.0)?;
             return Ok(channel.id.0);
         }
-        self.core.can_switch()?;
+        self.core.can_switch(&ViewId::main())?;
         let channel = self.store.lock().unwrap_or_else(|e| e.into_inner()).create_conversation(agent, project, name).map_err(|e| e.to_string())?;
         self.select_inner(&channel.id.0)?; Ok(channel.id.0)
     }
     pub fn create(&self, name: &str, mode: &str, source_channel: &str) -> Result<String, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        self.core.can_switch()?;
-        if self.core.active_channel_id() != source_channel { return Err("The channel changed. Open New channel again.".into()); }
-        if self.core.current_project().id.0.is_empty() { return Err("Select a project first.".into()); }
+        self.core.can_switch(&ViewId::main())?;
+        if self.core.active_channel_id(&ViewId::main()) != source_channel { return Err("The channel changed. Open New channel again.".into()); }
+        if self.core.current_project(&ViewId::main()).id.0.is_empty() { return Err("Select a project first.".into()); }
         let _ = (name, mode);
         Err("Open a Git branch to start another project channel.".into())
     }
     /// Create a text channel for the current project, start it, and select it. Returns the channel ID.
     pub fn create_text_channel(&self, project: &ProjectId, name: &str) -> Result<String, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        self.core.can_switch()?;
-        if self.core.current_project().id != *project { return Err("Open this project before you add a channel.".into()); }
+        self.core.can_switch(&ViewId::main())?;
+        if self.core.current_project(&ViewId::main()).id != *project { return Err("Open this project before you add a channel.".into()); }
         let channel = self.store.lock().unwrap_or_else(|e| e.into_inner()).create_project_text_channel(project, name).map_err(|e| e.to_string())?;
         self.start(&channel)?;
         self.select_inner(&channel.id.0)?;
         // A new channel changes the list. Refresh it without a wait.
-        self.core.refresh_branches_in_background();
+        self.core.refresh_branches_in_background(&ViewId::main());
         Ok(channel.id.0)
     }
     fn create_inner(&self, name: String, row: &discard_core::branch_tree::TreeRow, repository: &str, repository_path: &std::path::Path) -> Result<String, String> {
-        let project = self.core.current_project().id;
+        let project = self.core.current_project(&ViewId::main()).id;
         let agent_id = self.store.lock().unwrap_or_else(|e| e.into_inner()).project_main_agent(&project).map_err(|e| e.to_string())?
             .ok_or("This project has no main agent. Open the project first.")?;
         let channel = Channel { id: ChannelId::new(), project_id: Some(project), name, agent_id, workspace_mode: WorkspaceMode::Worktree };
@@ -660,7 +661,7 @@ impl Channels {
         }).transpose()?;
         {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-            let existing = store.channels_for_project(&self.core.current_project().id).map_err(|e| e.to_string())?;
+            let existing = store.channels_for_project(&self.core.current_project(&ViewId::main()).id).map_err(|e| e.to_string())?;
             if existing.iter().any(|c| c.name.eq_ignore_ascii_case(&channel.name)) { return Err("A channel with this name already exists.".into()); }
             // A detached commit is not a branch and must not claim a canonical branch channel.
             let branch = (!row.detached).then_some(row.name.as_str());
@@ -670,13 +671,13 @@ impl Channels {
         self.start(&channel)?;
         self.select_inner(&channel.id.0)?;
         // A new channel changes the list. Refresh it without a wait.
-        self.core.refresh_branches_in_background();
+        self.core.refresh_branches_in_background(&ViewId::main());
         Ok(channel.id.0)
     }
     pub fn decide_write_request(&self, requests: &discard_core::write_requests::WriteRequests, workspace: &discard_core::workspace::GitWorkspace, grants: &discard_core::workspace_grants::MainCheckoutGrants, channel: &str, id: &str, approve: bool) -> Result<discard_core::write_requests::WriteRequest, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         if approve {
-            if self.core.active_channel_id() != channel { return Err("Open this channel before approving.".into()); }
+            if self.core.active_channel_id(&ViewId::main()) != channel { return Err("Open this channel before approving.".into()); }
             self.core.begin_write_approval(channel)?;
         }
         let result: Result<_, String> = (|| {
@@ -713,7 +714,7 @@ impl Channels {
             };
             self.store.lock().unwrap_or_else(|e| e.into_inner()).insert_message(&message).map_err(|e| e.to_string())?;
             self.core.apply_channel(channel, discard_core::ui_state::Update::ConversationMarker(message));
-            self.core.refresh_branches_in_background();
+            self.core.refresh_branches_in_background(&ViewId::main());
             Ok((request, note))
         })();
         if approve { self.core.end_project_change(); }
@@ -793,7 +794,7 @@ impl Channels {
 
     /// Resolve a repository of the current project. The webview names it by ID: empty for the project root.
     fn repository(&self, project: &ProjectId, id: &str) -> Result<discard_core::worktree::DiscoveredRepository, String> {
-        if self.core.current_project().id != *project { return Err("Open this project first.".into()); }
+        if self.core.current_project(&ViewId::main()).id != *project { return Err("Open this project first.".into()); }
         discard_core::worktree::discover_repositories(&self.project_dir()).map_err(|e| e.to_string())?
             .into_iter().find(|repository| repository.id == id).ok_or_else(|| "This repository is no longer available.".to_string())
     }
@@ -818,7 +819,7 @@ impl Channels {
     }
     fn release(&self, held: Vec<String>) { for id in held { self.core.end_channel_change(&id); } }
     /// Show the new Git state: the branch list and the rows that depend on it.
-    fn after_git(&self) { self.core.refresh_branches_in_background(); }
+    fn after_git(&self) { self.core.refresh_branches_in_background(&ViewId::main()); }
     /// The channels that use a working tree. The first list holds every channel with a saved worktree record at its
     /// path, archived or not. The second holds the active ones among them and the branch channel of the branch that the
     /// tree holds.
@@ -886,7 +887,7 @@ impl Channels {
             discard_core::workspace::ArchiveOutcome::Archived { .. } => {
                 self.core.channel_read_only(&channel.0, true, true);
                 for thread in threads.iter().filter(|thread| self.core.has_channel(thread)) { self.core.channel_read_only(thread, true, true); }
-                if self.core.active_channel_id() == channel.0 { let _ = self.open_general(project); }
+                if self.core.active_channel_id(&ViewId::main()) == channel.0 { let _ = self.open_general(project); }
                 self.after_git();
                 Ok(super::dto::ArchiveChannelDto { archived: true, items: vec![] })
             }
@@ -1059,8 +1060,8 @@ impl Channels {
     }
     pub fn open_branch(&self, key: &str) -> Result<String, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        self.core.can_switch()?;
-        let project_id = self.core.current_project().id;
+        self.core.can_switch(&ViewId::main())?;
+        let project_id = self.core.current_project(&ViewId::main()).id;
         if project_id.0.is_empty() { return Err("Select a project first.".into()); }
         let repository_id = if key.starts_with('[') {
             let parts: Vec<String> = serde_json::from_str(key).map_err(|_| "Invalid repository row.")?;
@@ -1133,7 +1134,7 @@ pub fn validate_name(name: &str) -> Result<String, String> {
 #[cfg(test)]
 async fn settle(core: &AppCore) {
     for _ in 0..500 {
-        if !core.branch_refresh_pending() { return; }
+        if !core.branch_refresh_pending(&ViewId::main()) { return; }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     panic!("a branch refresh did not finish");
@@ -1159,8 +1160,8 @@ mod tests {
     fn core(channel: &Channel, dir: &std::path::Path) -> Arc<AppCore> {
         let (init, _) = launcher()(channel).unwrap();
         let core = Arc::new(AppCore::new(init));
-        core.configure_targets(channel.project_id.as_ref().expect("test channel has a project").0.clone(), dir, channel.agent_id.0.clone());
-        core.configure_read_marker(dir, &channel.id.0);
+        core.configure_targets(&ViewId::main(), channel.project_id.as_ref().expect("test channel has a project").0.clone(), dir, channel.agent_id.0.clone());
+        core.configure_read_marker(&ViewId::main(), dir, &channel.id.0);
         core
     }
     #[tokio::test]
@@ -1194,13 +1195,13 @@ mod tests {
                 let request = requests.request(kind, &channel.id, &agent, branch, path.to_string_lossy().into()).unwrap();
                 let (commands, mut received) = mpsc::unbounded_channel();
                 let core = Arc::new(AppCore::new(CoreInit { state: UiState::new(channel.id.clone(), vec![]), commands, project: "P".into(), channel: channel.name.clone(), agent: "A".into(), provider: "fake".into() }));
-                core.configure_targets(project.id.0.clone(), &repo, agent.0.clone());
+                core.configure_targets(&ViewId::main(), project.id.0.clone(), &repo, agent.0.clone());
                 let channels = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
                 assert!(channels.decide_write_request(&requests, &workspace, &grants, "other", &request.id, true).is_err());
                 core.send_to(Some(&channel.id.0), "initial request".into()).unwrap();
                 assert!(matches!(received.try_recv(), Ok(Command::Send(_))));
                 assert_eq!(channels.decide_write_request(&requests, &workspace, &grants, &channel.id.0, &request.id, true).unwrap_err(), "Wait for the current response to finish.");
-                core.apply(Update::TurnFinished(discard_core::driver::TurnOutcome::Completed));
+                core.apply(&ViewId::main(), Update::TurnFinished(discard_core::driver::TurnOutcome::Completed));
                 let result = channels.decide_write_request(&requests, &workspace, &grants, &channel.id.0, &request.id, approve).unwrap();
                 assert_eq!(result.state, if approve { "completed" } else { "denied" });
                 if approve {
@@ -1209,7 +1210,7 @@ mod tests {
                     else { assert!(grants.take(&channel.id, &agent)); assert!(!grants.take(&channel.id, &agent)); }
                 }
                 assert!(received.try_recv().is_err());
-                core.apply(Update::TurnFinished(discard_core::driver::TurnOutcome::Completed));
+                core.apply(&ViewId::main(), Update::TurnFinished(discard_core::driver::TurnOutcome::Completed));
                 assert!(channels.decide_write_request(&requests, &workspace, &grants, &channel.id.0, &request.id, true).is_err());
                 assert!(received.try_recv().is_err());
                 let messages = store.lock().unwrap().messages_for_channel(&channel.id).unwrap();
@@ -1237,8 +1238,8 @@ mod tests {
         core.begin_project_change().unwrap();
         let second_general = service.activate_project(&second.id).unwrap();
         core.end_project_change();
-        assert_eq!(core.current_project().path, second.path);
-        assert_eq!(core.active_channel_id(), second_general, "project activation opens its general channel");
+        assert_eq!(core.current_project(&ViewId::main()).path, second.path);
+        assert_eq!(core.active_channel_id(&ViewId::main()), second_general, "project activation opens its general channel");
         let direct = service.create_conversation(&agent, None, "Direct chat").unwrap();
         let saved_second = store.lock().unwrap().last_project_channel(&second.id).unwrap().unwrap().id;
         service.select(&direct).unwrap();
@@ -1247,8 +1248,8 @@ mod tests {
         let restored_first = service.activate_project(&first.id).unwrap();
         core.end_project_change();
         assert_eq!(restored_first, workspace.channel.id.0, "returning to A restores its saved channel");
-        assert_eq!(core.active_channel_id(), workspace.channel.id.0);
-        assert_eq!(core.current_project().path, first.path);
+        assert_eq!(core.active_channel_id(&ViewId::main()), workspace.channel.id.0);
+        assert_eq!(core.current_project(&ViewId::main()).path, first.path);
         let store = store.lock().unwrap();
         store.hide_project(&second.id).unwrap();
         assert_eq!(store.visible_projects().unwrap().len(), 1);
@@ -1257,8 +1258,8 @@ mod tests {
         assert_eq!(store.import_project_folder(second_dir.path()).unwrap().id, second.id);
         assert_eq!(store.channels_for_project(&second.id).unwrap().len(), 1);
         assert_eq!(store.visible_projects().unwrap().len(), 2);
-        core.clear_project();
-        assert!(core.current_project().id.0.is_empty());
+        core.clear_project(&ViewId::main());
+        assert!(core.current_project(&ViewId::main()).id.0.is_empty());
     }
 
     #[tokio::test]
@@ -1295,20 +1296,20 @@ mod tests {
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
         service.activate_project(&project.id).unwrap();
         settle(&core).await;
-        let rows: Vec<_> = core.snapshot().branches.into_iter().filter(|row| row.detached).collect();
+        let rows: Vec<_> = core.snapshot(&ViewId::main()).branches.into_iter().filter(|row| row.detached).collect();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].label, rows[1].label);
         assert_ne!(rows[0].key, rows[1].key);
         // A real branch with the same short SHA must retain its own channel.
         git(&["branch", &rows[0].label]);
         let branch_channel = service.open_branch(&rows[0].label).unwrap();
-        assert!(core.snapshot().branches.iter().filter(|row| row.current).all(|row| !row.detached));
+        assert!(core.snapshot(&ViewId::main()).branches.iter().filter(|row| row.current).all(|row| !row.detached));
         let first = service.open_branch(&rows[0].key).unwrap();
         let second = service.open_branch(&rows[1].key).unwrap();
         assert_ne!(first, second);
         assert_ne!(first, branch_channel);
         assert_eq!(service.open_branch(&rows[0].key).unwrap(), first);
-        let selected: Vec<_> = core.snapshot().branches.into_iter().filter(|row| row.current).collect();
+        let selected: Vec<_> = core.snapshot(&ViewId::main()).branches.into_iter().filter(|row| row.current).collect();
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].key, rows[0].key);
         let workspace = GitWorkspace::new(&dir.path().join("managed"), store.clone());
@@ -1343,12 +1344,12 @@ mod tests {
         let nested_project = store.lock().unwrap().import_project_folder(dir.path()).unwrap();
         service.activate_project(&nested_project.id).unwrap();
         settle(&core).await;
-        let main = core.snapshot().branches.into_iter().find(|row| row.detached && row.kind == "main").unwrap();
+        let main = core.snapshot(&ViewId::main()).branches.into_iter().find(|row| row.detached && row.kind == "main").unwrap();
         assert!(!main.repository.is_empty());
         let main_channel = service.open_branch(&main.key).unwrap();
         assert_eq!(workspace.conversation_directory(dir.path(), &ChannelId(main_channel.clone())).unwrap(), repo.canonicalize().unwrap());
         assert_eq!(service.open_branch(&main.key).unwrap(), main_channel);
-        assert_eq!(core.snapshot().branches.iter().filter(|row| row.current).count(), 1);
+        assert_eq!(core.snapshot(&ViewId::main()).branches.iter().filter(|row| row.current).count(), 1);
     }
 
     #[tokio::test]
@@ -1378,7 +1379,7 @@ mod tests {
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
         service.activate_project(&project.id).unwrap();
         settle(&core).await;
-        let snapshot = core.snapshot();
+        let snapshot = core.snapshot(&ViewId::main());
         assert_eq!(snapshot.repositories.len(), 2);
         let main_rows: Vec<_> = snapshot.branches.iter().filter(|row| row.label == "main").collect();
         assert_eq!(main_rows.len(), 2);
@@ -1386,8 +1387,8 @@ mod tests {
         let second = service.open_branch(&main_rows[1].key).unwrap();
         assert_ne!(first, second);
         assert_eq!(service.open_branch(&main_rows[0].key).unwrap(), first);
-        assert_eq!(core.snapshot().branches.iter().filter(|row| row.current).count(), 1);
-        assert_eq!(core.snapshot().branches.iter().find(|row| row.current).unwrap().key, main_rows[0].key);
+        assert_eq!(core.snapshot(&ViewId::main()).branches.iter().filter(|row| row.current).count(), 1);
+        assert_eq!(core.snapshot(&ViewId::main()).branches.iter().find(|row| row.current).unwrap().key, main_rows[0].key);
         {
             let store = store.lock().unwrap();
             assert!(!store.channel_archived(&ChannelId(first.clone())).unwrap());
@@ -1448,30 +1449,30 @@ mod tests {
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
         service.activate_project(&project.id).unwrap();
         settle(&core).await;
-        let snapshot = core.snapshot();
+        let snapshot = core.snapshot(&ViewId::main());
         assert_eq!(snapshot.branches.iter().map(|row| row.key.as_str()).collect::<Vec<_>>(), vec!["main", "feature"]);
         assert_eq!(snapshot.channel, "general");
         assert_eq!(store.lock().unwrap().channels_for_project(&project.id).unwrap().len(), 1);
 
         // A conversation's branch source must not override the browsed project.
-        core.configure_branch_source(store, ChannelId("elsewhere".into()), WorkspaceMode::MainCheckout, other.path().into());
-        core.refresh_branches(core.request_branch_refresh());
-        assert_eq!(core.snapshot().branches.len(), 2);
-        assert!(core.snapshot().branches.iter().all(|row| !row.current));
-        let stale = core.request_branch_refresh();
+        core.configure_branch_source(&ViewId::main(), store, ChannelId("elsewhere".into()), WorkspaceMode::MainCheckout, other.path().into());
+        core.refresh_branches(&ViewId::main(), core.request_branch_refresh(&ViewId::main()));
+        assert_eq!(core.snapshot(&ViewId::main()).branches.len(), 2);
+        assert!(core.snapshot(&ViewId::main()).branches.iter().all(|row| !row.current));
+        let stale = core.request_branch_refresh(&ViewId::main());
         service.activate_project(&other_project.id).unwrap();
         settle(&core).await;
-        core.refresh_branches(stale);
-        assert!(core.snapshot().branches.is_empty());
+        core.refresh_branches(&ViewId::main(), stale);
+        assert!(core.snapshot(&ViewId::main()).branches.is_empty());
         service.activate_project(&project.id).unwrap();
         settle(&core).await;
-        assert_eq!(core.snapshot().branches.len(), 2);
-        assert!(core.snapshot().branches.iter().all(|row| !row.current), "the general channel does not highlight the main checkout");
+        assert_eq!(core.snapshot(&ViewId::main()).branches.len(), 2);
+        assert!(core.snapshot(&ViewId::main()).branches.iter().all(|row| !row.current), "the general channel does not highlight the main checkout");
         service.open_branch("feature").unwrap();
-        assert!(core.snapshot().branches.iter().any(|row| row.key == "feature" && row.current), "canonical branch metadata highlights its branch without a worktree");
-        core.select_sidebar_project(None);
-        core.refresh_branches(core.request_branch_refresh());
-        assert!(core.snapshot().branches.is_empty());
+        assert!(core.snapshot(&ViewId::main()).branches.iter().any(|row| row.key == "feature" && row.current), "canonical branch metadata highlights its branch without a worktree");
+        core.select_sidebar_project(&ViewId::main(), None);
+        core.refresh_branches(&ViewId::main(), core.request_branch_refresh(&ViewId::main()));
+        assert!(core.snapshot(&ViewId::main()).branches.is_empty());
     }
 
     fn git_in(path: &std::path::Path, args: &[&str]) {
@@ -1499,17 +1500,17 @@ mod tests {
         settle(&core).await;
         let feature = service.open_branch("feature").unwrap();
         settle(&core).await;
-        assert_eq!(core.snapshot().branches.len(), 2);
+        assert_eq!(core.snapshot(&ViewId::main()).branches.len(), 2);
         // Git is unavailable now. A refresh would replace the rows with an empty list.
         std::fs::rename(repo.path().join(".git"), repo.path().join(".git-hidden")).unwrap();
         service.select(&general).unwrap();
-        let snapshot = core.snapshot();
+        let snapshot = core.snapshot(&ViewId::main());
         assert_eq!(snapshot.channel_id, general);
         assert_eq!(snapshot.branches.len(), 2, "selecting a channel keeps the rows");
         assert!(snapshot.branches.iter().all(|row| !row.current));
         service.select(&feature).unwrap();
         settle(&core).await;
-        let snapshot = core.snapshot();
+        let snapshot = core.snapshot(&ViewId::main());
         assert_eq!(snapshot.channel_id, feature);
         assert_eq!(snapshot.branches.len(), 2, "selecting a channel does not reload the rows");
         assert!(snapshot.branches.iter().any(|row| row.key == "feature" && row.current), "the selected row updates at once");
@@ -1532,11 +1533,11 @@ mod tests {
         let service = Channels::new(core.clone(), store, Handle::current(), launcher());
         service.activate_project(&project.id).unwrap();
         settle(&core).await;
-        assert_eq!(core.snapshot().branches.len(), 1);
+        assert_eq!(core.snapshot(&ViewId::main()).branches.len(), 1);
         git_in(repo.path(), &["branch", "later"]);
         service.open_branch("later").unwrap();
         settle(&core).await;
-        let snapshot = core.snapshot();
+        let snapshot = core.snapshot(&ViewId::main());
         assert!(snapshot.branches.iter().any(|row| row.key == "later" && row.current), "creating a channel refreshes the rows");
     }
 
@@ -1556,11 +1557,11 @@ mod tests {
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
         let created = service.activate_project(&project.id).unwrap();
         assert_eq!(created, first.id.0);
-        assert_eq!(core.snapshot().channel, "general");
+        assert_eq!(core.snapshot(&ViewId::main()).channel, "general");
         assert!(service.create("Tests", "main_checkout", &created).unwrap_err().contains("Open a Git branch"));
         assert!(service.create("old-ui", "main_checkout", &first.id.0).unwrap_err().contains("Open a Git branch"));
         service.select(&first.id.0).unwrap();
-        assert_eq!(core.snapshot().channel, "general");
+        assert_eq!(core.snapshot(&ViewId::main()).channel, "general");
         let reopened = Store::open(&path).unwrap();
         let rows = reopened.channels_for_project(&project.id).unwrap();
         assert_eq!(rows.len(), 1);
@@ -1569,7 +1570,7 @@ mod tests {
         let service = Channels::new(restored.clone(), Arc::new(Mutex::new(reopened)), Handle::current(), launcher());
         service.restore().unwrap();
         service.select(&created).unwrap();
-        assert_eq!(restored.snapshot().channel, "general");
+        assert_eq!(restored.snapshot(&ViewId::main()).channel, "general");
     }
 
     #[tokio::test]
@@ -1684,7 +1685,7 @@ mod tests {
         }).unwrap();
         service.open_agent(&unrelated).unwrap();
         assert_eq!(service.open_branch("feature/persisted").unwrap(), branch_id.0);
-        assert_eq!(app_core.snapshot().channel, "Feature");
+        assert_eq!(app_core.snapshot(&ViewId::main()).channel, "Feature");
         assert_eq!(store.lock().unwrap().channel_agents(&branch_id).unwrap(), vec![agent_id.clone()]);
         service.update_channel_topic(&project_id, &branch_id, 0, "Keep the migrated branch history").unwrap();
         assert_eq!(store.lock().unwrap().messages_for_channel(&branch_id).unwrap().len(), 1);
@@ -1709,8 +1710,8 @@ mod tests {
         let reopened_store = Arc::new(Mutex::new(reopened));
         let reopened_service = Channels::new(reopened_core.clone(), reopened_store, Handle::current(), launcher());
         assert_eq!(reopened_service.activate_project(&project_id).unwrap(), branch_id.0);
-        assert_eq!(reopened_core.active_channel_id(), branch_id.0);
-        assert_eq!(reopened_core.snapshot().channel, "Feature");
+        assert_eq!(reopened_core.active_channel_id(&ViewId::main()), branch_id.0);
+        assert_eq!(reopened_core.snapshot(&ViewId::main()).channel, "Feature");
     }
 
     #[tokio::test]
@@ -1743,8 +1744,8 @@ mod tests {
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
         assert!(list_branch_tree(dir.path()).is_err(), "test project has no Git metadata");
         assert_eq!(service.select(&branch.id.0).unwrap(), ());
-        assert_eq!(core.active_channel_id(), branch.id.0);
-        assert_eq!(core.active_context().0, agent);
+        assert_eq!(core.active_channel_id(&ViewId::main()), branch.id.0);
+        assert_eq!(core.active_context(&ViewId::main()).0, agent);
         assert_eq!(store.lock().unwrap().project_channel_metadata(&branch.id).unwrap().unwrap().branch.as_deref(), Some("feature/x"));
         assert_eq!(store.lock().unwrap().load_channel(&branch.id).unwrap().project_id, Some(project.id));
     }
@@ -1805,7 +1806,7 @@ mod tests {
         let core = core(&general, dir.path());
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
         let id = service.create_text_channel(&project.id, "  Release Notes ").unwrap();
-        assert_eq!(core.active_channel_id(), id, "the new channel opens");
+        assert_eq!(core.active_channel_id(&ViewId::main()), id, "the new channel opens");
         assert!(core.has_channel(&id));
         let channels = service.list_project_channels(&project.id).unwrap();
         let text = channels.iter().find(|channel| channel.id == id).unwrap();
@@ -1843,7 +1844,7 @@ mod tests {
         assert_eq!(store.lock().unwrap().load_channel(&plans).unwrap().name, "release-notes");
         let listed = service.list_project_channels(&project.id).unwrap();
         assert_eq!(listed.iter().find(|channel| channel.id == plans.0).unwrap().name, "release-notes");
-        assert_eq!(core.snapshot().channels.iter().find(|channel| channel.id == plans.0).unwrap().name, "release-notes", "a loaded channel shows the new name");
+        assert_eq!(core.snapshot(&ViewId::main()).channels.iter().find(|channel| channel.id == plans.0).unwrap().name, "release-notes", "a loaded channel shows the new name");
         for name in ["NOTES", "General"] {
             assert_eq!(service.rename_text_channel(&project.id, &plans, name).unwrap_err(), "A channel with this name already exists.");
         }
@@ -1881,8 +1882,8 @@ mod tests {
         assert_eq!(store.lock().unwrap().load_channel(&ChannelId(id.clone())).unwrap().agent_id, new_agent);
         assert_eq!(store.lock().unwrap().load_channel(&unloaded.id).unwrap().agent_id, new_agent);
         assert_eq!(store.lock().unwrap().load_channel(&general.id).unwrap().agent_id, new_agent);
-        assert_eq!(core.active_channel_id(), id);
-        assert_eq!(core.active_context().0, new_agent, "the open text channel runs the new agent");
+        assert_eq!(core.active_channel_id(&ViewId::main()), id);
+        assert_eq!(core.active_context(&ViewId::main()).0, new_agent, "the open text channel runs the new agent");
         assert!(!core.has_channel(&unloaded.id.0), "a text channel that is not loaded starts when it opens");
         assert!(core.send_to(Some(&id), "new agent is ready".into()).is_ok());
         // The text channel now runs a response. The change waits, as it does for a general channel.
@@ -1973,25 +1974,25 @@ mod tests {
         };
         let (init, _) = launcher(&general).unwrap();
         let core = Arc::new(AppCore::new(init));
-        core.configure_targets(project.id.0.clone(), dir.path(), old_agent.0.clone());
+        core.configure_targets(&ViewId::main(), project.id.0.clone(), dir.path(), old_agent.0.clone());
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher);
         assert!(core.begin_channel_change(&general.id.0).is_ok());
-        assert!(!core.archive_started_for(Some(&general.id.0)), "archive cannot start while channel identity is changing");
+        assert!(!core.archive_started_for(&ViewId::main(), Some(&general.id.0)), "archive cannot start while channel identity is changing");
         core.end_channel_change(&general.id.0);
-        assert!(core.archive_started_for(Some(&general.id.0)));
+        assert!(core.archive_started_for(&ViewId::main(), Some(&general.id.0)));
         assert!(service.change_project_main_agent(&project.id, &new_agent).unwrap_err().contains("archive confirmation"), "channel identity cannot change while the archive worker is active");
         assert_eq!(store.lock().unwrap().project_main_agent(&project.id).unwrap(), Some(old_agent.clone()));
-        core.archive_finished(super::super::plan::ArchiveStep::NeedsConfirm(vec!["dirty worktree".into()]));
+        core.archive_finished(&ViewId::main(), super::super::plan::ArchiveStep::NeedsConfirm(vec!["dirty worktree".into()]));
         assert!(service.change_project_main_agent(&project.id, &new_agent).unwrap_err().contains("archive confirmation"));
         assert_eq!(store.lock().unwrap().load_channel(&general.id).unwrap().agent_id, old_agent);
-        assert!(core.archive_started_for(Some(&general.id.0)), "accepting an archive confirmation can restart the archive worker");
-        core.archive_finished(super::super::plan::ArchiveStep::Failed("simulated archive failure".into()));
+        assert!(core.archive_started_for(&ViewId::main(), Some(&general.id.0)), "accepting an archive confirmation can restart the archive worker");
+        core.archive_finished(&ViewId::main(), super::super::plan::ArchiveStep::Failed("simulated archive failure".into()));
         assert!(service.change_project_main_agent(&project.id, &new_agent).unwrap_err().contains("simulated launcher failure"));
         assert_eq!(store.lock().unwrap().load_channel(&general.id).unwrap().agent_id, new_agent);
-        assert!(core.snapshot().notice.unwrap_or_default().contains("Select this channel again to retry"));
+        assert!(core.snapshot(&ViewId::main()).notice.unwrap_or_default().contains("Select this channel again to retry"));
         assert!(core.send_to(Some(&general.id.0), "old agent must not accept this".into()).is_err());
         service.select(&general.id.0).unwrap();
-        assert_eq!(core.active_context().0, new_agent);
+        assert_eq!(core.active_context(&ViewId::main()).0, new_agent);
         assert!(!core.send_to(Some(&general.id.0), "new agent is ready".into()).is_err());
     }
 
@@ -2039,10 +2040,10 @@ mod tests {
         });
         let initial = launch(&first_general).unwrap().0;
         let core = Arc::new(AppCore::new(initial));
-        core.configure_targets(first.id.0.clone(), first_dir.path(), old.0.clone());
+        core.configure_targets(&ViewId::main(), first.id.0.clone(), first_dir.path(), old.0.clone());
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launch);
         service.select(&second_general.id.0).unwrap();
-        assert_eq!(core.active_channel_id(), second_general.id.0);
+        assert_eq!(core.active_channel_id(&ViewId::main()), second_general.id.0);
         assert!(core.has_channel(&first_general.id.0), "the first general remains parked");
         core.begin_agent_change(&old.0).unwrap();
         store.lock().unwrap().delete_agent(&old, discard_core::store::DeleteAgentOptions { delete_conversations: false, delete_private_memory: false }).unwrap();
@@ -2053,7 +2054,7 @@ mod tests {
         assert_eq!(store.lock().unwrap().load_channel(&first_general.id).unwrap().agent_id, first_replacement);
         assert_eq!(store.lock().unwrap().load_channel(&second_general.id).unwrap().agent_id, second_replacement);
         assert!(store.lock().unwrap().messages_for_channel(&first_general.id).unwrap().iter().any(|message| matches!(message.blocks.as_slice(), [discard_core::model::Block::Markdown { text }] if text == "retained general history")));
-        assert_eq!(core.active_context().0, second_replacement);
+        assert_eq!(core.active_context(&ViewId::main()).0, second_replacement);
         assert!(!core.channel_session_closed(&first_general.id.0));
         assert!(core.channel_session_closed(&second_general.id.0), "failed replacement stays closed and retryable");
         assert_eq!(receivers.lock().unwrap().len(), 3, "the failed channel has no live replacement receiver");
@@ -2077,7 +2078,7 @@ mod tests {
         let store = Arc::new(Mutex::new(store));
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
         service.select_canonical_branch(&project.id, "feature/shared", &archived.id).unwrap();
-        assert_eq!(core.active_channel_id(), archived.id.0);
+        assert_eq!(core.active_channel_id(&ViewId::main()), archived.id.0);
         assert!(!store.lock().unwrap().channel_archived(&archived.id).unwrap());
         assert!(store.lock().unwrap().channel_archived(&current.id).unwrap());
     }
@@ -2103,10 +2104,10 @@ mod tests {
         };
         let (init, _) = launch(&channel).unwrap();
         let core = Arc::new(AppCore::new(init));
-        core.configure_targets(project.id.0.clone(), dir.path(), agent.0.clone());
+        core.configure_targets(&ViewId::main(), project.id.0.clone(), dir.path(), agent.0.clone());
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launch);
         service.select_canonical_branch(&project.id, "feature", &channel.id).unwrap();
-        assert!(core.snapshot().composer_disabled, "canonical selection preserves archived-agent read-only state");
+        assert!(core.snapshot(&ViewId::main()).composer_disabled, "canonical selection preserves archived-agent read-only state");
         assert!(core.send_to(Some(&channel.id.0), "must not be sent".into()).is_err());
         assert!(matches!(receivers.lock().unwrap()[0].try_recv(), Err(mpsc::error::TryRecvError::Empty)));
     }
@@ -2168,8 +2169,8 @@ mod navigation_action_tests {
         };
         let (init, _) = launch(&general).unwrap();
         let core = Arc::new(AppCore::new(init));
-        core.configure_targets(project.id.0.clone(), &repo, agent.0.clone());
-        core.configure_read_marker(dir.path(), &general.id.0);
+        core.configure_targets(&ViewId::main(), project.id.0.clone(), &repo, agent.0.clone());
+        core.configure_read_marker(&ViewId::main(), dir.path(), &general.id.0);
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launch);
         service.activate_project(&project.id).unwrap();
         settle(&core).await;
@@ -2197,7 +2198,7 @@ mod navigation_action_tests {
         assert!(!muted(&r, &plans));
         r.service.set_channel_muted(&r.project.id, &plans, true).unwrap();
         assert!(muted(&r, &plans) && r.store.lock().unwrap().channel_muted(&plans).unwrap());
-        assert!(r.core.snapshot().channels.iter().find(|c| c.id == plans.0).unwrap().muted);
+        assert!(r.core.snapshot(&ViewId::main()).channels.iter().find(|c| c.id == plans.0).unwrap().muted);
         r.service.set_channel_muted(&r.project.id, &plans, false).unwrap();
         assert!(!muted(&r, &plans));
         // #general can be muted.
@@ -2219,7 +2220,7 @@ mod navigation_action_tests {
         // Forget the loaded state and load the channel again from storage.
         r.core.set_channel_muted(&plans.0, false);
         r.service.select(&plans.0).unwrap();
-        assert!(r.core.snapshot().channels.iter().find(|c| c.id == plans.0).unwrap().muted, "selection copies the saved flag");
+        assert!(r.core.snapshot(&ViewId::main()).channels.iter().find(|c| c.id == plans.0).unwrap().muted, "selection copies the saved flag");
     }
 
     #[tokio::test]
@@ -2233,11 +2234,11 @@ mod navigation_action_tests {
         assert!(!r.store.lock().unwrap().channel_archived(&notes).unwrap(), "a refusal changes nothing");
         r.idle(&notes.0);
         // The open channel archives, and #general opens.
-        assert_eq!(r.core.active_channel_id(), notes.0);
+        assert_eq!(r.core.active_channel_id(&ViewId::main()), notes.0);
         let outcome = r.service.archive_channel(&r.workspace, &r.project.id, &notes, false).unwrap();
         assert_eq!(outcome, super::super::dto::ArchiveChannelDto { archived: true, items: vec![] });
         assert!(r.store.lock().unwrap().channel_archived(&notes).unwrap());
-        assert_eq!(r.core.active_channel_id(), r.general.id.0, "the app opens #general of the same project");
+        assert_eq!(r.core.active_channel_id(&ViewId::main()), r.general.id.0, "the app opens #general of the same project");
         assert_eq!(r.service.archive_channel(&r.workspace, &r.project.id, &notes, false).unwrap_err(), "This channel is already archived.");
     }
 
@@ -2247,7 +2248,7 @@ mod navigation_action_tests {
         let notes = ChannelId(r.service.create_text_channel(&r.project.id, "notes").unwrap());
         r.service.select(&r.general.id.0).unwrap();
         assert!(r.service.archive_channel(&r.workspace, &r.project.id, &notes, false).unwrap().archived);
-        assert_eq!(r.core.active_channel_id(), r.general.id.0);
+        assert_eq!(r.core.active_channel_id(&ViewId::main()), r.general.id.0);
         assert!(r.service.select(&notes.0).is_ok(), "an archived channel stays readable");
     }
 
@@ -2282,7 +2283,7 @@ mod navigation_action_tests {
         assert!(std::path::Path::new(&path).join("a.txt").exists());
         let created = std::path::Path::new(&path).canonicalize().unwrap();
         settle(&r.core).await;
-        assert!(r.core.snapshot().branches.iter().any(|row| row.worktree.as_deref().is_some_and(|w| std::path::Path::new(w).canonicalize().ok().as_ref() == Some(&created))), "a branch refresh shows the new worktree");
+        assert!(r.core.snapshot(&ViewId::main()).branches.iter().any(|row| row.worktree.as_deref().is_some_and(|w| std::path::Path::new(w).canonicalize().ok().as_ref() == Some(&created))), "a branch refresh shows the new worktree");
         // The branch is checked out now, so a second request is refused.
         assert!(r.service.create_worktree(&r.workspace, &r.project.id, "", "feature", None).unwrap_err().contains("checked out"));
     }
@@ -2437,7 +2438,7 @@ mod navigation_action_tests {
         assert_eq!(r.git(&["rev-parse", "HEAD"]), head);
         assert_eq!(std::fs::read_to_string(r.repo.join("a.txt")).unwrap(), "edited\n");
         settle(&r.core).await;
-        assert!(r.core.snapshot().branches.iter().any(|row| row.label == "topic/new"), "a branch refresh lists the new branch");
+        assert!(r.core.snapshot(&ViewId::main()).branches.iter().any(|row| row.label == "topic/new"), "a branch refresh lists the new branch");
         assert!(r.service.create_branch(&r.project.id, "", "/not/a/worktree", "x").unwrap_err().contains("no longer available"));
     }
 

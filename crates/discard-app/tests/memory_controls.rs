@@ -1,4 +1,5 @@
 use discard_app::desktop::settings::memory::{memory_view, mutate, resolve_proposal, resume};
+use discard_app::desktop::view::ViewId;
 use discard_core::{
     agent::AgentConfig,
     capability::ApprovalPolicy,
@@ -441,7 +442,7 @@ fn runtime_memory_notification_refreshes_cards_without_changing_transcript_ids()
         agent: "Ada".into(),
         provider: "codex".into(),
     });
-    let before = core.snapshot().memory_rev;
+    let before = core.snapshot(&ViewId::main()).memory_rev;
     core.apply_channel(
         &channel.0,
         Update::MemoryChanges {
@@ -449,8 +450,8 @@ fn runtime_memory_notification_refreshes_cards_without_changing_transcript_ids()
             changes: vec![],
         },
     );
-    assert_eq!(core.snapshot().memory_rev, before + 1);
-    assert!(core.history_snapshot().messages.is_empty());
+    assert_eq!(core.snapshot(&ViewId::main()).memory_rev, before + 1);
+    assert!(core.history_snapshot(&ViewId::main()).messages.is_empty());
 }
 
 #[test]

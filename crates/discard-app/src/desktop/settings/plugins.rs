@@ -79,16 +79,16 @@ pub fn settings_plugin_modified_diff(context: tauri::State<'_, super::SettingsCo
 
 #[cfg(test)]
 mod notice_tests {
-    use super::super::super::core::{AppCore, CoreInit};
+    use super::super::super::{core::{AppCore, CoreInit}, view::ViewId};
     use discard_core::{model::ChannelId, ui_state::UiState};
     #[test]
     fn plugin_notice_can_be_shown_and_dismissed() {
         let (commands, _rx) = tokio::sync::mpsc::unbounded_channel();
         let core = AppCore::new(CoreInit { state: UiState::new(ChannelId::new(), vec![]), commands, project: "p".into(), channel: "c".into(), agent: "a".into(), provider: "p".into() });
         core.set_plugin_notice(Some("failed".into()));
-        assert!(core.snapshot().banners.problem_lines.contains(&"failed".into()));
+        assert!(core.snapshot(&ViewId::main()).banners.problem_lines.contains(&"failed".into()));
         core.set_plugin_notice(None);
-        assert!(core.snapshot().banners.problem_lines.is_empty());
+        assert!(core.snapshot(&ViewId::main()).banners.problem_lines.is_empty());
     }
 }
 

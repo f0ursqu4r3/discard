@@ -334,7 +334,7 @@ pub async fn settings_agent_delete(app: tauri::AppHandle, channels: tauri::State
         agents_changed(&app);
         use tauri::Emitter;
         let _ = app.emit("discard://conversations", ());
-        let _ = app.emit("discard://channel-details", core.active_channel_id());
+        let _ = app.emit("discard://channel-details", core.active_channel_id(&super::super::view::ViewId::main()));
         reconcile
     }).await.map_err(|e| e.to_string()).and_then(|result| result);
     guard_core.end_agent_change(&guard_id); result

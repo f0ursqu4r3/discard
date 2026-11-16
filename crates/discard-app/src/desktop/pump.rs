@@ -2,6 +2,7 @@
 use super::{
     core::AppCore,
     dto::{HistoryDto, SnapshotDto, ThreadHistoryDto},
+    view::ViewId,
 };
 use discard_core::ui_state::Update;
 use std::sync::Arc;
@@ -30,8 +31,9 @@ pub async fn pump_live(core: Arc<AppCore>, updates: UnboundedReceiver<Update>, e
 }
 async fn run(core: Arc<AppCore>, mut updates: UnboundedReceiver<Update>, emit: Arc<dyn Emit>, min_interval: Duration, keep_alive: bool) {
     let mut connected = true;
-    let channel = core.active_channel_id();
-    let generation = core.runtime_generation();
+    let view = ViewId::main();
+    let channel = core.active_channel_id(&view);
+    let generation = core.runtime_generation(&view);
     let mut last = tokio::time::Instant::now() - min_interval;
     let mut history_rev = 0;
     let mut thread_rev = (String::new(), 0);
@@ -42,20 +44,21 @@ async fn run(core: Arc<AppCore>, mut updates: UnboundedReceiver<Update>, emit: A
             update = updates.recv(), if connected => match update {
                 Some(update) => {
                     if core.apply_runtime(&channel, Some(generation), update) {
-                        let generation = core.request_branch_refresh();
+                        let generation = core.request_branch_refresh(&view);
                         let branch_core = core.clone();
-                        tokio::task::spawn_blocking(move || branch_core.refresh_branches(generation));
+                        let branch_view = view.clone();
+                        tokio::task::spawn_blocking(move || branch_core.refresh_branches(&branch_view, generation));
                     }
                     dirty = true;
                 }
                 None => {
-                    if dirty { emit_current(&core, &*emit, &mut history_rev, &mut thread_rev, &mut conversations_rev); }
+                    if dirty { emit_current(&core, &view, &*emit, &mut history_rev, &mut thread_rev, &mut conversations_rev); }
                     if keep_alive { connected = false; } else { break; }
                 }
             },
             _ = core.changed.notified() => { dirty = true; }
             _ = tokio::time::sleep_until(last + min_interval), if dirty => {
-                emit_current(&core, &*emit, &mut history_rev, &mut thread_rev, &mut conversations_rev);
+                emit_current(&core, &view, &*emit, &mut history_rev, &mut thread_rev, &mut conversations_rev);
                 last = tokio::time::Instant::now();
                 dirty = false;
             }
@@ -63,14 +66,14 @@ async fn run(core: Arc<AppCore>, mut updates: UnboundedReceiver<Update>, emit: A
     }
 }
 
-fn emit_current(core: &AppCore, emit: &dyn Emit, history_rev: &mut u64, thread_rev: &mut (String, u64), conversations_rev: &mut u64) {
-    let snapshot = core.snapshot();
+fn emit_current(core: &AppCore, view: &ViewId, emit: &dyn Emit, history_rev: &mut u64, thread_rev: &mut (String, u64), conversations_rev: &mut u64) {
+    let snapshot = core.snapshot(view);
     let conversations = core.conversations_rev();
     if conversations != *conversations_rev { *conversations_rev = conversations; emit.conversations(); }
     // Send the open thread's transcript once per revision. Closing the thread forgets the revision.
     match snapshot.open_thread.as_ref() {
         Some(open) if (open.channel_id.as_str(), open.history_rev) != (thread_rev.0.as_str(), thread_rev.1) => {
-            if let Some(history) = core.thread_history_snapshot().filter(|h| h.channel_id == open.channel_id && h.rev == open.history_rev) {
+            if let Some(history) = core.thread_history_snapshot(view).filter(|h| h.channel_id == open.channel_id && h.rev == open.history_rev) {
                 emit.thread_history(&history);
                 *thread_rev = (open.channel_id.clone(), open.history_rev);
             }
@@ -79,7 +82,7 @@ fn emit_current(core: &AppCore, emit: &dyn Emit, history_rev: &mut u64, thread_r
         None => *thread_rev = (String::new(), 0),
     }
     if snapshot.history_rev != *history_rev {
-        let history = core.history_snapshot();
+        let history = core.history_snapshot(view);
         if history.channel_id == snapshot.channel_id && history.rev == snapshot.history_rev { emit.history(&history); }
         *history_rev = snapshot.history_rev;
     }

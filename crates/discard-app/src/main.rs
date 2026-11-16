@@ -249,9 +249,9 @@ fn run_app(
     };
     let on_ready: desktop::channels::OnReady = Arc::new(move |core| {
         let project_core = Arc::downgrade(core);
-        plugin_memory.set_project_source(Arc::new(move || project_core.upgrade().and_then(|core| core.active_context().1)));
+        plugin_memory.set_project_source(Arc::new(move || project_core.upgrade().and_then(|core| core.active_context(&desktop::view::ViewId::main()).1)));
         let core = Arc::downgrade(core);
-        plugin_memory.set_active_source(Arc::new(move || discard_core::model::AgentId(core.upgrade().map(|core| core.active_agent_id()).unwrap_or_default())));
+        plugin_memory.set_active_source(Arc::new(move || discard_core::model::AgentId(core.upgrade().map(|core| core.active_agent_id(&desktop::view::ViewId::main())).unwrap_or_default())));
     });
     let (init, updates_rx) = if let Some(channel) = &startup_channel { launcher(channel)? } else {
         let (commands, _) = mpsc::unbounded_channel();

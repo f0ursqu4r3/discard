@@ -2,6 +2,7 @@
 use super::dto::*;
 use crate::plugin_memory::PluginMemory;
 use super::threads::ThreadRecord;
+use super::view::ViewId;
 use discard_core::model::{AgentId, Message, PostedSource, ThreadKind, ThreadState};
 use discard_core::approval::Decision;
 use discard_core::event::{AgentStatus, ApprovalId};
@@ -12,7 +13,7 @@ use discard_core::branch_tree::{TreeRow, RowKind, current_row};
 use discard_core::window_state::{Bounds, PanelWidths, StateStore};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, mpsc::UnboundedSender};
@@ -66,18 +67,71 @@ pub struct CommandChannel { pub turn_running: bool, pub archived: bool, pub is_t
 
 fn channel_state<'a>(s: &'a State, id: &str) -> Option<&'a ChannelState> { s.channels.get(id) }
 
-/// The selected channel. With no channel selected, an empty placeholder sits in the pool under the empty key.
-fn selected(s: &State) -> Option<&ChannelState> { s.channels.get(&s.selected) }
-fn selected_mut(s: &mut State) -> Option<&mut ChannelState> { s.channels.get_mut(&s.selected) }
-/// The selected channel. The pool always holds it.
-fn current(s: &State) -> &ChannelState { selected(s).expect("the selected channel is in the pool") }
-fn current_mut(s: &mut State) -> &mut ChannelState { selected_mut(s).expect("the selected channel is in the pool") }
-/// Give the selected channel a new ID. Its key in the pool follows the ID.
-fn set_selected_id(s: &mut State, id: &str) {
-    let mut channel = s.channels.remove(&s.selected).expect("the selected channel is in the pool");
+/// What a call for a view that does not exist returns. A call never creates a view.
+const WINDOW_CLOSED: &str = "This window is closed.";
+
+/// The selected channel of a view. With no channel selected, the placeholder of the view stands in. The pool
+/// holds every other selected channel.
+fn current_of<'a>(s: &'a State, view: &'a View) -> &'a ChannelState {
+    if view.selected.is_empty() { &view.placeholder } else { s.channels.get(&view.selected).expect("the selected channel is in the pool") }
+}
+/// The selected channel of a view. The caller checked that the view exists.
+fn current<'a>(s: &'a State, view: &ViewId) -> &'a ChannelState { current_of(s, s.views.get(view).expect("the view exists")) }
+fn current_mut<'a>(s: &'a mut State, view: &ViewId) -> &'a mut ChannelState {
+    let State { views, channels, .. } = s;
+    let view = views.get_mut(view).expect("the view exists");
+    if view.selected.is_empty() { &mut view.placeholder } else { channels.get_mut(&view.selected).expect("the selected channel is in the pool") }
+}
+/// Whether a view shows the channel as its selected channel.
+fn is_shown(s: &State, channel: &str) -> bool { !channel.is_empty() && s.views.values().any(|v| v.selected == channel) }
+/// A loaded channel that a view shows as its selected channel.
+fn shown_channel<'a>(s: &'a State, channel: &str) -> Option<&'a ChannelState> { channel_state(s, channel).filter(|_| is_shown(s, channel)) }
+fn shown_channel_mut<'a>(s: &'a mut State, channel: &str) -> Option<&'a mut ChannelState> {
+    let shown = is_shown(s, channel);
+    s.channels.get_mut(channel).filter(|_| shown)
+}
+/// Whether the app-wide guard or the navigation guard of a view blocks work in the view.
+fn view_busy(s: &State, view: &View) -> bool { s.busy || view.navigation_busy }
+/// Whether the app-wide guard or the navigation guard of a view that shows `channel` blocks work in it.
+fn busy_for(s: &State, channel: &str) -> bool { s.busy || s.views.values().any(|v| v.navigation_busy && v.selected == channel) }
+/// Whether a view shows the thread beside its selected channel.
+fn thread_open(s: &State, thread: &str) -> bool { s.views.values().any(|v| v.open_thread.as_deref() == Some(thread)) }
+/// Close the thread panel of every view that shows `thread`.
+fn close_open_thread(s: &mut State, thread: &str) {
+    let mut closed = false;
+    for view in s.views.values_mut().filter(|v| v.open_thread.as_deref() == Some(thread)) { view.open_thread = None; closed = true; }
+    if closed { s.thread_rev += 1; }
+}
+/// Close the thread panel of every view whose thread left the pool.
+fn close_missing_threads(s: &mut State) {
+    let State { views, channels, thread_rev, .. } = s;
+    for view in views.values_mut().filter(|v| v.open_thread.as_ref().is_some_and(|thread| !channels.contains_key(thread))) { view.open_thread = None; *thread_rev += 1; }
+}
+/// An empty channel for a view that selects no channel.
+fn empty_channel() -> ChannelState {
+    let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+    ChannelState::new(CoreInit { state: UiState::new(discard_core::model::ChannelId(String::new()), vec![]), commands, project: String::new(), channel: String::new(), agent: String::new(), provider: String::new() })
+}
+/// Give the selected channel of a view a new ID. Its key in the pool follows the ID, and so does the selection of
+/// every view that shows it. A view with no channel selected moves its placeholder into the pool.
+fn set_selected_id(s: &mut State, view: &ViewId, id: &str) {
+    let old = s.views.get(view).expect("the view exists").selected.clone();
+    let mut channel = if old.is_empty() { std::mem::replace(&mut s.views.get_mut(view).expect("the view exists").placeholder, empty_channel()) } else { s.channels.remove(&old).expect("the selected channel is in the pool") };
+    debug_assert!(!s.channels.contains_key(id), "a channel ID is in the pool once");
     channel.channel_id = id.to_owned();
     s.channels.insert(id.to_owned(), channel);
-    s.selected = id.to_owned();
+    for other in s.views.values_mut().filter(|v| !old.is_empty() && v.selected == old) { other.selected = id.to_owned(); }
+    s.views.get_mut(view).expect("the view exists").selected = id.to_owned();
+}
+/// Copy the saved layout of the main window to the main view.
+fn sync_main_layout(s: &mut State) {
+    let layout = s.window.state();
+    if let Some(main) = s.views.get_mut(&ViewId::main()) { main.panels = layout.panels; main.member_list_visible = layout.member_list_visible; }
+}
+/// Panel widths in the range that the saved state allows.
+fn clamped_panels(panels: PanelWidths) -> PanelWidths {
+    let clamp = |width: f32| if width.is_finite() { width.clamp(discard_core::window_state::MIN_PANEL_WIDTH, discard_core::window_state::MAX_PANEL_WIDTH) } else { discard_core::window_state::DEFAULT_PANEL_WIDTH };
+    PanelWidths { channel_list: clamp(panels.channel_list), member_list: clamp(panels.member_list) }
 }
 
 fn agent_status_name(status: AgentStatus) -> &'static str {
@@ -155,8 +209,8 @@ fn thread_blocked(s: &State, thread: &ChannelState) -> bool {
     thread.read_only || thread.archived || thread.thread_parent.as_deref().and_then(|parent| channel_state(s, parent)).is_some_and(|parent| parent.archived)
 }
 
-fn open_thread_dto(s: &State) -> Option<OpenThreadDto> {
-    let id = s.open_thread.as_ref()?;
+fn open_thread_dto(s: &State, view: &View) -> Option<OpenThreadDto> {
+    let id = view.open_thread.as_ref()?;
     let channel = s.channels.get(id)?;
     let record = s.threads.get(id)?;
     let ui = &channel.ui;
@@ -186,8 +240,8 @@ fn refresh_thread(s: &mut State, thread: &str) {
 
 /// Tell the views that show a thread that its record changed: the parent transcript with the chip, the open panel.
 fn touch_thread(s: &mut State, parent: &str, thread: &str) {
-    if s.open_thread.as_deref() == Some(thread) { s.thread_rev += 1; }
-    if s.selected == parent { s.history_rev += 1; }
+    if thread_open(s, thread) { s.thread_rev += 1; }
+    if is_shown(s, parent) { s.history_rev += 1; }
 }
 
 /// Add a thread message to its parent channel as a reference row, once. Returns whether the parent changed.
@@ -195,7 +249,7 @@ fn post_into_parent(s: &mut State, thread: &str, reference: Message, source: Pos
     let Some(parent_id) = s.channels.get(thread).and_then(|t| t.thread_parent.clone()) else { return false };
     let author = s.channels.get(thread).and_then(|t| t.ui.authors().get(&source.source_message_id).cloned());
     let marker = s.window.last_read(&parent_id).map(str::to_owned);
-    let is_active = s.selected == parent_id;
+    let is_active = is_shown(s, &parent_id);
     let Some(parent) = s.channels.get_mut(&parent_id) else { return false };
     parent.posted.insert(reference.id.clone(), source);
     let added = !parent.ui.history().iter().any(|m| m.id == reference.id);
@@ -205,17 +259,13 @@ fn post_into_parent(s: &mut State, thread: &str, reference: Message, source: Pos
         parent.new_anchor = new_divider_anchor(parent.ui.history(), marker.as_deref(), parent.new_anchor.as_deref(), false);
     }
     if is_active { s.history_rev += 1; }
-    if s.open_thread.as_deref() == Some(thread) { s.thread_rev += 1; }
+    if thread_open(s, thread) { s.thread_rev += 1; }
     added
 }
 
-/// The conversation a command for `channel` acts on: the selected channel, or a loaded thread.
-fn command_target<'a>(s: &'a State, channel: Option<&str>) -> Option<&'a ChannelState> {
-    match channel {
-        None => Some(current(s)),
-        Some(id) if id == s.selected => Some(current(s)),
-        Some(id) => s.channels.get(id).filter(|c| c.thread_parent.is_some()),
-    }
+/// The conversation a command for `channel` acts on: a channel that a view shows, or a loaded thread.
+fn command_target<'a>(s: &'a State, channel: &str) -> Option<&'a ChannelState> {
+    channel_state(s, channel).filter(|c| c.thread_parent.is_some() || is_shown(s, channel))
 }
 
 /// What an update means for the sub-agent tasks and thread records.
@@ -285,35 +335,65 @@ impl ChannelState {
             archive: None, archived: false, archive_busy: false, read_only: false, muted: false, thread_parent: None, posted: HashMap::new() }
     }
 }
-struct State {
+/// The selection of one app window. The views share the channel pool.
+struct View {
     project: String,
-    project_busy: bool,
-    changing_agents: HashSet<String>,
-    changing_channels: HashSet<String>,
-    runtime_generation: u64,
-    /// Every loaded channel and thread, by channel ID. While no channel is selected, an empty placeholder holds the
-    /// selected slot under the empty key.
-    channels: BTreeMap<String, ChannelState>,
+    project_id: String,
+    project_path: String,
     /// The ID of the selected channel. Empty when no channel is selected.
     selected: String,
-    rev: u64,
-    history_rev: u64,
-    memory_rev: u64,
-    /// Every thread the app knows, by thread channel ID. Loaded threads keep their record current.
-    threads: BTreeMap<String, ThreadRecord>,
+    /// The empty channel that this view shows while it selects no channel. A write to it shows in this view only.
+    placeholder: ChannelState,
     /// The thread shown beside the selected channel.
     open_thread: Option<String>,
-    thread_rev: u64,
-    theme: ThemeDto,
-    window: StateStore,
     branches: Vec<TreeRow>,
     branch_repositories: Vec<String>,
     repositories: Vec<RepositoryDto>,
     repositories_loading: bool,
     current_branch: Option<usize>,
     collapsed: HashSet<String>,
-    project_id: String,
-    project_path: String,
+    branch_source: Option<BranchSource>,
+    branch_generation: u64,
+    /// Background branch refreshes of this view that have not finished.
+    branch_refreshes_pending: usize,
+    /// A project navigation of this view runs. It blocks the selection of this view only.
+    navigation_busy: bool,
+    panels: PanelWidths,
+    member_list_visible: bool,
+    /// The plugin slots that this view rendered last. A shared handle: rendering runs without the state lock.
+    slots: Arc<Mutex<super::slots::SlotCache>>,
+}
+impl View {
+    fn new(project: String, placeholder: ChannelState) -> Self {
+        Self {
+            project, project_id: String::new(), project_path: String::new(), selected: String::new(), placeholder, open_thread: None,
+            branches: vec![], branch_repositories: vec![], repositories: vec![], repositories_loading: true, current_branch: None, collapsed: HashSet::new(),
+            branch_source: None, branch_generation: 0, branch_refreshes_pending: 0, navigation_busy: false,
+            panels: PanelWidths::default(), member_list_visible: true, slots: Arc::new(Mutex::new(super::slots::SlotCache::default())),
+        }
+    }
+    /// What a snapshot reads for a view that does not exist. It is never stored.
+    fn closed() -> Self { Self::new(String::new(), empty_channel()) }
+}
+struct State {
+    /// The app-wide guard of changes that touch shared data: a project change, a write approval.
+    busy: bool,
+    changing_agents: HashSet<String>,
+    changing_channels: HashSet<String>,
+    runtime_generation: u64,
+    /// Every loaded channel and thread, by channel ID. The key is never empty: a view that selects no channel holds
+    /// its own placeholder.
+    channels: BTreeMap<String, ChannelState>,
+    /// The views by window label.
+    views: BTreeMap<ViewId, View>,
+    rev: u64,
+    history_rev: u64,
+    memory_rev: u64,
+    /// Every thread the app knows, by thread channel ID. Loaded threads keep their record current.
+    threads: BTreeMap<String, ThreadRecord>,
+    thread_rev: u64,
+    theme: ThemeDto,
+    window: StateStore,
     confirm: Option<super::plan::Confirm>,
     plugin_notice: Option<String>,
 }
@@ -328,12 +408,7 @@ pub struct AppCore {
     state: Mutex<State>,
     plugins: Mutex<Option<Arc<PluginService>>>,
     load_report: Mutex<LoadReport>,
-    slot_cache: Mutex<super::slots::SlotCache>,
     plugin_signature: Mutex<String>,
-    branch_source: Mutex<Option<BranchSource>>,
-    branch_generation: AtomicU64,
-    /// Background branch refreshes that have not finished.
-    branch_refreshes_pending: AtomicUsize,
     /// Moves when a thread list that the webview reads from storage changed without a command of the webview.
     conversations_rev: AtomicU64,
     sub_agents: super::delegation::SubAgents,
@@ -341,34 +416,27 @@ pub struct AppCore {
 }
 impl AppCore {
     pub fn new(init: CoreInit) -> Self {
-        let project = init.project.clone();
         let first = ChannelState::new(init);
         let selected = first.channel_id.clone();
+        let mut main = View::new(first.project_name.clone(), empty_channel());
+        let mut channels = BTreeMap::new();
+        // A first channel with no ID is the placeholder of the main view.
+        if selected.is_empty() { main.placeholder = first; } else { main.selected = selected.clone(); channels.insert(selected, first); }
         Self {
             state: Mutex::new(State {
-                project,
-                project_busy: false,
+                busy: false,
                 changing_agents: HashSet::new(),
                 changing_channels: HashSet::new(),
                 runtime_generation: 0,
-                channels: BTreeMap::from([(selected.clone(), first)]),
-                selected,
+                channels,
+                views: BTreeMap::from([(ViewId::main(), main)]),
                 window: StateStore::open(Path::new("")),
-                branches: vec![],
-                branch_repositories: vec![],
-                repositories: vec![],
-                repositories_loading: true,
-                current_branch: None,
-                collapsed: HashSet::new(),
-                project_id: String::new(),
-                project_path: String::new(),
                 confirm: None,
                 plugin_notice: None,
                 rev: 0,
                 history_rev: 0,
                 memory_rev: 0,
                 threads: BTreeMap::new(),
-                open_thread: None,
                 thread_rev: 0,
                 theme: ThemeDto {
                     mono_font: None,
@@ -386,11 +454,7 @@ impl AppCore {
             }),
             plugins: Mutex::new(None),
             load_report: Mutex::new(LoadReport::default()),
-            slot_cache: Mutex::new(super::slots::SlotCache::default()),
             plugin_signature: Mutex::new(String::new()),
-            branch_source: Mutex::new(None),
-            branch_generation: AtomicU64::new(0),
-            branch_refreshes_pending: AtomicUsize::new(0),
             conversations_rev: AtomicU64::new(0),
             sub_agents: super::delegation::SubAgents::default(),
             changed: Notify::new(),
@@ -401,40 +465,43 @@ impl AppCore {
     /// Moves when the engine followed a thread or a followed sub-agent thread changed state. The pump tells the
     /// webview (`discard://conversations`) so lists that it reads from storage load again.
     pub fn conversations_rev(&self) -> u64 { self.conversations_rev.load(Ordering::SeqCst) }
-    pub fn clear_project(&self) {
+    /// The labels of the views, in order.
+    pub fn view_ids(&self) -> Vec<ViewId> { self.state.lock().unwrap_or_else(|e| e.into_inner()).views.keys().cloned().collect() }
+    pub fn has_view(&self, view: &ViewId) -> bool { self.state.lock().unwrap_or_else(|e| e.into_inner()).views.contains_key(view) }
+    pub fn clear_project(&self, view: &ViewId) {
+        if !self.has_view(view) { return; }
         let (commands, _) = tokio::sync::mpsc::unbounded_channel();
         let project = discard_core::model::Project { id: discard_core::model::ProjectId(String::new()), name: String::new(), path: String::new() };
         let channel = discard_core::model::Channel { id: discard_core::model::ChannelId(String::new()), project_id: None, name: String::new(), agent_id: AgentId(String::new()), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout };
-        self.replace_project(CoreInit { state: UiState::new(channel.id.clone(), vec![]), commands, project: String::new(), channel: String::new(), agent: String::new(), provider: String::new() }, &project, &channel);
-        *self.branch_source.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.replace_project(view, CoreInit { state: UiState::new(channel.id.clone(), vec![]), commands, project: String::new(), channel: String::new(), agent: String::new(), provider: String::new() }, &project, &channel);
+        if let Some(target) = self.state.lock().unwrap_or_else(|e| e.into_inner()).views.get_mut(view) { target.branch_source = None; }
         self.clear_slots();
     }
     /// Browse projects independently of the active conversation.
-    pub fn select_sidebar_project(&self, project: Option<&discard_core::model::Project>) {
+    pub fn select_sidebar_project(&self, view: &ViewId, project: Option<&discard_core::model::Project>) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(v) = s.views.get_mut(view) else { return };
         // The same project keeps its rows. A refresh replaces them in one step.
-        let same = project.is_some_and(|p| p.id.0 == s.project_id && p.path == s.project_path);
-        s.project = project.map(|p| p.name.clone()).unwrap_or_default();
-        s.project_id = project.map(|p| p.id.0.clone()).unwrap_or_default();
-        s.project_path = project.map(|p| p.path.clone()).unwrap_or_default();
-        if same {
-            self.branch_generation.fetch_add(1, Ordering::SeqCst);
-            s.rev += 1;
-            self.changed.notify_one();
-            return;
+        let same = project.is_some_and(|p| p.id.0 == v.project_id && p.path == v.project_path);
+        v.project = project.map(|p| p.name.clone()).unwrap_or_default();
+        v.project_id = project.map(|p| p.id.0.clone()).unwrap_or_default();
+        v.project_path = project.map(|p| p.path.clone()).unwrap_or_default();
+        if !same {
+            v.branches.clear(); v.branch_repositories.clear(); v.repositories.clear(); v.repositories_loading = project.is_some();
+            v.current_branch = None;
+            v.collapsed.clear();
         }
-        s.branches.clear(); s.branch_repositories.clear(); s.repositories.clear(); s.repositories_loading = project.is_some();
-        s.current_branch = None;
-        s.collapsed.clear();
-        self.branch_generation.fetch_add(1, Ordering::SeqCst);
+        v.branch_generation += 1;
         s.rev += 1;
         self.changed.notify_one();
     }
 
+    /// Show the new name of a project in every view that shows it.
     pub fn update_project_name(&self, project_id: &str, name: &str) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if s.project_id == project_id {
-            s.project = name.to_owned();
+        let mut changed = false;
+        for v in s.views.values_mut().filter(|v| v.project_id == project_id) { v.project = name.to_owned(); changed = true; }
+        if changed {
             s.rev += 1;
             self.changed.notify_one();
         }
@@ -446,13 +513,14 @@ impl AppCore {
         s.channels.get(id).is_some_and(|c| c.ui.turn_running())
     }
     pub fn has_channel(&self, id: &str) -> bool { self.state.lock().unwrap_or_else(|e| e.into_inner()).channels.contains_key(id) }
-    /// The channels and threads that the pool holds. The no-channel placeholder does not count.
-    pub fn loaded_channel_count(&self) -> usize { self.state.lock().unwrap_or_else(|e| e.into_inner()).channels.keys().filter(|id| !id.is_empty()).count() }
+    /// The channels and threads that the pool holds. Loaded thread channels count. The placeholder of a view that
+    /// selects no channel does not.
+    pub fn loaded_channel_count(&self) -> usize { self.state.lock().unwrap_or_else(|e| e.into_inner()).channels.len() }
     pub fn agent_channel_ids(&self, id: &str) -> Vec<String> {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut ids: Vec<String> = s.channels.values().filter(|c| c.agent_id == id).map(|c| c.channel_id.clone()).collect();
-        // The selected channel comes first, then the others by ID.
-        ids.sort_by_key(|channel| *channel != s.selected);
+        // The channels that a view shows come first, then the others by ID.
+        ids.sort_by_key(|channel| !is_shown(&s, channel));
         ids
     }
     pub fn channel_session_closed(&self, id: &str) -> bool {
@@ -504,7 +572,7 @@ impl AppCore {
     /// The project-change guard blocks sends until fresh folder-bound runtimes are installed.
     pub fn invalidate_project_channels(&self, id: &discard_core::model::ProjectId) -> Result<(), String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if !s.project_busy { return Err("Begin the project change before reloading its sessions.".into()); }
+        if !s.busy { return Err("Begin the project change before reloading its sessions.".into()); }
         if s.channels.values().any(|c| c.project_id.as_ref() == Some(id) && (c.ui.turn_running() || c.archive_busy)) {
             return Err("Stop this project's responses before restarting its sessions.".into());
         }
@@ -544,94 +612,121 @@ impl AppCore {
     pub fn remove_agent_channels(&self, id: &str) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let removed: HashSet<String> = s.channels.iter().filter(|(_, c)| c.agent_id == id).map(|(channel, _)| channel.clone()).collect();
-        let removed_active = current(&s).agent_id == id;
+        let affected: Vec<ViewId> = s.views.iter().filter(|(view, _)| current(&s, view).agent_id == id).map(|(view, _)| view.clone()).collect();
         s.channels.retain(|_, c| c.agent_id != id);
         {
             let st = &mut *s;
             st.threads.retain(|thread, record| !removed.contains(thread) && !removed.contains(&record.parent));
             st.channels.retain(|thread, c| c.thread_parent.is_none() || st.threads.contains_key(thread));
         }
-        if s.open_thread.as_ref().is_some_and(|thread| !s.channels.contains_key(thread)) { s.open_thread = None; s.thread_rev += 1; }
-        if removed_active {
-            let (commands, _) = tokio::sync::mpsc::unbounded_channel();
-            let placeholder = ChannelState::new(CoreInit { state: UiState::new(discard_core::model::ChannelId(String::new()), vec![]), commands, project: String::new(), channel: String::new(), agent: String::new(), provider: String::new() });
-            s.selected = String::new();
-            s.channels.insert(String::new(), placeholder);
-            let _ = s.window.set_selected_conversation(None);
+        close_missing_threads(&mut s);
+        for view in &affected {
+            let target = s.views.get_mut(view).expect("the view exists");
+            target.selected = String::new();
+            target.placeholder = empty_channel();
+        }
+        if !affected.is_empty() {
+            if affected.iter().any(ViewId::is_main) { let _ = s.window.set_selected_conversation(None); }
             s.history_rev += 1;
         }
         s.rev += 1; drop(s);
-        if removed_active { self.clear_branch_source(); }
+        for view in &affected { self.clear_branch_source(view); }
         self.changed.notify_one();
     }
-    pub fn clear_branch_source(&self) {
-        *self.branch_source.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        self.branch_generation.fetch_add(1, Ordering::SeqCst);
-        self.set_branches(vec![], None);
+    pub fn clear_branch_source(&self, view: &ViewId) {
+        {
+            let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(v) = s.views.get_mut(view) else { return };
+            v.branch_source = None;
+            v.branch_generation += 1;
+        }
+        self.set_branches(view, vec![], None);
     }
-    pub fn current_project(&self) -> discard_core::model::Project {
+    pub fn current_project(&self, view: &ViewId) -> discard_core::model::Project {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        discard_core::model::Project { id: discard_core::model::ProjectId(s.project_id.clone()), name: s.project.clone(), path: s.project_path.clone() }
+        let (id, name, path) = s.views.get(view).map(|v| (v.project_id.clone(), v.project.clone(), v.project_path.clone())).unwrap_or_default();
+        discard_core::model::Project { id: discard_core::model::ProjectId(id), name, path }
     }
-    pub fn replace_project(&self, init: CoreInit, project: &discard_core::model::Project, channel: &discard_core::model::Channel) {
+    /// Show `project` and `channel` in a view. The channels that other views show stay in the pool.
+    pub fn replace_project(&self, view: &ViewId, init: CoreInit, project: &discard_core::model::Project, channel: &discard_core::model::Channel) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !s.views.contains_key(view) { return; }
         s.runtime_generation += 1;
         let mut next = ChannelState::new(init);
         next.runtime_generation = s.runtime_generation;
         next.channel_id = channel.id.0.clone(); next.agent_id = channel.agent_id.0.clone(); next.mode = channel.workspace_mode; next.project_id = channel.project_id.clone();
-        s.project = project.name.clone(); s.project_id = project.id.0.clone(); s.project_path = project.path.clone();
-        s.channels.clear(); s.channels.insert(channel.id.0.clone(), next); s.selected = channel.id.0.clone();
-        s.branches.clear(); s.branch_repositories.clear(); s.repositories.clear(); s.repositories_loading = false; s.collapsed.clear(); s.current_branch = None;
-        s.threads.clear();
-        if s.open_thread.take().is_some() { s.thread_rev += 1; }
-        if let Some(marker) = startup_marker(current(&s).ui.history(), s.window.last_read(&channel.id.0)) { let _ = s.window.set_last_read(&channel.id.0, &marker); }
-        let anchor = new_divider_anchor(current(&s).ui.history(), s.window.last_read(&channel.id.0), None, false);
-        current_mut(&mut s).new_anchor = anchor;
+        let kept: HashSet<String> = s.views.iter().filter(|(other, _)| *other != view).map(|(_, v)| v.selected.clone()).collect();
+        s.channels.retain(|id, c| kept.contains(id) || c.thread_parent.as_ref().is_some_and(|parent| kept.contains(parent)));
+        s.threads.retain(|_, record| kept.contains(&record.parent));
+        {
+            let st = &mut *s;
+            let target = st.views.get_mut(view).expect("the view exists");
+            target.project = project.name.clone(); target.project_id = project.id.0.clone(); target.project_path = project.path.clone();
+            target.selected = channel.id.0.clone();
+            target.branches.clear(); target.branch_repositories.clear(); target.repositories.clear(); target.repositories_loading = false; target.collapsed.clear(); target.current_branch = None;
+            target.branch_generation += 1;
+            if target.open_thread.take().is_some() { st.thread_rev += 1; }
+        }
+        if channel.id.0.is_empty() { s.views.get_mut(view).expect("the view exists").placeholder = next; } else { s.channels.insert(channel.id.0.clone(), next); }
+        close_missing_threads(&mut s);
+        if let Some(marker) = startup_marker(current(&s, view).ui.history(), s.window.last_read(&channel.id.0)) { let _ = s.window.set_last_read(&channel.id.0, &marker); }
+        let anchor = new_divider_anchor(current(&s, view).ui.history(), s.window.last_read(&channel.id.0), None, false);
+        current_mut(&mut s, view).new_anchor = anchor;
         s.rev += 1; s.history_rev += 1;
-        self.branch_generation.fetch_add(1, Ordering::SeqCst);
         self.changed.notify_one();
     }
+    /// Take the app-wide guard for a write approval in a channel that a view shows.
     pub fn begin_write_approval(&self, channel: &str) -> Result<(), String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if s.selected != channel { return Err("Open this channel before approving.".into()); }
-        let active = current(&s);
+        let Some(active) = shown_channel(&s, channel) else { return Err("Open this channel before approving.".into()) };
         if active.ui.turn_running() { return Err("Wait for the current response to finish.".into()); }
-        if s.project_busy || active.archive_busy || active.archive.is_some() || s.confirm.is_some() || active.read_only || active.archived {
+        if busy_for(&s, channel) || active.archive_busy || active.archive.is_some() || s.confirm.is_some() || active.read_only || active.archived {
             return Err("Finish the open operation before approving.".into());
         }
-        s.project_busy = true; s.rev += 1; self.changed.notify_one(); Ok(())
+        s.busy = true; s.rev += 1; self.changed.notify_one(); Ok(())
     }
 
+    /// Take the app-wide guard. Refused while any view navigates, because a project change reloads shared sessions.
     pub fn begin_project_change(&self) -> Result<(), String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let active = current(&s);
-        if s.project_busy || active.archive_busy || active.archive.is_some() || s.confirm.is_some() || s.channels.values().any(|c| c.ui.turn_running()) { return Err("Stop all agents and finish pending confirmations before changing projects.".into()); }
-        s.project_busy = true; s.rev += 1; self.changed.notify_one(); Ok(())
+        if s.busy || s.views.values().any(|v| v.navigation_busy) || s.channels.values().any(|c| c.archive_busy || c.archive.is_some()) || s.confirm.is_some() || s.channels.values().any(|c| c.ui.turn_running()) { return Err("Stop all agents and finish pending confirmations before changing projects.".into()); }
+        s.busy = true; s.rev += 1; self.changed.notify_one(); Ok(())
     }
 
-    /// Project selection preserves the transports of every loaded channel, including running turns.
-    pub fn begin_project_navigation(&self) -> Result<(), String> {
+    /// Project selection preserves the transports of every loaded channel, including running turns. It takes the
+    /// navigation guard of one view, so the other views stay free.
+    pub fn begin_project_navigation(&self, view: &ViewId) -> Result<(), String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let active = current(&s);
-        if s.project_busy || active.archive_busy || active.archive.is_some() || s.confirm.is_some() {
+        let Some(v) = s.views.get(view) else { return Err(WINDOW_CLOSED.into()) };
+        let active = current_of(&s, v);
+        if view_busy(&s, v) || active.archive_busy || active.archive.is_some() || s.confirm.is_some() {
             return Err("Finish the open confirmation before switching projects.".into());
         }
-        s.project_busy = true;
+        s.views.get_mut(view).expect("the view exists").navigation_busy = true;
         s.rev += 1;
         self.changed.notify_one();
         Ok(())
     }
+    pub fn end_project_navigation(&self, view: &ViewId) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(v) = s.views.get_mut(view) else { return };
+        v.navigation_busy = false;
+        s.rev += 1; self.changed.notify_one();
+    }
     pub fn end_project_change(&self) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        s.project_busy = false; s.rev += 1; self.changed.notify_one();
+        s.busy = false; s.rev += 1; self.changed.notify_one();
     }
-    pub fn active_channel_id(&self) -> String { self.state.lock().unwrap_or_else(|e| e.into_inner()).selected.clone() }
-    pub fn active_context(&self) -> (AgentId, Option<discard_core::model::ProjectId>) {
+    /// The ID of the channel that a view selects. `None` when the view does not exist.
+    fn selected_of(&self, view: &ViewId) -> Option<String> { self.state.lock().unwrap_or_else(|e| e.into_inner()).views.get(view).map(|v| v.selected.clone()) }
+    pub fn active_channel_id(&self, view: &ViewId) -> String { self.selected_of(view).unwrap_or_default() }
+    pub fn active_context(&self, view: &ViewId) -> (AgentId, Option<discard_core::model::ProjectId>) {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let active = current(&state);
+        let Some(v) = state.views.get(view) else { return (AgentId(String::new()), None) };
+        let active = current_of(&state, v);
         (AgentId(active.agent_id.clone()), active.project_id.clone())
     }
-    pub fn active_agent_id(&self) -> String { current(&self.state.lock().unwrap_or_else(|e| e.into_inner())).agent_id.clone() }
+    pub fn active_agent_id(&self, view: &ViewId) -> String { self.active_context(view).0.0 }
     pub fn any_running(&self) -> bool {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.channels.values().any(|c| c.ui.turn_running())
@@ -659,41 +754,49 @@ impl AppCore {
         s.rev += 1;
         self.changed.notify_one();
     }
-    pub fn can_switch(&self) -> Result<(), String> { self.can_switch_inner(false) }
-    pub(crate) fn can_switch_for_project(&self) -> Result<(), String> { self.can_switch_inner(true) }
-    fn can_switch_inner(&self, project_change: bool) -> Result<(), String> {
+    pub fn can_switch(&self, view: &ViewId) -> Result<(), String> { self.can_switch_inner(view, false) }
+    pub(crate) fn can_switch_for_project(&self, view: &ViewId) -> Result<(), String> { self.can_switch_inner(view, true) }
+    fn can_switch_inner(&self, view: &ViewId, project_change: bool) -> Result<(), String> {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let active = current(&s);
-        if (s.project_busy && !project_change) || active.archive_busy || active.archive.is_some() || s.confirm.is_some() { Err("Finish the open confirmation before switching channels.".into()) } else { Ok(()) }
+        let Some(v) = s.views.get(view) else { return Err(WINDOW_CLOSED.into()) };
+        let active = current_of(&s, v);
+        if (view_busy(&s, v) && !project_change) || active.archive_busy || active.archive.is_some() || s.confirm.is_some() { Err("Finish the open confirmation before switching channels.".into()) } else { Ok(()) }
     }
-    pub fn switch_channel(&self, id: &str) -> Result<(), String> { self.switch_channel_inner(id, false) }
-    pub(crate) fn switch_channel_for_project(&self, id: &str) -> Result<(), String> { self.switch_channel_inner(id, true) }
-    fn switch_channel_inner(&self, id: &str, project_change: bool) -> Result<(), String> {
+    pub fn switch_channel(&self, view: &ViewId, id: &str) -> Result<(), String> { self.switch_channel_inner(view, id, false) }
+    pub(crate) fn switch_channel_for_project(&self, view: &ViewId, id: &str) -> Result<(), String> { self.switch_channel_inner(view, id, true) }
+    fn switch_channel_inner(&self, view: &ViewId, id: &str, project_change: bool) -> Result<(), String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if s.selected == id { return Ok(()); }
-        let active = current(&s);
-        if (s.project_busy && !project_change) || active.archive_busy || active.archive.is_some() || s.confirm.is_some() { return Err("Finish the open confirmation before switching channels.".into()); }
+        let Some(v) = s.views.get(view) else { return Err(WINDOW_CLOSED.into()) };
+        if v.selected == id { return Ok(()); }
+        let active = current_of(&s, v);
+        if (view_busy(&s, v) && !project_change) || active.archive_busy || active.archive.is_some() || s.confirm.is_some() { return Err("Finish the open confirmation before switching channels.".into()); }
         if !s.channels.contains_key(id) || s.channels.get(id).is_some_and(|c| c.thread_parent.is_some()) { return Err("This channel is unavailable.".into()); }
-        s.window.set_selected_conversation(Some(id))?;
+        // Only the main window saves its selection.
+        if view.is_main() { s.window.set_selected_conversation(Some(id))?; }
+        let st = &mut *s;
+        let target = st.views.get_mut(view).expect("the view exists");
         // The thread panel belongs to the channel that held its anchor.
-        if s.open_thread.take().is_some() { s.thread_rev += 1; }
-        // The placeholder for no channel leaves the pool. Any other previous channel stays in it.
-        if s.selected.is_empty() { s.channels.remove(""); }
-        s.selected = id.to_owned();
-        s.current_branch = None;
+        if target.open_thread.take().is_some() { st.thread_rev += 1; }
+        target.selected = id.to_owned();
+        target.current_branch = None;
+        target.branch_generation += 1;
         s.rev += 1; s.history_rev += 1;
-        self.branch_generation.fetch_add(1, Ordering::SeqCst);
         self.changed.notify_one();
         Ok(())
     }
-    pub fn history_snapshot(&self) -> HistoryDto {
+    pub fn history_snapshot(&self, view: &ViewId) -> HistoryDto {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        HistoryDto { channel_id: s.selected.clone(), rev: s.history_rev, messages: channel_messages(&s, current(&s)) }
+        let Some(v) = s.views.get(view) else { return HistoryDto { channel_id: String::new(), rev: s.history_rev, messages: vec![] } };
+        HistoryDto { channel_id: v.selected.clone(), rev: s.history_rev, messages: channel_messages(&s, current_of(&s, v)) }
     }
-    pub fn snapshot(&self) -> SnapshotDto {
-        let (mut snapshot, slot_state, context) = {
+    /// The state of one view for its window. A view that does not exist gives the state of a view that selects
+    /// nothing.
+    pub fn snapshot(&self, view_id: &ViewId) -> SnapshotDto {
+        let (mut snapshot, slot_state, context, slot_cache) = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let active = current(&state);
+            let closed;
+            let view = match state.views.get(view_id) { Some(view) => view, None => { closed = View::closed(); &closed } };
+            let active = current_of(&state, view);
             let ui = &active.ui;
             let rev = state.rev;
             let history_rev = state.history_rev;
@@ -706,20 +809,19 @@ impl AppCore {
                 provider: active.provider.clone(),
             };
             let slot_state = ui.slot_state(&labels);
-            let window = state.window.state();
-            let branches = state.branches.iter().enumerate().map(|(index, row)| BranchRowDto {
-                repository: state.branch_repositories.get(index).cloned().unwrap_or_default(),
-                key: row.selection_key(state.branch_repositories.get(index).map(String::as_str).unwrap_or("")),
+            let branches = view.branches.iter().enumerate().map(|(index, row)| BranchRowDto {
+                repository: view.branch_repositories.get(index).cloned().unwrap_or_default(),
+                key: row.selection_key(view.branch_repositories.get(index).map(String::as_str).unwrap_or("")),
                 label: row.name.clone(),
                 kind: match row.kind { RowKind::Main => "main", RowKind::Worktree => "worktree", RowKind::Branch => "branch" }.into(),
-                depth: row.depth(), current: state.current_branch.is_some_and(|i| std::ptr::eq(&state.branches[i], row)),
-                collapsed: state.collapsed.contains(&row.name),
+                depth: row.depth(), current: view.current_branch.is_some_and(|i| std::ptr::eq(&view.branches[i], row)),
+                collapsed: view.collapsed.contains(&row.name),
                 detached: row.detached,
                 worktree: row.worktree.as_ref().map(|path| path.to_string_lossy().into_owned()),
-                has_children: state.branches.iter().enumerate().any(|(child_index, child)| state.branch_repositories.get(child_index) == state.branch_repositories.get(index) && child.parent.as_ref() == Some(&row.name)),
+                has_children: view.branches.iter().enumerate().any(|(child_index, child)| view.branch_repositories.get(child_index) == view.branch_repositories.get(index) && child.parent.as_ref() == Some(&row.name)),
             }).collect();
             let mut channels: Vec<_> = state.channels.values()
-                    .filter(|channel| !channel.channel_id.is_empty() && channel.thread_parent.is_none()).map(|channel| ChannelDto {
+                    .filter(|channel| channel.thread_parent.is_none()).map(|channel| ChannelDto {
                         threads: followed_links(&state, &channel.channel_id),
                         id: channel.channel_id.clone(), agent_id: channel.agent_id.clone(), project_id: channel.project_id.as_ref().map(|id| id.0.clone()), name: channel.channel.clone(), agent: channel.agent.clone(),
                         provider: channel.provider.clone(), workspace_mode: channel.mode.as_str().into(),
@@ -734,10 +836,10 @@ impl AppCore {
                 rev,
                 history_rev,
                 memory_rev: state.memory_rev,
-                project: state.project.clone(),
-                project_id: state.project_id.clone(),
-                project_path: state.project_path.clone(),
-                project_display_path: display_project_path(&state.project_path, std::env::home_dir().as_deref()),
+                project: view.project.clone(),
+                project_id: view.project_id.clone(),
+                project_path: view.project_path.clone(),
+                project_display_path: display_project_path(&view.project_path, std::env::home_dir().as_deref()),
                 active_project_id: active.project_id.as_ref().map(|id| id.0.clone()),
                 composer_disabled: active.channel_id.is_empty() || active.read_only || active.archived,
                 channel_id: active.channel_id.clone(),
@@ -757,20 +859,20 @@ impl AppCore {
                 unread: super::windows::channel_indicators(ui.history(), state.window.last_read(&active.channel_id), ui.pending_approvals(), active.muted).0,
                 new_anchor_id: active.new_anchor.clone(),
                 archived: active.archived,
-                archive_busy: state.project_busy || active.archive_busy,
-                member_list_visible: window.member_list_visible,
+                archive_busy: view_busy(&state, view) || active.archive_busy,
+                member_list_visible: view.member_list_visible,
                 panels: PanelsDto {
-                    channel_list: window.panels.channel_list,
-                    member_list: window.panels.member_list,
+                    channel_list: view.panels.channel_list,
+                    member_list: view.panels.member_list,
                 },
                 channels,
                 live_sub_agent_threads: live_sub_agent_chips(&state, &active.channel_id),
                 channel_threads: channel_thread_list(&state, &active.channel_id),
                 thread_approvals: pending_thread_approvals(&state),
-                open_thread: open_thread_dto(&state),
+                open_thread: open_thread_dto(&state, view),
                 branches,
-                repositories: state.repositories.clone(),
-                repositories_loading: state.repositories_loading,
+                repositories: view.repositories.clone(),
+                repositories_loading: view.repositories_loading,
                 slots: BTreeMap::new(),
                 banners: BannersDto {
                     review_count: 0,
@@ -782,14 +884,14 @@ impl AppCore {
                 },
                 theme,
             };
-            (snapshot, slot_state, (AgentId(active.agent_id.clone()), active.project_id.clone()))
+            (snapshot, slot_state, (AgentId(active.agent_id.clone()), active.project_id.clone()), view.slots.clone())
         };
         let plugins = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
         let mut slots = BTreeMap::new();
         if let Some(plugins) = plugins.as_ref() {
             plugins.set_ui_state(slot_state.clone());
             let mut manager = plugins.manager().lock().unwrap_or_else(|e| e.into_inner());
-            slots = self.slot_cache.lock().unwrap_or_else(|e| e.into_inner())
+            slots = slot_cache.lock().unwrap_or_else(|e| e.into_inner())
                 .get_or_render(&slot_state, || { let (agent, project) = context; PluginMemory::for_context(agent, project, || super::slots::render_slots(&mut manager, &slot_state)) });
             let errors = manager.errors();
             drop(manager);
@@ -805,40 +907,52 @@ impl AppCore {
     }
 
     /// Load the saved layout and initial branch tree.
-    pub fn configure_window(&self, data_dir: &Path, project_dir: &Path, channel_dir: Option<&Path>) {
+    pub fn configure_window(&self, view: &ViewId, data_dir: &Path, project_dir: &Path, channel_dir: Option<&Path>) {
         let rows = discard_core::worktree::list_branch_tree(project_dir).unwrap_or_default();
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).window = StateStore::open(&data_dir.join("state.toml"));
-        self.set_branches(rows, channel_dir);
+        {
+            let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            s.window = StateStore::open(&data_dir.join("state.toml"));
+            sync_main_layout(&mut s);
+        }
+        self.set_branches(view, rows, channel_dir);
     }
-    pub fn set_branches(&self, rows: Vec<TreeRow>, channel_dir: Option<&Path>) {
+    pub fn set_branches(&self, view: &ViewId, rows: Vec<TreeRow>, channel_dir: Option<&Path>) {
         let current = channel_dir.and_then(|path| {
             let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
             current_row(&rows, &path)
         });
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.branch_repositories = vec![String::new(); rows.len()];
-        state.repositories.clear();
-        state.repositories_loading = false;
-        state.branches = rows;
-        state.current_branch = current;
+        let Some(v) = state.views.get_mut(view) else { return };
+        v.branch_repositories = vec![String::new(); rows.len()];
+        v.repositories.clear();
+        v.repositories_loading = false;
+        v.branches = rows;
+        v.current_branch = current;
         state.rev += 1;
         self.changed.notify_one();
     }
-    pub fn configure_branch_source(&self, store: Arc<Mutex<discard_core::store::Store>>, channel: discard_core::model::ChannelId, mode: discard_core::model::WorkspaceMode, project: PathBuf) {
-        *self.branch_source.lock().unwrap_or_else(|e| e.into_inner()) = Some(BranchSource { store, project });
+    pub fn configure_branch_source(&self, view: &ViewId, store: Arc<Mutex<discard_core::store::Store>>, channel: discard_core::model::ChannelId, mode: discard_core::model::WorkspaceMode, project: PathBuf) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        set_selected_id(&mut state, &channel.0);
-        current_mut(&mut state).mode = mode;
+        let Some(v) = state.views.get_mut(view) else { return };
+        v.branch_source = Some(BranchSource { store, project });
+        set_selected_id(&mut state, view, &channel.0);
+        current_mut(&mut state, view).mode = mode;
     }
-    pub fn request_branch_refresh(&self) -> u64 { self.branch_generation.fetch_add(1, Ordering::SeqCst) + 1 }
+    /// Start a branch refresh of a view. A refresh that an older request started does not apply its result.
+    pub fn request_branch_refresh(&self, view: &ViewId) -> u64 {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(v) = state.views.get_mut(view) else { return 0 };
+        v.branch_generation += 1;
+        v.branch_generation
+    }
     /// What marks the selected branch row: the canonical branch of the channel, or its legacy working directory.
-    fn branch_hint(&self) -> Option<(PathBuf, BranchHint)> {
-        let source = self.branch_source.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let (project, channel, mode, active_project) = {
+    fn branch_hint(&self, view: &ViewId) -> Option<(PathBuf, BranchHint)> {
+        let (source, project, channel, mode, active_project) = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let active = current(&state);
-            (PathBuf::from(&state.project_path), discard_core::model::ChannelId(active.channel_id.clone()), active.mode,
-                active.project_id.as_ref().is_some_and(|id| id.0 == state.project_id))
+            let v = state.views.get(view)?;
+            let active = current_of(&state, v);
+            (v.branch_source.clone(), PathBuf::from(&v.project_path), discard_core::model::ChannelId(active.channel_id.clone()), active.mode,
+                active.project_id.as_ref().is_some_and(|id| id.0 == v.project_id))
         };
         if project.as_os_str().is_empty() { return None; }
         let hint = source.filter(|source| active_project && source.project == project).map(|source| {
@@ -861,35 +975,38 @@ impl AppCore {
         }).or_else(|| current.and_then(|path| current_row(rows, &path.canonicalize().unwrap_or(path))))
     }
     /// Mark the selected channel's row in the rows already in state. It runs no Git command.
-    pub fn reselect_current_branch(&self) {
-        let Some((_, hint)) = self.branch_hint() else {
+    pub fn reselect_current_branch(&self, view: &ViewId) {
+        let Some((_, hint)) = self.branch_hint(view) else {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.current_branch = None;
+            let Some(v) = state.views.get_mut(view) else { return };
+            v.current_branch = None;
             state.rev += 1;
             self.changed.notify_one();
             return;
         };
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.current_branch = Self::pick_branch(&state.branches, &state.branch_repositories, hint);
+        let Some(v) = state.views.get_mut(view) else { return };
+        v.current_branch = Self::pick_branch(&v.branches, &v.branch_repositories, hint);
         state.rev += 1;
         self.changed.notify_one();
     }
     /// Reload repositories on a blocking thread. The caller does not wait for Git.
-    pub fn refresh_branches_in_background(self: &Arc<Self>) {
-        let generation = self.request_branch_refresh();
+    pub fn refresh_branches_in_background(self: &Arc<Self>, view: &ViewId) {
+        let generation = self.request_branch_refresh(view);
         let core = self.clone();
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else { return core.refresh_branches(generation) };
-        self.branch_refreshes_pending.fetch_add(1, Ordering::SeqCst);
+        let view = view.clone();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else { return core.refresh_branches(&view, generation) };
+        if let Some(v) = self.state.lock().unwrap_or_else(|e| e.into_inner()).views.get_mut(&view) { v.branch_refreshes_pending += 1; }
         runtime.spawn_blocking(move || {
-            core.refresh_branches(generation);
-            core.branch_refreshes_pending.fetch_sub(1, Ordering::SeqCst);
+            core.refresh_branches(&view, generation);
+            if let Some(v) = core.state.lock().unwrap_or_else(|e| e.into_inner()).views.get_mut(&view) { v.branch_refreshes_pending -= 1; }
         });
     }
-    /// True while a background branch refresh runs.
-    pub fn branch_refresh_pending(&self) -> bool { self.branch_refreshes_pending.load(Ordering::SeqCst) > 0 }
-    /// Reload repositories for the selected project, even without an active conversation.
-    pub fn refresh_branches(&self, generation: u64) {
-        let Some((project, hint)) = self.branch_hint() else { return };
+    /// True while a background branch refresh of the view runs.
+    pub fn branch_refresh_pending(&self, view: &ViewId) -> bool { self.state.lock().unwrap_or_else(|e| e.into_inner()).views.get(view).is_some_and(|v| v.branch_refreshes_pending > 0) }
+    /// Reload repositories for the project of a view, even without an active conversation.
+    pub fn refresh_branches(&self, view: &ViewId, generation: u64) {
+        let Some((project, hint)) = self.branch_hint(view) else { return };
         let discovered = discard_core::worktree::discover_repositories(&project).unwrap_or_default();
         let mut rows = Vec::new();
         let mut branch_repositories = Vec::new();
@@ -906,48 +1023,58 @@ impl AppCore {
         }
         let selected = Self::pick_branch(&rows, &branch_repositories, hint);
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if self.branch_generation.load(Ordering::SeqCst) == generation {
-            state.branches = rows;
-            state.branch_repositories = branch_repositories;
-            state.repositories = repositories;
-            state.repositories_loading = false;
-            state.current_branch = selected;
+        let Some(v) = state.views.get_mut(view) else { return };
+        if v.branch_generation == generation {
+            v.branches = rows;
+            v.branch_repositories = branch_repositories;
+            v.repositories = repositories;
+            v.repositories_loading = false;
+            v.current_branch = selected;
             state.rev += 1;
             self.changed.notify_one();
         }
     }
-    pub fn configure_targets(&self, project_id: String, project_dir: &Path, agent_id: String) {
+    pub fn configure_targets(&self, view: &ViewId, project_id: String, project_dir: &Path, agent_id: String) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.project_id = project_id;
-        state.project_path = project_dir.to_string_lossy().into_owned();
-        let project_id = (!state.project_id.is_empty()).then(|| discard_core::model::ProjectId(state.project_id.clone()));
-        let active = current_mut(&mut state);
+        let Some(v) = state.views.get_mut(view) else { return };
+        v.project_id = project_id;
+        v.project_path = project_dir.to_string_lossy().into_owned();
+        let project_id = (!v.project_id.is_empty()).then(|| discard_core::model::ProjectId(v.project_id.clone()));
+        let active = current_mut(&mut state, view);
         active.agent_id = agent_id;
         active.project_id = project_id;
     }
     /// Initialize read markers for this channel, treating old history as read on first use.
-    pub fn configure_read_marker(&self, data_dir: &Path, channel_id: &str) {
+    pub fn configure_read_marker(&self, view: &ViewId, data_dir: &Path, channel_id: &str) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !s.views.contains_key(view) { return; }
         s.window = StateStore::open(&data_dir.join("state.toml"));
-        set_selected_id(&mut s, channel_id);
-        let marker = startup_marker(current(&s).ui.history(), s.window.last_read(channel_id));
+        sync_main_layout(&mut s);
+        set_selected_id(&mut s, view, channel_id);
+        let marker = startup_marker(current(&s, view).ui.history(), s.window.last_read(channel_id));
         if let Some(marker) = marker { let _ = s.window.set_last_read(channel_id, &marker); }
-        let anchor = new_divider_anchor(current(&s).ui.history(), s.window.last_read(channel_id), None, false);
-        current_mut(&mut s).new_anchor = anchor;
+        let anchor = new_divider_anchor(current(&s, view).ui.history(), s.window.last_read(channel_id), None, false);
+        current_mut(&mut s, view).new_anchor = anchor;
     }
-    pub fn mark_read(&self, message_id: &str) -> Result<(), String> { self.mark_read_in(None, message_id) }
+    /// Mark a message of the channel that a view selects as read.
+    pub fn mark_read(&self, view: &ViewId, message_id: &str) -> Result<(), String> {
+        let Some(selected) = self.selected_of(view) else { return Err(WINDOW_CLOSED.into()) };
+        if selected.is_empty() { return Ok(()); }
+        self.mark_read_in(Some(&selected), message_id)
+    }
+    /// Mark a message of a channel that a view shows, or of a loaded thread, as read. `None` names no channel.
     pub fn mark_read_in(&self, channel: Option<&str>, message_id: &str) -> Result<(), String> {
+        let Some(channel) = channel else { return Ok(()) };
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(thread) = channel.filter(|id| *id != s.selected && s.channels.get(*id).is_some_and(|c| c.thread_parent.is_some())) {
-            return self.mark_thread_read(&mut s, thread, message_id);
+        if !is_shown(&s, channel) {
+            if s.channels.get(channel).is_some_and(|c| c.thread_parent.is_some()) { return self.mark_thread_read(&mut s, channel, message_id); }
+            return Ok(());
         }
-        if s.selected.is_empty() || channel.is_some_and(|id| id != s.selected) { return Ok(()); }
-        let Some(index) = current(&s).ui.history().iter().position(|m| m.id.0 == message_id) else { return Ok(()) };
-        let channel = s.selected.clone();
-        if s.window.last_read(&channel).and_then(|id| current(&s).ui.history().iter().position(|m| m.id.0 == id)).is_some_and(|previous| previous > index) { return Ok(()); }
-        let changed = s.window.last_read(&channel) != Some(message_id);
-        if changed { s.window.set_last_read(&channel, message_id)?; }
-        let cleared = current_mut(&mut s).new_anchor.take().is_some();
+        let Some(index) = channel_state(&s, channel).and_then(|c| c.ui.history().iter().position(|m| m.id.0 == message_id)) else { return Ok(()) };
+        if s.window.last_read(channel).and_then(|id| channel_state(&s, channel).and_then(|c| c.ui.history().iter().position(|m| m.id.0 == id))).is_some_and(|previous| previous > index) { return Ok(()); }
+        let changed = s.window.last_read(channel) != Some(message_id);
+        if changed { s.window.set_last_read(channel, message_id)?; }
+        let cleared = s.channels.get_mut(channel).is_some_and(|c| c.new_anchor.take().is_some());
         if changed || cleared { s.rev += 1; self.changed.notify_one(); }
         Ok(())
     }
@@ -958,23 +1085,31 @@ impl AppCore {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         super::windows::save_restorable_bounds(&mut s.window, bounds, screens)
     }
-    pub fn set_panels(&self, channel_list: f32, member_list: f32) -> Result<(), String> {
+    /// Set the panel widths of a view. Only the main window saves them. Another view keeps them in memory.
+    pub fn set_panels(&self, view: &ViewId, channel_list: f32, member_list: f32) -> Result<(), String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        s.window.set_panels(PanelWidths { channel_list, member_list })?;
+        if !s.views.contains_key(view) { return Err(WINDOW_CLOSED.into()); }
+        let panels = PanelWidths { channel_list, member_list };
+        if view.is_main() { s.window.set_panels(panels)?; sync_main_layout(&mut s); }
+        else { s.views.get_mut(view).expect("the view exists").panels = clamped_panels(panels); }
         s.rev += 1;
         self.changed.notify_one();
         Ok(())
     }
-    pub fn set_member_list_visible(&self, visible: bool) -> Result<(), String> {
+    /// Show or hide the member list of a view. Only the main window saves it. Another view keeps it in memory.
+    pub fn set_member_list_visible(&self, view: &ViewId, visible: bool) -> Result<(), String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        s.window.set_member_list_visible(visible)?;
+        if !s.views.contains_key(view) { return Err(WINDOW_CLOSED.into()); }
+        if view.is_main() { s.window.set_member_list_visible(visible)?; sync_main_layout(&mut s); }
+        else { s.views.get_mut(view).expect("the view exists").member_list_visible = visible; }
         s.rev += 1;
         self.changed.notify_one();
         Ok(())
     }
-    pub fn toggle_branch(&self, key: String) {
+    pub fn toggle_branch(&self, view: &ViewId, key: String) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if !s.collapsed.remove(&key) { s.collapsed.insert(key); }
+        let Some(v) = s.views.get_mut(view) else { return };
+        if !v.collapsed.remove(&key) { v.collapsed.insert(key); }
         s.rev += 1;
         self.changed.notify_one();
     }
@@ -1016,8 +1151,8 @@ impl AppCore {
         self.changed.notify_one();
     }
     /// Run a plugin action, then discard any cached trees it could have changed.
-    pub fn plugin_action(&self, plugin: &str, action: &str) -> Result<(), String> {
-        let (agent, project) = { let state = self.state.lock().unwrap_or_else(|e| e.into_inner()); let active = current(&state); (AgentId(active.agent_id.clone()), active.project_id.clone()) };
+    pub fn plugin_action(&self, view: &ViewId, plugin: &str, action: &str) -> Result<(), String> {
+        let (agent, project) = { let state = self.state.lock().unwrap_or_else(|e| e.into_inner()); let Some(v) = state.views.get(view) else { return Err(WINDOW_CLOSED.into()) }; let active = current_of(&state, v); (AgentId(active.agent_id.clone()), active.project_id.clone()) };
         let plugins = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
         let Some(plugins) = plugins.as_ref() else { return Err("plugins are unavailable".into()) };
         let result = PluginMemory::for_context(agent, project, || plugins.manager().lock().unwrap_or_else(|e| e.into_inner()).run_action(plugin, action).map_err(|e| e.to_string()));
@@ -1036,8 +1171,7 @@ impl AppCore {
     pub fn command_channel(&self, channel_id: &str) -> Option<CommandChannel> {
         if channel_id.is_empty() { return None; }
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if s.selected == channel_id {
-            let active = current(&s);
+        if let Some(active) = shown_channel(&s, channel_id) {
             return Some(CommandChannel { turn_running: active.ui.turn_running(), archived: active.archived || active.read_only, is_thread: false });
         }
         let thread = s.channels.get(channel_id).filter(|c| c.thread_parent.is_some())?;
@@ -1055,7 +1189,8 @@ impl AppCore {
     }
     /// Discard the plugin trees after plugin state changes.
     pub fn clear_slots(&self) {
-        self.slot_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        let caches: Vec<_> = self.state.lock().unwrap_or_else(|e| e.into_inner()).views.values().map(|v| v.slots.clone()).collect();
+        for cache in caches { cache.lock().unwrap_or_else(|e| e.into_inner()).clear(); }
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.rev += 1;
         self.changed.notify_one();
@@ -1063,10 +1198,11 @@ impl AppCore {
     pub fn set_load_report(&self, report: LoadReport) {
         *self.load_report.lock().unwrap_or_else(|e| e.into_inner()) = report;
     }
-    /// Show a notice in the main window.
-    pub fn notice(&self, message: String) {
+    /// Show a notice in the window of a view.
+    pub fn notice(&self, view: &ViewId, message: String) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        current_mut(&mut state).ui.apply(Update::Notice(message));
+        if !state.views.contains_key(view) { return; }
+        current_mut(&mut state, view).ui.apply(Update::Notice(message));
         state.rev += 1;
         self.changed.notify_one();
     }
@@ -1095,21 +1231,23 @@ impl AppCore {
         if ending.is_some() { state.rev += 1; self.changed.notify_one(); }
         ending
     }
-    pub fn archive_started(&self) -> bool { self.archive_started_for(None) }
-    pub fn archive_started_for(&self, expected_channel: Option<&str>) -> bool {
+    pub fn archive_started(&self, view: &ViewId) -> bool { self.archive_started_for(view, None) }
+    pub fn archive_started_for(&self, view: &ViewId, expected_channel: Option<&str>) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let active = current(&state);
-        if active.channel_id.is_empty() || active.read_only || state.changing_agents.contains(&active.agent_id) || state.changing_channels.contains(&active.channel_id) || state.project_busy || expected_channel.is_some_and(|id| id != active.channel_id) || active.ui.turn_running() || active.archived || active.archive_busy { return false; }
-        let active = current_mut(&mut state);
+        let Some(v) = state.views.get(view) else { return false };
+        let active = current_of(&state, v);
+        if active.channel_id.is_empty() || active.read_only || state.changing_agents.contains(&active.agent_id) || state.changing_channels.contains(&active.channel_id) || view_busy(&state, v) || expected_channel.is_some_and(|id| id != active.channel_id) || active.ui.turn_running() || active.archived || active.archive_busy { return false; }
+        let active = current_mut(&mut state, view);
         active.archive = None;
         active.archive_busy = true;
         state.rev += 1;
         self.changed.notify_one();
         true
     }
-    pub fn archive_finished(&self, result: super::plan::ArchiveStep) {
+    pub fn archive_finished(&self, view: &ViewId, result: super::plan::ArchiveStep) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let active = current_mut(&mut state);
+        if !state.views.contains_key(view) { return; }
+        let active = current_mut(&mut state, view);
         active.archive_busy = false;
         match result {
             super::plan::ArchiveStep::Done(message) => { active.archived = true; active.ui.apply(Update::Notice(message)); }
@@ -1119,31 +1257,36 @@ impl AppCore {
         state.rev += 1;
         self.changed.notify_one();
     }
-    pub fn cancel_archive(&self) {
+    pub fn cancel_archive(&self, view: &ViewId) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if current_mut(&mut state).archive.take().is_some() { state.rev += 1; self.changed.notify_one(); }
+        if !state.views.contains_key(view) { return; }
+        if current_mut(&mut state, view).archive.take().is_some() { state.rev += 1; self.changed.notify_one(); }
     }
-    pub fn has_pending_archive(&self) -> bool { current(&self.state.lock().unwrap_or_else(|e| e.into_inner())).archive.is_some() }
-    pub fn resolve_copy(&self, target: &discard_core::context_menu::ContextTarget, action: discard_core::action::Action) -> Option<String> {
+    pub fn has_pending_archive(&self, view: &ViewId) -> bool {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let active = current(&state);
+        state.views.get(view).is_some_and(|v| current_of(&state, v).archive.is_some())
+    }
+    pub fn resolve_copy(&self, view: &ViewId, target: &discard_core::context_menu::ContextTarget, action: discard_core::action::Action) -> Option<String> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let v = state.views.get(view)?;
+        let active = current_of(&state, v);
         discard_core::context_menu::resolve_copy(active.ui.history(), &active.channel, target, action)
             .or_else(|| {
-                let thread = state.open_thread.as_ref().and_then(|id| state.channels.get(id))?;
+                let thread = v.open_thread.as_ref().and_then(|id| state.channels.get(id))?;
                 discard_core::context_menu::resolve_copy(thread.ui.history(), &thread.channel, target, action)
             })
     }
-    pub fn menu_context(&self) -> discard_core::action::MenuContext {
+    pub fn menu_context(&self, view: &ViewId) -> discard_core::action::MenuContext {
         use discard_core::action::{MenuContext, MenuTarget, PluginMenuItem};
-        let (turn_running, archived) = { let state = self.state.lock().unwrap_or_else(|e| e.into_inner()); let active = current(&state); (active.ui.turn_running(), active.archived || active.read_only || active.channel_id.is_empty()) };
+        let (turn_running, archived) = { let state = self.state.lock().unwrap_or_else(|e| e.into_inner()); state.views.get(view).map(|v| current_of(&state, v)).map_or((false, true), |active| (active.ui.turn_running(), active.archived || active.read_only || active.channel_id.is_empty())) };
         let safe_mode = self.load_report.lock().unwrap_or_else(|e| e.into_inner()).safe_mode;
         let plugins = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
         let Some(plugins) = plugins.as_ref() else { return MenuContext { turn_running, archived, safe_mode, ..Default::default() } };
         let plugin_items = plugins.manager().lock().unwrap_or_else(|e| e.into_inner()).menu_items().into_iter().filter_map(|(plugin, index, item)| Some(PluginMenuItem { plugin, index, target: MenuTarget::parse(&item.target)?, label: item.label })).collect();
         MenuContext { turn_running, archived, safe_mode, pending_reviews: plugins.pending().len(), plugin_items }
     }
-    pub fn run_plugin_menu(&self, plugin: &str, index: usize, target: Option<&discard_core::context_menu::ContextTarget>) -> Result<(), String> {
-        let (agent, project) = { let state = self.state.lock().unwrap_or_else(|e| e.into_inner()); let active = current(&state); (AgentId(active.agent_id.clone()), active.project_id.clone()) };
+    pub fn run_plugin_menu(&self, view: &ViewId, plugin: &str, index: usize, target: Option<&discard_core::context_menu::ContextTarget>) -> Result<(), String> {
+        let (agent, project) = { let state = self.state.lock().unwrap_or_else(|e| e.into_inner()); let Some(v) = state.views.get(view) else { return Err(WINDOW_CLOSED.into()) }; let active = current_of(&state, v); (AgentId(active.agent_id.clone()), active.project_id.clone()) };
         let plugins = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
         let Some(plugins) = plugins.as_ref() else { return Err("plugins are unavailable".into()) };
         let (kind, id) = target.map_or(("app".to_owned(), String::new()), |target| (target.kind().id().to_owned(), target.target_id()));
@@ -1163,11 +1306,16 @@ impl AppCore {
             self.changed.notify_one();
         }
     }
-    pub fn history(&self) -> Vec<MessageDto> {
+    pub fn history(&self, view: &ViewId) -> Vec<MessageDto> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        channel_messages(&state, current(&state))
+        state.views.get(view).map(|v| channel_messages(&state, current_of(&state, v))).unwrap_or_default()
     }
-    pub fn send(&self, text: String) { let _ = self.send_to(None, text); }
+    /// Send a message to the channel that a view selects.
+    pub fn send(&self, view: &ViewId, text: String) {
+        let Some(selected) = self.selected_of(view) else { return };
+        let _ = self.send_to(Some(&selected), text);
+    }
+    /// Send a message to a channel that a view shows. `None` names no channel, and nothing is sent.
     pub fn send_to(&self, channel: Option<&str>, text: String) -> Result<(), String> {
         self.send_to_agent(channel, text, None)
     }
@@ -1178,18 +1326,18 @@ impl AppCore {
         if text.trim().is_empty() && attachments.is_empty() {
             return Ok(());
         }
+        let Some(channel) = channel else { return Err("Name the channel to send to.".into()) };
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if channel.is_some_and(|id| id != s.selected) { return Err("The channel changed. Send the message again.".into()); }
-        let active = current(&s);
-        if active.channel_id.is_empty() || active.read_only || s.changing_agents.contains(&active.agent_id) || s.changing_channels.contains(&active.channel_id) || s.project_busy || active.ui.turn_running() || active.archived || active.archive_busy || active.archive.is_some() {
+        let Some(active) = shown_channel(&s, channel) else { return Err("The channel changed. Send the message again.".into()) };
+        if active.read_only || s.changing_agents.contains(&active.agent_id) || s.changing_channels.contains(&active.channel_id) || busy_for(&s, channel) || active.ui.turn_running() || active.archived || active.archive_busy || active.archive.is_some() {
             return Err("This channel cannot send a message right now.".into());
         }
         if recipient.as_ref().is_some_and(|agent| s.changing_agents.contains(&agent.agent_id.0)) {
             return Err("The mentioned agent is being updated. Try again.".into());
         }
         let command = if attachments.is_empty() { Command::Send(text.clone()) } else { Command::SendAttachments { text: text.clone(), attachments: attachments.clone() } };
-        if current(&s).commands.send(command).is_ok() {
-            let active = current_mut(&mut s);
+        if active.commands.send(command).is_ok() {
+            let active = shown_channel_mut(&mut s, channel).expect("checked under lock");
             active.new_anchor = None;
             active.ui.user_sent_with_attachments(&text, &attachments);
             if let Some(author) = recipient { active.ui.apply(Update::Responding(author)); }
@@ -1213,28 +1361,34 @@ impl AppCore {
         Self::continue_blocked(&s, channel, None)
     }
     fn continue_blocked(s: &State, channel: &str, agent: Option<&AgentId>) -> Result<(), String> {
-        if s.selected != channel { return Err("Open this channel first.".into()); }
-        let active = current(s);
+        let Some(active) = shown_channel(s, channel) else { return Err("Open this channel first.".into()) };
         if active.ui.turn_running() { return Err("Wait for the current response to finish.".into()); }
-        if active.read_only || active.archived || active.archive_busy || active.archive.is_some() || s.project_busy || s.changing_channels.contains(channel) || agent.is_some_and(|agent| s.changing_agents.contains(&agent.0)) {
+        if active.read_only || active.archived || active.archive_busy || active.archive.is_some() || busy_for(s, channel) || s.changing_channels.contains(channel) || agent.is_some_and(|agent| s.changing_agents.contains(&agent.0)) {
             return Err("This channel cannot send a message right now.".into());
         }
         Ok(())
     }
     fn continue_with(&self, channel: &str, agent: AgentId, note: String, declined: bool) -> Result<(), String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if s.selected != channel { return Err("The channel changed. Open the channel and try again.".into()); }
+        if !is_shown(&s, channel) { return Err("The channel changed. Open the channel and try again.".into()); }
         Self::continue_blocked(&s, channel, Some(&agent))?;
         let command = if declined { Command::ContinueDeclined { agent, note } } else { Command::Continue { agent, note } };
-        current(&s).commands.send(command).map_err(|_| "The agent session is unavailable.")?;
-        current_mut(&mut s).ui.response_started();
+        let active = shown_channel_mut(&mut s, channel).expect("checked under lock");
+        active.commands.send(command).map_err(|_| "The agent session is unavailable.")?;
+        active.ui.response_started();
         s.rev += 1;
         self.changed.notify_one();
         Ok(())
     }
 
-    pub fn decide(&self, approval_id: String, decision: String) { self.decide_in(None, approval_id, decision, None); }
+    /// Decide an approval of the channel that a view selects.
+    pub fn decide(&self, view: &ViewId, approval_id: String, decision: String) {
+        let Some(selected) = self.selected_of(view) else { return };
+        self.decide_in(Some(&selected), approval_id, decision, None);
+    }
+    /// Decide an approval of a channel that a view shows, or of a loaded thread. `None` names no channel.
     pub fn decide_in(&self, channel: Option<&str>, approval_id: String, decision: String, rule_cut: Option<usize>) {
+        let Some(channel) = channel else { return };
         let decision = match decision.as_str() {
             "approve" => Decision::Approve,
             "deny" => Decision::Deny,
@@ -1250,10 +1404,15 @@ impl AppCore {
             decision,
         });
     }
-    pub fn cancel(&self) { self.cancel_in(None); }
-    /// Stop the turn of the selected channel or of a loaded thread. Stopping a parent channel also stops the
-    /// sub-agents that its turn started. Stopping a sub-agent thread ends only that task.
+    /// Stop the turn of the channel that a view selects.
+    pub fn cancel(&self, view: &ViewId) {
+        let Some(selected) = self.selected_of(view) else { return };
+        self.cancel_in(Some(&selected));
+    }
+    /// Stop the turn of a channel that a view shows or of a loaded thread. `None` names no channel. Stopping a
+    /// parent channel also stops the sub-agents that its turn started. Stopping a sub-agent thread ends only that task.
     pub fn cancel_in(&self, channel: Option<&str>) {
+        let Some(channel) = channel else { return };
         let parent = {
             let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let Some(target) = command_target(&s, channel) else { return };
@@ -1289,7 +1448,7 @@ impl AppCore {
         runtime.thread_parent = Some(info.parent_channel_id.0.clone());
         s.channels.insert(channel.id.0.clone(), runtime);
         s.threads.insert(channel.id.0.clone(), record);
-        if s.selected == info.parent_channel_id.0 { s.history_rev += 1; }
+        if is_shown(&s, &info.parent_channel_id.0) { s.history_rev += 1; }
         s.rev += 1;
         self.changed.notify_one();
     }
@@ -1301,25 +1460,26 @@ impl AppCore {
         // The engine ends its turn on a stop, and its loop ends when the sender is dropped.
         let _ = runtime.commands.send(Command::Cancel);
         s.channels.remove(id);
-        if s.open_thread.as_deref() == Some(id) { s.open_thread = None; s.thread_rev += 1; }
+        close_open_thread(&mut s, id);
         s.rev += 1;
         self.changed.notify_one();
     }
     /// Replace what the app knows about the threads of `parent`. A loaded thread keeps its live record.
     pub fn set_channel_threads(&self, parent: &str, records: Vec<ThreadRecord>) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let shown = is_shown(&s, parent);
         let st = &mut *s;
         let loaded: HashSet<String> = st.channels.iter().filter(|(_, c)| c.thread_parent.as_deref() == Some(parent)).map(|(id, _)| id.clone()).collect();
         st.threads.retain(|id, record| record.parent != parent || loaded.contains(id));
         for record in records.into_iter().filter(|record| !loaded.contains(&record.id)) { st.threads.insert(record.id.clone(), record); }
-        if st.selected == parent { st.history_rev += 1; }
+        if shown { st.history_rev += 1; }
         st.rev += 1;
         self.changed.notify_one();
     }
     /// Set the reference rows of a loaded channel: the thread message each one shows.
     pub fn set_posted(&self, channel: &str, posted: HashMap<discard_core::model::MessageId, PostedSource>) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let is_active = s.selected == channel;
+        let is_active = is_shown(&s, channel);
         let Some(target) = s.channels.get_mut(channel) else { return };
         target.posted = posted;
         if is_active { s.history_rev += 1; }
@@ -1329,22 +1489,24 @@ impl AppCore {
     pub fn thread_parent(&self, id: &str) -> Option<String> {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).channels.get(id).and_then(|c| c.thread_parent.clone())
     }
-    pub fn open_thread_id(&self) -> Option<String> { self.state.lock().unwrap_or_else(|e| e.into_inner()).open_thread.clone() }
-    /// Show a loaded thread beside the selected channel. Only a thread of the selected channel can open.
-    pub fn open_thread(&self, id: &str) -> Result<(), String> {
+    pub fn open_thread_id(&self, view: &ViewId) -> Option<String> { self.state.lock().unwrap_or_else(|e| e.into_inner()).views.get(view)?.open_thread.clone() }
+    /// Show a loaded thread beside the selected channel of a view. Only a thread of that channel can open.
+    pub fn open_thread(&self, view: &ViewId, id: &str) -> Result<(), String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(v) = s.views.get(view) else { return Err(WINDOW_CLOSED.into()) };
         let Some(record) = s.threads.get(id) else { return Err("This thread is unavailable.".into()) };
-        if record.parent != s.selected { return Err("Open this thread's channel first.".into()); }
+        if record.parent != v.selected { return Err("Open this thread's channel first.".into()); }
         if !s.channels.get(id).is_some_and(|c| c.thread_parent.is_some()) { return Err("This thread is not loaded.".into()); }
-        if s.open_thread.as_deref() == Some(id) { return Ok(()); }
-        s.open_thread = Some(id.to_owned());
+        if v.open_thread.as_deref() == Some(id) { return Ok(()); }
+        s.views.get_mut(view).expect("the view exists").open_thread = Some(id.to_owned());
         s.thread_rev += 1; s.rev += 1;
         self.changed.notify_one();
         Ok(())
     }
-    pub fn close_thread(&self) {
+    pub fn close_thread(&self, view: &ViewId) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if s.open_thread.take().is_some() { s.thread_rev += 1; s.rev += 1; self.changed.notify_one(); }
+        let Some(v) = s.views.get_mut(view) else { return };
+        if v.open_thread.take().is_some() { s.thread_rev += 1; s.rev += 1; self.changed.notify_one(); }
     }
     /// Forget a thread that never received its first message.
     pub fn remove_thread(&self, id: &str) {
@@ -1352,8 +1514,8 @@ impl AppCore {
         if !s.channels.get(id).is_some_and(|c| c.thread_parent.is_some()) { return; }
         s.channels.remove(id);
         let parent = s.threads.remove(id).map(|record| record.parent);
-        if s.open_thread.as_deref() == Some(id) { s.open_thread = None; s.thread_rev += 1; }
-        if parent.is_some_and(|parent| parent == s.selected) { s.history_rev += 1; }
+        close_open_thread(&mut s, id);
+        if parent.is_some_and(|parent| is_shown(&s, &parent)) { s.history_rev += 1; }
         s.rev += 1;
         self.changed.notify_one();
     }
@@ -1362,8 +1524,8 @@ impl AppCore {
         let Some(record) = s.threads.get_mut(id) else { return };
         record.followed = followed;
         let parent = record.parent.clone();
-        if s.selected == parent { s.history_rev += 1; }
-        if s.open_thread.as_deref() == Some(id) { s.thread_rev += 1; }
+        if is_shown(&s, &parent) { s.history_rev += 1; }
+        if thread_open(&s, id) { s.thread_rev += 1; }
         s.rev += 1;
         self.changed.notify_one();
     }
@@ -1396,10 +1558,10 @@ impl AppCore {
         }
         let parent = s.threads.remove(id).map(|record| record.parent);
         let _ = s.window.clear_last_read(id);
-        if s.open_thread.as_deref() == Some(id) { s.open_thread = None; s.thread_rev += 1; }
+        close_open_thread(&mut s, id);
         let st = &mut *s;
         for channel in st.channels.values_mut() { channel.posted.retain(|_, source| source.thread_channel_id.0 != id); }
-        if parent.is_none_or(|parent| parent == s.selected) { s.history_rev += 1; }
+        if parent.is_none_or(|parent| is_shown(&s, &parent)) { s.history_rev += 1; }
         s.rev += 1;
         self.changed.notify_one();
     }
@@ -1469,7 +1631,7 @@ impl AppCore {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(reason) = Self::busy_reason(&s, id) { return Err(reason.into()); }
         let loaded = s.channels.get(id).filter(|c| c.thread_parent.is_none());
-        if s.project_busy || loaded.is_some_and(|c| s.changing_agents.contains(&c.agent_id)) { return Err("Finish the open operation before you archive the channel.".into()); }
+        if busy_for(&s, id) || loaded.is_some_and(|c| s.changing_agents.contains(&c.agent_id)) { return Err("Finish the open operation before you archive the channel.".into()); }
         if loaded.is_some_and(|c| c.read_only) { return Err("This channel is read only. It cannot be archived.".into()); }
         s.changing_channels.insert(id.to_owned());
         Ok(())
@@ -1487,8 +1649,8 @@ impl AppCore {
         if parent.new_anchor.as_deref() == Some(reference.0.as_str()) { parent.new_anchor = None; }
         // A marker on the removed row moves to the row before it, so the messages after it keep their read state.
         if st.window.last_read(&parent_id) == Some(reference.0.as_str()) && let Some(before) = before { let _ = st.window.set_last_read(&parent_id, &before); }
-        if s.selected == parent_id { s.history_rev += 1; }
-        if s.open_thread.as_deref() == Some(source.thread_channel_id.0.as_str()) { s.thread_rev += 1; }
+        if is_shown(&s, &parent_id) { s.history_rev += 1; }
+        if thread_open(&s, source.thread_channel_id.0.as_str()) { s.thread_rev += 1; }
         s.rev += 1;
         self.changed.notify_one();
     }
@@ -1499,9 +1661,8 @@ impl AppCore {
     /// Check what must hold before a thread row is created in `parent`.
     pub fn can_start_thread(&self, parent: &str) -> Result<(), String> {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if s.selected != parent { return Err("The channel changed. Start the thread again.".into()); }
-        let active = current(&s);
-        if active.read_only || active.archived || active.archive_busy || active.archive.is_some() || s.project_busy || s.changing_channels.contains(parent) {
+        let Some(active) = shown_channel(&s, parent) else { return Err("The channel changed. Start the thread again.".into()) };
+        if active.read_only || active.archived || active.archive_busy || active.archive.is_some() || busy_for(&s, parent) || s.changing_channels.contains(parent) {
             return Err("This channel cannot start a thread right now.".into());
         }
         Ok(())
@@ -1513,7 +1674,7 @@ impl AppCore {
         let Some(target) = s.channels.get(thread).filter(|c| c.thread_parent.is_some()) else { return Err("This thread is unavailable.".into()) };
         // A message in a sub-agent thread whose task runs steers the task. Any other running turn refuses it.
         let steering = s.threads.get(thread).is_some_and(|record| record.kind == ThreadKind::SubAgent && record.state == Some(ThreadState::Running)) && target.ui.turn_running();
-        if thread_blocked(&s, target) || s.changing_agents.contains(&target.agent_id) || s.changing_channels.contains(thread) || s.project_busy || (target.ui.turn_running() && !steering) {
+        if thread_blocked(&s, target) || s.changing_agents.contains(&target.agent_id) || s.changing_channels.contains(thread) || busy_for(&s, target.thread_parent.as_deref().unwrap_or_default()) || (target.ui.turn_running() && !steering) {
             return Err("This thread cannot send a message right now.".into());
         }
         if recipient.as_ref().is_some_and(|agent| s.changing_agents.contains(&agent.agent_id.0)) {
@@ -1562,9 +1723,9 @@ impl AppCore {
         self.changed.notify_one();
     }
     /// The transcript of the open thread, with its anchor message.
-    pub fn thread_history_snapshot(&self) -> Option<ThreadHistoryDto> {
+    pub fn thread_history_snapshot(&self, view: &ViewId) -> Option<ThreadHistoryDto> {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let id = s.open_thread.as_ref()?;
+        let id = s.views.get(view)?.open_thread.as_ref()?;
         let thread = s.channels.get(id)?;
         let record = s.threads.get(id)?;
         let anchor = channel_state(&s, &record.parent).and_then(|parent| {
@@ -1580,14 +1741,33 @@ impl AppCore {
         if marker.and_then(|id| channel.ui.history().iter().position(|m| m.id.0 == id)).is_some_and(|previous| previous > index) || marker == Some(message_id) { return Ok(()); }
         s.window.set_last_read(thread, message_id)?;
         // The chip and the channel bar show the thread's unread state. The parent's own state does not change.
-        if s.threads.get(thread).is_some_and(|record| s.selected == record.parent) { s.history_rev += 1; }
+        if s.threads.get(thread).is_some_and(|record| is_shown(s, &record.parent)) { s.history_rev += 1; }
         s.rev += 1;
         self.changed.notify_one();
         Ok(())
     }
 
-    pub fn apply(&self, update: Update) -> bool { self.apply_channel(&self.active_channel_id(), update) }
-    pub fn runtime_generation(&self) -> u64 { current(&self.state.lock().unwrap_or_else(|e| e.into_inner())).runtime_generation }
+    /// Apply an update to the channel that a view selects, or to its placeholder while it selects none.
+    pub fn apply(&self, view: &ViewId, update: Update) -> bool {
+        let Some(selected) = self.selected_of(view) else { return false };
+        if !selected.is_empty() { return self.apply_channel(&selected, update); }
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(v) = s.views.get_mut(view) else { return false };
+        let was_running = v.placeholder.ui.turn_running();
+        let old_len = v.placeholder.ui.history().len();
+        v.placeholder.ui.apply(update);
+        let finished = was_running && !v.placeholder.ui.turn_running();
+        let grown = old_len != v.placeholder.ui.history().len();
+        s.rev += 1;
+        if grown { s.history_rev += 1; }
+        drop(s);
+        self.changed.notify_one();
+        finished
+    }
+    pub fn runtime_generation(&self, view: &ViewId) -> u64 {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.views.get(view).map_or(0, |v| current_of(&s, v).runtime_generation)
+    }
     pub fn channel_runtime_generation(&self, id: &str) -> Option<u64> {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.channels.get(id).map(|c| c.runtime_generation)
@@ -1619,7 +1799,7 @@ impl AppCore {
         // What a sub-agent task or its parent needs from this update, read before the update moves into the state.
         let note = SubAgentNote::of(&update);
         let finished;
-        if s.selected != channel {
+        if !is_shown(&s, channel) {
             let marker = s.window.last_read(channel).map(str::to_owned);
             let Some(other) = s.channels.get_mut(channel) else { drop(s); self.sub_agents.observe(channel, &note); return false };
             let was_running = other.ui.turn_running();
@@ -1631,23 +1811,25 @@ impl AppCore {
             s.rev += 1;
         } else {
             if memory_changed { s.memory_rev += 1; }
-            let old_len = current(&s).ui.history().len();
-            let was_running = current(&s).ui.turn_running();
-            current_mut(&mut s).ui.apply(update);
+            let shown = s.channels.get_mut(channel).expect("a shown channel is in the pool");
+            let old_len = shown.ui.history().len();
+            let was_running = shown.ui.turn_running();
+            shown.ui.apply(update);
+            let (grown, running) = (old_len != shown.ui.history().len(), shown.ui.turn_running());
             if super::windows::should_clear_confirm(s.channels.values().any(|c| c.ui.turn_running()), s.confirm.is_some()) { s.confirm = None; }
             s.rev += 1;
-            if old_len != current(&s).ui.history().len() {
-                let active = current(&s);
+            if grown {
+                let active = &s.channels[channel];
                 let anchor = new_divider_anchor(active.ui.history(), s.window.last_read(&active.channel_id), active.new_anchor.as_deref(), false);
-                current_mut(&mut s).new_anchor = anchor;
+                s.channels.get_mut(channel).expect("a shown channel is in the pool").new_anchor = anchor;
                 s.history_rev += 1;
             }
-            finished = was_running && !current(&s).ui.turn_running();
+            finished = was_running && !running;
         }
         let id_replaced = saved.is_some();
         if let Some((old, new)) = saved {
             if s.window.last_read(channel) == Some(old.0.as_str()) { let _ = s.window.set_last_read(channel, &new.0); }
-            if s.selected == channel { s.history_rev += 1; }
+            if is_shown(&s, channel) { s.history_rev += 1; }
         }
         if let Some(before) = thread_len {
             let after = s.channels.get(channel).map(|c| c.ui.history().len());
@@ -1726,7 +1908,7 @@ mod read_tests {
                 paths: vec![],
             },
         })));
-        AppCore::new(CoreInit { state: ui, commands, project: "P".into(), channel: "C".into(), agent: "A".into(), provider: "fake".into() }).snapshot().prompts.remove(0)
+        AppCore::new(CoreInit { state: ui, commands, project: "P".into(), channel: "C".into(), agent: "A".into(), provider: "fake".into() }).snapshot(&ViewId::main()).prompts.remove(0)
     }
     fn core_with_channels(ids: &[&str]) -> AppCore {
         let init = |id: &str| {
@@ -1740,23 +1922,170 @@ mod read_tests {
         }
         core
     }
+    /// Add a view that Task 3 will open through `open_view`. It selects `selected`, a channel of the pool.
+    fn add_view(core: &AppCore, label: &str, selected: &str) -> ViewId {
+        let view = ViewId::from_label(label).unwrap();
+        let mut other = View::new("p".into(), empty_channel());
+        other.selected = selected.into();
+        core.state.lock().unwrap().views.insert(view.clone(), other);
+        view
+    }
+    fn main() -> ViewId { ViewId::main() }
     #[test]
     fn a_switch_keeps_both_channels_in_the_pool() {
         let core = core_with_channels(&["a", "b"]);
-        core.switch_channel("b").unwrap();
-        assert_eq!(core.active_channel_id(), "b");
+        core.switch_channel(&main(), "b").unwrap();
+        assert_eq!(core.active_channel_id(&main()), "b");
         assert!(core.has_channel("a") && core.has_channel("b"));
         assert_eq!(core.loaded_channel_count(), 2);
     }
     #[test]
-    fn leaving_the_no_channel_placeholder_drops_it_from_the_pool() {
+    fn the_no_channel_placeholder_is_never_in_the_pool() {
         let core = core_with_channels(&["", "b"]);
-        assert_eq!(core.active_channel_id(), "");
-        assert_eq!(core.loaded_channel_count(), 1);
-        core.switch_channel("b").unwrap();
-        assert_eq!(core.active_channel_id(), "b");
+        assert_eq!(core.active_channel_id(&main()), "");
         assert!(!core.has_channel(""));
         assert_eq!(core.loaded_channel_count(), 1);
+        core.switch_channel(&main(), "b").unwrap();
+        assert_eq!(core.active_channel_id(&main()), "b");
+        assert!(!core.has_channel(""));
+        assert_eq!(core.loaded_channel_count(), 1);
+    }
+    #[test]
+    fn a_missing_view_is_an_error_and_is_not_created() {
+        let core = core_with_channels(&["a", "b"]);
+        let gone = ViewId::project(&discard_core::model::ProjectId("p".into()));
+        assert_eq!(core.switch_channel(&gone, "b").unwrap_err(), "This window is closed.");
+        assert_eq!(core.can_switch(&gone).unwrap_err(), "This window is closed.");
+        assert_eq!(core.begin_project_navigation(&gone).unwrap_err(), "This window is closed.");
+        assert_eq!(core.set_panels(&gone, 250.0, 250.0).unwrap_err(), "This window is closed.");
+        assert_eq!(core.mark_read(&gone, "m").unwrap_err(), "This window is closed.");
+        assert!(core.open_thread(&gone, "t").is_err());
+        core.notice(&gone, "lost".into());
+        core.toggle_branch(&gone, "k".into());
+        core.close_thread(&gone);
+        assert_eq!(core.active_channel_id(&gone), "");
+        assert_eq!(core.snapshot(&gone).channel_id, "");
+        assert!(core.snapshot(&gone).notice.is_none());
+        assert_eq!(core.view_ids(), vec![ViewId::main()]);
+        assert!(!core.has_view(&gone));
+        assert_eq!(core.active_channel_id(&ViewId::main()), "a");
+        assert!(core.snapshot(&ViewId::main()).notice.is_none());
+    }
+    #[test]
+    fn views_select_independently_and_share_the_pool() {
+        let core = core_with_channels(&["a"]);
+        let (commands, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let channel = discard_core::model::Channel { id: ChannelId("b".into()), agent_id: AgentId::new(), project_id: None, name: "b".into(), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout };
+        core.add_channel(CoreInit { state: UiState::new(ChannelId("b".into()), vec![]), commands, project: "p".into(), channel: "b".into(), agent: "a".into(), provider: "fake".into() }, &channel);
+        let other = add_view(&core, "project-p", "a");
+        assert!(core.send_to(Some("b"), "nobody shows b".into()).is_err(), "a channel that no view shows takes no message");
+        core.switch_channel(&other, "b").unwrap();
+        assert_eq!(core.snapshot(&other).channel_id, "b");
+        assert_eq!(core.snapshot(&main()).channel_id, "a");
+        assert_eq!(core.history_snapshot(&other).channel_id, "b");
+        assert_eq!(core.history_snapshot(&main()).channel_id, "a");
+        assert_eq!(core.loaded_channel_count(), 2);
+        core.send_to(Some("b"), "hello".into()).unwrap();
+        assert!(matches!(received.try_recv(), Ok(Command::Send(text)) if text == "hello"));
+        assert!(core.snapshot(&other).turn_running && !core.snapshot(&main()).turn_running);
+        core.switch_channel(&main(), "b").unwrap();
+        assert!(core.snapshot(&main()).turn_running, "a second view of the channel shows the same turn");
+        core.switch_channel(&other, "a").unwrap();
+        assert!(core.snapshot(&main()).turn_running && !core.snapshot(&other).turn_running);
+    }
+    #[test]
+    fn each_view_owns_its_no_channel_placeholder() {
+        let core = core_with_channels(&["", "b"]);
+        let other = add_view(&core, "project-p", "");
+        core.notice(&main(), "main only".into());
+        assert_eq!(core.snapshot(&main()).notice.as_deref(), Some("main only"));
+        assert_eq!(core.snapshot(&other).notice, None);
+        core.configure_targets(&other, "p".into(), Path::new("/p"), "agent-p".into());
+        assert_eq!(core.active_agent_id(&other), "agent-p");
+        assert_eq!(core.active_agent_id(&main()), "");
+        assert!(!core.has_channel(""));
+    }
+    #[test]
+    fn the_navigation_guard_belongs_to_one_view() {
+        let core = core_with_channels(&["a", "b"]);
+        let other = add_view(&core, "project-p", "b");
+        core.begin_project_navigation(&main()).unwrap();
+        assert!(core.begin_project_navigation(&main()).is_err(), "navigation of one view is serialized");
+        assert!(core.snapshot(&main()).archive_busy);
+        assert!(!core.snapshot(&other).archive_busy, "another view stays free");
+        assert!(core.switch_channel(&main(), "b").is_err());
+        core.switch_channel(&other, "a").unwrap();
+        core.begin_project_navigation(&other).unwrap();
+        core.end_project_navigation(&other);
+        assert!(core.begin_project_change().is_err(), "a project change waits for every navigation");
+        core.end_project_navigation(&main());
+        core.begin_project_change().unwrap();
+        // The app-wide guard shows in every view and blocks navigation in every view.
+        assert!(core.snapshot(&main()).archive_busy && core.snapshot(&other).archive_busy);
+        assert!(core.begin_project_navigation(&other).is_err());
+        core.end_project_change();
+        assert!(!core.snapshot(&main()).archive_busy && !core.snapshot(&other).archive_busy);
+    }
+    #[test]
+    fn only_the_main_view_saves_its_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = core_with_channels(&["a"]);
+        core.configure_read_marker(&main(), dir.path(), "a");
+        let other = add_view(&core, "project-p", "a");
+        core.set_panels(&other, 300.0, 1000.0).unwrap();
+        core.set_member_list_visible(&other, false).unwrap();
+        let panels = core.snapshot(&other).panels;
+        assert_eq!((panels.channel_list, panels.member_list), (300.0, discard_core::window_state::MAX_PANEL_WIDTH));
+        assert!(!core.snapshot(&other).member_list_visible);
+        assert!(core.snapshot(&main()).member_list_visible, "the main view keeps its own layout");
+        assert_eq!(StateStore::open(&dir.path().join("state.toml")).state().panels, PanelWidths::default());
+        core.set_panels(&main(), 260.0, 270.0).unwrap();
+        assert_eq!(core.snapshot(&main()).panels.channel_list, 260.0);
+        assert_eq!(StateStore::open(&dir.path().join("state.toml")).state().panels, PanelWidths { channel_list: 260.0, member_list: 270.0 });
+    }
+    #[test]
+    fn a_thread_panel_belongs_to_its_view() {
+        let core = core_with_channels(&["a"]);
+        let other = add_view(&core, "project-p", "a");
+        core.state.lock().unwrap().views.get_mut(&other).unwrap().open_thread = Some("t".into());
+        assert_eq!(core.open_thread_id(&other).as_deref(), Some("t"));
+        assert_eq!(core.open_thread_id(&main()), None);
+        core.close_thread(&main());
+        assert_eq!(core.open_thread_id(&other).as_deref(), Some("t"));
+        core.close_thread(&other);
+        assert_eq!(core.open_thread_id(&other), None);
+    }
+    #[test]
+    fn removing_the_agent_of_the_selected_channel_leaves_an_empty_snapshot() {
+        let core = core_with_channels(&["a", "b"]);
+        core.configure_targets(&main(), "".into(), Path::new(""), "agent-a".into());
+        core.remove_agent_channels("agent-a");
+        let snapshot = core.snapshot(&main());
+        assert_eq!(snapshot.channel_id, "");
+        assert!(snapshot.composer_disabled);
+        assert_eq!(core.active_channel_id(&main()), "");
+        assert!(!core.has_channel("a") && !core.has_channel(""));
+        // The view writes to its fresh placeholder again.
+        core.notice(&main(), "after".into());
+        assert_eq!(core.snapshot(&main()).notice.as_deref(), Some("after"));
+    }
+    #[test]
+    fn removing_an_agent_resets_only_the_views_that_show_it() {
+        let core = core_with_channels(&["a", "b"]);
+        let other = add_view(&core, "project-p", "b");
+        core.configure_targets(&main(), "".into(), Path::new(""), "agent-a".into());
+        core.remove_agent_channels("agent-a");
+        assert_eq!(core.active_channel_id(&main()), "");
+        assert_eq!(core.active_channel_id(&other), "b");
+        assert_eq!(core.snapshot(&other).channel_id, "b");
+    }
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "once")]
+    fn a_re_key_onto_a_pooled_id_is_loud() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = core_with_channels(&["a", "b"]);
+        core.configure_read_marker(&main(), dir.path(), "b");
     }
     fn core_with_plugin(init: &str) -> (AppCore, tempfile::TempDir) {
         use discard_lua::{PluginLimits, PluginManager, keystore::StaticKeyStore, ledger::Ledger, snapshot::Snapshot};
@@ -1777,7 +2106,7 @@ mod read_tests {
         let (core, _dir) = core_with_plugin(r#"discard.command("echo", function(args) return "got " .. args end, { description = "  ", args = "<text>" })"#);
         let commands = core.plugin_commands();
         assert_eq!(commands, vec![discard_core::slash::PluginCommand { plugin: "notes".into(), name: "echo".into(), description: None, args: Some("<text>".into()) }]);
-        let id = core.active_channel_id();
+        let id = core.active_channel_id(&ViewId::main());
         assert_eq!(core.run_plugin_command(&id, "echo", "hi"), Some(Ok(Some("got hi".into()))));
         assert_eq!(core.run_plugin_command(&id, "nope", ""), None);
         assert_eq!(core.run_plugin_command("missing", "echo", "hi"), Some(Err("The channel is not open.".into())));
@@ -1785,7 +2114,7 @@ mod read_tests {
     #[test]
     fn command_channel_covers_the_active_channel_only_when_it_is_known() {
         let (core, _dir) = core_with_plugin("");
-        assert_eq!(core.command_channel(&core.active_channel_id()), Some(CommandChannel { turn_running: false, archived: false, is_thread: false }));
+        assert_eq!(core.command_channel(&core.active_channel_id(&ViewId::main())), Some(CommandChannel { turn_running: false, archived: false, is_thread: false }));
         assert_eq!(core.command_channel("missing"), None);
         assert_eq!(core.command_channel(""), None);
     }
@@ -1826,7 +2155,7 @@ mod read_tests {
         ui.apply(Update::SessionProfile(workspace(AutorunState::Unavailable("r".into()))));
         ui.response_started();
         let core = AppCore::new(CoreInit { state: ui, commands, project: "P".into(), channel: "C".into(), agent: "A".into(), provider: "fake".into() });
-        assert_eq!(serde_json::to_value(core.snapshot()).unwrap()["autorun"], serde_json::json!({"state": "unavailable", "reason": "r"}));
+        assert_eq!(serde_json::to_value(core.snapshot(&ViewId::main())).unwrap()["autorun"], serde_json::json!({"state": "unavailable", "reason": "r"}));
     }
 
     #[test]
@@ -1839,8 +2168,8 @@ mod read_tests {
         ui.apply(Update::TurnFinished(discard_core::driver::TurnOutcome::Completed));
         assert!(!ui.turn_running());
         let core = AppCore::new(CoreInit { state: ui, commands, project: "P".into(), channel: "C".into(), agent: "A".into(), provider: "fake".into() });
-        assert!(core.snapshot().autorun.is_none());
-        assert_eq!(serde_json::to_value(core.snapshot()).unwrap()["autorun"], serde_json::Value::Null);
+        assert!(core.snapshot(&ViewId::main()).autorun.is_none());
+        assert_eq!(serde_json::to_value(core.snapshot(&ViewId::main())).unwrap()["autorun"], serde_json::Value::Null);
     }
 
     #[test]
@@ -1851,8 +2180,8 @@ mod read_tests {
         let (commands, _) = tokio::sync::mpsc::unbounded_channel();
         let direct = discard_core::model::Channel { id: channel.clone(), agent_id: AgentId::new(), project_id: None, name: "Direct".into(), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout };
         core.add_channel(CoreInit { state: UiState::new(channel.clone(), vec![]), commands, project: String::new(), channel: "Direct".into(), agent: "A".into(), provider: "fake".into() }, &direct);
-        core.switch_channel(&channel.0).unwrap();
-        assert_eq!(core.active_context(), (direct.agent_id, None));
+        core.switch_channel(&ViewId::main(), &channel.0).unwrap();
+        assert_eq!(core.active_context(&ViewId::main()), (direct.agent_id, None));
     }
 
     #[test]
@@ -1864,12 +2193,12 @@ mod read_tests {
         store.set_last_read("channel", "one").unwrap();
         let (commands, _) = tokio::sync::mpsc::unbounded_channel();
         let core = AppCore::new(CoreInit { state: UiState::new(channel, history), commands, project: "p".into(), channel: "c".into(), agent: "a".into(), provider: "p".into() });
-        core.configure_read_marker(dir.path(), "channel");
-        let before = core.snapshot();
+        core.configure_read_marker(&ViewId::main(), dir.path(), "channel");
+        let before = core.snapshot(&ViewId::main());
         assert!(before.unread);
         assert_eq!(before.new_anchor_id.as_deref(), Some("two"));
-        core.mark_read("two").unwrap();
-        let after = core.snapshot();
+        core.mark_read(&ViewId::main(), "two").unwrap();
+        let after = core.snapshot(&ViewId::main());
         assert!(!after.unread);
         assert!(after.new_anchor_id.is_none());
         assert!(after.rev > before.rev);
@@ -1883,19 +2212,19 @@ mod read_tests {
         store.set_last_read("channel", "one").unwrap();
         let (commands, received) = tokio::sync::mpsc::unbounded_channel();
         let core = AppCore::new(CoreInit { state: UiState::new(channel, history), commands, project: "p".into(), channel: "c".into(), agent: "a".into(), provider: "p".into() });
-        core.configure_read_marker(dir.path(), "channel");
+        core.configure_read_marker(&ViewId::main(), dir.path(), "channel");
         (dir, core, received)
     }
 
     #[test]
     fn a_muted_channel_shows_no_unread_marker_anywhere_and_unmuting_shows_it_again() {
         let (_dir, core, _received) = muted_fixture();
-        let unread = |core: &AppCore| { let snapshot = core.snapshot(); (snapshot.unread, snapshot.channels[0].unread, snapshot.channels[0].muted) };
+        let unread = |core: &AppCore| { let snapshot = core.snapshot(&ViewId::main()); (snapshot.unread, snapshot.channels[0].unread, snapshot.channels[0].muted) };
         assert_eq!(unread(&core), (true, true, false));
-        let before = core.snapshot().rev;
+        let before = core.snapshot(&ViewId::main()).rev;
         core.set_channel_muted("channel", true);
         assert_eq!(unread(&core), (false, false, true), "the row and the project rail read the channel unread flag");
-        assert!(core.snapshot().rev > before);
+        assert!(core.snapshot(&ViewId::main()).rev > before);
         // Mute changes no read marker: unmuting shows the unread marker again.
         core.set_channel_muted("channel", false);
         assert_eq!(unread(&core), (true, true, false));
@@ -1907,10 +2236,10 @@ mod read_tests {
     fn a_muted_channel_keeps_its_pending_approval_count() {
         use discard_core::event::{Event, EventId, EventKind, SessionId};
         let (_dir, core, _received) = muted_fixture();
-        core.apply(Update::Event(Box::new(Event { id: EventId::new(), session_id: SessionId::new(), seq: 1, raw: None,
+        core.apply(&ViewId::main(), Update::Event(Box::new(Event { id: EventId::new(), session_id: SessionId::new(), seq: 1, raw: None,
             kind: EventKind::ApprovalRequest { kind: Default::default(), paths: vec![], approval_id: ApprovalId::new(), call_id: "c".into(), tool: "Bash".into(), input: serde_json::json!({"command": "ls"}) } })));
         core.set_channel_muted("channel", true);
-        let snapshot = core.snapshot();
+        let snapshot = core.snapshot(&ViewId::main());
         assert_eq!((snapshot.pending_approvals, snapshot.channels[0].pending_approvals, snapshot.channels[0].unread), (1, 1, false));
     }
 
@@ -1918,10 +2247,10 @@ mod read_tests {
     fn a_channel_is_busy_while_a_turn_runs_an_approval_waits_or_another_action_runs() {
         let (_dir, core, _received) = muted_fixture();
         assert_eq!(core.channel_busy_reason("channel"), None);
-        core.send("work".into());
+        core.send(&ViewId::main(), "work".into());
         assert!(core.channel_busy_reason("channel").unwrap().contains("A turn runs"));
         assert!(core.begin_channel_action("channel").is_err());
-        core.apply(Update::TurnFinished(discard_core::driver::TurnOutcome::Completed));
+        core.apply(&ViewId::main(), Update::TurnFinished(discard_core::driver::TurnOutcome::Completed));
         assert_eq!(core.channel_busy_reason("channel"), None);
         core.begin_channel_action("channel").unwrap();
         assert!(core.channel_busy_reason("channel").unwrap().contains("changing"), "a second action waits for the first");
@@ -1940,12 +2269,12 @@ mod read_tests {
         store.set_last_read("channel", "one").unwrap();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let core = AppCore::new(CoreInit { state: UiState::new(channel, history), commands, project: "p".into(), channel: "c".into(), agent: "a".into(), provider: "p".into() });
-        core.configure_read_marker(dir.path(), "channel");
-        core.send("hello".into());
-        let before = core.snapshot();
+        core.configure_read_marker(&ViewId::main(), dir.path(), "channel");
+        core.send(&ViewId::main(), "hello".into());
+        let before = core.snapshot(&ViewId::main());
         assert!(before.new_anchor_id.is_none());
-        core.mark_read("two").unwrap();
-        let after = core.snapshot();
+        core.mark_read(&ViewId::main(), "two").unwrap();
+        let after = core.snapshot(&ViewId::main());
         assert!(!after.unread);
         assert!(after.rev > before.rev);
     }
@@ -1957,11 +2286,11 @@ mod read_tests {
         let history: Vec<_> = ["one", "two"].into_iter().map(|id| Message { id: MessageId(id.into()), channel_id: channel.clone(), role: Role::Agent, blocks: vec![] }).collect();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let core = AppCore::new(CoreInit { state: UiState::new(channel, history), commands, project: "p".into(), channel: "c".into(), agent: "a".into(), provider: "p".into() });
-        core.configure_read_marker(dir.path(), "channel");
-        core.mark_read("two").unwrap();
-        core.mark_read("one").unwrap();
+        core.configure_read_marker(&ViewId::main(), dir.path(), "channel");
+        core.mark_read(&ViewId::main(), "two").unwrap();
+        core.mark_read(&ViewId::main(), "one").unwrap();
         assert_eq!(StateStore::open(&dir.path().join("state.toml")).last_read("channel"), Some("two"));
-        assert!(!core.snapshot().unread);
+        assert!(!core.snapshot(&ViewId::main()).unread);
     }
 
     #[test]
@@ -1971,8 +2300,8 @@ mod read_tests {
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let core = AppCore::new(CoreInit { state: UiState::new(channel, vec![]), commands, project: "p".into(), channel: "c".into(), agent: "a".into(), provider: "p".into() });
         let rows = vec![TreeRow { name: "main".into(), kind: RowKind::Main, worktree: Some("/repo".into()), detached: false, is_discard: false, parent: None }, TreeRow { name: "work".into(), kind: RowKind::Worktree, worktree: Some("/work".into()), detached: false, is_discard: true, parent: None }];
-        core.set_branches(rows, Some(Path::new("/work/sub")));
-        let snapshot = core.snapshot();
+        core.set_branches(&ViewId::main(), rows, Some(Path::new("/work/sub")));
+        let snapshot = core.snapshot(&ViewId::main());
         assert!(!snapshot.branches[0].current);
         assert!(snapshot.branches[1].current);
     }
@@ -1995,10 +2324,10 @@ mod read_tests {
         let history = vec![Message { id: MessageId("one".into()), channel_id: channel.clone(), role: Role::Agent, blocks: vec![] }];
         let (commands, _rx) = tokio::sync::mpsc::unbounded_channel();
         let core = AppCore::new(CoreInit { state: UiState::new(channel, history), commands, project: "p".into(), channel: "c".into(), agent: "a".into(), provider: "p".into() });
-        core.configure_read_marker(dir.path(), "channel");
-        core.mark_read("one").unwrap();
+        core.configure_read_marker(&ViewId::main(), dir.path(), "channel");
+        core.mark_read(&ViewId::main(), "one").unwrap();
         assert_eq!(StateStore::open(&dir.path().join("state.toml")).last_read("channel"), Some("one"));
-        core.mark_read("unknown").unwrap();
+        core.mark_read(&ViewId::main(), "unknown").unwrap();
         assert_eq!(StateStore::open(&dir.path().join("state.toml")).last_read("channel"), Some("one"));
     }
 }

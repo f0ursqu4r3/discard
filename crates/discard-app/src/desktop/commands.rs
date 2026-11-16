@@ -1,16 +1,17 @@
 use super::{
     core::AppCore,
     dto::{HistoryDto, SnapshotDto},
+    view::ViewId,
 };
 use std::sync::Arc;
 use tauri::State;
 #[tauri::command]
 pub fn get_snapshot(core: State<'_, Arc<AppCore>>) -> SnapshotDto {
-    core.snapshot()
+    core.snapshot(&ViewId::main())
 }
 #[tauri::command]
 pub fn get_history(core: State<'_, Arc<AppCore>>) -> HistoryDto {
-    core.history_snapshot()
+    core.history_snapshot(&ViewId::main())
 }
 #[tauri::command]
 pub fn send_message(channels: State<'_, Arc<super::channels::Channels>>, context: State<'_, super::settings::SettingsContext>, channel_id: String, text: String, attachment_ids: Option<Vec<String>>, also_post: Option<bool>) -> Result<(), String> {
@@ -21,7 +22,7 @@ pub fn send_message(channels: State<'_, Arc<super::channels::Channels>>, context
 /// The open thread's transcript, or null when no thread is open. The `discard://thread-history` event sends the same value.
 #[tauri::command]
 pub fn get_thread_history(core: State<'_, Arc<AppCore>>) -> Option<super::dto::ThreadHistoryDto> {
-    core.thread_history_snapshot()
+    core.thread_history_snapshot(&ViewId::main())
 }
 
 /// Start a thread on a saved message of the selected channel, send its first message, and open it. Returns the thread channel ID.
@@ -48,7 +49,7 @@ pub async fn open_thread(channels: State<'_, Arc<super::channels::Channels>>, th
 
 #[tauri::command]
 pub fn close_thread(core: State<'_, Arc<AppCore>>) {
-    core.close_thread();
+    core.close_thread(&ViewId::main());
 }
 
 /// Select the parent channel of a followed thread and open the thread beside it. Returns the parent channel ID.
@@ -256,7 +257,7 @@ pub async fn decide_worktree_removal(
         };
         store.lock().unwrap_or_else(|e| e.into_inner()).insert_message(&message).map_err(|e| format!("Action status: {}. Could not save its transcript note: {e}", request.state))?;
         core.apply_channel(&channel.0, discard_core::ui_state::Update::ConversationMarker(message));
-        core.refresh_branches_in_background();
+        core.refresh_branches_in_background(&ViewId::main());
         Ok(request)
     }).await.map_err(|e| e.to_string())?
 }
@@ -271,15 +272,15 @@ pub fn cancel_turn(core: State<'_, Arc<AppCore>>, channel_id: String) {
 
 #[tauri::command]
 pub fn set_panels(core: State<'_, Arc<AppCore>>, channel_list: f32, member_list: f32) -> Result<(), String> {
-    core.set_panels(channel_list, member_list)
+    core.set_panels(&ViewId::main(), channel_list, member_list)
 }
 #[tauri::command]
 pub fn set_member_list_visible(core: State<'_, Arc<AppCore>>, visible: bool) -> Result<(), String> {
-    core.set_member_list_visible(visible)
+    core.set_member_list_visible(&ViewId::main(), visible)
 }
 #[tauri::command]
 pub fn toggle_branch(core: State<'_, Arc<AppCore>>, key: String) {
-    core.toggle_branch(key);
+    core.toggle_branch(&ViewId::main(), key);
 }
 
 #[tauri::command]
@@ -293,21 +294,22 @@ pub fn confirm_resolve(app: tauri::AppHandle, core: State<'_, Arc<AppCore>>, act
 }
 #[tauri::command]
 pub fn archive_confirm(core: State<'_, Arc<AppCore>>, actions: State<'_, Arc<super::actions::DesktopActions>>, accept: bool) {
-    if !core.has_pending_archive() { return; }
-    if accept { super::actions::archive(core.inner().clone(), &actions, true); } else { core.cancel_archive(); }
+    let view = ViewId::main();
+    if !core.has_pending_archive(&view) { return; }
+    if accept { super::actions::archive(core.inner().clone(), &actions, &view, true); } else { core.cancel_archive(&view); }
 }
 #[tauri::command]
 pub fn context_menu(core: State<'_, Arc<AppCore>>, target: super::dto::ContextTargetDto) -> Vec<super::dto::MenuEntryDto> {
-    discard_core::context_menu::context_menu(&target.into(), &core.menu_context()).into_iter().filter_map(super::dto::MenuEntryDto::from_entry).collect()
+    discard_core::context_menu::context_menu(&target.into(), &core.menu_context(&ViewId::main())).into_iter().filter_map(super::dto::MenuEntryDto::from_entry).collect()
 }
 #[tauri::command]
 pub fn run_action(app: tauri::AppHandle, core: State<'_, Arc<AppCore>>, actions: State<'_, Arc<super::actions::DesktopActions>>, action_id: String, target: Option<super::dto::ContextTargetDto>) -> Option<String> {
     if action_id == "open_provider_settings" {
-        if let Err(error) = super::windows::open_settings(&app, discard_core::settings_page::SettingsPage::Providers) { core.notice(format!("Cannot open CLI connections: {error}")); }
+        if let Err(error) = super::windows::open_settings(&app, discard_core::settings_page::SettingsPage::Providers) { core.notice(&ViewId::main(), format!("Cannot open CLI connections: {error}")); }
         return None;
     }
     if action_id == "relaunch" {
-        let ctx = core.menu_context();
+        let ctx = core.menu_context(&ViewId::main());
         let ending = super::plan::Confirm::Relaunch { safe_mode: ctx.safe_mode };
         if core.any_running() && actions.confirms() { core.ask(ending); }
         else { super::actions::perform(&app, &core, &actions, ending); }
@@ -319,9 +321,9 @@ pub fn run_action(app: tauri::AppHandle, core: State<'_, Arc<AppCore>>, actions:
 #[tauri::command]
 pub fn plugin_menu_action(core: State<'_, Arc<AppCore>>, plugin: String, index: usize, target: super::dto::ContextTargetDto) -> Result<(), String> {
     let target = target.into();
-    let allowed = discard_core::context_menu::context_menu(&target, &core.menu_context()).iter().any(|item| matches!(item, discard_core::action::MenuEntry::Plugin { plugin: p, index: i, .. } if p == &plugin && *i == index));
+    let allowed = discard_core::context_menu::context_menu(&target, &core.menu_context(&ViewId::main())).iter().any(|item| matches!(item, discard_core::action::MenuEntry::Plugin { plugin: p, index: i, .. } if p == &plugin && *i == index));
     if !allowed { return Err("plugin menu item is unavailable".into()); }
-    match core.run_plugin_menu(&plugin, index, Some(&target)) {
+    match core.run_plugin_menu(&ViewId::main(), &plugin, index, Some(&target)) {
         Ok(()) => Ok(()),
         Err(error) => { core.plugin_failure(&plugin, &error); Err(error) }
     }
@@ -371,7 +373,7 @@ pub async fn run_command(app: tauri::AppHandle, core: State<'_, Arc<AppCore>>, a
 
 #[tauri::command]
 pub fn plugin_action(core: State<'_, Arc<AppCore>>, plugin: String, action: String) -> Result<(), String> {
-    core.plugin_action(&plugin, &action)
+    core.plugin_action(&ViewId::main(), &plugin, &action)
 }
 
 #[tauri::command]
@@ -499,10 +501,11 @@ pub fn ungroup_rail_group(app: tauri::AppHandle, context: State<'_, super::setti
 #[tauri::command]
 pub async fn select_project(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String) -> Result<String, String> {
     let channels = channels.inner().clone();
-    channels.core.begin_project_navigation()?;
+    let view = ViewId::main();
+    channels.core.begin_project_navigation(&view)?;
     let core = channels.core.clone();
     let result = tauri::async_runtime::spawn_blocking(move || channels.activate_project(&discard_core::model::ProjectId(project_id))).await.map_err(|e| e.to_string()).and_then(|r| r);
-    core.end_project_change();
+    core.end_project_navigation(&view);
     let channel_id = result?;
     use tauri::Emitter;
     let _ = app.emit("discard://conversation-opened", channel_id.clone());
@@ -564,8 +567,8 @@ pub async fn remove_project(channels: State<'_, Arc<super::channels::Channels>>,
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let id = discard_core::model::ProjectId(project_id);
         let next = channels.store.lock().unwrap_or_else(|e| e.into_inner()).visible_projects().map_err(|e| e.to_string())?.into_iter().find(|p| p.id != id);
-        if channels.core.current_project().id == id {
-            if let Some(next) = next { channels.activate_project(&next.id)?; } else { channels.core.select_sidebar_project(None); }
+        if channels.core.current_project(&ViewId::main()).id == id {
+            if let Some(next) = next { channels.activate_project(&next.id)?; } else { channels.core.select_sidebar_project(&ViewId::main(), None); }
         }
         channels.store.lock().unwrap_or_else(|e| e.into_inner()).hide_project(&id).map_err(|e| e.to_string())
     }).await.map_err(|e| e.to_string()).and_then(|r| r);
@@ -577,7 +580,7 @@ pub async fn remove_project(channels: State<'_, Arc<super::channels::Channels>>,
 pub async fn choose_project_folder(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, change_current: bool) -> Result<bool, String> {
     use tauri_plugin_dialog::DialogExt;
     let channels = channels.inner().clone(); channels.core.begin_project_change()?;
-    let snapshot = channels.core.snapshot(); let core = channels.core.clone();
+    let snapshot = channels.core.snapshot(&ViewId::main()); let core = channels.core.clone();
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
         let title = if change_current { "Change project folder" } else { "Import project folder" };
         let selected = app.dialog().file().set_title(title).set_directory(&snapshot.project_path).blocking_pick_folder();

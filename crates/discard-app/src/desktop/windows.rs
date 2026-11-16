@@ -67,13 +67,13 @@ mod tests {
 
     #[test]
     fn close_request_prevents_close_and_shows_confirmation_during_a_turn() {
-        use crate::desktop::core::{AppCore, CoreInit};
+        use crate::desktop::{core::{AppCore, CoreInit}, view::ViewId};
         use discard_core::{model::ChannelId, ui_state::UiState};
         let (commands, _rx) = tokio::sync::mpsc::unbounded_channel();
         let core = AppCore::new(CoreInit { state: UiState::new(ChannelId::new(), vec![]), commands, project: "p".into(), channel: "c".into(), agent: "a".into(), provider: "p".into() });
-        core.send("hello".into());
+        core.send(&ViewId::main(), "hello".into());
         assert!(request_main_close(&core, true, true));
-        assert_eq!(core.snapshot().banners.confirm.as_deref(), Some("The agent is working. Quit Discard and stop the turn?"));
+        assert_eq!(core.snapshot(&ViewId::main()).banners.confirm.as_deref(), Some("The agent is working. Quit Discard and stop the turn?"));
     }
 
     #[test]

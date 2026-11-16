@@ -1,5 +1,5 @@
 //! Execute the pure action plans for the desktop window.
-use super::{core::AppCore, plan::{self, Confirm, Plan}};
+use super::{core::AppCore, plan::{self, Confirm, Plan}, view::ViewId};
 use discard_core::{action::Action, context_menu::ContextTarget, model::ChannelId, settings::SettingsStore, workspace::GitWorkspace};
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use tauri::{AppHandle, Emitter, Manager};
@@ -36,46 +36,48 @@ pub fn perform(app: &AppHandle, core: &AppCore, actions: &DesktopActions, ending
             actions.exiting.store(true, Ordering::SeqCst);
             app.exit(0);
         }
-        Err(error) => core.notice(format!("Could not relaunch: {error}")),
+        Err(error) => core.notice(&ViewId::main(), format!("Could not relaunch: {error}")),
     }
 }
 /// Start the archive operation away from the UI thread.
-pub fn archive(core: Arc<AppCore>, actions: &DesktopActions, force: bool) {
-    archive_for(core, actions, force, None);
+pub fn archive(core: Arc<AppCore>, actions: &DesktopActions, view: &ViewId, force: bool) {
+    archive_for(core, actions, view, force, None);
 }
-fn archive_for(core: Arc<AppCore>, actions: &DesktopActions, force: bool, channel: Option<&str>) {
-    if !core.archive_started_for(channel) { return; }
+fn archive_for(core: Arc<AppCore>, actions: &DesktopActions, view: &ViewId, force: bool, channel: Option<&str>) {
+    if !core.archive_started_for(view, channel) { return; }
     let workspace = actions.workspace.clone();
     let terminals = actions.terminals.clone();
-    let channel_id = ChannelId(core.active_channel_id());
+    let channel_id = ChannelId(core.active_channel_id(view));
+    let view = view.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let outcome = workspace.archive(&channel_id, force);
         if matches!(outcome, Ok(discard_core::workspace::ArchiveOutcome::Archived { .. })) { terminals.close_channel(&channel_id.0, Some("This channel was archived. The session ended.")); }
-        core.archive_finished(plan::archive_step(outcome));
+        core.archive_finished(&view, plan::archive_step(outcome));
     });
 }
 /// Run a core action. Copy results return to the webview for the Web Clipboard API.
 pub fn run(app: &AppHandle, core: &Arc<AppCore>, actions: &DesktopActions, action: Action, target: Option<ContextTarget>) -> Option<String> {
+    let view = ViewId::main();
     let channel = match &target { Some(ContextTarget::Channel { id }) => Some(id.as_str()), _ => None };
-    if !plan::channel_target_allowed(action, channel, &core.active_channel_id()) { return None; }
-    let ctx = core.menu_context();
+    if !plan::channel_target_allowed(action, channel, &core.active_channel_id(&view)) { return None; }
+    let ctx = core.menu_context(&view);
     // The turn state of the target channel decides a stop. Other actions use the active channel.
     let turn_running = match channel { Some(id) if action == Action::CancelTurn => core.channel_running(id), _ => ctx.turn_running };
     match plan::plan_targeted(action, target.is_some(), ctx.turn_running, ctx.archived) {
-        plan::TargetedPlan::Copy => return target.as_ref().and_then(|target| core.resolve_copy(target, action)),
+        plan::TargetedPlan::Copy => return target.as_ref().and_then(|target| core.resolve_copy(&view, target, action)),
         plan::TargetedPlan::Archive => {
-            if let Some(ContextTarget::Channel { id }) = &target { archive_for(core.clone(), actions, false, Some(id)); }
+            if let Some(ContextTarget::Channel { id }) = &target { archive_for(core.clone(), actions, &view, false, Some(id)); }
             return None;
         }
-        plan::TargetedPlan::ArchiveBlocked => { core.notice("Stop the turn before archiving the channel".into()); return None; }
+        plan::TargetedPlan::ArchiveBlocked => { core.notice(&view, "Stop the turn before archiving the channel".into()); return None; }
         plan::TargetedPlan::Nothing => {}
     }
     match plan::plan(action, if matches!(action, Action::Quit | Action::ToggleSafeMode | Action::CloseWindow) { core.any_running() } else { turn_running }, actions.confirms(), ctx.safe_mode) {
-        Plan::OpenSettings(page) => if let Err(error) = super::windows::open_settings(app, page) { core.notice(format!("Cannot open Settings: {error}")); },
+        Plan::OpenSettings(page) => if let Err(error) = super::windows::open_settings(app, page) { core.notice(&view, format!("Cannot open Settings: {error}")); },
         Plan::OpenAgentProfile => {
             let id = match &target {
                 Some(ContextTarget::Agent { id, .. }) => id.clone(),
-                _ => core.snapshot().agent_id,
+                _ => core.snapshot(&view).agent_id,
             };
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.emit("discard://agent-profile", id);
@@ -83,9 +85,9 @@ pub fn run(app: &AppHandle, core: &Arc<AppCore>, actions: &DesktopActions, actio
                 let _ = window.set_focus();
             }
         }
-        Plan::CancelTurn => core.cancel_in(channel),
+        Plan::CancelTurn => match channel { Some(id) => core.cancel_in(Some(id)), None => core.cancel(&view) },
         Plan::ToggleTerminal => if let Some(window) = app.get_webview_window("main") { let _ = window.emit("discard://toggle-terminal", ()); },
-        Plan::ToggleMemberList => { let _ = core.set_member_list_visible(!core.snapshot().member_list_visible); }
+        Plan::ToggleMemberList => { let _ = core.set_member_list_visible(&view, !core.snapshot(&view).member_list_visible); }
         Plan::Ask(ending) => core.ask(ending),
         Plan::Perform(ending) => perform(app, core, actions, ending),
         Plan::Minimize => if let Some(window) = app.get_webview_window("main") { let _ = window.minimize(); },
