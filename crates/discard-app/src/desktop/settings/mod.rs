@@ -44,7 +44,7 @@ pub fn settings_search(query: String) -> Vec<SidebarEntry> { sidebar_entries(&qu
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GeneralPatch { pub default_provider: Option<String>, pub confirm_while_working: Option<bool> }
+pub struct GeneralPatch { pub default_provider: Option<String>, pub confirm_while_working: Option<bool>, pub keep_running_in_background: Option<bool> }
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,7 +66,12 @@ pub fn settings_get(app: tauri::AppHandle, context: tauri::State<'_, SettingsCon
     let issues = general::issue_lines(store.issues());
     drop(store);
     match page.as_str() {
-        "general" => Ok(serde_json::json!({"defaultProvider": settings.general.default_provider, "confirmWhileWorking": settings.general.confirm_while_working, "providers": discard_core::bootstrap::PROVIDERS, "issues": issues, "themeProblems": appearance_data(&app, &context, &settings.appearance)["problems"] })),
+        "general" => {
+            use tauri::Manager;
+            // macOS has no tray icon and always reports `Ok`, so it shows no line.
+            let unavailable = app.try_state::<super::tray::TrayState>().and_then(|state| state.unavailable());
+            Ok(general::general_page(&settings.general, &issues, appearance_data(&app, &context, &settings.appearance)["problems"].clone(), unavailable))
+        }
         "appearance" => Ok(appearance_data(&app, &context, &settings.appearance)),
         _ => Err("Unknown settings page".into()),
     }
@@ -80,12 +85,8 @@ fn apply_one(store: &mut discard_core::settings::SettingsStore, changes: Vec<dis
 
 #[tauri::command]
 pub fn settings_set_general(app: tauri::AppHandle, actions: tauri::State<'_, std::sync::Arc<super::actions::DesktopActions>>, patch: GeneralPatch) -> Result<(), String> {
-    use discard_core::settings::Change;
     use tauri::Emitter;
-    let mut changes = Vec::new();
-    if let Some(value) = patch.default_provider { changes.push(Change::DefaultProvider(value)); }
-    if let Some(value) = patch.confirm_while_working { changes.push(Change::ConfirmWhileWorking(value)); }
-    apply_one(&mut actions.settings.lock().unwrap_or_else(|e| e.into_inner()), changes)?;
+    apply_one(&mut actions.settings.lock().unwrap_or_else(|e| e.into_inner()), general::general_changes(patch))?;
     let _ = app.emit("discard://settings", ());
     Ok(())
 }

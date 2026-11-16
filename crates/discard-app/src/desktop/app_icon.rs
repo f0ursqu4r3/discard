@@ -2,7 +2,7 @@
 use discard_core::settings::AppIcon;
 use tauri::AppHandle;
 
-fn png(icon: AppIcon) -> &'static [u8] {
+pub(super) fn png(icon: AppIcon) -> &'static [u8] {
     match icon {
         AppIcon::Classic => include_bytes!("../../icons/classic.png"),
         AppIcon::Landscape => include_bytes!("../../icons/landscape.png"),
@@ -14,7 +14,7 @@ fn png(icon: AppIcon) -> &'static [u8] {
     }
 }
 
-/// Show `icon` as the Dock icon on macOS, or as the icon of every window elsewhere.
+/// Show `icon` as the Dock icon on macOS, or as the icon of every window and of the tray icon elsewhere.
 pub fn apply(app: &AppHandle, icon: AppIcon) {
     let bytes = png(icon);
     #[cfg(target_os = "macos")]
@@ -40,6 +40,8 @@ pub fn apply(app: &AppHandle, icon: AppIcon) {
                 for window in app.webview_windows().values() {
                     let _ = window.set_icon(image.clone());
                 }
+                // The tray icon follows the setting (spec T5). Windows and Linux only: macOS has none.
+                super::tray::set_icon(app, image);
             }
             Err(error) => tracing::warn!(%error, icon = icon.as_str(), "cannot decode app icon"),
         }

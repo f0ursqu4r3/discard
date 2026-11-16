@@ -231,6 +231,11 @@ pub fn run(
                 plugin_theme,
             );
             core.set_theme(theme::theme_dto(&theme_state, mode));
+            // Windows and Linux get a tray icon: it is the way back to an app with no window (spec T2). macOS has the Dock.
+            // The code compiles on every platform. The app decides at run time.
+            let tray_state = if cfg!(target_os = "macos") { Ok(()) } else { tray::create(app.handle()) };
+            if let Err(error) = &tray_state { tracing::warn!(%error, "cannot create the tray icon: the app quits when the last window closes"); }
+            app.manage(tray::TrayState(tray_state));
             let mut applied_icon = appearance.app_icon;
             app_icon::apply(app.handle(), applied_icon);
             let icon_app = app.handle().clone();
@@ -352,12 +357,17 @@ pub fn run(
         if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event && windows::reopen_shows_main(has_visible_windows, windows::visible_app_windows(handle)) {
             windows::show_main_window(handle);
         }
-        if let tauri::RunEvent::ExitRequested { api, .. } = event && !exit_actions.exiting.load(Ordering::SeqCst) {
-            // An exit request is a quit, so the Quit rule decides, with no other app window and no background mode.
-            if let plan::Close::Ask(ending) = plan::close_plan(plan::WindowKind::Main, 0, false, exit_core.any_running(), exit_actions.confirms()) {
-                api.prevent_exit();
-                windows::ask_visibly(handle, &exit_core, ending);
-            } else if exit_core.any_running() { exit_core.cancel_all(); }
+        if let tauri::RunEvent::ExitRequested { api, code, .. } = event && !exit_actions.exiting.load(Ordering::SeqCst) {
+            // No code means that the last window is gone. In background mode that does not end the app. An exit request
+            // with a code is a quit, so the Quit rule decides.
+            match plan::exit_plan(code.is_none(), windows::background_enabled(handle, &exit_actions), exit_core.any_running(), exit_actions.confirms()) {
+                plan::Exit::Prevent => api.prevent_exit(),
+                plan::Exit::Ask(ending) => {
+                    api.prevent_exit();
+                    windows::ask_visibly(handle, &exit_core, ending);
+                }
+                plan::Exit::Allow => if exit_core.any_running() { exit_core.cancel_all(); },
+            }
         }
     });
     Ok(())
@@ -377,6 +387,8 @@ pub mod menu;
 pub mod actions;
 
 pub mod app_icon;
+
+pub mod tray;
 
 mod slash;
 

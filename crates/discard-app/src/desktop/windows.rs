@@ -311,10 +311,12 @@ pub fn reveal_changed_view(app: &tauri::AppHandle, caller: &super::view::ViewId,
 /// Show and focus the main window. A hidden main window shows again, with its view and its place.
 pub fn show_main_window(app: &tauri::AppHandle) { show_view_window(app, &super::view::ViewId::main()); }
 
-/// Whether the app runs in the background: the last app window closes alone and the app goes on.
-pub fn background_enabled() -> bool {
-    // No tray icon and no setting exist yet. The close rule reads this one value, so the app ends with its last app window.
-    false
+/// Whether the app runs in the background now: the last app window closes alone and the app goes on. The close rule
+/// and the exit rule read this one value. It is read at the time of the event: the setting can change while the app runs.
+pub fn background_enabled(app: &tauri::AppHandle, actions: &super::actions::DesktopActions) -> bool {
+    use tauri::Manager;
+    let tray_ok = app.try_state::<super::tray::TrayState>().is_some_and(|state| state.0.is_ok());
+    super::tray::background_enabled(actions.keeps_running(), cfg!(target_os = "macos"), tray_ok)
 }
 
 /// Whether a click on the Dock icon shows the main window. `has_visible_windows` comes from the system and counts
@@ -478,10 +480,23 @@ fn apply_refocus(app: &tauri::AppHandle, core: &super::core::AppCore, visible: &
     }
 }
 /// A window closed that no close request handled: the window of a project, by command or by its own close. Its view is
-/// dropped already. The focus moves to a window that stays, and the main window shows when none stays. The closing
-/// window is still in the list of windows when this runs, so it is left out.
+/// dropped already. The focus moves to a window that stays, and the main window shows when none stays, unless the app
+/// runs in the background (spec T1) or exits. The closing window is still in the list of windows when this runs, so it
+/// is left out.
 fn refocus_after_close(app: &tauri::AppHandle, core: &super::core::AppCore, closing: &str) {
-    apply_refocus(app, core, &super::plan::other_app_labels(&visible_app_window_labels(app), closing));
+    use super::plan::Refocus;
+    use tauri::Manager;
+    let actions = app.state::<std::sync::Arc<super::actions::DesktopActions>>();
+    let visible = super::plan::other_app_labels(&visible_app_window_labels(app), closing);
+    let exiting = actions.exiting.load(std::sync::atomic::Ordering::SeqCst);
+    match super::plan::refocus_after_close(&visible, &core.focused_view(), background_enabled(app, &actions), exiting) {
+        None => {}
+        Some(Refocus::Focus(view)) => core.set_focused_view(&view),
+        Some(Refocus::ShowMain) => {
+            show_main_window(app);
+            core.set_focused_view(&super::view::ViewId::main());
+        }
+    }
 }
 /// Ask a question about ending the app in a window that the user can see. It shows in the focused window, so the focus
 /// goes to a visible window first, and the main window shows when no app window is visible.
@@ -501,6 +516,8 @@ pub fn close_project_window(app: &tauri::AppHandle, core: &super::core::AppCore,
     registry.forget(view.label());
     core.drop_view(&view);
     if let Some(window) = app.get_webview_window(view.label()) { let _ = window.destroy(); }
+    // The refocus runs window operations. It must not hold the lock of the registry.
+    drop(registry);
     refocus_after_close(app, core, view.label());
 }
 
@@ -512,7 +529,7 @@ pub fn on_close_requested(window: &tauri::Window, core: &super::core::AppCore, a
     let app = window.app_handle();
     let visible = visible_app_window_labels(app);
     let stay = plan::other_app_labels(&visible, window.label());
-    let close = plan::close_plan(plan::window_kind(window.label()), stay.len(), background_enabled(), core.any_running(), actions.confirms());
+    let close = plan::close_plan(plan::window_kind(window.label()), stay.len(), background_enabled(app, actions), core.any_running(), actions.confirms());
     // The question shows in the focused window: that window must be visible.
     if matches!(close, Close::Ask(_)) { apply_refocus(app, core, &visible); }
     let refused = refuses_close(core, close);

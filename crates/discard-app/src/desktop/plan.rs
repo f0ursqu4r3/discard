@@ -112,6 +112,35 @@ pub fn refocus(visible: &[String], focused: &super::view::ViewId) -> Option<Refo
     })
 }
 
+/// Choose how to keep the focus after an app window closed that no close request handled. It is `refocus`, with two
+/// exceptions that show nothing: the app exits, or the app runs in the background and no app window is visible (spec
+/// T1). A quit question needs no such exception: it shows the main window through `refocus` itself (spec T6).
+pub fn refocus_after_close(visible: &[String], focused: &super::view::ViewId, background: bool, exiting: bool) -> Option<Refocus> {
+    if exiting || (background && other_app_labels(visible, "").is_empty()) { return None; }
+    refocus(visible, focused)
+}
+
+/// What an exit request of the event loop does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Exit {
+    /// The app stays: it runs in the background.
+    Prevent,
+    /// The Quit rule asks for a confirmation first.
+    Ask(Confirm),
+    /// The app ends.
+    Allow,
+}
+
+/// Decide what an exit request does. `implicit` is true when the event loop asks because no window is left. That
+/// request does not end an app that runs in the background. A request with an exit code is a quit: the Quit rule decides.
+pub fn exit_plan(implicit: bool, background: bool, turn_running: bool, confirm_while_working: bool) -> Exit {
+    if implicit && background { return Exit::Prevent; }
+    match close_plan(WindowKind::Main, 0, false, turn_running, confirm_while_working) {
+        Close::Ask(ending) => Exit::Ask(ending),
+        Close::Allow | Close::Hide | Close::Quit => Exit::Allow,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetedPlan { Copy, Archive, ArchiveBlocked, Nothing }
 
@@ -208,7 +237,7 @@ pub fn plugin_item_notice(plugin: &str, error: &str) -> String { format!("{plugi
 
 #[cfg(test)]
 mod tests {
-    use super::{ArchiveStep, Close, Confirm, Plan, TargetedPlan, Refocus, WindowKind, archive_step, channel_target_allowed, close_plan, other_app_labels, other_app_windows, refocus, plan, plan_targeted, prepare_exit, window_kind};
+    use super::{ArchiveStep, Close, Confirm, Exit, Plan, TargetedPlan, Refocus, WindowKind, archive_step, channel_target_allowed, close_plan, exit_plan, other_app_labels, other_app_windows, refocus, refocus_after_close, plan, plan_targeted, prepare_exit, window_kind};
     use discard_core::workspace::ArchiveOutcome;
     use discard_core::action::Action;
     use discard_core::settings_page::SettingsPage;
@@ -422,6 +451,49 @@ mod tests {
         // The focused window is visible: nothing changes.
         assert_eq!(refocus(&labels(&["main", "project-a"]), &project("project-a")), None);
         assert_eq!(refocus(&labels(&["main"]), &main_view()), None);
+    }
+
+    #[test]
+    fn a_close_shows_the_main_window_only_when_the_app_does_not_run_in_the_background() {
+        // No app window stays. Without background mode the main window shows again (decision 7).
+        assert_eq!(refocus_after_close(&[], &project("project-a"), false, false), Some(Refocus::ShowMain));
+        // In background mode the app stays with no window (spec T1).
+        assert_eq!(refocus_after_close(&[], &project("project-a"), true, false), None);
+        assert_eq!(refocus_after_close(&labels(&["settings"]), &main_view(), true, false), None, "Settings is not an app window");
+        assert_eq!(refocus_after_close(&labels(&["settings"]), &main_view(), false, false), Some(Refocus::ShowMain));
+        // A window stays: the focus rule is the same in both modes.
+        for background in [false, true] {
+            assert_eq!(refocus_after_close(&labels(&["main", "project-b"]), &project("project-a"), background, false), Some(Refocus::Focus(main_view())));
+            assert_eq!(refocus_after_close(&labels(&["main"]), &main_view(), background, false), None);
+        }
+    }
+
+    #[test]
+    fn nothing_shows_while_the_app_exits() {
+        for background in [false, true] {
+            assert_eq!(refocus_after_close(&[], &project("project-a"), background, true), None);
+            assert_eq!(refocus_after_close(&labels(&["project-b"]), &main_view(), background, true), None);
+        }
+    }
+
+    #[test]
+    fn the_last_window_closing_by_itself_ends_the_app_only_when_it_is_not_in_the_background() {
+        // The event loop asks to exit because no window is left (no exit code).
+        assert_eq!(exit_plan(true, true, true, true), Exit::Prevent, "agents continue, whatever turn runs");
+        assert_eq!(exit_plan(true, true, false, false), Exit::Prevent);
+        assert_eq!(exit_plan(true, false, true, true), Exit::Ask(Confirm::Quit));
+        assert_eq!(exit_plan(true, false, true, false), Exit::Allow);
+        assert_eq!(exit_plan(true, false, false, true), Exit::Allow);
+    }
+
+    #[test]
+    fn an_exit_that_code_asks_for_follows_the_quit_rule_in_both_modes() {
+        // A request with an exit code is a quit, not a window that closed.
+        for background in [false, true] {
+            assert_eq!(exit_plan(false, background, true, true), Exit::Ask(Confirm::Quit));
+            assert_eq!(exit_plan(false, background, true, false), Exit::Allow);
+            assert_eq!(exit_plan(false, background, false, true), Exit::Allow);
+        }
     }
 
     #[test]

@@ -27,6 +27,8 @@ pub struct DesktopActions {
 }
 impl DesktopActions {
     pub fn confirms(&self) -> bool { self.settings.lock().unwrap_or_else(|e| e.into_inner()).settings().general.confirm_while_working }
+    /// The setting that keeps the app running when the last app window closes. The tray icon decides whether it applies.
+    pub fn keeps_running(&self) -> bool { self.settings.lock().unwrap_or_else(|e| e.into_inner()).settings().general.keep_running_in_background }
 }
 /// Prepare a quit or relaunch before ending the running turn.
 pub fn perform(app: &AppHandle, core: &AppCore, actions: &DesktopActions, ending: Confirm) {
