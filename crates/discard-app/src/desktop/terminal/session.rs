@@ -21,6 +21,8 @@ pub enum Event {
     Output(Vec<u8>),
     /// The shell ended. The session keeps its output.
     Exit(Exit),
+    /// Another window took the session. The listener stops hearing events.
+    Moved,
     /// The app closed the session. The text says why.
     Closed(String),
 }
@@ -29,6 +31,17 @@ pub enum Event {
 pub struct Exit {
     pub code: Option<i32>,
     pub signal: Option<String>,
+}
+
+/// Shown when a window other than the owner uses a session. Also the notice of the web panel.
+pub const OPEN_ELSEWHERE: &str = "This terminal is open in another window.";
+
+/// The owner rule: a session with no owner is open to every window. Else only the owner passes.
+pub fn check_owner(current: Option<&str>, window: &str) -> Result<(), String> {
+    match current {
+        Some(owner) if owner != window => Err(OPEN_ELSEWHERE.into()),
+        _ => Ok(()),
+    }
 }
 
 /// Receives events in order. Returns `false` when nobody listens any more.
@@ -53,6 +66,8 @@ pub struct Attached {
 struct State {
     ring: Ring,
     sink: Option<Sink>,
+    /// The label of the window that holds `sink`.
+    owner: Option<String>,
     reader_done: bool,
     child_gone: bool,
     exit: Option<Exit>,
@@ -74,6 +89,7 @@ impl Shared {
             && !sink(event)
         {
             state.sink = None;
+            state.owner = None;
         }
     }
 }
@@ -117,7 +133,7 @@ impl Session {
         let mut reader = master.try_clone_reader().map_err(|error| error.to_string())?;
         let mut writer = master.take_writer().map_err(|error| error.to_string())?;
         let shared = Arc::new(Shared {
-            state: Mutex::new(State { ring: Ring::new(SCROLLBACK_BYTES), sink, reader_done: false, child_gone: false, exit: None }),
+            state: Mutex::new(State { ring: Ring::new(SCROLLBACK_BYTES), sink, owner: None, reader_done: false, child_gone: false, exit: None }),
             changed: Condvar::new(),
         });
 
@@ -182,17 +198,40 @@ impl Session {
         &self.cwd
     }
 
-    /// Make `sink` the listener and return what it missed. The output lock makes the cut exact:
+    /// Make `sink` the listener of the window `owner` and return what it missed. A listener of another
+    /// window hears `Event::Moved` first. A listener of the same window goes without notice. A dead
+    /// or gone listener cannot stop the attach. The output lock makes the cut exact:
     /// bytes before it are in the scrollback, bytes after it go to `sink`.
-    pub fn attach(&self, sink: Sink) -> Attached {
+    pub fn attach(&self, owner: &str, sink: Sink) -> Attached {
         let mut state = lock(&self.shared.state);
+        if state.owner.as_deref().is_some_and(|previous| previous != owner)
+            && let Some(previous) = &state.sink
+        {
+            let _ = previous(Event::Moved);
+        }
         state.sink = Some(sink);
+        state.owner = Some(owner.to_owned());
         Attached { scrollback: state.ring.snapshot(), exit: state.exit.clone() }
     }
 
-    /// Stop sending events. The session keeps its output.
-    pub fn detach(&self) {
-        lock(&self.shared.state).sink = None;
+    /// The label of the window that listens, if any.
+    pub fn owner(&self) -> Option<String> {
+        lock(&self.shared.state).owner.clone()
+    }
+
+    /// Fail when `window` is not the owner. See `check_owner`.
+    pub fn require_owner(&self, window: &str) -> Result<(), String> {
+        check_owner(lock(&self.shared.state).owner.as_deref(), window)
+    }
+
+    /// Stop sending events to `window`. The session keeps its output. A window that is not the owner
+    /// fails and changes nothing, so the old window of a moved session cannot cut off the new one.
+    pub fn detach(&self, window: &str) -> Result<(), String> {
+        let mut state = lock(&self.shared.state);
+        check_owner(state.owner.as_deref(), window)?;
+        state.sink = None;
+        state.owner = None;
+        Ok(())
     }
 
     pub fn exit(&self) -> Option<Exit> {
@@ -222,12 +261,17 @@ impl Session {
         let mut state = lock(&self.shared.state);
         Shared::emit(&mut state, Event::Closed(reason.to_owned()));
         state.sink = None;
+        state.owner = None;
     }
 
     /// End the shell and its process group. Sends hang-up first, then kill after `grace`.
     /// This blocks for up to `grace`. Callers off the UI path run it on a thread.
     pub fn terminate(&self, grace: Duration) {
-        lock(&self.shared.state).sink = None;
+        {
+            let mut state = lock(&self.shared.state);
+            state.sink = None;
+            state.owner = None;
+        }
         *lock(&self.input) = None;
         if lock(&self.shared.state).child_gone {
             return;
@@ -299,5 +343,117 @@ mod tests {
     fn size_never_has_a_zero_side() {
         let value = size(0, 0);
         assert_eq!((value.cols, value.rows), (1, 1));
+    }
+
+    #[cfg(unix)]
+    mod owners {
+        use super::*;
+
+        type Heard = Arc<Mutex<Vec<Event>>>;
+
+        fn sink(heard: &Heard) -> Sink {
+            let heard = heard.clone();
+            Box::new(move |event| {
+                heard.lock().unwrap().push(event);
+                true
+            })
+        }
+
+        fn shell() -> (Arc<Session>, tempfile::TempDir) {
+            let dir = tempfile::tempdir().unwrap();
+            let spec = SpawnSpec {
+                shell: "/bin/sh".into(),
+                args: vec!["-i".into()],
+                cwd: dir.path().to_path_buf(),
+                cols: 80,
+                rows: 24,
+                env: Vec::new(),
+                env_remove: Vec::new(),
+            };
+            (Session::spawn(spec, None).unwrap(), dir)
+        }
+
+        fn heard_text(heard: &Heard) -> String {
+            let bytes: Vec<u8> = heard.lock().unwrap().iter().filter_map(|event| if let Event::Output(bytes) = event { Some(bytes.clone()) } else { None }).flatten().collect();
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+
+        fn moves(heard: &Heard) -> usize {
+            heard.lock().unwrap().iter().filter(|event| **event == Event::Moved).count()
+        }
+
+        fn wait_for(what: &str, condition: impl Fn() -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !condition() {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        #[test]
+        fn a_second_window_takes_the_session_and_the_first_is_told() {
+            let (session, _dir) = shell();
+            let (first, second) = (Heard::default(), Heard::default());
+            session.attach("main", sink(&first));
+            session.attach("project-p", sink(&second));
+            assert_eq!(moves(&first), 1);
+            assert_eq!(moves(&second), 0);
+            assert_eq!(session.owner().as_deref(), Some("project-p"));
+
+            session.write(b"echo second-window-only\n".to_vec()).unwrap();
+            wait_for("the output of the second window", || heard_text(&second).contains("second-window-only"));
+            assert!(!heard_text(&first).contains("second-window-only"));
+            session.terminate(Duration::from_millis(500));
+        }
+
+        #[test]
+        fn the_same_window_attaches_again_without_a_move() {
+            let (session, _dir) = shell();
+            let (first, again) = (Heard::default(), Heard::default());
+            session.attach("main", sink(&first));
+            session.attach("main", sink(&again));
+            assert_eq!(moves(&first), 0);
+            assert_eq!(moves(&again), 0);
+            assert_eq!(session.owner().as_deref(), Some("main"));
+            session.terminate(Duration::from_millis(500));
+        }
+
+        #[test]
+        fn a_detach_from_the_old_window_leaves_the_new_listener_in_place() {
+            let (session, _dir) = shell();
+            let (first, second) = (Heard::default(), Heard::default());
+            session.attach("main", sink(&first));
+            session.attach("project-p", sink(&second));
+            assert_eq!(session.detach("main"), Err(OPEN_ELSEWHERE.to_string()));
+            assert_eq!(session.owner().as_deref(), Some("project-p"));
+
+            session.write(b"echo still-here\n".to_vec()).unwrap();
+            wait_for("the output after the refused detach", || heard_text(&second).contains("still-here"));
+
+            assert_eq!(session.detach("project-p"), Ok(()));
+            assert_eq!(session.owner(), None);
+            session.terminate(Duration::from_millis(500));
+        }
+
+        #[test]
+        fn a_gone_owner_does_not_block_a_new_attach() {
+            let (session, _dir) = shell();
+            // The first listener belongs to a window that is gone: its sink fails.
+            session.attach("project-gone", Box::new(|_| false));
+            let heard = Heard::default();
+            let attached = session.attach("main", sink(&heard));
+            assert!(attached.exit.is_none());
+            assert_eq!(session.owner().as_deref(), Some("main"));
+            session.write(b"echo taken-over\n".to_vec()).unwrap();
+            wait_for("the output of the new owner", || heard_text(&heard).contains("taken-over"));
+            session.terminate(Duration::from_millis(500));
+        }
+
+        #[test]
+        fn the_owner_rule_lets_the_owner_pass_and_stops_other_windows() {
+            assert_eq!(check_owner(Some("main"), "main"), Ok(()));
+            assert_eq!(check_owner(None, "main"), Ok(()));
+            assert_eq!(check_owner(Some("project-p"), "main"), Err("This terminal is open in another window.".to_string()));
+        }
     }
 }

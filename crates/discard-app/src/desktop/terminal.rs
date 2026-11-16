@@ -1,12 +1,12 @@
 //! The integrated terminal: one shell per project channel, for the user only.
 //!
-//! No agent, MCP tool, plugin, or plugin event can reach this module. Its commands answer the main
-//! window alone. The module logs session start and end, never what the shell reads or writes.
+//! No agent, MCP tool, plugin, or plugin event can reach this module. Its commands answer app windows
+//! alone: the main window and the project windows. The module logs session start and end, never what the shell reads or writes.
 pub mod cwd;
 pub mod ring;
 pub mod session;
 
-use super::channels::Channels;
+use super::{channels::Channels, view::ViewId};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use discard_core::model::ChannelId;
 use serde::Serialize;
@@ -162,6 +162,8 @@ pub enum TerminalEvent {
     /// Output bytes, base64. A chunk can end inside a UTF-8 sequence, so the webview decodes them as a stream.
     Output { data: String },
     Exit { exit_code: Option<i32>, signal: Option<String> },
+    /// Another window took the session. This window stops hearing it.
+    Moved,
     /// The app ended the session, for example because its folder is gone.
     Closed { reason: String },
 }
@@ -171,6 +173,7 @@ impl From<Event> for TerminalEvent {
         match event {
             Event::Output(bytes) => TerminalEvent::Output { data: STANDARD.encode(bytes) },
             Event::Exit(Exit { code, signal }) => TerminalEvent::Exit { exit_code: code, signal },
+            Event::Moved => TerminalEvent::Moved,
             Event::Closed(reason) => TerminalEvent::Closed { reason },
         }
     }
@@ -198,8 +201,22 @@ pub struct TerminalStatus {
     pub signal: Option<String>,
 }
 
-fn main_window_only(window: &tauri::WebviewWindow) -> Result<(), String> {
-    if window.label() == "main" { Ok(()) } else { Err("The terminal is available in the main window only.".into()) }
+/// Pass for the label of an app window: the main window or a project window.
+fn app_label(label: &str) -> Result<(), String> {
+    if ViewId::from_label(label).is_some() { Ok(()) } else { Err("The terminal is available in app windows only.".into()) }
+}
+
+fn app_window_only(window: &tauri::WebviewWindow) -> Result<(), String> {
+    app_label(window.label())
+}
+
+/// The session of a channel when this window may use it. A channel without a session is `Ok(None)`.
+fn owned_session(terminals: &Terminals, channel: &str, window: &str) -> Result<Option<Arc<Session>>, String> {
+    let session = terminals.get(channel);
+    if let Some(session) = &session {
+        session.require_owner(window)?;
+    }
+    Ok(session)
 }
 
 fn missing(channel: &str) -> String {
@@ -207,7 +224,8 @@ fn missing(channel: &str) -> String {
 }
 
 /// Open or re-attach the terminal of a channel. A new session starts in the working folder of the channel.
-/// `on_event` replaces any earlier listener. The result holds the output so far, and the stream continues from there.
+/// `on_event` replaces any earlier listener, also one of a window that is gone. A listener of another window
+/// hears `moved` first. The result holds the output so far, and the stream continues from there.
 #[tauri::command]
 pub async fn terminal_open(
     window: tauri::WebviewWindow,
@@ -218,7 +236,8 @@ pub async fn terminal_open(
     rows: u16,
     on_event: Channel<TerminalEvent>,
 ) -> Result<OpenedTerminal, String> {
-    main_window_only(&window)?;
+    app_window_only(&window)?;
+    let owner = window.label().to_owned();
     let (channels, terminals) = (channels.inner().clone(), terminals.inner().clone());
     tauri::async_runtime::spawn_blocking(move || {
         let session = match terminals.get(&channel_id) {
@@ -233,7 +252,7 @@ pub async fn terminal_open(
             }
         };
         let sink: Sink = Box::new(move |event| on_event.send(event.into()).is_ok());
-        let attached = session.attach(sink);
+        let attached = session.attach(&owner, sink);
         Ok(OpenedTerminal {
             session_id: session.id().to_owned(),
             cwd: session.cwd().to_string_lossy().into_owned(),
@@ -250,38 +269,40 @@ pub async fn terminal_open(
 /// Send keystrokes to the shell. The webview sends one call at a time, so the order holds.
 #[tauri::command]
 pub async fn terminal_write(window: tauri::WebviewWindow, terminals: State<'_, Arc<Terminals>>, channel_id: String, data: String) -> Result<(), String> {
-    main_window_only(&window)?;
-    terminals.get(&channel_id).ok_or_else(|| missing(&channel_id))?.write(data.into_bytes())
+    app_window_only(&window)?;
+    owned_session(&terminals, &channel_id, window.label())?.ok_or_else(|| missing(&channel_id))?.write(data.into_bytes())
 }
 
 #[tauri::command]
 pub async fn terminal_resize(window: tauri::WebviewWindow, terminals: State<'_, Arc<Terminals>>, channel_id: String, cols: u16, rows: u16) -> Result<(), String> {
-    main_window_only(&window)?;
-    terminals.get(&channel_id).ok_or_else(|| missing(&channel_id))?.resize(cols, rows)
+    app_window_only(&window)?;
+    owned_session(&terminals, &channel_id, window.label())?.ok_or_else(|| missing(&channel_id))?.resize(cols, rows)
 }
 
-/// Stop streaming to the webview. The session keeps running and keeps its output.
+/// Stop streaming to the webview. The session keeps running and keeps its output. Only the owner can do it.
 #[tauri::command]
 pub async fn terminal_detach(window: tauri::WebviewWindow, terminals: State<'_, Arc<Terminals>>, channel_id: String) -> Result<(), String> {
-    main_window_only(&window)?;
-    if let Some(session) = terminals.get(&channel_id) {
-        session.detach();
+    app_window_only(&window)?;
+    match terminals.get(&channel_id) {
+        Some(session) => session.detach(window.label()),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Kill the shell and its process group, then drop the session. A channel without a session is fine.
+/// Only the owner can do it.
 #[tauri::command]
 pub async fn terminal_close(window: tauri::WebviewWindow, terminals: State<'_, Arc<Terminals>>, channel_id: String) -> Result<(), String> {
-    main_window_only(&window)?;
+    app_window_only(&window)?;
+    owned_session(&terminals, &channel_id, window.label())?;
     terminals.close_channel(&channel_id, None);
     Ok(())
 }
 
-/// The state of a channel session, or null when it has none.
+/// The state of a channel session, or null when it has none. Any app window can ask.
 #[tauri::command]
 pub async fn terminal_status(window: tauri::WebviewWindow, terminals: State<'_, Arc<Terminals>>, channel_id: String) -> Result<Option<TerminalStatus>, String> {
-    main_window_only(&window)?;
+    app_window_only(&window)?;
     Ok(terminals.get(&channel_id).map(|session| {
         let exit = session.exit();
         TerminalStatus {
@@ -328,6 +349,23 @@ mod tests {
         assert_eq!(exit, serde_json::json!({ "kind": "exit", "exitCode": 3, "signal": null }));
         let closed = serde_json::to_value(TerminalEvent::from(Event::Closed("gone".into()))).unwrap();
         assert_eq!(closed, serde_json::json!({ "kind": "closed", "reason": "gone" }));
+        let moved = serde_json::to_value(TerminalEvent::from(Event::Moved)).unwrap();
+        assert_eq!(moved, serde_json::json!({ "kind": "moved" }));
+    }
+
+    #[test]
+    fn the_main_window_and_project_windows_are_app_windows() {
+        assert_eq!(app_label("main"), Ok(()));
+        assert_eq!(app_label(ViewId::project(&discard_core::model::ProjectId("p1".into())).label()), Ok(()));
+        for label in ["settings", "project-", "Main", ""] {
+            assert_eq!(app_label(label), Err("The terminal is available in app windows only.".to_string()), "{label:?}");
+        }
+    }
+
+    #[test]
+    fn a_session_of_a_channel_is_missing_without_an_error_for_any_owner() {
+        let terminals = Terminals::default();
+        assert!(owned_session(&terminals, "channel-1", "main").unwrap().is_none());
     }
 
     #[test]

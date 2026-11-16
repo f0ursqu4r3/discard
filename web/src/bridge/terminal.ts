@@ -6,6 +6,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 export type TerminalEvent =
   | { kind: 'output'; data: string }
   | { kind: 'exit'; exitCode: number | null; signal: string | null }
+  | { kind: 'moved' }
   | { kind: 'closed'; reason: string }
 
 export interface TerminalOpened {

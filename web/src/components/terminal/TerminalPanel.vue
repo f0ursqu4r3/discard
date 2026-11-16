@@ -124,6 +124,11 @@ function start(channelId: string) {
   queue = queue.then(() => attach(channelId, run)).catch(ignore)
 }
 
+// Opening again moves the session to this window. The other window gets the moved notice.
+function showHere() {
+  start(props.channelId)
+}
+
 async function restart() {
   const id = props.channelId
   generation++
@@ -327,14 +332,24 @@ defineExpose({ restart, kill, view })
     </header>
     <div class="relative min-h-0 flex-1" :style="{ backgroundColor: theme.background }">
       <div ref="host" data-testid="terminal-host" class="absolute inset-0 px-2 py-1" />
-      <p
+      <div
         v-if="status"
-        data-testid="terminal-status"
-        role="status"
-        class="pointer-events-none absolute inset-x-2 bottom-1 truncate rounded bg-muted/90 px-2 py-1 text-xs text-muted-foreground"
+        class="pointer-events-none absolute inset-x-2 bottom-1 flex items-center gap-2 rounded bg-muted/90 px-2 py-1 text-xs text-muted-foreground"
       >
-        {{ status }}
-      </p>
+        <p data-testid="terminal-status" role="status" class="min-w-0 flex-1 truncate">
+          {{ status }}
+        </p>
+        <Button
+          v-if="view.phase === 'moved'"
+          data-testid="terminal-show-here"
+          variant="ghost"
+          size="xs"
+          class="pointer-events-auto"
+          @click="showHere"
+        >
+          Show Here
+        </Button>
+      </div>
     </div>
   </section>
 </template>
