@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ChevronDown, ChevronRight } from '@lucide/vue'
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref, useTemplateRef, watch } from 'vue'
 import type { ChangeFileDto } from '../../bridge/types'
 import { Input } from '../ui/input'
 import { buildTree, filterFiles, flattenTree, statusTone } from './tree'
@@ -8,6 +8,7 @@ import { buildTree, filterFiles, flattenTree, statusTone } from './tree'
 const props = defineProps<{ files: ChangeFileDto[]; selected: string | null }>()
 const emit = defineEmits<{ select: [path: string] }>()
 
+const list = useTemplateRef<HTMLElement>('list')
 const filter = ref('')
 const collapsed = ref(new Set<string>())
 const filtering = computed(() => filter.value.trim() !== '')
@@ -15,6 +16,19 @@ const matches = computed(() => filterFiles(props.files, filter.value))
 // A filter opens every folder, so a match is never hidden in a closed folder.
 const rows = computed(() =>
   flattenTree(buildTree(matches.value), filtering.value ? new Set() : collapsed.value),
+)
+
+// Keep the selected row in view. A row in a closed folder or filtered out is not drawn, so nothing scrolls.
+watch(
+  () => props.selected,
+  async (path) => {
+    if (path === null) return
+    await nextTick()
+    const row = [...(list.value?.querySelectorAll<HTMLElement>('[data-tree-file]') ?? [])].find(
+      (element) => element.dataset.path === path,
+    )
+    row?.scrollIntoView?.({ block: 'nearest' })
+  },
 )
 
 function toggle(path: string) {
@@ -37,7 +51,7 @@ const indent = (depth: number) => ({ paddingLeft: `calc(0.5rem + ${depth} * 0.75
         @update:model-value="filter = String($event)"
       />
     </div>
-    <ul class="min-h-0 flex-1 overflow-y-auto py-1" aria-label="Changed files">
+    <ul ref="list" class="min-h-0 flex-1 overflow-y-auto py-1" aria-label="Changed files">
       <li v-for="row in rows" :key="row.node.path + row.node.type">
         <button
           v-if="row.node.type === 'folder'"
