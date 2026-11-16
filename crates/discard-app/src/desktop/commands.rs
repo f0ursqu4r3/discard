@@ -480,6 +480,7 @@ pub fn update_project_profile(app: tauri::AppHandle, core: State<'_, Arc<AppCore
     context.store.lock().unwrap_or_else(|e| e.into_inner())
         .update_project_profile(&id, &name, avatar.as_deref()).map_err(|e| e.to_string())?;
     core.update_project_name(&id.0, name.trim());
+    super::windows::set_project_window_title(&app, &id, name.trim());
     use tauri::Emitter;
     let _ = app.emit("discard://projects", ());
     Ok(())
@@ -611,18 +612,25 @@ pub async fn set_project_main_agent(app: tauri::AppHandle, channels: State<'_, A
     Ok(())
 }
 #[tauri::command]
-pub async fn remove_project(window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, terminals: State<'_, Arc<super::terminal::Terminals>>, project_id: String) -> Result<(), String> {
+pub async fn open_project_window(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String) -> Result<(), String> {
     let channels = channels.inner().clone();
-    let view = view_of(&window, &channels.core)?;
+    // An async command, so the window is not built on the thread of the event loop. The view opens on a blocking thread.
+    tauri::async_runtime::spawn_blocking(move || super::windows::open_project_window(&app, &channels, &discard_core::model::ProjectId(project_id))).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn remove_project(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, terminals: State<'_, Arc<super::terminal::Terminals>>, project_id: String) -> Result<(), String> {
+    let channels = channels.inner().clone();
+    // The window that asks must be open. The project window of the removed project closes first, so the next project
+    // never applies to it.
+    view_of(&window, &channels.core)?;
     channels.core.begin_project_change()?;
+    super::windows::close_project_window(&app, &channels.core, &discard_core::model::ProjectId(project_id.clone()));
     let core = channels.core.clone();
     let (terminals, closing) = (terminals.inner().clone(), project_id.clone());
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let id = discard_core::model::ProjectId(project_id);
-        let next = channels.store.lock().unwrap_or_else(|e| e.into_inner()).visible_projects().map_err(|e| e.to_string())?.into_iter().find(|p| p.id != id);
-        if channels.core.current_project(&view).id == id {
-            if let Some(next) = next { channels.activate_project(&view, &next.id)?; } else { channels.core.select_sidebar_project(&view, None); }
-        }
+        // A project view never changes project: only the main view moves to the next project.
+        channels.leave_removed_project(&id)?;
         channels.store.lock().unwrap_or_else(|e| e.into_inner()).hide_project(&id).map_err(|e| e.to_string())
     }).await.map_err(|e| e.to_string()).and_then(|r| r);
     core.end_project_change();

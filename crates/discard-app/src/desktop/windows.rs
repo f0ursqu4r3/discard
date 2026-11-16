@@ -100,6 +100,59 @@ mod tests {
     }
 
     #[test]
+    fn a_project_window_opens_32_points_from_the_main_window() {
+        let main = Bounds { x: 100.0, y: 80.0, width: 1200.0, height: 800.0 };
+        assert_eq!(project_window_position(Some(main)), Some((132.0, 112.0)));
+        assert_eq!(project_window_position(None), None);
+        // The offset does not depend on the size of the main window, and a negative position keeps its sign.
+        let left = Bounds { x: -1500.0, y: -20.0, width: 640.0, height: 480.0 };
+        assert_eq!(project_window_position(Some(left)), Some((-1468.0, 12.0)));
+    }
+
+    #[test]
+    fn a_project_window_is_named_after_its_project() {
+        assert_eq!(project_window_title("Mission Control"), "Mission Control");
+        assert_eq!(project_window_title(""), "", "a title is the name as it is");
+        let id = discard_core::model::ProjectId("0193a1b2-aaaa-7bbb-8ccc-0123456789ab".into());
+        assert_eq!(project_window_url(&id), "index.html#/project/0193a1b2-aaaa-7bbb-8ccc-0123456789ab");
+        assert_eq!(PROJECT_WINDOW_SIZE, (1100.0, 750.0));
+    }
+
+    #[test]
+    fn a_second_open_focuses_the_project_window() {
+        assert_eq!(project_window_action(false), ProjectWindowAction::Create);
+        assert_eq!(project_window_action(true), ProjectWindowAction::Focus);
+    }
+
+    #[test]
+    fn app_window_labels_keep_the_labels_of_views() {
+        let project = discard_core::model::ProjectId("p-1".into());
+        let label = crate::desktop::view::ViewId::project(&project).label().to_owned();
+        let labels = view_labels(["settings".to_owned(), label.clone(), "main".to_owned(), "project-a b".to_owned(), "other".to_owned()]);
+        assert_eq!(labels, vec!["main".to_owned(), label]);
+        assert!(view_labels(Vec::<String>::new()).is_empty());
+    }
+
+    #[test]
+    fn the_destroyed_window_of_a_project_drops_its_view_and_no_other() {
+        use crate::desktop::view::ViewId;
+        let project = discard_core::model::ProjectId("p-1".into());
+        assert_eq!(view_of_closed_window(ViewId::project(&project).label()), Some(ViewId::project(&project)));
+        assert_eq!(view_of_closed_window("main"), None, "the main view stays");
+        assert_eq!(view_of_closed_window("settings"), None);
+        assert_eq!(view_of_closed_window("project-"), None);
+    }
+
+    #[test]
+    fn project_windows_may_call_the_commands_of_the_main_window() {
+        let capability: serde_json::Value = serde_json::from_str(include_str!("../../capabilities/default.json")).unwrap();
+        assert_eq!(capability["windows"], serde_json::json!(["main", "settings", "project-*"]));
+        // The pattern matches the label of every project window.
+        let label = crate::desktop::view::ViewId::project(&discard_core::model::ProjectId("a b/c".into()));
+        assert!(label.label().starts_with("project-"));
+    }
+
+    #[test]
     fn bounds_saved_only_when_restorable() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = StateStore::open(&dir.path().join("state.toml"));
@@ -173,4 +226,94 @@ pub(crate) fn show_conversation(app: &tauri::AppHandle) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+/// The start size of a project window, in logical points.
+pub const PROJECT_WINDOW_SIZE: (f64, f64) = (1100.0, 750.0);
+/// A project window opens this far from the main window on each axis, in logical points.
+const PROJECT_WINDOW_OFFSET: f32 = 32.0;
+
+/// Where a project window opens: the position of the main window plus the offset on each axis. `None` when the
+/// bounds of the main window are unknown. The system then places the window.
+pub fn project_window_position(main: Option<Bounds>) -> Option<(f32, f32)> {
+    main.map(|bounds| (bounds.x + PROJECT_WINDOW_OFFSET, bounds.y + PROJECT_WINDOW_OFFSET))
+}
+/// The title of a project window is the name of its project.
+pub fn project_window_title(name: &str) -> String { name.to_owned() }
+/// The page of a project window.
+pub fn project_window_url(project: &discard_core::model::ProjectId) -> String { format!("index.html#/project/{}", project.0) }
+
+/// Choose whether to create the window of a project or focus it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProjectWindowAction { Create, Focus }
+
+pub fn project_window_action(exists: bool) -> ProjectWindowAction {
+    if exists { ProjectWindowAction::Focus } else { ProjectWindowAction::Create }
+}
+/// The labels that name an app window (a view), in order. Other windows, such as Settings, are not in the list.
+fn view_labels(labels: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut labels: Vec<String> = labels.into_iter().filter(|label| super::view::ViewId::from_label(label).is_some()).collect();
+    labels.sort();
+    labels
+}
+/// The labels of the app windows that are open.
+pub fn app_window_labels(app: &tauri::AppHandle) -> Vec<String> {
+    use tauri::Manager;
+    view_labels(app.webview_windows().into_keys())
+}
+/// The view to drop when the window with this label is gone: the view of a project window. The main view stays.
+pub fn view_of_closed_window(label: &str) -> Option<super::view::ViewId> {
+    super::view::ViewId::from_label(label).filter(|view| !view.is_main())
+}
+
+/// Show and focus the window of a view.
+pub fn show_view_window(app: &tauri::AppHandle, view: &super::view::ViewId) {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window(view.label()) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// Open the project window of `project`, or show and focus it when it is open. The view of a new window opens first.
+/// A window that cannot be built leaves no view behind.
+pub fn open_project_window(app: &tauri::AppHandle, channels: &std::sync::Arc<super::channels::Channels>, project: &discard_core::model::ProjectId) -> Result<(), String> {
+    use tauri::Manager;
+    let label = super::view::ViewId::project(project);
+    if project_window_action(app.get_webview_window(label.label()).is_some()) == ProjectWindowAction::Focus {
+        show_view_window(app, &label);
+        return Ok(());
+    }
+    let view = channels.open_project_view(project)?;
+    let name = channels.core.current_project(&view).name;
+    // The live position of the main window, or its saved position when the window is not there.
+    let main = app.get_webview_window("main").and_then(|window| window_geometry(&window.as_ref().window())).map(|(bounds, _)| bounds).or_else(|| channels.core.window_bounds());
+    let mut builder = tauri::WebviewWindowBuilder::new(app, view.label(), tauri::WebviewUrl::App(project_window_url(project).into()))
+        .title(project_window_title(&name)).inner_size(PROJECT_WINDOW_SIZE.0, PROJECT_WINDOW_SIZE.1).disable_drag_drop_handler();
+    if let Some((x, y)) = project_window_position(main) { builder = builder.position(f64::from(x), f64::from(y)); }
+    // The title bar options exist on macOS only.
+    #[cfg(target_os = "macos")]
+    { builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay).hidden_title(true).traffic_light_position(tauri::LogicalPosition::new(12.0, 20.0)); }
+    if let Err(error) = builder.build() {
+        // A second open that ran at the same time can have built the window already. Its view stays.
+        if app.get_webview_window(view.label()).is_none() { channels.core.drop_view(&view); }
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
+/// Close the project window of `project` and drop its view. The window closes with no confirmation. A turn goes on,
+/// and the channels stay loaded.
+pub fn close_project_window(app: &tauri::AppHandle, core: &super::core::AppCore, project: &discard_core::model::ProjectId) {
+    use tauri::Manager;
+    let view = super::view::ViewId::project(project);
+    core.drop_view(&view);
+    if let Some(window) = app.get_webview_window(view.label()) { let _ = window.destroy(); }
+}
+
+/// Show the new name of a project in the title of its project window.
+pub fn set_project_window_title(app: &tauri::AppHandle, project: &discard_core::model::ProjectId, name: &str) {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window(super::view::ViewId::project(project).label()) { let _ = window.set_title(&project_window_title(name)); }
 }

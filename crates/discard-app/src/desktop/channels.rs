@@ -61,6 +61,18 @@ impl Channels {
         self.core.refresh_branches_in_background(view);
         Ok((view.clone(), channel.id.0))
     }
+    /// Move the main view off a project that is about to be removed: to the next visible project, or to no project.
+    /// A project view never changes project, so no other view moves.
+    pub fn leave_removed_project(&self, id: &ProjectId) -> Result<(), String> {
+        let main = ViewId::main();
+        if self.core.current_project(&main).id != *id { return Ok(()); }
+        let next = self.store.lock().unwrap_or_else(|e| e.into_inner()).visible_projects().map_err(|e| e.to_string())?.into_iter().find(|p| p.id != *id);
+        match next {
+            Some(next) => { self.activate_project(&main, &next.id)?; }
+            None => self.core.select_sidebar_project(&main, None),
+        }
+        Ok(())
+    }
     /// Open the view of the project window of `project`, fixed to the project, on the saved channel of the project.
     /// A view that exists is returned as it is. The new view starts its first branch refresh.
     pub fn open_project_view(&self, project: &ProjectId) -> Result<ViewId, String> {
@@ -73,7 +85,10 @@ impl Channels {
             let channel = Self::saved_channel(&store, project)?;
             (entry, channel)
         };
-        if !self.core.open_view(view.clone(), &entry) { return Ok(view); }
+        let opened = self.core.open_view(view.clone(), &entry);
+        let exists = self.core.has_view(&view);
+        let view = view_after_open(view, opened, exists)?;
+        if !opened { return Ok(view); }
         if let Err(error) = self.select_inner_mode(&view, &channel.id.0, true) {
             // A project view with no channel is of no use. A failed open leaves no view behind.
             self.core.drop_view(&view);
@@ -391,12 +406,11 @@ impl Channels {
             if self.core.has_channel(&updated.id.0) && self.core.channel_session_closed(&updated.id.0) { self.start_mode(&updated, true)?; }
             else { self.refresh_channel_access(&updated)?; }
             // Every view that selected the old canonical channel moves to the new one (decision 22).
-            let mut moved = Vec::new();
             if let Some(old) = previous.as_ref().filter(|old| old.id != target.id) && !self.core.views_selecting(&old.id.0).is_empty() {
                 if !self.core.has_channel(&updated.id.0) { self.start(&updated)?; }
-                moved = self.move_views(&old.id.0, &updated.id.0)?;
+                return self.move_views(view, &old.id.0, &updated.id.0);
             }
-            self.refresh_branches_of(view, &moved);
+            self.refresh_branches_of(view, &[]);
             Ok(())
         })();
         for id in begun { self.core.end_channel_change(&id); }
@@ -438,24 +452,23 @@ impl Channels {
             } else { self.start(&updated)?; }
             self.refresh_channel_access(&updated)?;
             // Every view that selected the old canonical channel moves to the new one (decision 22).
-            let moved = match previous.as_ref().filter(|old| old.id != updated.id) {
-                Some(old) => self.move_views(&old.id.0, &updated.id.0)?,
-                None => Vec::new(),
-            };
-            self.refresh_branches_of(view, &moved);
-            Ok(())
+            match previous.as_ref().filter(|old| old.id != updated.id) {
+                Some(old) => self.move_views(view, &old.id.0, &updated.id.0),
+                None => { self.refresh_branches_of(view, &[]); Ok(()) }
+            }
         })();
         for id in begun { self.core.end_channel_change(&id); }
         result
     }
     /// Move every view that selects channel `from` to channel `to`. A view that cannot move does not stop the others.
-    /// Returns the views that moved, or the first error.
-    fn move_views(&self, from: &str, to: &str) -> Result<Vec<ViewId>, String> {
+    /// The views that moved, and `view` that ran the action, reload their branches before the first error returns.
+    fn move_views(&self, view: &ViewId, from: &str, to: &str) -> Result<(), String> {
         let (mut moved, mut failure) = (Vec::new(), None);
-        for view in self.core.views_selecting(from) {
-            match self.select_inner(&view, to) { Ok(_) => moved.push(view), Err(error) => { failure.get_or_insert(error); } }
+        for shown in self.core.views_selecting(from) {
+            match self.select_inner(&shown, to) { Ok(_) => moved.push(shown), Err(error) => { failure.get_or_insert(error); } }
         }
-        failure.map_or(Ok(moved), Err)
+        self.refresh_branches_of(view, &moved);
+        failure.map_or(Ok(()), Err)
     }
     /// Reload the branches of the view that ran an action and of the views that the action moved.
     fn refresh_branches_of(&self, view: &ViewId, moved: &[ViewId]) {
@@ -590,7 +603,9 @@ impl Channels {
         }
         Ok(view.clone())
     }
-    pub fn reload_project(&self, view: &ViewId, id: &ProjectId) -> Result<(), String> {
+    /// Restart the loaded channels of a project after a folder change. Every view of the project gets the new path and
+    /// branch source, not only the view that ran the change. `_view` is the view that ran it.
+    pub fn reload_project(&self, _view: &ViewId, id: &ProjectId) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let channels: Vec<_> = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -604,10 +619,17 @@ impl Channels {
         };
         self.core.invalidate_project_channels(id)?;
         for channel in channels { self.start_mode(&channel, true)?; }
-        if self.core.active_context(view).1.as_ref() == Some(id) {
-            self.select_inner_mode(view, &self.core.active_channel_id(view), true)?;
+        let project = self.store.lock().unwrap_or_else(|e| e.into_inner()).list_projects().map_err(|e| e.to_string())?.into_iter().find(|p| p.id == *id);
+        let mut failure = None;
+        for shown in self.core.view_ids() {
+            let browses = self.core.current_project(&shown).id == *id;
+            let selects = self.core.active_context(&shown).1.as_ref() == Some(id);
+            if !browses && !selects { continue; }
+            if browses && let Some(project) = &project { self.core.select_sidebar_project(&shown, Some(project)); }
+            if selects && let Err(error) = self.select_inner_mode(&shown, &self.core.active_channel_id(&shown), true) { failure.get_or_insert(error); }
+            self.core.refresh_branches_in_background(&shown);
         }
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
     /// Restart loaded project channels that Store reassigned after an agent was deleted.
     pub fn reconcile_deleted_agent(&self, deleted_agent_id: &str) -> Result<(), String> {
@@ -1175,6 +1197,11 @@ impl Channels {
     }
 }
 
+/// The view that `open_project_view` returns. `opened` is the result of `open_view`: false when the view existed. That
+/// view can close before the check, so a view that was not added and is not there is an error, not a view to use.
+fn view_after_open(view: ViewId, opened: bool, exists: bool) -> Result<ViewId, String> {
+    if opened || exists { Ok(view) } else { Err(super::core::WINDOW_CLOSED.into()) }
+}
 /// The engine of a running sub-agent thread ended without a final state: the task fails.
 fn sub_agent_stream_closed(core: &AppCore, store: &Arc<Mutex<Store>>, thread: &str) {
     use discard_core::model::ThreadState;
@@ -2811,5 +2838,140 @@ mod navigation_action_tests {
         assert_eq!(r.core.view_ids(), vec![ViewId::main()]);
         assert_eq!(r.core.active_channel_id(&ViewId::main()), before, "the main view did not change");
         assert_eq!(r.core.current_project(&ViewId::main()).id, p);
+    }
+
+    #[tokio::test]
+    async fn a_project_view_opens_on_the_saved_channel_of_the_project() {
+        let r = rig().await;
+        let p = r.project.id.clone();
+        let (_, q_general) = second_project(&r);
+        // The saved channel of project "p" is "notes". The main view then selects a channel of project "q".
+        let notes = r.service.create_text_channel(&ViewId::main(), &p, "notes").unwrap();
+        r.service.select(&ViewId::main(), &q_general.id.0).unwrap();
+        assert_eq!(r.store.lock().unwrap().last_project_channel(&p).unwrap().unwrap().id.0, notes);
+        let main_before = (r.core.active_channel_id(&ViewId::main()), r.core.current_project(&ViewId::main()).id);
+        let selected = r.store.lock().unwrap().selected_project().unwrap().map(|project| project.id);
+        let view = r.service.open_project_view(&p).unwrap();
+        assert_eq!(r.core.active_channel_id(&view), notes);
+        assert_eq!(r.core.current_project(&view).id, p);
+        assert_eq!((r.core.active_channel_id(&ViewId::main()), r.core.current_project(&ViewId::main()).id), main_before, "the main view is unchanged");
+        assert_eq!(r.core.active_channel_id(&ViewId::main()), q_general.id.0);
+        assert_eq!(r.store.lock().unwrap().selected_project().unwrap().map(|project| project.id), selected, "the project of the store is unchanged");
+        // A second open returns the same view and changes no selection.
+        r.service.select(&view, &r.general.id.0).unwrap();
+        assert_eq!(r.service.open_project_view(&p).unwrap(), view);
+        assert_eq!(r.core.active_channel_id(&view), r.general.id.0);
+        assert_eq!(r.core.active_channel_id(&ViewId::main()), q_general.id.0);
+        assert_eq!(r.core.view_ids(), vec![ViewId::main(), view]);
+    }
+
+    #[tokio::test]
+    async fn the_project_name_of_every_view_follows_a_rename() {
+        let r = rig().await;
+        let p = r.project.id.clone();
+        let (q, _) = second_project(&r);
+        let q_view = r.service.open_project_view(&q.id).unwrap();
+        let p_view = r.service.open_project_view(&p).unwrap();
+        let before = r.core.current_project(&p_view).name;
+        r.core.update_project_name(&p.0, "Mission Control");
+        assert_eq!(r.core.current_project(&p_view).name, "Mission Control");
+        assert_eq!(r.core.current_project(&ViewId::main()).name, "Mission Control", "the main view shows the project too");
+        assert_ne!(before, "Mission Control");
+        assert_eq!(r.core.current_project(&q_view).name, q.name, "a view of another project keeps its name");
+        assert_eq!(r.core.snapshot(&p_view).project, "Mission Control");
+    }
+
+    #[test]
+    fn a_view_that_does_not_exist_after_the_open_is_an_error() {
+        let view = ViewId::project(&discard_core::model::ProjectId("p".into()));
+        assert_eq!(view_after_open(view.clone(), true, true), Ok(view.clone()));
+        // Another open made the view first: it is there, so it is returned.
+        assert_eq!(view_after_open(view.clone(), false, true), Ok(view.clone()));
+        // `open_view` added nothing and the view is not there (a close ran in between): no view.
+        assert_eq!(view_after_open(view, false, false), Err("This window is closed.".into()));
+    }
+
+    #[tokio::test]
+    async fn views_that_moved_are_refreshed_when_another_view_cannot_move() {
+        let r = rig().await;
+        let p = r.project.id.clone();
+        let (q, _) = second_project(&r);
+        let q_view = r.service.open_project_view(&q.id).unwrap();
+        let p_view = r.service.open_project_view(&p).unwrap();
+        let notes = r.service.create_text_channel(&p_view, &p, "notes").unwrap();
+        r.service.select(&ViewId::main(), &notes).unwrap();
+        for view in [&ViewId::main(), &p_view, &q_view] { settle_view(&r.core, view).await; }
+        // The main view sorts first and cannot move: its navigation runs. The project view moves after it.
+        r.core.begin_project_navigation(&ViewId::main()).unwrap();
+        r.git(&["branch", "late"]);
+        let has_late = |view: &ViewId| r.core.snapshot(view).branches.iter().any(|row| row.label == "late");
+        assert!(!has_late(&p_view) && !has_late(&q_view));
+        // The caller is a third view, so only the refresh of the moved views can show the new branch.
+        let error = r.service.move_views(&q_view, &notes, &r.general.id.0).unwrap_err();
+        assert!(error.contains("Finish the open confirmation"), "{error}");
+        assert_eq!((r.core.active_channel_id(&p_view), r.core.active_channel_id(&ViewId::main())), (r.general.id.0.clone(), notes.clone()));
+        r.core.end_project_navigation(&ViewId::main());
+        for view in [&ViewId::main(), &p_view, &q_view] { settle_view(&r.core, view).await; }
+        assert!(has_late(&p_view), "the view that moved was refreshed");
+        assert!(!has_late(&ViewId::main()), "the view that did not move was not refreshed");
+    }
+
+    #[tokio::test]
+    async fn a_folder_change_reaches_every_view_of_the_project() {
+        let r = rig().await;
+        let p = r.project.id.clone();
+        let p_view = r.service.open_project_view(&p).unwrap();
+        for view in [&ViewId::main(), &p_view] { settle_view(&r.core, view).await; }
+        let moved = r.dir.path().join("moved");
+        std::fs::create_dir(&moved).unwrap();
+        run(&moved, &["init", "-q", "-b", "trunk2"]);
+        std::fs::write(moved.join("b.txt"), "two\n").unwrap();
+        run(&moved, &["add", "-A"]);
+        run(&moved, &["commit", "-q", "-m", "init"]);
+        let labels = |view: &ViewId| r.core.snapshot(view).branches.into_iter().map(|row| row.label).collect::<Vec<_>>();
+        assert!(labels(&p_view).contains(&"main".to_owned()) && !labels(&p_view).contains(&"trunk2".to_owned()));
+        r.store.lock().unwrap().change_project_folder(&p, &moved).unwrap();
+        let path = r.store.lock().unwrap().visible_projects().unwrap().into_iter().find(|project| project.id == p).unwrap().path;
+        assert_ne!(path, r.repo.to_string_lossy());
+        // The main view calls, as `choose_project_folder` does from the main window.
+        r.core.begin_project_change().unwrap();
+        let reloaded = r.service.reload_project(&ViewId::main(), &p);
+        r.core.end_project_change();
+        reloaded.unwrap();
+        for view in [&ViewId::main(), &p_view] { settle_view(&r.core, view).await; }
+        for view in [&ViewId::main(), &p_view] {
+            assert_eq!(r.core.current_project(view).path, path, "{view:?} has the new path");
+            assert!(labels(view).contains(&"trunk2".to_owned()), "{view:?} lists the branches of the new folder: {:?}", labels(view));
+            assert!(!labels(view).contains(&"main".to_owned()), "{view:?} no longer lists the old folder");
+        }
+        assert_eq!(r.core.active_channel_id(&p_view), r.general.id.0, "the project view keeps its channel");
+    }
+
+    #[tokio::test]
+    async fn removing_a_project_moves_the_main_view_and_no_project_view() {
+        let r = rig().await;
+        let p = r.project.id.clone();
+        let (q, q_general) = second_project(&r);
+        let p_view = r.service.open_project_view(&p).unwrap();
+        let q_view = r.service.open_project_view(&q.id).unwrap();
+        // A project that the main view does not show: nothing moves.
+        r.service.leave_removed_project(&q.id).unwrap();
+        assert_eq!(r.core.current_project(&ViewId::main()).id, p);
+        // The main view leaves p for the next project. The view of p keeps its project and channel until its window closes.
+        r.service.leave_removed_project(&p).unwrap();
+        assert_eq!(r.core.current_project(&ViewId::main()).id, q.id);
+        assert_eq!(r.core.active_channel_id(&ViewId::main()), q_general.id.0);
+        assert_eq!((r.core.current_project(&p_view).id, r.core.active_channel_id(&p_view)), (p.clone(), r.general.id.0.clone()));
+        assert_eq!((r.core.current_project(&q_view).id, r.core.active_channel_id(&q_view)), (q.id.clone(), q_general.id.0.clone()));
+    }
+
+    #[tokio::test]
+    async fn removing_the_last_project_leaves_the_main_view_with_no_project() {
+        let r = rig().await;
+        let p = r.project.id.clone();
+        let p_view = r.service.open_project_view(&p).unwrap();
+        r.service.leave_removed_project(&p).unwrap();
+        assert_eq!(r.core.current_project(&ViewId::main()).id.0, "");
+        assert_eq!((r.core.current_project(&p_view).id, r.core.active_channel_id(&p_view)), (p, r.general.id.0.clone()), "a project view never moves to no project");
     }
 }
