@@ -99,7 +99,7 @@ async fn fresh_navigation_direct_chats_fixed_projects_and_saved_selection_are_in
         .unwrap()
         .import_project_folder(project_dir.path())
         .unwrap();
-    let project_one = channels.activate_project(&ViewId::main(), &project.id).unwrap();
+    let project_one = channels.activate_project(&ViewId::main(), &project.id).unwrap().1;
     assert_ne!(core.active_channel_id(&ViewId::main()), direct);
     assert_eq!(core.snapshot(&ViewId::main()).channel, "general");
     assert_eq!(store.lock().unwrap().channels_for_project(&project.id).unwrap().len(), 1);
@@ -142,14 +142,14 @@ async fn project_navigation_keeps_active_and_background_responses_running() {
     let second = store.lock().unwrap().import_project_folder(second_dir.path()).unwrap();
     let core = empty_core(dir.path());
     let channels = service(core.clone(), store.clone());
-    let first_channel = channels.activate_project(&ViewId::main(), &first.id).unwrap();
+    let first_channel = channels.activate_project(&ViewId::main(), &first.id).unwrap().1;
     core.send_to(Some(&first_channel), "First response".into()).unwrap();
     let first_generation = core.channel_runtime_generation(&first_channel).unwrap();
 
     assert!(core.begin_project_change().is_err(), "folder changes remain blocked");
     core.begin_project_navigation(&ViewId::main()).unwrap();
     assert!(core.begin_project_navigation(&ViewId::main()).is_err(), "navigation remains serialized");
-    let second_channel = channels.activate_project(&ViewId::main(), &second.id).unwrap();
+    let second_channel = channels.activate_project(&ViewId::main(), &second.id).unwrap().1;
     core.end_project_navigation(&ViewId::main());
     assert_eq!(core.current_project(&ViewId::main()).id, second.id);
     assert_eq!(core.channel_runtime_generation(&first_channel), Some(first_generation));
@@ -168,7 +168,7 @@ async fn project_navigation_keeps_active_and_background_responses_running() {
     assert!(!core.history(&ViewId::main()).iter().any(|message| message.id == reply.id.0));
 
     core.begin_project_navigation(&ViewId::main()).unwrap();
-    assert_eq!(channels.activate_project(&ViewId::main(), &first.id).unwrap(), first_channel);
+    assert_eq!(channels.activate_project(&ViewId::main(), &first.id).unwrap().1, first_channel);
     core.end_project_navigation(&ViewId::main());
     assert!(core.history(&ViewId::main()).iter().any(|message| message.id == reply.id.0));
     assert!(core.snapshot(&ViewId::main()).channels.iter().find(|c| c.id == second_channel).unwrap().running);

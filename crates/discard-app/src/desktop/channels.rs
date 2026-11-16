@@ -1,6 +1,6 @@
 //! Real project channels. Git and storage work run off the webview thread.
 use discard_core::model::{AgentId, MessageId};
-use super::core::{AppCore, CoreInit};
+use super::core::{AppCore, CoreInit, WINDOW_CLOSED};
 use super::threads::ThreadRecord;
 use super::view::ViewId;
 use discard_core::{model::{Channel, ChannelId, ProjectId, WorkspaceMode}, store::{Store, WorktreeRecord}, ui_state::Update, worktree::{list_branch_tree, WorktreeManager}};
@@ -22,30 +22,65 @@ impl Channels {
         Self { core, store, runtime, launch, operation: Mutex::new(()) }
     }
     fn project_dir(&self, view: &ViewId) -> PathBuf { self.core.current_project(view).path.into() }
-    /// Caller holds the project-change guard. Prepare runtimes before replacing visible state.
-    pub fn activate_project(&self, view: &ViewId, id: &ProjectId) -> Result<String, String> {
+    /// The view that carries out a selection of `target` for `view`: the view itself, or the main view when `view` is a
+    /// project view and the target is outside its project (decisions 17 and 17b). A closed view is an error. It never
+    /// acts on another view.
+    fn routed(&self, view: &ViewId, target: Option<&ProjectId>) -> Result<ViewId, String> {
+        if !self.core.has_view(view) { return Err(WINDOW_CLOSED.into()); }
+        Ok(self.core.route(view, target))
+    }
+    /// The channel that a rail click on a project opens: the saved channel of the project, or its `#general`.
+    fn saved_channel(store: &Store, id: &ProjectId) -> Result<Channel, String> {
+        let main = match store.project_main_agent(id).map_err(|e| e.to_string())? {
+            Some(main) => main,
+            None => store.list_agents().map_err(|e| e.to_string())?.into_iter()
+                .find(|(_, config)| config.model.as_ref().is_some_and(|model| !model.trim().is_empty()))
+                .map(|(agent, _)| agent)
+                .ok_or("No configured agent with a model is available. Configure an agent in Settings, then open this project again.")?,
+        };
+        store.ensure_project_general_channel(id, &main).map_err(|e| e.to_string())?;
+        store.project_channel_or_fallback(id, &main).map_err(|e| e.to_string())
+    }
+    /// Caller holds the project-change guard. Prepare runtimes before replacing visible state. A project view that asks
+    /// for another project routes to the main view. Returns the view that changed and the ID of its channel. Only the
+    /// main view changes the selected project of the store.
+    pub fn activate_project(&self, view: &ViewId, id: &ProjectId) -> Result<(ViewId, String), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let view = &self.routed(view, Some(id))?;
         self.core.can_switch_for_project(view)?;
         let (project, channel) = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
             let project = store.visible_projects().map_err(|e| e.to_string())?.into_iter().find(|p| p.id == *id).ok_or("Project unavailable")?;
-            store.select_project(id).map_err(|e| e.to_string())?;
-            let main = match store.project_main_agent(id).map_err(|e| e.to_string())? {
-                Some(main) => main,
-                None => store.list_agents().map_err(|e| e.to_string())?.into_iter()
-                    .find(|(_, config)| config.model.as_ref().is_some_and(|model| !model.trim().is_empty()))
-                    .map(|(agent, _)| agent)
-                    .ok_or("No configured agent with a model is available. Configure an agent in Settings, then open this project again.")?,
-            };
-            store.ensure_project_general_channel(id, &main).map_err(|e| e.to_string())?;
-            let channel = store.project_channel_or_fallback(id, &main).map_err(|e| e.to_string())?;
+            if view.is_main() { store.select_project(id).map_err(|e| e.to_string())?; }
+            let channel = Self::saved_channel(&store, id)?;
             (project, channel)
         };
         self.core.select_sidebar_project(view, Some(&project));
         self.select_inner_mode(view, &channel.id.0, true)?;
         self.store.lock().unwrap_or_else(|e| e.into_inner()).select_project_channel(id, &channel.id).map_err(|e| e.to_string())?;
         self.core.refresh_branches_in_background(view);
-        Ok(channel.id.0)
+        Ok((view.clone(), channel.id.0))
+    }
+    /// Open the view of the project window of `project`, fixed to the project, on the saved channel of the project.
+    /// A view that exists is returned as it is. The new view starts its first branch refresh.
+    pub fn open_project_view(&self, project: &ProjectId) -> Result<ViewId, String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let view = ViewId::project(project);
+        if self.core.has_view(&view) { return Ok(view); }
+        let (entry, channel) = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            let entry = store.visible_projects().map_err(|e| e.to_string())?.into_iter().find(|p| p.id == *project).ok_or("Project unavailable")?;
+            let channel = Self::saved_channel(&store, project)?;
+            (entry, channel)
+        };
+        if !self.core.open_view(view.clone(), &entry) { return Ok(view); }
+        if let Err(error) = self.select_inner_mode(&view, &channel.id.0, true) {
+            // A project view with no channel is of no use. A failed open leaves no view behind.
+            self.core.drop_view(&view);
+            return Err(error);
+        }
+        self.core.refresh_branches_in_background(&view);
+        Ok(view)
     }
     pub fn restore(&self, view: &ViewId) -> Result<(), String> {
         if let Some(id) = self.core.saved_conversation()
@@ -71,6 +106,8 @@ impl Channels {
         Ok(())
     }
     fn start_mode(&self, channel: &Channel, restart: bool) -> Result<(), String> {
+        // A channel has one session. A channel that the pool holds, another view's included, launches nothing.
+        if !restart && self.core.has_channel(&channel.id.0) { return Ok(()); }
         let (init, mut updates) = (self.launch)(channel)?;
         let thread = self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(&channel.id).map_err(|e| e.to_string())?;
         if restart { if !self.core.restart_closed_channel(init, channel)? { return Ok(()); } }
@@ -96,16 +133,22 @@ impl Channels {
     pub fn in_project(&self, id: &str) -> bool {
         self.store.lock().unwrap_or_else(|e| e.into_inner()).load_channel(&ChannelId(id.to_owned())).is_ok_and(|channel| channel.project_id.is_some())
     }
-    /// Select a channel. A thread opens beside its parent channel, which becomes the selected channel.
-    pub fn select(&self, view: &ViewId, id: &str) -> Result<(), String> {
+    /// Select a channel. A thread opens beside its parent channel, which becomes the selected channel. A project view
+    /// that selects a channel of another project, or a direct message, routes to the main view. Returns the view that
+    /// changed.
+    pub fn select(&self, view: &ViewId, id: &str) -> Result<ViewId, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let thread = self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(&ChannelId(id.to_owned())).map_err(|e| e.to_string())?;
         if let Some(thread) = thread { return self.select_thread_inner(view, &thread); }
         self.select_inner(view, id)
     }
-    fn select_thread_inner(&self, view: &ViewId, thread: &discard_core::model::ThreadInfo) -> Result<(), String> {
-        if self.core.active_channel_id(view) != thread.parent_channel_id.0 { self.select_inner(view, &thread.parent_channel_id.0)?; }
-        self.open_thread_inner(view, &thread.channel_id)
+    /// Select the parent of a thread and open the thread beside it, in the view that the parent project routes to.
+    fn select_thread_inner(&self, view: &ViewId, thread: &discard_core::model::ThreadInfo) -> Result<ViewId, String> {
+        let project = self.store.lock().unwrap_or_else(|e| e.into_inner()).load_channel(&thread.parent_channel_id).map_err(|e| e.to_string())?.project_id;
+        let view = self.routed(view, project.as_ref())?;
+        if self.core.active_channel_id(&view) != thread.parent_channel_id.0 { self.select_inner(&view, &thread.parent_channel_id.0)?; }
+        self.open_thread_inner(&view, &thread.channel_id)?;
+        Ok(view)
     }
     /// Select the parent channel of a thread and open the thread beside it. Returns the parent channel ID.
     pub fn select_thread(&self, view: &ViewId, thread: &ChannelId) -> Result<String, String> {
@@ -347,11 +390,13 @@ impl Channels {
                 && previous.id != target.id { self.core.channel_read_only(&previous.id.0, true, true); }
             if self.core.has_channel(&updated.id.0) && self.core.channel_session_closed(&updated.id.0) { self.start_mode(&updated, true)?; }
             else { self.refresh_channel_access(&updated)?; }
-            if previous.as_ref().is_some_and(|old| old.id != target.id && self.core.active_channel_id(view) == old.id.0) {
+            // Every view that selected the old canonical channel moves to the new one (decision 22).
+            let mut moved = Vec::new();
+            if let Some(old) = previous.as_ref().filter(|old| old.id != target.id) && !self.core.views_selecting(&old.id.0).is_empty() {
                 if !self.core.has_channel(&updated.id.0) { self.start(&updated)?; }
-                self.select_inner(view, &updated.id.0)?;
+                moved = self.move_views(&old.id.0, &updated.id.0)?;
             }
-            self.core.refresh_branches_in_background(view);
+            self.refresh_branches_of(view, &moved);
             Ok(())
         })();
         for id in begun { self.core.end_channel_change(&id); }
@@ -392,14 +437,30 @@ impl Channels {
                 }
             } else { self.start(&updated)?; }
             self.refresh_channel_access(&updated)?;
-            if previous.as_ref().is_some_and(|old| old.id != updated.id && self.core.active_channel_id(view) == old.id.0) {
-                self.select_inner(view, &updated.id.0)?;
-            }
-            self.core.refresh_branches_in_background(view);
+            // Every view that selected the old canonical channel moves to the new one (decision 22).
+            let moved = match previous.as_ref().filter(|old| old.id != updated.id) {
+                Some(old) => self.move_views(&old.id.0, &updated.id.0)?,
+                None => Vec::new(),
+            };
+            self.refresh_branches_of(view, &moved);
             Ok(())
         })();
         for id in begun { self.core.end_channel_change(&id); }
         result
+    }
+    /// Move every view that selects channel `from` to channel `to`. A view that cannot move does not stop the others.
+    /// Returns the views that moved, or the first error.
+    fn move_views(&self, from: &str, to: &str) -> Result<Vec<ViewId>, String> {
+        let (mut moved, mut failure) = (Vec::new(), None);
+        for view in self.core.views_selecting(from) {
+            match self.select_inner(&view, to) { Ok(_) => moved.push(view), Err(error) => { failure.get_or_insert(error); } }
+        }
+        failure.map_or(Ok(moved), Err)
+    }
+    /// Reload the branches of the view that ran an action and of the views that the action moved.
+    fn refresh_branches_of(&self, view: &ViewId, moved: &[ViewId]) {
+        self.core.refresh_branches_in_background(view);
+        for other in moved.iter().filter(|other| *other != view) { self.core.refresh_branches_in_background(other); }
     }
     pub fn channel_details(&self, project: &ProjectId, channel: &ChannelId) -> Result<super::dto::ChannelDetailsDto, String> {
         let (channel, metadata, archived) = self.project_channel(project, channel, true)?;
@@ -490,15 +551,19 @@ impl Channels {
         for id in begun { self.core.end_channel_change(&id); }
         result
     }
-    fn select_inner(&self, view: &ViewId, id: &str) -> Result<(), String> { self.select_inner_mode(view, id, false) }
-    fn select_inner_mode(&self, view: &ViewId, id: &str, project_change: bool) -> Result<(), String> {
-        if project_change { self.core.can_switch_for_project(view)?; } else { self.core.can_switch(view)?; }
+    fn select_inner(&self, view: &ViewId, id: &str) -> Result<ViewId, String> { self.select_inner_mode(view, id, false) }
+    /// Select a channel in a view. Every selection of a channel ends here, so this is where a project view stays fixed
+    /// to its project: a channel of another project, or a direct message, changes the main view instead. Returns the
+    /// view that changed.
+    fn select_inner_mode(&self, view: &ViewId, id: &str, project_change: bool) -> Result<ViewId, String> {
         let (channel, project) = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
             let channel = store.load_channel(&ChannelId(id.to_owned())).map_err(|e| e.to_string())?;
             let project = channel.project_id.as_ref().and_then(|id| store.list_projects().ok()?.into_iter().find(|p| p.id == *id));
             (channel, project)
         };
+        let view = &self.routed(view, channel.project_id.as_ref())?;
+        if project_change { self.core.can_switch_for_project(view)?; } else { self.core.can_switch(view)?; }
         let restart = self.core.has_channel(id) && self.core.channel_session_closed(id);
         if !self.core.has_channel(id) { self.start(&channel)?; }
         if project_change { self.core.switch_channel_for_project(view, id)?; } else { self.core.switch_channel(view, id)?; }
@@ -523,7 +588,7 @@ impl Channels {
         if restart && let Err(error) = self.start_mode(&channel, true) {
             self.core.append_channel_notice(id, format!("Conversation history is open, but its session could not restart: {error}. Select this conversation again to retry."));
         }
-        Ok(())
+        Ok(view.clone())
     }
     pub fn reload_project(&self, view: &ViewId, id: &ProjectId) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
@@ -884,8 +949,9 @@ impl Channels {
             discard_core::workspace::ArchiveOutcome::Archived { .. } => {
                 self.core.channel_read_only(&channel.0, true, true);
                 for thread in threads.iter().filter(|thread| self.core.has_channel(thread)) { self.core.channel_read_only(thread, true, true); }
-                if self.core.active_channel_id(view) == channel.0 { let _ = self.open_general(view, project); }
-                self.after_git(view);
+                // Every view that shows the channel opens `#general` of the project (decision 22).
+                let moved: Vec<ViewId> = self.core.views_selecting(&channel.0).into_iter().filter(|shown| self.open_general(shown, project).is_ok()).collect();
+                self.refresh_branches_of(view, &moved);
                 Ok(super::dto::ArchiveChannelDto { archived: true, items: vec![] })
             }
         }
@@ -898,7 +964,7 @@ impl Channels {
                 .find(|channel| store.project_channel_metadata(&channel.id).ok().flatten().is_some_and(|metadata| metadata.kind == discard_core::model::ProjectChannelKind::General))
         };
         let general = general.ok_or("This project has no #general channel.")?;
-        self.select_inner(view, &general.id.0)
+        self.select_inner(view, &general.id.0).map(|_| ())
     }
 
     /// Check that a branch can get a worktree, and find its channel. A branch with no channel gets one at creation.
@@ -1233,7 +1299,7 @@ mod tests {
         let store = Arc::new(Mutex::new(store));
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
         core.begin_project_change().unwrap();
-        let second_general = service.activate_project(&ViewId::main(), &second.id).unwrap();
+        let second_general = service.activate_project(&ViewId::main(), &second.id).unwrap().1;
         core.end_project_change();
         assert_eq!(core.current_project(&ViewId::main()).path, second.path);
         assert_eq!(core.active_channel_id(&ViewId::main()), second_general, "project activation opens its general channel");
@@ -1242,7 +1308,7 @@ mod tests {
         service.select(&ViewId::main(), &direct).unwrap();
         assert_eq!(store.lock().unwrap().last_project_channel(&second.id).unwrap().unwrap().id, saved_second, "direct chat selection does not change the saved project channel");
         core.begin_project_change().unwrap();
-        let restored_first = service.activate_project(&ViewId::main(), &first.id).unwrap();
+        let restored_first = service.activate_project(&ViewId::main(), &first.id).unwrap().1;
         core.end_project_change();
         assert_eq!(restored_first, workspace.channel.id.0, "returning to A restores its saved channel");
         assert_eq!(core.active_channel_id(&ViewId::main()), workspace.channel.id.0);
@@ -1493,7 +1559,7 @@ mod tests {
         }));
         let store = Arc::new(Mutex::new(store));
         let service = Channels::new(core.clone(), store, Handle::current(), launcher());
-        let general = service.activate_project(&ViewId::main(), &project.id).unwrap();
+        let general = service.activate_project(&ViewId::main(), &project.id).unwrap().1;
         settle(&core).await;
         let feature = service.open_branch(&ViewId::main(), "feature").unwrap();
         settle(&core).await;
@@ -1552,7 +1618,7 @@ mod tests {
         let store = Arc::new(Mutex::new(store));
         let core = core(&first, dir.path());
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
-        let created = service.activate_project(&ViewId::main(), &project.id).unwrap();
+        let created = service.activate_project(&ViewId::main(), &project.id).unwrap().1;
         assert_eq!(created, first.id.0);
         assert_eq!(core.snapshot(&ViewId::main()).channel, "general");
         assert!(service.create(&ViewId::main(), "Tests", "main_checkout", &created).unwrap_err().contains("Open a Git branch"));
@@ -1668,7 +1734,7 @@ mod tests {
         let store = Arc::new(Mutex::new(migrated));
         let service = Channels::new(app_core.clone(), store.clone(), Handle::current(), launcher());
 
-        assert_eq!(service.activate_project(&ViewId::main(), &project_id).unwrap(), general_id.0);
+        assert_eq!(service.activate_project(&ViewId::main(), &project_id).unwrap().1, general_id.0);
         let unrelated = store.lock().unwrap().create_agent(&AgentConfig {
             workspace_write: false, sandbox_autorun: false, delegation: false,
             reasoning_effort: None,
@@ -1706,7 +1772,7 @@ mod tests {
         let reopened_core = core(&reopened_general, dir.path());
         let reopened_store = Arc::new(Mutex::new(reopened));
         let reopened_service = Channels::new(reopened_core.clone(), reopened_store, Handle::current(), launcher());
-        assert_eq!(reopened_service.activate_project(&ViewId::main(), &project_id).unwrap(), branch_id.0);
+        assert_eq!(reopened_service.activate_project(&ViewId::main(), &project_id).unwrap().1, branch_id.0);
         assert_eq!(reopened_core.active_channel_id(&ViewId::main()), branch_id.0);
         assert_eq!(reopened_core.snapshot(&ViewId::main()).channel, "Feature");
     }
@@ -1740,7 +1806,7 @@ mod tests {
         let core = core(&branch, dir.path());
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
         assert!(list_branch_tree(dir.path()).is_err(), "test project has no Git metadata");
-        assert_eq!(service.select(&ViewId::main(), &branch.id.0).unwrap(), ());
+        assert_eq!(service.select(&ViewId::main(), &branch.id.0).unwrap(), ViewId::main());
         assert_eq!(core.active_channel_id(&ViewId::main()), branch.id.0);
         assert_eq!(core.active_context(&ViewId::main()).0, agent);
         assert_eq!(store.lock().unwrap().project_channel_metadata(&branch.id).unwrap().unwrap().branch.as_deref(), Some("feature/x"));
@@ -2516,5 +2582,234 @@ mod navigation_action_tests {
         assert!(r.service.remove_worktree(&ViewId::main(), &r.project.id, "", &path, false).unwrap().removed);
         assert!(r.worktree_record(&owner.id).is_none() && r.worktree_record(&borrower.id).is_none());
         assert!(r.store.lock().unwrap().load_channel(&borrower.id).is_ok());
+    }
+
+    // Project views: a project view is fixed to its project (decisions 17 and 17b to 22 and 24 to 26).
+
+    /// A second project with its own `#general`, in the store of the rig.
+    fn second_project(r: &Rig) -> (discard_core::model::Project, Channel) {
+        let folder = r.dir.path().join("other");
+        std::fs::create_dir(&folder).unwrap();
+        let store = r.store.lock().unwrap();
+        let project = store.import_project_folder(&folder).unwrap();
+        store.set_project_main_agent(&project.id, &r.agent).unwrap();
+        let general = store.ensure_project_general_channel(&project.id, &r.agent).unwrap();
+        (project, general)
+    }
+    /// How many engines the launcher started.
+    fn launches(r: &Rig) -> usize { r._receivers.lock().unwrap().len() }
+    /// Wait until the background branch refreshes of a view finish.
+    async fn settle_view(core: &AppCore, view: &ViewId) {
+        for _ in 0..500 {
+            if !core.branch_refresh_pending(view) { return; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("a branch refresh did not finish");
+    }
+
+    #[tokio::test]
+    async fn a_target_outside_the_project_routes_to_the_main_view() {
+        let r = rig().await;
+        let (q, q_general) = second_project(&r);
+        let p = r.project.id.clone();
+        let p_view = r.service.open_project_view(&p).unwrap();
+        assert_eq!(r.core.route(&p_view, Some(&p)), p_view);
+        assert_eq!(r.core.route(&p_view, Some(&q.id)), ViewId::main());
+        assert_eq!(r.core.route(&p_view, None), ViewId::main(), "a direct message");
+        // A channel of its own project stays in the project view.
+        let notes = r.service.create_text_channel(&p_view, &p, "notes").unwrap();
+        assert_eq!((r.core.active_channel_id(&p_view), r.core.active_channel_id(&ViewId::main())), (notes.clone(), r.general.id.0.clone()));
+        assert_eq!(r.service.select(&p_view, &r.general.id.0).unwrap(), p_view);
+        assert_eq!(r.core.active_channel_id(&p_view), r.general.id.0);
+        // A channel of another project changes the main view only.
+        assert_eq!(r.service.select(&p_view, &q_general.id.0).unwrap(), ViewId::main());
+        assert_eq!(r.core.active_channel_id(&ViewId::main()), q_general.id.0);
+        assert_eq!(r.core.active_channel_id(&p_view), r.general.id.0, "the project view did not move");
+        // So does a direct message.
+        let direct = r.store.lock().unwrap().create_conversation(&r.agent, None, "Direct").unwrap();
+        assert_eq!(r.service.select(&p_view, &direct.id.0).unwrap(), ViewId::main());
+        assert_eq!(r.core.active_channel_id(&ViewId::main()), direct.id.0);
+        assert_eq!(r.core.active_channel_id(&p_view), r.general.id.0);
+        assert_eq!(r.core.current_project(&p_view).id, p, "the project of the view does not change");
+    }
+
+    #[tokio::test]
+    async fn no_selection_path_takes_a_project_view_out_of_its_project() {
+        let r = rig().await;
+        let (q, q_general) = second_project(&r);
+        let p_view = r.service.open_project_view(&r.project.id).unwrap();
+        let stays = |r: &Rig| assert_eq!((r.core.active_channel_id(&p_view), r.core.current_project(&p_view).id), (r.general.id.0.clone(), r.project.id.clone()));
+        // A direct message of an agent, and a new direct message.
+        assert_eq!(r.service.open_agent(&p_view, &r.agent).unwrap(), r.core.active_channel_id(&ViewId::main()));
+        stays(&r);
+        let created = r.service.create_conversation(&p_view, &r.agent, None, "Direct").unwrap();
+        assert_eq!(r.core.active_channel_id(&ViewId::main()), created);
+        stays(&r);
+        // The general channel of another project.
+        let general = r.service.create_conversation(&p_view, &r.agent, Some(&q.id), "general").unwrap();
+        assert_eq!((general.as_str(), r.core.active_channel_id(&ViewId::main())), (q_general.id.0.as_str(), q_general.id.0.clone()));
+        stays(&r);
+        // A thread of another project opens beside its parent in the main view.
+        let anchor = { let store = r.store.lock().unwrap(); let message = Message { id: MessageId::new(), channel_id: q_general.id.clone(), role: Role::Agent, blocks: vec![Block::Markdown { text: "answer".into() }] }; store.insert_message(&message).unwrap(); message.id };
+        let thread = r.store.lock().unwrap().create_thread(&q_general.id, &anchor, "Why", &r.agent).unwrap();
+        r.service.select(&ViewId::main(), &r.general.id.0).unwrap();
+        assert_eq!(r.service.select_thread(&p_view, &thread.id).unwrap(), q_general.id.0);
+        assert_eq!(r.core.active_channel_id(&ViewId::main()), q_general.id.0);
+        assert_eq!(r.core.open_thread_id(&ViewId::main()), Some(thread.id.0.clone()));
+        assert_eq!(r.core.open_thread_id(&p_view), None);
+        stays(&r);
+        assert_eq!(r.service.select(&p_view, &thread.id.0).unwrap(), ViewId::main());
+        stays(&r);
+        // A project change that asks for another project.
+        assert_eq!(r.service.activate_project(&p_view, &q.id).unwrap(), (ViewId::main(), q_general.id.0.clone()));
+        stays(&r);
+        assert_eq!(r.core.current_project(&ViewId::main()).id, q.id);
+        // The store keeps the project of the main view.
+        assert_eq!(r.store.lock().unwrap().selected_project().unwrap().unwrap().id, q.id);
+        assert_eq!(r.service.activate_project(&p_view, &r.project.id).unwrap(), (p_view.clone(), r.general.id.0.clone()));
+        assert_eq!(r.store.lock().unwrap().selected_project().unwrap().unwrap().id, q.id, "a project view does not select the project of the store");
+        assert_eq!(r.core.current_project(&ViewId::main()).id, q.id);
+    }
+
+    #[tokio::test]
+    async fn a_project_view_lists_only_its_project_in_a_service_rig() {
+        let r = rig().await;
+        let (q, q_general) = second_project(&r);
+        let p_view = r.service.open_project_view(&r.project.id).unwrap();
+        r.service.select(&ViewId::main(), &q_general.id.0).unwrap();
+        let projects = |view: &ViewId| r.core.snapshot(view).channels.into_iter().map(|c| c.project_id).collect::<Vec<_>>();
+        assert_eq!(projects(&p_view), vec![Some(r.project.id.0.clone())]);
+        let all = projects(&ViewId::main());
+        assert!(all.contains(&Some(r.project.id.0.clone())) && all.contains(&Some(q.id.0.clone())), "{all:?}");
+    }
+
+    #[tokio::test]
+    async fn opening_a_project_view_selects_the_saved_channel_and_starts_its_branch_refresh() {
+        let r = rig().await;
+        let p = r.project.id.clone();
+        let (loaded, started) = (r.core.loaded_channel_count(), launches(&r));
+        let view = r.service.open_project_view(&p).unwrap();
+        assert_eq!(view, ViewId::project(&p));
+        assert_eq!(r.core.view_ids(), vec![ViewId::main(), view.clone()]);
+        assert_eq!(r.core.active_channel_id(&view), r.general.id.0);
+        assert_eq!((r.core.loaded_channel_count(), launches(&r)), (loaded, started), "the channel is in the pool: no second session");
+        settle_view(&r.core, &view).await;
+        let snapshot = r.core.snapshot(&view);
+        assert!(!snapshot.repositories_loading && snapshot.branches.iter().any(|row| row.label == "main"), "the new view got its branches");
+        assert_eq!((snapshot.project_id.as_str(), snapshot.channel_id.as_str()), (p.0.as_str(), r.general.id.0.as_str()));
+        // A view that exists comes back as it is.
+        let notes = r.service.create_text_channel(&view, &p, "notes").unwrap();
+        assert_eq!(r.service.open_project_view(&p).unwrap(), view);
+        assert_eq!(r.core.active_channel_id(&view), notes);
+        assert_eq!(r.core.view_ids().len(), 2);
+        // The next view opens on the channel that the store saved, whichever view selected it.
+        r.core.drop_view(&view);
+        let again = r.service.open_project_view(&p).unwrap();
+        assert_eq!(r.core.active_channel_id(&again), notes);
+        // An unknown project opens no view.
+        assert!(r.service.open_project_view(&discard_core::model::ProjectId::new()).is_err());
+        assert_eq!(r.core.view_ids().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn two_views_that_select_one_channel_share_one_session() {
+        let r = rig().await;
+        let p = r.project.id.clone();
+        let p_view = r.service.open_project_view(&p).unwrap();
+        let notes = r.service.create_text_channel(&ViewId::main(), &p, "notes").unwrap();
+        r.service.select(&ViewId::main(), &r.general.id.0).unwrap();
+        let (loaded, started) = (r.core.loaded_channel_count(), launches(&r));
+        r.service.select(&p_view, &notes).unwrap();
+        r.service.select(&ViewId::main(), &notes).unwrap();
+        assert_eq!((r.core.active_channel_id(&p_view), r.core.active_channel_id(&ViewId::main())), (notes.clone(), notes.clone()));
+        assert_eq!(r.core.loaded_channel_count(), loaded, "the pool did not grow");
+        assert_eq!(launches(&r), started, "the launcher did not run again for the channel");
+        // A channel that the pool holds starts no session, whoever asks.
+        r.service.start(&Channel { id: ChannelId(notes.clone()), project_id: Some(p), name: "notes".into(), agent_id: r.agent.clone(), workspace_mode: WorkspaceMode::Worktree }).unwrap();
+        assert_eq!((r.core.loaded_channel_count(), launches(&r)), (loaded, started));
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_channel_falls_back_in_every_view() {
+        let r = rig().await;
+        let p = r.project.id.clone();
+        let p_view = r.service.open_project_view(&p).unwrap();
+        let notes = ChannelId(r.service.create_text_channel(&ViewId::main(), &p, "notes").unwrap());
+        r.service.select(&p_view, &notes.0).unwrap();
+        assert_eq!((r.core.active_channel_id(&ViewId::main()), r.core.active_channel_id(&p_view)), (notes.0.clone(), notes.0.clone()));
+        assert!(r.service.archive_channel(&ViewId::main(), &r.workspace, &p, &notes, false).unwrap().archived);
+        assert_eq!(r.core.active_channel_id(&ViewId::main()), r.general.id.0);
+        assert_eq!(r.core.active_channel_id(&p_view), r.general.id.0, "the project view opens #general too");
+        // A view that does not show the channel stays where it is, and one that does is moved from another view.
+        let plans = ChannelId(r.service.create_text_channel(&p_view, &p, "plans").unwrap());
+        assert_eq!((r.core.active_channel_id(&ViewId::main()), r.core.active_channel_id(&p_view)), (r.general.id.0.clone(), plans.0.clone()));
+        assert!(r.service.archive_channel(&ViewId::main(), &r.workspace, &p, &plans, false).unwrap().archived);
+        assert_eq!((r.core.active_channel_id(&ViewId::main()), r.core.active_channel_id(&p_view)), (r.general.id.0.clone(), r.general.id.0.clone()));
+    }
+
+    #[tokio::test]
+    async fn a_canonical_branch_change_moves_every_view_that_selected_the_old_channel() {
+        let r = rig().await;
+        let p = r.project.id.clone();
+        let archived = Channel { id: ChannelId::new(), project_id: Some(p.clone()), name: "Feature old".into(), agent_id: r.agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+        let current = Channel { id: ChannelId::new(), name: "Feature current".into(), ..archived.clone() };
+        {
+            let store = r.store.lock().unwrap();
+            store.create_named_channel(&archived, Some("feature/shared"), None).unwrap();
+            store.create_named_channel(&current, Some("feature/shared"), None).unwrap();
+        }
+        let p_view = r.service.open_project_view(&p).unwrap();
+        r.service.select(&ViewId::main(), &current.id.0).unwrap();
+        r.service.select(&p_view, &current.id.0).unwrap();
+        r.service.select_canonical_branch(&ViewId::main(), &p, "feature/shared", &archived.id).unwrap();
+        assert_eq!((r.core.active_channel_id(&ViewId::main()), r.core.active_channel_id(&p_view)), (archived.id.0.clone(), archived.id.0.clone()));
+        assert_eq!(r.core.loaded_channel_count(), r.core.snapshot(&ViewId::main()).channels.len(), "every loaded channel is listed once");
+    }
+
+    #[tokio::test]
+    async fn a_project_view_does_not_change_saved_window_state() {
+        let r = rig().await;
+        let p = r.project.id.clone();
+        let (q, _) = second_project(&r);
+        let panels = discard_core::window_state::StateStore::open(&r.dir.path().join("state.toml")).state().panels;
+        let kept = r.service.create_text_channel(&ViewId::main(), &p, "kept").unwrap();
+        let saved = r.core.saved_conversation();
+        assert_eq!(saved.as_deref(), Some(kept.as_str()), "the main view saves its selection");
+        let p_view = r.service.open_project_view(&p).unwrap();
+        let notes = r.service.create_text_channel(&p_view, &p, "notes").unwrap();
+        r.core.set_panels(&p_view, 300.0, 310.0).unwrap();
+        r.core.set_member_list_visible(&p_view, false).unwrap();
+        r.service.select(&p_view, &r.general.id.0).unwrap();
+        r.service.select(&p_view, &notes).unwrap();
+        assert_eq!(r.core.saved_conversation(), saved, "the project view does not save selected_conversation");
+        assert_eq!(discard_core::window_state::StateStore::open(&r.dir.path().join("state.toml")).state().panels, panels);
+        assert_eq!(r.core.snapshot(&ViewId::main()).panels.channel_list, panels.channel_list);
+        assert!(r.core.snapshot(&ViewId::main()).member_list_visible);
+        let shown = r.core.snapshot(&p_view);
+        assert_eq!((shown.panels.channel_list, shown.panels.member_list, shown.member_list_visible), (300.0, 310.0, false));
+        // The selected channel of the project is saved, and the selected project of the store is not.
+        assert_eq!(r.store.lock().unwrap().last_project_channel(&p).unwrap().unwrap().id.0, notes);
+        r.store.lock().unwrap().select_project(&q.id).unwrap();
+        r.service.select(&p_view, &r.general.id.0).unwrap();
+        assert_eq!(r.store.lock().unwrap().selected_project().unwrap().unwrap().id, q.id);
+    }
+
+    #[tokio::test]
+    async fn a_view_dropped_during_navigation_stays_dropped() { // Review Focus 3
+        let r = rig().await;
+        let p = r.project.id.clone();
+        let p_view = r.service.open_project_view(&p).unwrap();
+        let before = r.core.active_channel_id(&ViewId::main());
+        r.core.begin_project_navigation(&p_view).unwrap();
+        r.core.drop_view(&p_view);
+        assert_eq!(r.service.activate_project(&p_view, &p).unwrap_err(), "This window is closed.");
+        // A target outside the project does not fall back to the main view either.
+        let (q, _) = second_project(&r);
+        assert_eq!(r.service.activate_project(&p_view, &q.id).unwrap_err(), "This window is closed.");
+        assert_eq!(r.service.select(&p_view, &r.general.id.0).unwrap_err(), "This window is closed.");
+        r.core.end_project_navigation(&p_view);
+        assert_eq!(r.core.view_ids(), vec![ViewId::main()]);
+        assert_eq!(r.core.active_channel_id(&ViewId::main()), before, "the main view did not change");
+        assert_eq!(r.core.current_project(&ViewId::main()).id, p);
     }
 }

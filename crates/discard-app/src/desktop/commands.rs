@@ -18,18 +18,21 @@ fn resolve_view(label: &str, has_view: impl Fn(&ViewId) -> bool, focused: ViewId
 fn view_of(window: &tauri::WebviewWindow, core: &AppCore) -> Result<ViewId, String> {
     resolve_view(window.label(), |view| core.has_view(view), core.focused_view())
 }
-/// Like `view_of`, for a command that returns no error. The view of a closed window does not exist, and a call for
-/// it reads and changes nothing.
-fn view_quiet(window: &tauri::WebviewWindow, core: &AppCore) -> ViewId {
-    view_of(window, core).unwrap_or_else(|_| ViewId::from_label(window.label()).unwrap_or_else(ViewId::main))
+/// The view of a command that returns no error. `None` when the window is closed: the call acts on no view, not
+/// even the main view.
+fn quiet_view(label: &str, has_view: impl Fn(&ViewId) -> bool, focused: ViewId) -> Option<ViewId> {
+    resolve_view(label, has_view, focused).ok()
+}
+fn view_quiet(window: &tauri::WebviewWindow, core: &AppCore) -> Option<ViewId> {
+    quiet_view(window.label(), |view| core.has_view(view), core.focused_view())
 }
 #[tauri::command]
 pub fn get_snapshot(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>) -> SnapshotDto {
-    core.snapshot(&view_quiet(&window, &core))
+    view_quiet(&window, &core).map_or_else(|| core.closed_snapshot(), |view| core.snapshot(&view))
 }
 #[tauri::command]
 pub fn get_history(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>) -> HistoryDto {
-    core.history_snapshot(&view_quiet(&window, &core))
+    view_quiet(&window, &core).map_or_else(|| core.closed_history(), |view| core.history_snapshot(&view))
 }
 #[tauri::command]
 pub fn send_message(channels: State<'_, Arc<super::channels::Channels>>, context: State<'_, super::settings::SettingsContext>, channel_id: String, text: String, attachment_ids: Option<Vec<String>>, also_post: Option<bool>) -> Result<(), String> {
@@ -40,7 +43,7 @@ pub fn send_message(channels: State<'_, Arc<super::channels::Channels>>, context
 /// The open thread's transcript, or null when no thread is open. The `discard://thread-history` event sends the same value.
 #[tauri::command]
 pub fn get_thread_history(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>) -> Option<super::dto::ThreadHistoryDto> {
-    core.thread_history_snapshot(&view_quiet(&window, &core))
+    core.thread_history_snapshot(&view_quiet(&window, &core)?)
 }
 
 /// Start a thread on a saved message of the selected channel, send its first message, and open it. Returns the thread channel ID.
@@ -69,7 +72,7 @@ pub async fn open_thread(window: tauri::WebviewWindow, channels: State<'_, Arc<s
 
 #[tauri::command]
 pub fn close_thread(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>) {
-    core.close_thread(&view_quiet(&window, &core));
+    if let Some(view) = view_quiet(&window, &core) { core.close_thread(&view); }
 }
 
 /// Select the parent channel of a followed thread and open the thread beside it. Returns the parent channel ID.
@@ -316,7 +319,7 @@ pub fn set_member_list_visible(window: tauri::WebviewWindow, core: State<'_, Arc
 }
 #[tauri::command]
 pub fn toggle_branch(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>, key: String) {
-    core.toggle_branch(&view_quiet(&window, &core), key);
+    if let Some(view) = view_quiet(&window, &core) { core.toggle_branch(&view, key); }
 }
 
 #[tauri::command]
@@ -330,17 +333,18 @@ pub fn confirm_resolve(app: tauri::AppHandle, core: State<'_, Arc<AppCore>>, act
 }
 #[tauri::command]
 pub fn archive_confirm(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>, actions: State<'_, Arc<super::actions::DesktopActions>>, accept: bool) {
-    let view = view_quiet(&window, &core);
+    let Some(view) = view_quiet(&window, &core) else { return };
     if !core.has_pending_archive(&view) { return; }
     if accept { super::actions::archive(core.inner().clone(), &actions, &view, true); } else { core.cancel_archive(&view); }
 }
 #[tauri::command]
 pub fn context_menu(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>, target: super::dto::ContextTargetDto) -> Vec<super::dto::MenuEntryDto> {
-    discard_core::context_menu::context_menu(&target.into(), &core.menu_context(&view_quiet(&window, &core))).into_iter().filter_map(super::dto::MenuEntryDto::from_entry).collect()
+    let Some(view) = view_quiet(&window, &core) else { return vec![] };
+    discard_core::context_menu::context_menu(&target.into(), &core.menu_context(&view)).into_iter().filter_map(super::dto::MenuEntryDto::from_entry).collect()
 }
 #[tauri::command]
 pub fn run_action(app: tauri::AppHandle, window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>, actions: State<'_, Arc<super::actions::DesktopActions>>, action_id: String, target: Option<super::dto::ContextTargetDto>) -> Option<String> {
-    let view = view_quiet(&window, &core);
+    let view = view_quiet(&window, &core)?;
     if action_id == "open_provider_settings" {
         if let Err(error) = super::windows::open_settings(&app, discard_core::settings_page::SettingsPage::Providers) { core.notice(&view, format!("Cannot open CLI connections: {error}")); }
         return None;
@@ -431,7 +435,7 @@ pub async fn create_channel(window: tauri::WebviewWindow, channels: State<'_, Ar
 pub async fn switch_channel(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, channel_id: String) -> Result<(), String> {
     let channels = channels.inner().clone();
     let view = view_of(&window, &channels.core)?;
-    let in_project = tauri::async_runtime::spawn_blocking(move || channels.select(&view, &channel_id).map(|()| channels.in_project(&channel_id))).await.map_err(|e| e.to_string())??;
+    let in_project = tauri::async_runtime::spawn_blocking(move || channels.select(&view, &channel_id).map(|_| channels.in_project(&channel_id))).await.map_err(|e| e.to_string())??;
     // A project channel is in the lists already. Only a direct message can change the catalogs.
     if !in_project {
         use tauri::Emitter;
@@ -550,7 +554,8 @@ pub async fn select_project(app: tauri::AppHandle, window: tauri::WebviewWindow,
     let navigating = view.clone();
     let result = tauri::async_runtime::spawn_blocking(move || channels.activate_project(&navigating, &discard_core::model::ProjectId(project_id))).await.map_err(|e| e.to_string()).and_then(|r| r);
     core.end_project_navigation(&view);
-    let channel_id = result?;
+    // The first value is the view that changed. A project view that asks for another project changes the main view.
+    let (_, channel_id) = result?;
     use tauri::Emitter;
     let _ = app.emit("discard://conversation-opened", channel_id.clone());
     let _ = app.emit("discard://conversations", ());
@@ -639,8 +644,10 @@ pub async fn choose_project_folder(app: tauri::AppHandle, window: tauri::Webview
         let project = {
             let store = channels.store.lock().unwrap_or_else(|e| e.into_inner());
             if change_current {
-                store.change_project_folder(&discard_core::model::ProjectId(snapshot.project_id), &path).map_err(|e| e.to_string())?;
-                store.selected_project().map_err(|e| e.to_string())?.ok_or("Project unavailable")?
+                // The project of the calling view, not the project that the store has selected (the main view's).
+                let id = discard_core::model::ProjectId(snapshot.project_id);
+                store.change_project_folder(&id, &path).map_err(|e| e.to_string())?;
+                store.visible_projects().map_err(|e| e.to_string())?.into_iter().find(|project| project.id == id).ok_or("Project unavailable")?
             } else { store.import_project_folder(&path).map_err(|e| e.to_string())? }
         };
         channels.activate_project(&view, &project.id)?;
@@ -810,6 +817,15 @@ mod tests {
         let main_only = |view: &ViewId| view.is_main();
         assert_eq!(resolve_view("project-p", main_only, ViewId::main()), Err("This window is closed.".to_string()));
         assert_eq!(resolve_view("main", |_| false, ViewId::main()), Err("This window is closed.".to_string()));
+    }
+    #[test]
+    fn a_quiet_command_of_a_closed_window_acts_on_no_view() {
+        let main_only = |view: &ViewId| view.is_main();
+        assert_eq!(quiet_view("project-p", main_only, ViewId::main()), None, "a closed project window does not fall back to the main view");
+        assert_eq!(quiet_view("main", |_| false, ViewId::main()), None);
+        assert_eq!(quiet_view("main", main_only, ViewId::main()), Some(ViewId::main()));
+        let focused = ViewId::project(&ProjectId("p".into()));
+        assert_eq!(quiet_view("settings", |_| false, focused.clone()), Some(focused));
     }
     #[test]
     fn a_window_that_is_not_an_app_window_gets_the_focused_view() {

@@ -1,7 +1,7 @@
 use discard_app::desktop::{
     view::ViewId,
     core::{AppCore, CoreInit},
-    dto::{HistoryDto, SnapshotDto},
+    dto::{HistoryDto, SnapshotDto, ThreadHistoryDto},
     pump::{Emit, pump},
 };
 use discard_core::agent::AgentConfig;
@@ -30,6 +30,7 @@ impl Emit for RecordingEmit {
 struct ViewEmit {
     snapshots: Mutex<Vec<(ViewId, SnapshotDto)>>,
     histories: Mutex<Vec<(ViewId, HistoryDto)>>,
+    thread_histories: Mutex<Vec<(ViewId, ThreadHistoryDto)>>,
 }
 impl Emit for ViewEmit {
     fn snapshot(&self, view: &ViewId, value: &SnapshotDto) {
@@ -38,6 +39,9 @@ impl Emit for ViewEmit {
     fn history(&self, view: &ViewId, value: &HistoryDto) {
         self.histories.lock().unwrap().push((view.clone(), value.clone()));
     }
+    fn thread_history(&self, view: &ViewId, value: &ThreadHistoryDto) {
+        self.thread_histories.lock().unwrap().push((view.clone(), value.clone()));
+    }
 }
 impl ViewEmit {
     fn snapshots_of(&self, view: &ViewId) -> Vec<SnapshotDto> {
@@ -45,6 +49,9 @@ impl ViewEmit {
     }
     fn histories_of(&self, view: &ViewId) -> Vec<HistoryDto> {
         self.histories.lock().unwrap().iter().filter(|(v, _)| v == view).map(|(_, h)| h.clone()).collect()
+    }
+    fn thread_histories_of(&self, view: &ViewId) -> Vec<ThreadHistoryDto> {
+        self.thread_histories.lock().unwrap().iter().filter(|(v, _)| v == view).map(|(_, h)| h.clone()).collect()
     }
 }
 /// A core whose main view selects "a" and whose project view selects "b". Both channels belong to project "p".
@@ -344,6 +351,29 @@ async fn each_view_receives_its_own_snapshot_and_history() {
     assert!(other_snapshots.last().unwrap().live_blocks.is_empty());
 }
 #[tokio::test]
+async fn the_thread_history_goes_only_to_the_view_that_has_the_thread_open() {
+    let (core, other) = two_views();
+    // Both views show "a". Only the main view opens the thread of "a".
+    core.switch_channel(&other, "a").unwrap();
+    let (commands, _) = mpsc::unbounded_channel();
+    let thread = Channel { id: ChannelId("t".into()), project_id: Some(ProjectId("p".into())), name: "t".into(), agent_id: AgentId("agent".into()), workspace_mode: WorkspaceMode::MainCheckout };
+    let info = discard_core::model::ThreadInfo {
+        channel_id: thread.id.clone(), parent_channel_id: ChannelId("a".into()), anchor_message_id: None, kind: discard_core::model::ThreadKind::SubAgent,
+        followed: false, name: "t".into(), state: None, agent_id: AgentId("agent".into()), agent_name: "A".into(),
+    };
+    core.add_thread(CoreInit { state: UiState::new(thread.id.clone(), vec![]), commands, project: "p".into(), channel: "t".into(), agent: "A".into(), provider: "fake".into() }, &thread, &info);
+    core.open_thread(&ViewId::main(), "t").unwrap();
+    let emit = Arc::new(ViewEmit::default());
+    let (tx, rx) = mpsc::unbounded_channel();
+    tx.send(text()).unwrap();
+    drop(tx);
+    pump(core.clone(), rx, emit.clone(), Duration::from_millis(16)).await;
+    let opened = emit.thread_histories_of(&ViewId::main());
+    assert!(!opened.is_empty() && opened.iter().all(|h| h.channel_id == "t"), "the main view gets the transcript of its open thread");
+    assert!(emit.thread_histories_of(&other).is_empty(), "the other view has no thread open and gets no thread transcript");
+    assert!(emit.snapshots_of(&other).iter().all(|s| s.open_thread.is_none()));
+}
+#[tokio::test]
 async fn a_dropped_view_receives_nothing_more_and_a_new_view_receives_from_its_start() {
     let (core, other) = two_views();
     let emit = Arc::new(ViewEmit::default());
@@ -363,6 +393,7 @@ async fn a_dropped_view_receives_nothing_more_and_a_new_view_receives_from_its_s
     let probe = emit.clone();
     wait(Box::new(move || probe.snapshots_of(&ViewId::main()).last().is_some_and(|s| s.notice.as_deref() == Some("after the drop")))).await;
     let count = emit.snapshots_of(&other).len();
+    let histories = emit.histories_of(&other).len();
     core.notice(&main, "again".into());
     let probe = emit.clone();
     wait(Box::new(move || probe.snapshots_of(&ViewId::main()).last().is_some_and(|s| s.notice.as_deref() == Some("again")))).await;
@@ -374,7 +405,7 @@ async fn a_dropped_view_receives_nothing_more_and_a_new_view_receives_from_its_s
     let reopened = other.clone();
     wait(Box::new(move || probe.snapshots_of(&reopened).len() > count)).await;
     assert_eq!(emit.snapshots_of(&other).last().unwrap().channel_id, "b");
-    assert!(!emit.histories_of(&other).is_empty());
+    assert!(emit.histories_of(&other).len() > histories, "the reopened view gets a history of its own");
     assert!(!task.is_finished());
     drop(sender);
     task.abort();

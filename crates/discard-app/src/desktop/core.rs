@@ -134,6 +134,9 @@ fn clamped_panels(panels: PanelWidths) -> PanelWidths {
     PanelWidths { channel_list: clamp(panels.channel_list), member_list: clamp(panels.member_list) }
 }
 
+/// What a window of a view that does not exist reads in its history: no channel and no messages.
+fn closed_history(s: &State) -> HistoryDto { HistoryDto { channel_id: String::new(), rev: s.history_rev, messages: vec![] } }
+
 /// What a window of a view that does not exist reads: no project, no channel, and the theme of the app. It builds
 /// no view, no channel list, and no plugin slots.
 fn closed_snapshot(s: &State) -> SnapshotDto {
@@ -213,9 +216,15 @@ fn channel_thread_list(s: &State, channel: &str) -> Vec<ThreadChipDto> {
     records.into_iter().map(|r| r.chip(s.window.last_read(&r.id), thread_approvals(s, &r.id))).collect()
 }
 
-/// Every loaded thread with an approval that waits, followed or not.
-fn pending_thread_approvals(s: &State) -> Vec<ThreadApprovalDto> {
-    s.threads.values().filter_map(|r| {
+/// Whether a view lists the channel of `project` in its snapshot. The main view lists every project. A project view
+/// lists its own project only (decision 21a).
+fn lists_project(view: &ViewId, view_project: &str, project: Option<&discard_core::model::ProjectId>) -> bool {
+    view.is_main() || project.is_some_and(|project| project.0 == view_project)
+}
+
+/// Every loaded thread of a channel that `listed` accepts with an approval that waits, followed or not.
+fn pending_thread_approvals(s: &State, listed: impl Fn(Option<&discard_core::model::ProjectId>) -> bool) -> Vec<ThreadApprovalDto> {
+    s.threads.values().filter(|r| listed(channel_state(s, &r.parent).or_else(|| channel_state(s, &r.id)).and_then(|c| c.project_id.as_ref()))).filter_map(|r| {
         let pending = thread_approvals(s, &r.id);
         (pending > 0).then(|| ThreadApprovalDto { thread_id: r.id.clone(), parent_channel_id: r.parent.clone(), name: r.name.clone(), kind: r.kind.as_str().into(), agent_name: r.agent_name.clone(), pending_approvals: pending })
     }).collect()
@@ -511,6 +520,12 @@ impl AppCore {
         if channel.is_empty() { return vec![]; }
         self.state.lock().unwrap_or_else(|e| e.into_inner()).views.iter().filter(|(_, v)| v.selected == channel).map(|(view, _)| view.clone()).collect()
     }
+    /// The view that carries out a selection of `target_project` for `view`. The main view selects anything. A project
+    /// view is fixed to its project: a target in another project, and a target with no project (a direct message),
+    /// go to the main view (decisions 17 and 17b). The caller checks that `view` exists.
+    pub fn route(&self, view: &ViewId, target_project: Option<&discard_core::model::ProjectId>) -> ViewId {
+        if view.is_main() || view.project_id().as_ref() == target_project { view.clone() } else { ViewId::main() }
+    }
     /// The view of the window that the user used last.
     // TODO: track the focused window. Until then the main view stands in.
     pub fn focused_view(&self) -> ViewId { ViewId::main() }
@@ -693,10 +708,12 @@ impl AppCore {
         let (id, name, path) = s.views.get(view).map(|v| (v.project_id.clone(), v.project.clone(), v.project_path.clone())).unwrap_or_default();
         discard_core::model::Project { id: discard_core::model::ProjectId(id), name, path }
     }
-    /// Show `project` and `channel` in a view. The channels that other views show stay in the pool.
-    pub fn replace_project(&self, view: &ViewId, init: CoreInit, project: &discard_core::model::Project, channel: &discard_core::model::Channel) {
+    /// Show `project` and `channel` in a view. The channels that other views show stay in the pool. Returns false
+    /// when `init` was not installed: the view is gone, or another view already loaded the channel. The caller must
+    /// not launch a session before it knows the channel is not loaded, because a dropped `init` ends its engine.
+    pub fn replace_project(&self, view: &ViewId, init: CoreInit, project: &discard_core::model::Project, channel: &discard_core::model::Channel) -> bool {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if !s.views.contains_key(view) { return; }
+        if !s.views.contains_key(view) { return false; }
         s.runtime_generation += 1;
         let mut next = ChannelState::new(init);
         next.runtime_generation = s.runtime_generation;
@@ -714,13 +731,15 @@ impl AppCore {
             if target.open_thread.take().is_some() { st.thread_rev += 1; }
         }
         // A channel that another view shows keeps its loaded state. The new runtime is dropped, so its engine ends.
-        if channel.id.0.is_empty() { s.views.get_mut(view).expect("the view exists").placeholder = next; } else if !s.channels.contains_key(&channel.id.0) { s.channels.insert(channel.id.0.clone(), next); }
+        let installed = channel.id.0.is_empty() || !s.channels.contains_key(&channel.id.0);
+        if channel.id.0.is_empty() { s.views.get_mut(view).expect("the view exists").placeholder = next; } else if installed { s.channels.insert(channel.id.0.clone(), next); }
         close_missing_threads(&mut s);
         if let Some(marker) = startup_marker(current(&s, view).ui.history(), s.window.last_read(&channel.id.0)) { let _ = s.window.set_last_read(&channel.id.0, &marker); }
         let anchor = new_divider_anchor(current(&s, view).ui.history(), s.window.last_read(&channel.id.0), None, false);
         current_mut(&mut s, view).new_anchor = anchor;
         s.rev += 1; s.history_rev += 1;
         self.changed.notify_one();
+        installed
     }
     /// Take the app-wide guard for a write approval in a channel that a view shows.
     pub fn begin_write_approval(&self, channel: &str) -> Result<(), String> {
@@ -833,9 +852,13 @@ impl AppCore {
     }
     pub fn history_snapshot(&self, view: &ViewId) -> HistoryDto {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(v) = s.views.get(view) else { return HistoryDto { channel_id: String::new(), rev: s.history_rev, messages: vec![] } };
+        let Some(v) = s.views.get(view) else { return closed_history(&s) };
         HistoryDto { channel_id: v.selected.clone(), rev: s.history_rev, messages: channel_messages(&s, current_of(&s, v)) }
     }
+    /// The history of a window that has no view. A command for such a window reads no view.
+    pub fn closed_history(&self) -> HistoryDto { closed_history(&self.state.lock().unwrap_or_else(|e| e.into_inner())) }
+    /// The state of a window that has no view. A command for such a window reads no view.
+    pub fn closed_snapshot(&self) -> SnapshotDto { closed_snapshot(&self.state.lock().unwrap_or_else(|e| e.into_inner())) }
     /// The state of one view for its window. A view that does not exist gives a minimal state that selects nothing.
     pub fn snapshot(&self, view_id: &ViewId) -> SnapshotDto {
         let (mut snapshot, slot_state, context, slot_cache) = {
@@ -866,7 +889,7 @@ impl AppCore {
                 has_children: view.branches.iter().enumerate().any(|(child_index, child)| view.branch_repositories.get(child_index) == view.branch_repositories.get(index) && child.parent.as_ref() == Some(&row.name)),
             }).collect();
             let mut channels: Vec<_> = state.channels.values()
-                    .filter(|channel| channel.thread_parent.is_none()).map(|channel| ChannelDto {
+                    .filter(|channel| channel.thread_parent.is_none() && lists_project(view_id, &view.project_id, channel.project_id.as_ref())).map(|channel| ChannelDto {
                         threads: followed_links(&state, &channel.channel_id),
                         id: channel.channel_id.clone(), agent_id: channel.agent_id.clone(), project_id: channel.project_id.as_ref().map(|id| id.0.clone()), name: channel.channel.clone(), agent: channel.agent.clone(),
                         provider: channel.provider.clone(), workspace_mode: channel.mode.as_str().into(),
@@ -913,7 +936,7 @@ impl AppCore {
                 channels,
                 live_sub_agent_threads: live_sub_agent_chips(&state, &active.channel_id),
                 channel_threads: channel_thread_list(&state, &active.channel_id),
-                thread_approvals: pending_thread_approvals(&state),
+                thread_approvals: pending_thread_approvals(&state, |project| lists_project(view_id, &view.project_id, project)),
                 open_thread: open_thread_dto(&state, view),
                 branches,
                 repositories: view.repositories.clone(),
@@ -2330,13 +2353,54 @@ mod read_tests {
         // A runtime for "a" is launched while main still shows "a". The pool keeps the loaded state.
         let (commands, _) = tokio::sync::mpsc::unbounded_channel();
         let channel = discard_core::model::Channel { id: ChannelId("a".into()), agent_id: AgentId("agent".into()), project_id: Some(discard_core::model::ProjectId("p".into())), name: "a".into(), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout };
-        core.replace_project(&other, CoreInit { state: UiState::new(channel.id.clone(), vec![]), commands, project: "p".into(), channel: "a".into(), agent: "a".into(), provider: "fake".into() }, &project("p"), &channel);
+        let installed = core.replace_project(&other, CoreInit { state: UiState::new(channel.id.clone(), vec![]), commands, project: "p".into(), channel: "a".into(), agent: "a".into(), provider: "fake".into() }, &project("p"), &channel);
+        assert!(!installed, "the pool held the channel, so the new runtime was dropped and the caller is told");
         assert_eq!(core.active_channel_id(&other), "a");
         assert_eq!(core.active_channel_id(&main()), "a");
         assert_eq!(core.snapshot(&main()).notice.as_deref(), Some("main only"), "the loaded channel kept its state");
         assert_eq!(core.snapshot(&other).notice.as_deref(), Some("main only"));
         assert!(core.has_channel("a") && !core.has_channel("b"), "the channel that no view shows is gone");
         assert_eq!(core.loaded_channel_count(), 1);
+    }
+    #[test]
+    fn replacing_the_project_of_a_view_reports_whether_its_runtime_was_installed() {
+        let core = core_with_project_channels("p", &["a"]);
+        let other = add_view(&core, "project-p", "a");
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let fresh = discard_core::model::Channel { id: ChannelId("c".into()), agent_id: AgentId("agent".into()), project_id: project_of("p"), name: "c".into(), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout };
+        assert!(core.replace_project(&other, CoreInit { state: UiState::new(fresh.id.clone(), vec![]), commands, project: "p".into(), channel: "c".into(), agent: "a".into(), provider: "fake".into() }, &project("p"), &fresh), "a channel that no view loaded takes the runtime");
+        assert!(core.has_channel("c") && core.has_channel("a"), "main still shows a");
+        let gone = ViewId::project(&discard_core::model::ProjectId("gone".into()));
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        assert!(!core.replace_project(&gone, CoreInit { state: UiState::new(fresh.id.clone(), vec![]), commands, project: "p".into(), channel: "c".into(), agent: "a".into(), provider: "fake".into() }, &project("p"), &fresh), "a view that does not exist installs nothing");
+        assert!(!core.has_view(&gone));
+    }
+    #[test]
+    fn clearing_the_project_of_a_view_unloads_no_channel_that_another_view_selects() {
+        let core = core_with_project_channels("p", &["a", "b"]);
+        let other = add_view(&core, "project-p", "a");
+        core.notice(&main(), "kept".into());
+        core.clear_project(&other);
+        assert_eq!(core.active_channel_id(&other), "");
+        assert_eq!(core.current_project(&other).id.0, "");
+        assert!(core.has_channel("a"), "the main view still shows a");
+        assert!(!core.has_channel("b"), "no view shows b");
+        assert_eq!(core.active_channel_id(&main()), "a");
+        assert_eq!(core.snapshot(&main()).notice.as_deref(), Some("kept"));
+        assert_eq!(core.current_project(&main()).id.0, "p");
+    }
+    #[test]
+    fn clearing_the_slots_clears_the_cache_of_every_view() {
+        let core = core_with_project_channels("p", &["a"]);
+        let other = add_view(&core, "project-p", "a");
+        let state = serde_json::json!({"k": 1});
+        let cache_of = |view: &ViewId| core.state.lock().unwrap().views[view].slots.clone();
+        assert!(!Arc::ptr_eq(&cache_of(&main()), &cache_of(&other)), "each view has its own cache");
+        let renders = |view: &ViewId| { let mut calls = 0; cache_of(view).lock().unwrap().get_or_render(&state, || { calls += 1; BTreeMap::new() }); calls };
+        assert_eq!((renders(&main()), renders(&other)), (1, 1));
+        assert_eq!((renders(&main()), renders(&other)), (0, 0), "the caches hold their entries");
+        core.clear_slots();
+        assert_eq!((renders(&main()), renders(&other)), (1, 1), "both caches render again");
     }
     #[test]
     fn a_view_that_selects_no_channel_has_nothing_to_apply() {
@@ -2349,6 +2413,86 @@ mod read_tests {
         core.switch_channel(&main(), "b").unwrap();
         core.apply(&main(), Update::Notice("kept".into()));
         assert_eq!(core.snapshot(&main()).notice.as_deref(), Some("kept"));
+    }
+    fn project_of(id: &str) -> Option<discard_core::model::ProjectId> { Some(discard_core::model::ProjectId(id.into())) }
+    /// A channel of `project` with no engine. Its command channel stays open.
+    fn add_project_channel(core: &AppCore, project: &str, id: &str) {
+        let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        std::mem::forget(receiver);
+        let channel = discard_core::model::Channel { id: ChannelId(id.into()), agent_id: AgentId("agent".into()), project_id: project_of(project), name: id.into(), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout };
+        core.add_channel(CoreInit { state: UiState::new(ChannelId(id.into()), vec![]), commands, project: project.into(), channel: id.into(), agent: "a".into(), provider: "fake".into() }, &channel);
+    }
+    fn ask_approval(core: &AppCore, channel: &str) {
+        core.apply_channel(channel, Update::Event(Box::new(discard_core::event::Event {
+            id: discard_core::event::EventId::new(), session_id: discard_core::event::SessionId::new(), seq: 1, raw: None,
+            kind: discard_core::event::EventKind::ApprovalRequest {
+                kind: discard_core::approval::ApprovalKind::ProviderTool, approval_id: ApprovalId::new(), call_id: "shell".into(), tool: "Bash".into(),
+                input: serde_json::json!({"command":"cargo test -p x"}), paths: vec![],
+            },
+        })));
+    }
+    #[test]
+    fn a_target_outside_the_project_routes_to_the_main_view_in_the_core() {
+        let core = core_with_project_channels("p", &["a"]);
+        let p_view = add_view(&core, "project-p", "a");
+        let (p, q) = (project_of("p").unwrap(), project_of("q").unwrap());
+        assert_eq!(core.route(&p_view, Some(&p)), p_view);
+        assert_eq!(core.route(&p_view, Some(&q)), main());
+        assert_eq!(core.route(&p_view, None), main(), "a direct message");
+        assert_eq!(core.route(&main(), Some(&q)), main());
+        assert_eq!(core.route(&main(), None), main());
+        assert_eq!(core.route(&main(), Some(&p)), main());
+    }
+    #[test]
+    fn a_project_view_lists_only_its_project() {
+        let core = core_with_project_channels("p", &["a", "b"]);
+        add_project_channel(&core, "q", "x");
+        // A direct message has no project.
+        let direct = discard_core::model::Channel { id: ChannelId("dm".into()), agent_id: AgentId::new(), project_id: None, name: "dm".into(), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout };
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        core.add_channel(CoreInit { state: UiState::new(ChannelId("dm".into()), vec![]), commands, project: String::new(), channel: "dm".into(), agent: "a".into(), provider: "fake".into() }, &direct);
+        let p_view = add_view(&core, "project-p", "b");
+        let listed = |view: &ViewId| core.snapshot(view).channels.into_iter().map(|c| (c.id, c.project_id)).collect::<Vec<_>>();
+        assert_eq!(listed(&p_view), vec![("a".to_string(), Some("p".to_string())), ("b".to_string(), Some("p".to_string()))]);
+        let all = listed(&main());
+        assert!(all.contains(&("x".to_string(), Some("q".to_string()))) && all.contains(&("a".to_string(), Some("p".to_string()))) && all.contains(&("dm".to_string(), None)), "{all:?}");
+        assert_eq!(all.len(), 4, "the main view lists every loaded channel");
+    }
+    #[test]
+    fn a_project_view_lists_only_the_thread_approvals_of_its_project() {
+        let core = core_with_project_channels("p", &["a"]);
+        add_project_channel(&core, "q", "x");
+        let p_view = add_view(&core, "project-p", "a");
+        for (thread, parent, project) in [("t-p", "a", "p"), ("t-q", "x", "q")] {
+            let info = discard_core::model::ThreadInfo { channel_id: ChannelId(thread.into()), parent_channel_id: ChannelId(parent.into()), anchor_message_id: None, kind: ThreadKind::SubAgent, followed: false, name: thread.into(), state: None, agent_id: AgentId("agent".into()), agent_name: "a".into() };
+            let channel = discard_core::model::Channel { id: ChannelId(thread.into()), agent_id: AgentId("agent".into()), project_id: project_of(project), name: thread.into(), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout };
+            let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+            std::mem::forget(receiver);
+            core.add_thread(CoreInit { state: UiState::new(ChannelId(thread.into()), vec![]), commands, project: project.into(), channel: thread.into(), agent: "a".into(), provider: "fake".into() }, &channel, &info);
+            ask_approval(&core, thread);
+        }
+        let waiting = |view: &ViewId| core.snapshot(view).thread_approvals.into_iter().map(|a| a.thread_id).collect::<Vec<_>>();
+        assert_eq!(waiting(&p_view), vec!["t-p".to_string()]);
+        assert_eq!(waiting(&main()), vec!["t-p".to_string(), "t-q".to_string()]);
+    }
+    #[test]
+    fn a_read_in_one_view_clears_unread_in_the_other() { // Review Focus 4
+        let dir = tempfile::tempdir().unwrap();
+        let history: Vec<_> = ["one", "two"].into_iter().map(|id| Message { id: MessageId(id.into()), channel_id: ChannelId("a".into()), role: Role::Agent, blocks: vec![] }).collect();
+        StateStore::open(&dir.path().join("state.toml")).set_last_read("a", "one").unwrap();
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let core = AppCore::new(CoreInit { state: UiState::new(ChannelId("a".into()), history), commands, project: "p".into(), channel: "a".into(), agent: "a".into(), provider: "fake".into() });
+        core.configure_targets(&main(), "p".into(), Path::new("/p"), "agent".into());
+        core.configure_read_marker(&main(), dir.path(), "a");
+        add_project_channel(&core, "p", "b");
+        let p_view = add_view(&core, "project-p", "a");
+        core.switch_channel(&main(), "b").unwrap();
+        let unread = |view: &ViewId| core.snapshot(view).channels.into_iter().find(|c| c.id == "a").unwrap().unread;
+        assert!(unread(&main()) && unread(&p_view), "a has a message that nobody read");
+        assert!(core.snapshot(&p_view).unread);
+        core.mark_read_in(Some("a"), "two").unwrap();
+        assert!(!unread(&main()), "the read in the project view cleared the marker in the main view");
+        assert!(!core.snapshot(&p_view).unread);
     }
     fn core_with_plugin(init: &str) -> (AppCore, tempfile::TempDir) {
         use discard_lua::{PluginLimits, PluginManager, keystore::StaticKeyStore, ledger::Ledger, snapshot::Snapshot};
