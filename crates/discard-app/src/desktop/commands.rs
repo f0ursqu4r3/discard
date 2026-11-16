@@ -1,17 +1,35 @@
 use super::{
-    core::AppCore,
+    core::{AppCore, WINDOW_CLOSED},
     dto::{HistoryDto, SnapshotDto},
     view::ViewId,
 };
 use std::sync::Arc;
 use tauri::State;
-#[tauri::command]
-pub fn get_snapshot(core: State<'_, Arc<AppCore>>) -> SnapshotDto {
-    core.snapshot(&ViewId::main())
+
+/// The view that a command acts on, from the label of the calling window. An app window with a view gets that view.
+/// An app window with no view is closed: `Err`. Any other window (Settings) gets the focused view.
+fn resolve_view(label: &str, has_view: impl Fn(&ViewId) -> bool, focused: ViewId) -> Result<ViewId, String> {
+    match ViewId::from_label(label) {
+        Some(view) if has_view(&view) => Ok(view),
+        Some(_) => Err(WINDOW_CLOSED.into()),
+        None => Ok(focused),
+    }
+}
+fn view_of(window: &tauri::WebviewWindow, core: &AppCore) -> Result<ViewId, String> {
+    resolve_view(window.label(), |view| core.has_view(view), core.focused_view())
+}
+/// Like `view_of`, for a command that returns no error. The view of a closed window does not exist, and a call for
+/// it reads and changes nothing.
+fn view_quiet(window: &tauri::WebviewWindow, core: &AppCore) -> ViewId {
+    view_of(window, core).unwrap_or_else(|_| ViewId::from_label(window.label()).unwrap_or_else(ViewId::main))
 }
 #[tauri::command]
-pub fn get_history(core: State<'_, Arc<AppCore>>) -> HistoryDto {
-    core.history_snapshot(&ViewId::main())
+pub fn get_snapshot(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>) -> SnapshotDto {
+    core.snapshot(&view_quiet(&window, &core))
+}
+#[tauri::command]
+pub fn get_history(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>) -> HistoryDto {
+    core.history_snapshot(&view_quiet(&window, &core))
 }
 #[tauri::command]
 pub fn send_message(channels: State<'_, Arc<super::channels::Channels>>, context: State<'_, super::settings::SettingsContext>, channel_id: String, text: String, attachment_ids: Option<Vec<String>>, also_post: Option<bool>) -> Result<(), String> {
@@ -21,19 +39,20 @@ pub fn send_message(channels: State<'_, Arc<super::channels::Channels>>, context
 
 /// The open thread's transcript, or null when no thread is open. The `discard://thread-history` event sends the same value.
 #[tauri::command]
-pub fn get_thread_history(core: State<'_, Arc<AppCore>>) -> Option<super::dto::ThreadHistoryDto> {
-    core.thread_history_snapshot(&ViewId::main())
+pub fn get_thread_history(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>) -> Option<super::dto::ThreadHistoryDto> {
+    core.thread_history_snapshot(&view_quiet(&window, &core))
 }
 
 /// Start a thread on a saved message of the selected channel, send its first message, and open it. Returns the thread channel ID.
 #[tauri::command]
 #[expect(clippy::too_many_arguments, reason = "Tauri passes one argument per command field.")]
-pub async fn start_thread(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, context: State<'_, super::settings::SettingsContext>, parent_channel_id: String, anchor_message_id: String, text: String, attachment_ids: Option<Vec<String>>, also_post: Option<bool>) -> Result<String, String> {
+pub async fn start_thread(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, context: State<'_, super::settings::SettingsContext>, parent_channel_id: String, anchor_message_id: String, text: String, attachment_ids: Option<Vec<String>>, also_post: Option<bool>) -> Result<String, String> {
     let channels = channels.inner().clone();
+    let view = view_of(&window, &channels.core)?;
     let home = context.home.clone();
     let id = tauri::async_runtime::spawn_blocking(move || {
         let attachments = discard_core::attachments::load_all(&home, &attachment_ids.unwrap_or_default())?;
-        channels.start_thread(&parent_channel_id, &anchor_message_id, text, attachments, also_post.unwrap_or(false))
+        channels.start_thread(&view, &parent_channel_id, &anchor_message_id, text, attachments, also_post.unwrap_or(false))
     }).await.map_err(|e| e.to_string())??;
     use tauri::Emitter;
     let _ = app.emit("discard://conversations", ());
@@ -42,21 +61,23 @@ pub async fn start_thread(app: tauri::AppHandle, channels: State<'_, Arc<super::
 
 /// Show a thread of the selected channel beside it.
 #[tauri::command]
-pub async fn open_thread(channels: State<'_, Arc<super::channels::Channels>>, thread_id: String) -> Result<(), String> {
+pub async fn open_thread(window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, thread_id: String) -> Result<(), String> {
     let channels = channels.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || channels.open_thread(&discard_core::model::ChannelId(thread_id))).await.map_err(|e| e.to_string())?
+    let view = view_of(&window, &channels.core)?;
+    tauri::async_runtime::spawn_blocking(move || channels.open_thread(&view, &discard_core::model::ChannelId(thread_id))).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn close_thread(core: State<'_, Arc<AppCore>>) {
-    core.close_thread(&ViewId::main());
+pub fn close_thread(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>) {
+    core.close_thread(&view_quiet(&window, &core));
 }
 
 /// Select the parent channel of a followed thread and open the thread beside it. Returns the parent channel ID.
 #[tauri::command]
-pub async fn select_thread(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, thread_id: String) -> Result<String, String> {
+pub async fn select_thread(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, thread_id: String) -> Result<String, String> {
     let channels = channels.inner().clone();
-    let parent = tauri::async_runtime::spawn_blocking(move || channels.select_thread(&discard_core::model::ChannelId(thread_id))).await.map_err(|e| e.to_string())??;
+    let view = view_of(&window, &channels.core)?;
+    let parent = tauri::async_runtime::spawn_blocking(move || channels.select_thread(&view, &discard_core::model::ChannelId(thread_id))).await.map_err(|e| e.to_string())??;
     use tauri::Emitter;
     let _ = app.emit("discard://conversations", ());
     super::windows::show_conversation(&app);
@@ -150,10 +171,12 @@ pub async fn set_channel_muted(app: tauri::AppHandle, channels: State<'_, Arc<su
 
 /// Archive the channel of a row. `archived` is false when the archive needs the second confirm: call again with `force`.
 #[tauri::command]
-pub async fn archive_project_channel(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, workspace: State<'_, Arc<discard_core::workspace::GitWorkspace>>, terminals: State<'_, Arc<super::terminal::Terminals>>, project_id: String, channel_id: String, force: bool) -> Result<super::dto::ArchiveChannelDto, String> {
+#[expect(clippy::too_many_arguments, reason = "Tauri passes one argument per command field.")]
+pub async fn archive_project_channel(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, workspace: State<'_, Arc<discard_core::workspace::GitWorkspace>>, terminals: State<'_, Arc<super::terminal::Terminals>>, project_id: String, channel_id: String, force: bool) -> Result<super::dto::ArchiveChannelDto, String> {
     let (channels, workspace) = (channels.inner().clone(), workspace.inner().clone());
+    let view = view_of(&window, &channels.core)?;
     let closing = channel_id.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || channels.archive_channel(&workspace, &discard_core::model::ProjectId(project_id), &discard_core::model::ChannelId(channel_id), force)).await.map_err(|e| e.to_string())?;
+    let result = tauri::async_runtime::spawn_blocking(move || channels.archive_channel(&view, &workspace, &discard_core::model::ProjectId(project_id), &discard_core::model::ChannelId(channel_id), force)).await.map_err(|e| e.to_string())?;
     if result.as_ref().is_ok_and(|archived| archived.archived) { terminals.close_channel(&closing, Some("This channel was archived. The session ended.")); }
     conversations_changed(&app);
     result
@@ -161,67 +184,77 @@ pub async fn archive_project_channel(app: tauri::AppHandle, channels: State<'_, 
 
 /// Where Create Worktree… will put the worktree of a branch.
 #[tauri::command]
-pub async fn worktree_plan(channels: State<'_, Arc<super::channels::Channels>>, workspace: State<'_, Arc<discard_core::workspace::GitWorkspace>>, project_id: String, repository: String, branch: String) -> Result<super::dto::WorktreePlanDto, String> {
+pub async fn worktree_plan(window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, workspace: State<'_, Arc<discard_core::workspace::GitWorkspace>>, project_id: String, repository: String, branch: String) -> Result<super::dto::WorktreePlanDto, String> {
     let (channels, workspace) = (channels.inner().clone(), workspace.inner().clone());
-    tauri::async_runtime::spawn_blocking(move || channels.worktree_plan(&workspace, &discard_core::model::ProjectId(project_id), &repository, &branch)).await.map_err(|e| e.to_string())?
+    let view = view_of(&window, &channels.core)?;
+    tauri::async_runtime::spawn_blocking(move || channels.worktree_plan(&view, &workspace, &discard_core::model::ProjectId(project_id), &repository, &branch)).await.map_err(|e| e.to_string())?
 }
 
 /// Create a linked worktree for a branch. Returns its path.
 #[tauri::command]
-pub async fn create_branch_worktree(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, workspace: State<'_, Arc<discard_core::workspace::GitWorkspace>>, project_id: String, repository: String, branch: String, channel_id: Option<String>) -> Result<String, String> {
+#[expect(clippy::too_many_arguments, reason = "Tauri passes one argument per command field.")]
+pub async fn create_branch_worktree(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, workspace: State<'_, Arc<discard_core::workspace::GitWorkspace>>, project_id: String, repository: String, branch: String, channel_id: Option<String>) -> Result<String, String> {
     let (channels, workspace) = (channels.inner().clone(), workspace.inner().clone());
-    let result = tauri::async_runtime::spawn_blocking(move || channels.create_worktree(&workspace, &discard_core::model::ProjectId(project_id), &repository, &branch, channel_id.as_deref())).await.map_err(|e| e.to_string())?;
+    let view = view_of(&window, &channels.core)?;
+    let result = tauri::async_runtime::spawn_blocking(move || channels.create_worktree(&view, &workspace, &discard_core::model::ProjectId(project_id), &repository, &branch, channel_id.as_deref())).await.map_err(|e| e.to_string())?;
     conversations_changed(&app);
     result
 }
 
 /// Rename a local branch and its channel binding. Returns the new name.
 #[tauri::command]
-pub async fn rename_git_branch(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, repository: String, branch: String, new_name: String) -> Result<String, String> {
+pub async fn rename_git_branch(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, repository: String, branch: String, new_name: String) -> Result<String, String> {
     let channels = channels.inner().clone();
-    let result = tauri::async_runtime::spawn_blocking(move || channels.rename_branch(&discard_core::model::ProjectId(project_id), &repository, &branch, &new_name)).await.map_err(|e| e.to_string())?;
+    let view = view_of(&window, &channels.core)?;
+    let result = tauri::async_runtime::spawn_blocking(move || channels.rename_branch(&view, &discard_core::model::ProjectId(project_id), &repository, &branch, &new_name)).await.map_err(|e| e.to_string())?;
     conversations_changed(&app);
     result
 }
 
 /// The unmerged commits that deleting a branch would drop, or the reason it cannot be deleted.
 #[tauri::command]
-pub async fn branch_deletion_info(channels: State<'_, Arc<super::channels::Channels>>, project_id: String, repository: String, branch: String) -> Result<usize, String> {
+pub async fn branch_deletion_info(window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, repository: String, branch: String) -> Result<usize, String> {
     let channels = channels.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || channels.branch_deletion_info(&discard_core::model::ProjectId(project_id), &repository, &branch)).await.map_err(|e| e.to_string())?
+    let view = view_of(&window, &channels.core)?;
+    tauri::async_runtime::spawn_blocking(move || channels.branch_deletion_info(&view, &discard_core::model::ProjectId(project_id), &repository, &branch)).await.map_err(|e| e.to_string())?
 }
 
 /// Delete a local branch. Unmerged commits need `force`.
 #[tauri::command]
-pub async fn delete_git_branch(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, repository: String, branch: String, force: bool) -> Result<super::dto::BranchDeletionDto, String> {
+pub async fn delete_git_branch(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, repository: String, branch: String, force: bool) -> Result<super::dto::BranchDeletionDto, String> {
     let channels = channels.inner().clone();
-    let result = tauri::async_runtime::spawn_blocking(move || channels.delete_branch(&discard_core::model::ProjectId(project_id), &repository, &branch, force)).await.map_err(|e| e.to_string())?;
+    let view = view_of(&window, &channels.core)?;
+    let result = tauri::async_runtime::spawn_blocking(move || channels.delete_branch(&view, &discard_core::model::ProjectId(project_id), &repository, &branch, force)).await.map_err(|e| e.to_string())?;
     conversations_changed(&app);
     result
 }
 
 /// Start a new branch in a working tree and switch it to the branch. Returns the new name.
 #[tauri::command]
-pub async fn create_git_branch(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, repository: String, worktree: String, name: String) -> Result<String, String> {
+pub async fn create_git_branch(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, repository: String, worktree: String, name: String) -> Result<String, String> {
     let channels = channels.inner().clone();
-    let result = tauri::async_runtime::spawn_blocking(move || channels.create_branch(&discard_core::model::ProjectId(project_id), &repository, &worktree, &name)).await.map_err(|e| e.to_string())?;
+    let view = view_of(&window, &channels.core)?;
+    let result = tauri::async_runtime::spawn_blocking(move || channels.create_branch(&view, &discard_core::model::ProjectId(project_id), &repository, &worktree, &name)).await.map_err(|e| e.to_string())?;
     conversations_changed(&app);
     result
 }
 
 /// The files that removing a working tree would discard, or the reason it cannot be removed.
 #[tauri::command]
-pub async fn worktree_removal_info(channels: State<'_, Arc<super::channels::Channels>>, project_id: String, repository: String, worktree: String) -> Result<super::dto::WorktreeFilesDto, String> {
+pub async fn worktree_removal_info(window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, repository: String, worktree: String) -> Result<super::dto::WorktreeFilesDto, String> {
     let channels = channels.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || channels.worktree_removal_info(&discard_core::model::ProjectId(project_id), &repository, &worktree)).await.map_err(|e| e.to_string())?
+    let view = view_of(&window, &channels.core)?;
+    tauri::async_runtime::spawn_blocking(move || channels.worktree_removal_info(&view, &discard_core::model::ProjectId(project_id), &repository, &worktree)).await.map_err(|e| e.to_string())?
 }
 
 /// Remove a linked working tree. The branch stays. Files that would be lost need `force`.
 #[tauri::command]
-pub async fn remove_git_worktree(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, terminals: State<'_, Arc<super::terminal::Terminals>>, project_id: String, repository: String, worktree: String, force: bool) -> Result<super::dto::WorktreeRemovalDto, String> {
+#[expect(clippy::too_many_arguments, reason = "Tauri passes one argument per command field.")]
+pub async fn remove_git_worktree(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, terminals: State<'_, Arc<super::terminal::Terminals>>, project_id: String, repository: String, worktree: String, force: bool) -> Result<super::dto::WorktreeRemovalDto, String> {
     let channels = channels.inner().clone();
+    let view = view_of(&window, &channels.core)?;
     let folder = std::path::PathBuf::from(&worktree);
-    let result = tauri::async_runtime::spawn_blocking(move || channels.remove_worktree(&discard_core::model::ProjectId(project_id), &repository, &worktree, force)).await.map_err(|e| e.to_string())?;
+    let result = tauri::async_runtime::spawn_blocking(move || channels.remove_worktree(&view, &discard_core::model::ProjectId(project_id), &repository, &worktree, force)).await.map_err(|e| e.to_string())?;
     if result.as_ref().is_ok_and(|removal| removal.removed) { terminals.close_inside(&folder, Some("The worktree of this terminal was removed. The session ended.")); }
     conversations_changed(&app);
     result
@@ -233,7 +266,9 @@ pub fn get_worktree_requests(access: State<'_, Arc<discard_core::worktree_access
 }
 
 #[tauri::command]
+#[expect(clippy::too_many_arguments, reason = "Tauri passes one argument per command field.")]
 pub async fn decide_worktree_removal(
+    window: tauri::WebviewWindow,
     access: State<'_, Arc<discard_core::worktree_access::WorktreeAccess>>,
     terminals: State<'_, Arc<super::terminal::Terminals>>,
     channels: State<'_, Arc<super::channels::Channels>>,
@@ -243,6 +278,7 @@ pub async fn decide_worktree_removal(
     let access = access.inner().clone();
     let store = channels.store.clone();
     let core = core.inner().clone();
+    let view = view_of(&window, &core)?;
     let terminals = terminals.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let channel = discard_core::model::ChannelId(channel_id);
@@ -257,7 +293,7 @@ pub async fn decide_worktree_removal(
         };
         store.lock().unwrap_or_else(|e| e.into_inner()).insert_message(&message).map_err(|e| format!("Action status: {}. Could not save its transcript note: {e}", request.state))?;
         core.apply_channel(&channel.0, discard_core::ui_state::Update::ConversationMarker(message));
-        core.refresh_branches_in_background(&ViewId::main());
+        core.refresh_branches_in_background(&view);
         Ok(request)
     }).await.map_err(|e| e.to_string())?
 }
@@ -271,16 +307,16 @@ pub fn cancel_turn(core: State<'_, Arc<AppCore>>, channel_id: String) {
 }
 
 #[tauri::command]
-pub fn set_panels(core: State<'_, Arc<AppCore>>, channel_list: f32, member_list: f32) -> Result<(), String> {
-    core.set_panels(&ViewId::main(), channel_list, member_list)
+pub fn set_panels(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>, channel_list: f32, member_list: f32) -> Result<(), String> {
+    core.set_panels(&view_of(&window, &core)?, channel_list, member_list)
 }
 #[tauri::command]
-pub fn set_member_list_visible(core: State<'_, Arc<AppCore>>, visible: bool) -> Result<(), String> {
-    core.set_member_list_visible(&ViewId::main(), visible)
+pub fn set_member_list_visible(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>, visible: bool) -> Result<(), String> {
+    core.set_member_list_visible(&view_of(&window, &core)?, visible)
 }
 #[tauri::command]
-pub fn toggle_branch(core: State<'_, Arc<AppCore>>, key: String) {
-    core.toggle_branch(&ViewId::main(), key);
+pub fn toggle_branch(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>, key: String) {
+    core.toggle_branch(&view_quiet(&window, &core), key);
 }
 
 #[tauri::command]
@@ -293,37 +329,39 @@ pub fn confirm_resolve(app: tauri::AppHandle, core: State<'_, Arc<AppCore>>, act
     if let Some(ending) = core.take_confirm() && accept { super::actions::perform(&app, &core, &actions, ending); }
 }
 #[tauri::command]
-pub fn archive_confirm(core: State<'_, Arc<AppCore>>, actions: State<'_, Arc<super::actions::DesktopActions>>, accept: bool) {
-    let view = ViewId::main();
+pub fn archive_confirm(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>, actions: State<'_, Arc<super::actions::DesktopActions>>, accept: bool) {
+    let view = view_quiet(&window, &core);
     if !core.has_pending_archive(&view) { return; }
     if accept { super::actions::archive(core.inner().clone(), &actions, &view, true); } else { core.cancel_archive(&view); }
 }
 #[tauri::command]
-pub fn context_menu(core: State<'_, Arc<AppCore>>, target: super::dto::ContextTargetDto) -> Vec<super::dto::MenuEntryDto> {
-    discard_core::context_menu::context_menu(&target.into(), &core.menu_context(&ViewId::main())).into_iter().filter_map(super::dto::MenuEntryDto::from_entry).collect()
+pub fn context_menu(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>, target: super::dto::ContextTargetDto) -> Vec<super::dto::MenuEntryDto> {
+    discard_core::context_menu::context_menu(&target.into(), &core.menu_context(&view_quiet(&window, &core))).into_iter().filter_map(super::dto::MenuEntryDto::from_entry).collect()
 }
 #[tauri::command]
-pub fn run_action(app: tauri::AppHandle, core: State<'_, Arc<AppCore>>, actions: State<'_, Arc<super::actions::DesktopActions>>, action_id: String, target: Option<super::dto::ContextTargetDto>) -> Option<String> {
+pub fn run_action(app: tauri::AppHandle, window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>, actions: State<'_, Arc<super::actions::DesktopActions>>, action_id: String, target: Option<super::dto::ContextTargetDto>) -> Option<String> {
+    let view = view_quiet(&window, &core);
     if action_id == "open_provider_settings" {
-        if let Err(error) = super::windows::open_settings(&app, discard_core::settings_page::SettingsPage::Providers) { core.notice(&ViewId::main(), format!("Cannot open CLI connections: {error}")); }
+        if let Err(error) = super::windows::open_settings(&app, discard_core::settings_page::SettingsPage::Providers) { core.notice(&view, format!("Cannot open CLI connections: {error}")); }
         return None;
     }
     if action_id == "relaunch" {
-        let ctx = core.menu_context(&ViewId::main());
+        let ctx = core.menu_context(&view);
         let ending = super::plan::Confirm::Relaunch { safe_mode: ctx.safe_mode };
         if core.any_running() && actions.confirms() { core.ask(ending); }
         else { super::actions::perform(&app, &core, &actions, ending); }
         return None;
     }
     let action = discard_core::action::Action::from_id(&action_id)?;
-    super::actions::run(&app, core.inner(), &actions, action, target.map(Into::into))
+    super::actions::run(&app, core.inner(), &actions, &view, action, target.map(Into::into))
 }
 #[tauri::command]
-pub fn plugin_menu_action(core: State<'_, Arc<AppCore>>, plugin: String, index: usize, target: super::dto::ContextTargetDto) -> Result<(), String> {
+pub fn plugin_menu_action(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>, plugin: String, index: usize, target: super::dto::ContextTargetDto) -> Result<(), String> {
+    let view = view_of(&window, &core)?;
     let target = target.into();
-    let allowed = discard_core::context_menu::context_menu(&target, &core.menu_context(&ViewId::main())).iter().any(|item| matches!(item, discard_core::action::MenuEntry::Plugin { plugin: p, index: i, .. } if p == &plugin && *i == index));
+    let allowed = discard_core::context_menu::context_menu(&target, &core.menu_context(&view)).iter().any(|item| matches!(item, discard_core::action::MenuEntry::Plugin { plugin: p, index: i, .. } if p == &plugin && *i == index));
     if !allowed { return Err("plugin menu item is unavailable".into()); }
-    match core.run_plugin_menu(&ViewId::main(), &plugin, index, Some(&target)) {
+    match core.run_plugin_menu(&view, &plugin, index, Some(&target)) {
         Ok(()) => Ok(()),
         Err(error) => { core.plugin_failure(&plugin, &error); Err(error) }
     }
@@ -337,10 +375,11 @@ pub async fn list_commands(core: State<'_, Arc<AppCore>>) -> Result<Vec<super::d
 
 /// Run a slash command in a channel. Returns the text to show, if any.
 #[tauri::command]
-pub async fn run_command(app: tauri::AppHandle, core: State<'_, Arc<AppCore>>, actions: State<'_, Arc<super::actions::DesktopActions>>, channel_id: String, name: String, args: String) -> Result<Option<String>, String> {
+pub async fn run_command(app: tauri::AppHandle, window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>, actions: State<'_, Arc<super::actions::DesktopActions>>, channel_id: String, name: String, args: String) -> Result<Option<String>, String> {
     use discard_core::{action::Action, context_menu::ContextTarget, slash::{self, Builtin}};
     use super::slash::{Step, builtin_step};
     if !slash::valid_name(&name) { return Err(format!("Unknown command: /{name}")); }
+    let view = view_of(&window, &core)?;
     let channel = core.command_channel(&channel_id).ok_or("The channel is not open.")?;
     if channel.archived { return Err("The channel is archived.".into()); }
     let (entries, shadowed) = slash::registry(&core.plugin_commands());
@@ -352,7 +391,7 @@ pub async fn run_command(app: tauri::AppHandle, core: State<'_, Arc<AppCore>>, a
             Step::Dispatch(action) => {
                 // Stop and archive act on the channel. The other actions are app-wide, and a channel target would drop them in a thread.
                 let target = matches!(action, Action::CancelTurn | Action::ArchiveChannel).then(|| ContextTarget::Channel { id: channel_id });
-                super::actions::run(&app, core.inner(), &actions, action, target);
+                super::actions::run(&app, core.inner(), &actions, &view, action, target);
                 Ok(None)
             }
         };
@@ -372,8 +411,8 @@ pub async fn run_command(app: tauri::AppHandle, core: State<'_, Arc<AppCore>>, a
 }
 
 #[tauri::command]
-pub fn plugin_action(core: State<'_, Arc<AppCore>>, plugin: String, action: String) -> Result<(), String> {
-    core.plugin_action(&ViewId::main(), &plugin, &action)
+pub fn plugin_action(window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>, plugin: String, action: String) -> Result<(), String> {
+    core.plugin_action(&view_of(&window, &core)?, &plugin, &action)
 }
 
 #[tauri::command]
@@ -383,14 +422,16 @@ pub fn web_shortcuts(actions: State<'_, Arc<super::actions::DesktopActions>>) ->
 }
 
 #[tauri::command]
-pub async fn create_channel(channels: State<'_, Arc<super::channels::Channels>>, name: String, workspace_mode: String, source_channel: String) -> Result<String, String> {
+pub async fn create_channel(window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, name: String, workspace_mode: String, source_channel: String) -> Result<String, String> {
     let channels = channels.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || channels.create(&name, &workspace_mode, &source_channel)).await.map_err(|e| e.to_string())?
+    let view = view_of(&window, &channels.core)?;
+    tauri::async_runtime::spawn_blocking(move || channels.create(&view, &name, &workspace_mode, &source_channel)).await.map_err(|e| e.to_string())?
 }
 #[tauri::command]
-pub async fn switch_channel(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, channel_id: String) -> Result<(), String> {
+pub async fn switch_channel(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, channel_id: String) -> Result<(), String> {
     let channels = channels.inner().clone();
-    let in_project = tauri::async_runtime::spawn_blocking(move || channels.select(&channel_id).map(|()| channels.in_project(&channel_id))).await.map_err(|e| e.to_string())??;
+    let view = view_of(&window, &channels.core)?;
+    let in_project = tauri::async_runtime::spawn_blocking(move || channels.select(&view, &channel_id).map(|()| channels.in_project(&channel_id))).await.map_err(|e| e.to_string())??;
     // A project channel is in the lists already. Only a direct message can change the catalogs.
     if !in_project {
         use tauri::Emitter;
@@ -400,9 +441,10 @@ pub async fn switch_channel(app: tauri::AppHandle, channels: State<'_, Arc<super
     Ok(())
 }
 #[tauri::command]
-pub async fn create_text_channel(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, name: String) -> Result<String, String> {
+pub async fn create_text_channel(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, name: String) -> Result<String, String> {
     let channels = channels.inner().clone();
-    let result = tauri::async_runtime::spawn_blocking(move || channels.create_text_channel(&discard_core::model::ProjectId(project_id), &name)).await.map_err(|e| e.to_string())?;
+    let view = view_of(&window, &channels.core)?;
+    let result = tauri::async_runtime::spawn_blocking(move || channels.create_text_channel(&view, &discard_core::model::ProjectId(project_id), &name)).await.map_err(|e| e.to_string())?;
     // Creation can persist before runtime selection fails. Refresh every catalog in either case.
     use tauri::Emitter;
     let _ = app.emit("discard://conversations", ());
@@ -411,9 +453,10 @@ pub async fn create_text_channel(app: tauri::AppHandle, channels: State<'_, Arc<
     result
 }
 #[tauri::command]
-pub async fn open_branch_channel(channels: State<'_, Arc<super::channels::Channels>>, key: String) -> Result<String, String> {
+pub async fn open_branch_channel(window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, key: String) -> Result<String, String> {
     let channels = channels.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || channels.open_branch(&key)).await.map_err(|e| e.to_string())?
+    let view = view_of(&window, &channels.core)?;
+    tauri::async_runtime::spawn_blocking(move || channels.open_branch(&view, &key)).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -499,12 +542,13 @@ pub fn ungroup_rail_group(app: tauri::AppHandle, context: State<'_, super::setti
     change_rail(&app, &context, |store| store.rail_ungroup(&group_id))
 }
 #[tauri::command]
-pub async fn select_project(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, project_id: String) -> Result<String, String> {
+pub async fn select_project(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, project_id: String) -> Result<String, String> {
     let channels = channels.inner().clone();
-    let view = ViewId::main();
+    let view = view_of(&window, &channels.core)?;
     channels.core.begin_project_navigation(&view)?;
     let core = channels.core.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || channels.activate_project(&discard_core::model::ProjectId(project_id))).await.map_err(|e| e.to_string()).and_then(|r| r);
+    let navigating = view.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || channels.activate_project(&navigating, &discard_core::model::ProjectId(project_id))).await.map_err(|e| e.to_string()).and_then(|r| r);
     core.end_project_navigation(&view);
     let channel_id = result?;
     use tauri::Emitter;
@@ -529,14 +573,16 @@ pub async fn invite_channel_member(channels: State<'_, Arc<super::channels::Chan
     tauri::async_runtime::spawn_blocking(move || channels.invite_channel_member(&discard_core::model::ProjectId(project_id), &discard_core::model::ChannelId(channel_id), &discard_core::model::AgentId(agent_id))).await.map_err(|e| e.to_string())?
 }
 #[tauri::command]
-pub async fn select_canonical_branch(channels: State<'_, Arc<super::channels::Channels>>, project_id: String, branch: String, channel_id: String) -> Result<(), String> {
+pub async fn select_canonical_branch(window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, branch: String, channel_id: String) -> Result<(), String> {
     let channels = channels.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || channels.select_canonical_branch(&discard_core::model::ProjectId(project_id), &branch, &discard_core::model::ChannelId(channel_id))).await.map_err(|e| e.to_string())?
+    let view = view_of(&window, &channels.core)?;
+    tauri::async_runtime::spawn_blocking(move || channels.select_canonical_branch(&view, &discard_core::model::ProjectId(project_id), &branch, &discard_core::model::ChannelId(channel_id))).await.map_err(|e| e.to_string())?
 }
 #[tauri::command]
-pub async fn select_canonical_project_channel(channels: State<'_, Arc<super::channels::Channels>>, project_id: String, channel_id: String) -> Result<(), String> {
+pub async fn select_canonical_project_channel(window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, project_id: String, channel_id: String) -> Result<(), String> {
     let channels = channels.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || channels.select_canonical_general(&discard_core::model::ProjectId(project_id), &discard_core::model::ChannelId(channel_id))).await.map_err(|e| e.to_string())?
+    let view = view_of(&window, &channels.core)?;
+    tauri::async_runtime::spawn_blocking(move || channels.select_canonical_general(&view, &discard_core::model::ProjectId(project_id), &discard_core::model::ChannelId(channel_id))).await.map_err(|e| e.to_string())?
 }
 #[tauri::command]
 pub async fn get_channel_details(channels: State<'_, Arc<super::channels::Channels>>, project_id: String, channel_id: String) -> Result<super::dto::ChannelDetailsDto, String> {
@@ -560,15 +606,17 @@ pub async fn set_project_main_agent(app: tauri::AppHandle, channels: State<'_, A
     Ok(())
 }
 #[tauri::command]
-pub async fn remove_project(channels: State<'_, Arc<super::channels::Channels>>, terminals: State<'_, Arc<super::terminal::Terminals>>, project_id: String) -> Result<(), String> {
-    let channels = channels.inner().clone(); channels.core.begin_project_change()?;
+pub async fn remove_project(window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, terminals: State<'_, Arc<super::terminal::Terminals>>, project_id: String) -> Result<(), String> {
+    let channels = channels.inner().clone();
+    let view = view_of(&window, &channels.core)?;
+    channels.core.begin_project_change()?;
     let core = channels.core.clone();
     let (terminals, closing) = (terminals.inner().clone(), project_id.clone());
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let id = discard_core::model::ProjectId(project_id);
         let next = channels.store.lock().unwrap_or_else(|e| e.into_inner()).visible_projects().map_err(|e| e.to_string())?.into_iter().find(|p| p.id != id);
-        if channels.core.current_project(&ViewId::main()).id == id {
-            if let Some(next) = next { channels.activate_project(&next.id)?; } else { channels.core.select_sidebar_project(&ViewId::main(), None); }
+        if channels.core.current_project(&view).id == id {
+            if let Some(next) = next { channels.activate_project(&view, &next.id)?; } else { channels.core.select_sidebar_project(&view, None); }
         }
         channels.store.lock().unwrap_or_else(|e| e.into_inner()).hide_project(&id).map_err(|e| e.to_string())
     }).await.map_err(|e| e.to_string()).and_then(|r| r);
@@ -577,10 +625,12 @@ pub async fn remove_project(channels: State<'_, Arc<super::channels::Channels>>,
     result
 }
 #[tauri::command]
-pub async fn choose_project_folder(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, change_current: bool) -> Result<bool, String> {
+pub async fn choose_project_folder(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, change_current: bool) -> Result<bool, String> {
     use tauri_plugin_dialog::DialogExt;
-    let channels = channels.inner().clone(); channels.core.begin_project_change()?;
-    let snapshot = channels.core.snapshot(&ViewId::main()); let core = channels.core.clone();
+    let channels = channels.inner().clone();
+    let view = view_of(&window, &channels.core)?;
+    channels.core.begin_project_change()?;
+    let snapshot = channels.core.snapshot(&view); let core = channels.core.clone();
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
         let title = if change_current { "Change project folder" } else { "Import project folder" };
         let selected = app.dialog().file().set_title(title).set_directory(&snapshot.project_path).blocking_pick_folder();
@@ -593,8 +643,8 @@ pub async fn choose_project_folder(app: tauri::AppHandle, channels: State<'_, Ar
                 store.selected_project().map_err(|e| e.to_string())?.ok_or("Project unavailable")?
             } else { store.import_project_folder(&path).map_err(|e| e.to_string())? }
         };
-        channels.activate_project(&project.id)?;
-        if change_current { channels.reload_project(&project.id)?; }
+        channels.activate_project(&view, &project.id)?;
+        if change_current { channels.reload_project(&view, &project.id)?; }
         Ok(true)
     }).await.map_err(|e| e.to_string()).and_then(|r| r);
     core.end_project_change(); result
@@ -625,19 +675,21 @@ pub async fn search_agent_history(context: State<'_, super::settings::SettingsCo
     }).await.map_err(|e| e.to_string())?
 }
 #[tauri::command]
-pub async fn create_conversation(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, agent_id: String, project_id: Option<String>, name: String) -> Result<String, String> {
+pub async fn create_conversation(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, agent_id: String, project_id: Option<String>, name: String) -> Result<String, String> {
     let channels = channels.inner().clone();
-    let result = tauri::async_runtime::spawn_blocking(move || channels.create_conversation(&discard_core::model::AgentId(agent_id), project_id.map(discard_core::model::ProjectId).as_ref(), &name)).await.map_err(|e| e.to_string())?;
+    let view = view_of(&window, &channels.core)?;
+    let result = tauri::async_runtime::spawn_blocking(move || channels.create_conversation(&view, &discard_core::model::AgentId(agent_id), project_id.map(discard_core::model::ProjectId).as_ref(), &name)).await.map_err(|e| e.to_string())?;
     // Creation can persist before runtime selection fails. Refresh every catalog in either case.
     use tauri::Emitter;
     let _ = app.emit("discard://conversations", ());
     result
 }
 #[tauri::command]
-pub async fn open_agent_chat(app: tauri::AppHandle, channels: State<'_, Arc<super::channels::Channels>>, agent_id: String) -> Result<String, String> {
+pub async fn open_agent_chat(app: tauri::AppHandle, window: tauri::WebviewWindow, channels: State<'_, Arc<super::channels::Channels>>, agent_id: String) -> Result<String, String> {
     use tauri::Emitter;
     let channels = channels.inner().clone();
-    let id = tauri::async_runtime::spawn_blocking(move || channels.open_agent(&discard_core::model::AgentId(agent_id))).await.map_err(|e| e.to_string())??;
+    let view = view_of(&window, &channels.core)?;
+    let id = tauri::async_runtime::spawn_blocking(move || channels.open_agent(&view, &discard_core::model::AgentId(agent_id))).await.map_err(|e| e.to_string())??;
     let _ = app.emit("discard://conversations", ());
     Ok(id)
 }
@@ -679,7 +731,9 @@ pub fn get_write_requests(requests: State<'_, Arc<discard_core::write_requests::
 }
 
 #[tauri::command]
+#[expect(clippy::too_many_arguments, reason = "Tauri passes one argument per command field.")]
 pub async fn decide_write_request(
+    window: tauri::WebviewWindow,
     grants: State<'_, Arc<discard_core::workspace_grants::MainCheckoutGrants>>,
     requests: State<'_, Arc<discard_core::write_requests::WriteRequests>>,
     workspace: State<'_, Arc<discard_core::workspace::GitWorkspace>>,
@@ -688,7 +742,8 @@ pub async fn decide_write_request(
 ) -> Result<discard_core::write_requests::WriteRequest, String> {
     let grants = grants.inner().clone();
     let requests = requests.inner().clone(); let workspace = workspace.inner().clone(); let channels = channels.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || channels.decide_write_request(&requests, &workspace, &grants, &channel_id, &request_id, approve)).await.map_err(|e| e.to_string())?
+    let view = view_of(&window, &channels.core)?;
+    tauri::async_runtime::spawn_blocking(move || channels.decide_write_request(&view, &requests, &workspace, &grants, &channel_id, &request_id, approve)).await.map_err(|e| e.to_string())?
 }
 
 /// The requests of agents in `channel_id` to add an agent to the project, oldest first, decided or not.
@@ -733,4 +788,33 @@ pub async fn channel_changes(channels: State<'_, Arc<super::channels::Channels>>
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use discard_core::model::ProjectId;
+
+    #[test]
+    fn a_command_acts_on_the_view_of_the_calling_window() { // Review Focus 2
+        let project = ViewId::project(&ProjectId("p".into()));
+        let has = |view: &ViewId| *view == project || view.is_main();
+        assert_eq!(resolve_view("project-p", has, ViewId::main()), Ok(project.clone()));
+        // A reload of the webview of the project window keeps its view, whatever window has the focus.
+        let other = ViewId::project(&ProjectId("q".into()));
+        assert_eq!(resolve_view("project-p", has, other.clone()), Ok(project.clone()));
+        assert_eq!(resolve_view("main", has, other), Ok(ViewId::main()));
+    }
+    #[test]
+    fn a_closed_project_window_gets_an_error_and_no_other_view() {
+        let main_only = |view: &ViewId| view.is_main();
+        assert_eq!(resolve_view("project-p", main_only, ViewId::main()), Err("This window is closed.".to_string()));
+        assert_eq!(resolve_view("main", |_| false, ViewId::main()), Err("This window is closed.".to_string()));
+    }
+    #[test]
+    fn a_window_that_is_not_an_app_window_gets_the_focused_view() {
+        let focused = ViewId::project(&ProjectId("p".into()));
+        assert_eq!(resolve_view("settings", |_| false, focused.clone()), Ok(focused.clone()));
+        assert_eq!(resolve_view("project-", |_| false, focused.clone()), Ok(focused), "a label that is not canonical is not an app window");
+    }
 }

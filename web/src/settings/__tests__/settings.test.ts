@@ -15,7 +15,8 @@ vi.mock('@tauri-apps/api/core', () => ({
     return {}
   }),
 }))
-vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
+const listen = vi.hoisted(() => vi.fn(async () => () => {}))
+vi.mock('@tauri-apps/api/event', () => ({ listen }))
 describe('settings sidebar', () => {
   it('searches page labels and disables unavailable pages', async () => {
     const view = mount(SettingsApp)
@@ -25,5 +26,16 @@ describe('settings sidebar', () => {
     await flushPromises()
     expect(view.text()).toContain('Appearance')
     expect(view.text()).not.toContain('General')
+  })
+  // The Settings window has no view. It listens with the default target, so it gets the snapshot of every view.
+  it('listens for the snapshot with no window target', async () => {
+    const view = mount(SettingsApp)
+    await flushPromises()
+    const calls = (listen.mock.calls as unknown[][]).filter(
+      ([name]) => name === 'discard://snapshot',
+    )
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toHaveLength(2)
+    view.unmount()
   })
 })

@@ -127,7 +127,7 @@ fn world_with(limits: Limits) -> World {
     let core = Arc::new(AppCore::new(init));
     core.configure_read_marker(&ViewId::main(), dir.path(), &parent.id.0);
     let channels = Arc::new(Channels::new(core.clone(), store.clone(), tokio::runtime::Handle::current(), launch));
-    channels.select(&parent.id.0).unwrap();
+    channels.select(&ViewId::main(), &parent.id.0).unwrap();
     let delegator = Arc::new(AppDelegator::new(Arc::downgrade(&channels)).with_limits(limits));
     World { _dir: dir, store, core, channels, rigs, delegator, agent, parent, question }
 }
@@ -194,7 +194,7 @@ async fn two_tasks_run_together_and_the_results_come_back_in_task_order() {
     assert_eq!(snapshot.live_sub_agent_threads[0].agent_name, "Quinn");
     assert!(w.core.history(&ViewId::main()).iter().all(|m| m.sub_agent_threads.is_empty()), "nothing hangs under a message before the turn ends");
     // The thread of an unanchored run opens. Its composer is on: a message steers the task.
-    w.channels.open_thread(&ChannelId(threads[0].clone())).unwrap();
+    w.channels.open_thread(&ViewId::main(), &ChannelId(threads[0].clone())).unwrap();
     let open = w.core.snapshot(&ViewId::main()).open_thread.unwrap();
     assert_eq!((open.kind.as_str(), open.state.as_deref(), open.anchor_message_id.clone(), open.agent_name.as_str()), ("sub_agent", Some("running"), None, "Quinn"));
     assert!(!open.composer_disabled && open.composer_disabled_reason.is_none());
@@ -263,7 +263,7 @@ async fn the_chips_move_to_the_saved_response_when_the_parent_turn_ends() {
     assert_eq!(message.sub_agent_threads[1].last_message.as_ref().map(|m| m.preview.as_str()), Some("b answer"));
     assert!(w.core.snapshot(&ViewId::main()).live_sub_agent_threads.is_empty(), "the live chips are gone");
     // A response can hold a question thread too.
-    let thread = w.channels.start_thread(&w.parent.id.0, &response.0, "why?".into(), vec![], false);
+    let thread = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &response.0, "why?".into(), vec![], false);
     assert!(thread.is_ok(), "{thread:?}");
     until("the question thread chip", || w.core.history(&ViewId::main()).iter().find(|m| m.id == response.0).is_some_and(|m| m.thread.is_some())).await;
     let message = w.core.history(&ViewId::main()).into_iter().find(|m| m.id == response.0).unwrap();
@@ -275,23 +275,23 @@ async fn a_parent_in_the_background_still_gets_its_sub_agents_and_shows_them_whe
     let w = world();
     let other = w.store.lock().unwrap().create_conversation(&w.agent, None, "other").unwrap();
     w.parent_turn_running();
-    w.channels.select(&other.id.0).unwrap();
+    w.channels.select(&ViewId::main(), &other.id.0).unwrap();
     assert!(w.core.snapshot(&ViewId::main()).live_sub_agent_threads.is_empty(), "the chips are for the selected channel only");
     let results = finish(call(&w, &w.parent.id, vec![task("one", &w.agent), task("two", &w.agent)])).await;
     assert!(results.iter().all(|r| r.state == ThreadState::Done));
     let snapshot = w.core.snapshot(&ViewId::main());
     assert_eq!((snapshot.channel_id.as_str(), snapshot.open_thread.is_none(), snapshot.live_sub_agent_threads.len()), (other.id.0.as_str(), true, 0));
     assert!(results.iter().all(|r| w.core.has_channel(&r.thread_channel_id.0)), "the thread state exists although nobody looked");
-    w.channels.select(&w.parent.id.0).unwrap();
+    w.channels.select(&ViewId::main(), &w.parent.id.0).unwrap();
     assert_eq!(w.core.snapshot(&ViewId::main()).live_sub_agent_threads.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["one", "two"]);
     assert!(w.core.snapshot(&ViewId::main()).open_thread.is_none(), "selecting the parent does not open a thread");
     // A thread that nobody opened can be opened from its chip, and the whole run is in it.
-    w.channels.open_thread(&results[0].thread_channel_id).unwrap();
+    w.channels.open_thread(&ViewId::main(), &results[0].thread_channel_id).unwrap();
     assert_eq!(w.core.thread_history_snapshot(&ViewId::main()).unwrap().messages.len(), 2);
     // From another channel, selecting the unanchored thread selects its parent and opens the panel.
-    w.channels.select(&other.id.0).unwrap();
+    w.channels.select(&ViewId::main(), &other.id.0).unwrap();
     assert!(w.core.snapshot(&ViewId::main()).open_thread.is_none());
-    assert_eq!(w.channels.select_thread(&results[1].thread_channel_id).unwrap(), w.parent.id.0);
+    assert_eq!(w.channels.select_thread(&ViewId::main(), &results[1].thread_channel_id).unwrap(), w.parent.id.0);
     let snapshot = w.core.snapshot(&ViewId::main());
     assert_eq!((snapshot.channel_id.as_str(), snapshot.open_thread.map(|t| t.channel_id)), (w.parent.id.0.as_str(), Some(results[1].thread_channel_id.0.clone())));
 }
@@ -302,9 +302,9 @@ async fn two_calls_from_different_channels_run_at_the_same_time() {
     let other = w.store.lock().unwrap().create_conversation(&w.agent, None, "other").unwrap();
     for name in ["x", "y"] { w.rigs.scripts.lock().unwrap().insert(name.into(), vec![Step::working(), Step::Hang]); }
     put(&w.store.lock().unwrap(), &other.id, Role::User, "other request", None);
-    w.channels.select(&other.id.0).unwrap();
+    w.channels.select(&ViewId::main(), &other.id.0).unwrap();
     w.core.send_to(Some(&other.id.0), "other request".into()).unwrap();
-    w.channels.select(&w.parent.id.0).unwrap();
+    w.channels.select(&ViewId::main(), &w.parent.id.0).unwrap();
     w.parent_turn_running();
     let first = call(&w, &w.parent.id, vec![task("x", &w.agent)]);
     let second = call(&w, &other.id, vec![task("y", &w.agent)]);
@@ -407,7 +407,7 @@ async fn a_finished_sub_agent_thread_supports_post_follow_leave_and_read() {
     let thread = results[0].thread_channel_id.clone();
     // It cannot start a thread.
     let brief = w.store.lock().unwrap().messages_for_channel(&thread).unwrap()[0].id.clone();
-    assert!(w.channels.start_thread(&thread.0, &brief.0, "nested".into(), vec![], false).unwrap_err().contains("sub-agent thread cannot start"));
+    assert!(w.channels.start_thread(&ViewId::main(), &thread.0, &brief.0, "nested".into(), vec![], false).unwrap_err().contains("sub-agent thread cannot start"));
     assert_eq!(w.store.lock().unwrap().messages_for_channel(&thread).unwrap().len(), 2, "nothing was added");
     // Follow and leave, with the sub-agent fields on the link.
     w.channels.set_thread_followed(&thread, true).unwrap();
@@ -418,7 +418,7 @@ async fn a_finished_sub_agent_thread_supports_post_follow_leave_and_read() {
     w.channels.set_thread_followed(&thread, false).unwrap();
     assert!(w.core.snapshot(&ViewId::main()).channels[0].threads.is_empty());
     // Open it, read it, and post its result to the channel.
-    w.channels.open_thread(&thread).unwrap();
+    w.channels.open_thread(&ViewId::main(), &thread).unwrap();
     let messages = w.core.thread_history_snapshot(&ViewId::main()).unwrap().messages;
     assert_eq!(messages[0].author.as_ref().map(|a| a.name.as_str()), Some("Quinn"));
     assert!(w.core.snapshot(&ViewId::main()).open_thread.unwrap().unread, "the reply is unread");
@@ -441,7 +441,7 @@ async fn a_message_in_a_finished_sub_agent_thread_starts_a_follow_up_turn_and_ke
     assert_eq!((results[0].state, results[0].text.as_str()), (ThreadState::Done, "first answer"));
     assert_eq!(results[0].steer_note, None, "a task without a steer has no note");
     until("the thread turn to end", || !w.thread_running(&thread)).await;
-    w.channels.open_thread(&thread).unwrap();
+    w.channels.open_thread(&ViewId::main(), &thread).unwrap();
     w.channels.send_with_options(&thread.0, "Where is it defined?".into(), vec![], false).unwrap();
     // The message shows at once, and the follow-up turn runs.
     let open = w.core.snapshot(&ViewId::main()).open_thread.unwrap();
@@ -465,7 +465,7 @@ async fn a_steer_keeps_the_task_open_and_the_call_returns_the_text_of_the_last_t
     w.parent_turn_running();
     let call = call(&w, &w.parent.id, vec![task("steered", &w.agent)]);
     let thread = w.started(&w.parent.id, 1).await.remove(0);
-    w.channels.open_thread(&thread).unwrap();
+    w.channels.open_thread(&ViewId::main(), &thread).unwrap();
     until("the partial text", || w.core.snapshot(&ViewId::main()).open_thread.is_some_and(|t| !t.live_blocks.is_empty())).await;
     let open = w.core.snapshot(&ViewId::main()).open_thread.unwrap();
     assert!(!open.composer_disabled && open.turn_running && open.state.as_deref() == Some("running"), "the composer takes a steer");
@@ -494,7 +494,7 @@ async fn a_steered_task_that_ends_cancelled_still_carries_the_note() {
     w.parent_turn_running();
     let call = call(&w, &w.parent.id, vec![task("steered", &w.agent)]);
     let thread = w.started(&w.parent.id, 1).await.remove(0);
-    w.channels.open_thread(&thread).unwrap();
+    w.channels.open_thread(&ViewId::main(), &thread).unwrap();
     until("the partial text", || w.core.snapshot(&ViewId::main()).open_thread.is_some_and(|t| !t.live_blocks.is_empty())).await;
     w.channels.send_with_options(&thread.0, "Only look in \"tests\".".into(), vec![], false).unwrap();
     until("the steer turn to run", || w.store.lock().unwrap().messages_for_channel(&thread).unwrap().len() >= 3).await;
@@ -527,7 +527,7 @@ async fn a_new_process_opens_a_finished_sub_agent_thread_from_storage() {
     let chips = &history.iter().find(|m| m.id == response.0).expect("the saved response").sub_agent_threads;
     assert_eq!(chips.iter().map(|c| (c.name.as_str(), c.state.as_deref(), c.message_count)).collect::<Vec<_>>(), [("one", Some("done"), 2), ("two", Some("done"), 2)], "the chips come from storage, in task order");
     assert!(core.snapshot(&ViewId::main()).live_sub_agent_threads.is_empty(), "an anchored thread is not live");
-    channels.open_thread(&results[1].thread_channel_id).unwrap();
+    channels.open_thread(&ViewId::main(), &results[1].thread_channel_id).unwrap();
     let open = core.snapshot(&ViewId::main()).open_thread.unwrap();
     assert_eq!((open.kind.as_str(), open.state.as_deref(), open.anchor_message_id.as_deref(), open.composer_disabled_reason.as_deref()), ("sub_agent", Some("done"), Some(response.0.as_str()), None));
     assert!(!open.composer_disabled, "a finished sub-agent thread takes a reply");
@@ -561,8 +561,8 @@ async fn selecting_a_channel_never_anchors_the_threads_of_a_turn_that_runs() {
 #[derive(Default)]
 struct Recorder { conversations: Mutex<usize> }
 impl Emit for Recorder {
-    fn snapshot(&self, _: &discard_app::desktop::dto::SnapshotDto) {}
-    fn history(&self, _: &discard_app::desktop::dto::HistoryDto) {}
+    fn snapshot(&self, _: &ViewId, _: &discard_app::desktop::dto::SnapshotDto) {}
+    fn history(&self, _: &ViewId, _: &discard_app::desktop::dto::HistoryDto) {}
     fn conversations(&self) { *self.conversations.lock().unwrap() += 1; }
 }
 
@@ -579,7 +579,7 @@ async fn a_follow_by_the_engine_tells_the_webview_to_load_the_thread_lists_again
     until("the follow", || w.core.snapshot(&ViewId::main()).channels[0].threads.len() == 1).await;
     until("the event", || *recorder.conversations.lock().unwrap() >= 1).await;
     assert_eq!(w.channels.thread_links(&w.parent.id).unwrap().len(), 1, "storage lists the followed thread");
-    w.channels.open_thread(&thread).unwrap();
+    w.channels.open_thread(&ViewId::main(), &thread).unwrap();
     let approval = w.core.snapshot(&ViewId::main()).open_thread.unwrap().prompts[0].approval_id.clone();
     w.core.decide_in(Some(&thread.0), approval, "deny".into(), None);
     finish(call).await;
@@ -739,7 +739,7 @@ async fn a_failed_start_removes_the_parked_runtime_and_the_chip_shows_failed() {
     let chips = w.core.snapshot(&ViewId::main()).live_sub_agent_threads;
     assert_eq!(chips.iter().map(|c| c.state.as_deref()).collect::<Vec<_>>(), [Some("failed"), Some("done")], "no chip stays running");
     // It can still be opened later: the transcript loads from storage again.
-    w.channels.open_thread(&dead).unwrap();
+    w.channels.open_thread(&ViewId::main(), &dead).unwrap();
     assert_eq!(w.core.open_thread_id(&ViewId::main()), Some(dead.0.clone()));
 }
 

@@ -446,7 +446,9 @@ pub async fn memory_fresh_conversation(
     )?;
     let channels = channels.inner().clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
+        // A Settings action opens its conversation in the main window.
         channels.create_conversation(
+            &super::super::view::ViewId::main(),
             &source.agent_id,
             source.project_id.as_ref(),
             "Fresh conversation",

@@ -30,7 +30,7 @@ pub fn settings_keymap_set(app: tauri::AppHandle, core: tauri::State<'_, std::sy
     if reset { super::general::apply_change(&mut store, Change::ResetKeybinding(action))?; } else { set_key(&mut store, action, chord)?; }
     let map = store.settings().keymap.clone();
     drop(store);
-    let menu = super::super::menu::build_menu(&app, &core.menu_context(&super::super::view::ViewId::main()), &map).map_err(|e| e.to_string())?;
+    let menu = super::super::menu::build_menu(&app, &core.menu_context(&core.focused_view()), &map).map_err(|e| e.to_string())?;
     app.set_menu(menu).map_err(|e| e.to_string())?;
     let _ = app.emit("discard://shortcuts", super::super::menu::web_shortcuts(&map));
     let _ = app.emit("discard://settings", ());

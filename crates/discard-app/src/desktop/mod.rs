@@ -32,9 +32,10 @@ struct WebEmit {
     settings: Arc<Mutex<SettingsStore>>,
     menu_state: Mutex<Option<(discard_core::action::MenuContext, discard_core::keymap::Keymap)>>,
 }
-impl Emit for WebEmit {
-    fn snapshot(&self, value: &SnapshotDto) {
-        let ctx = self.core.menu_context(&view::ViewId::main());
+impl WebEmit {
+    /// Rebuild the native menu when its context or the keymap changed.
+    fn update_menu(&self, view: &view::ViewId) {
+        let ctx = self.core.menu_context(view);
         let map = self.settings.lock().unwrap_or_else(|e| e.into_inner()).settings().keymap.clone();
         let mut previous = self.menu_state.lock().unwrap_or_else(|e| e.into_inner());
         if previous.as_ref() != Some(&(ctx.clone(), map.clone())) {
@@ -46,13 +47,20 @@ impl Emit for WebEmit {
                 Err(error) => tracing::warn!(%error, "cannot update native menu"),
             }
         }
-        let _ = self.app.emit("discard://snapshot", value);
     }
-    fn history(&self, value: &HistoryDto) {
-        let _ = self.app.emit("discard://history", value);
+}
+// A view event goes to the window of the view. The web store listens with the label of its window as the target.
+impl Emit for WebEmit {
+    fn snapshot(&self, view: &view::ViewId, value: &SnapshotDto) {
+        // The native menu follows the main view until the app tracks the focused window.
+        if view.is_main() { self.update_menu(view); }
+        let _ = self.app.emit_to(view.label(), "discard://snapshot", value);
     }
-    fn thread_history(&self, value: &ThreadHistoryDto) {
-        let _ = self.app.emit("discard://thread-history", value);
+    fn history(&self, view: &view::ViewId, value: &HistoryDto) {
+        let _ = self.app.emit_to(view.label(), "discard://history", value);
+    }
+    fn thread_history(&self, view: &view::ViewId, value: &ThreadHistoryDto) {
+        let _ = self.app.emit_to(view.label(), "discard://thread-history", value);
     }
     fn conversations(&self) {
         let _ = self.app.emit("discard://conversations", ());
@@ -103,7 +111,7 @@ pub fn run(
     config.delegation.delegator.install(Arc::new(delegation::AppDelegator::new(Arc::downgrade(&channels))));
     if let Some(channel) = &config.startup_channel && let Err(error) = channels.refresh_threads(&channel.id) { core.notice(&main, format!("Could not load threads: {error}")); }
     if config.startup_channel.is_none()
-        && let Err(error) = channels.restore() { core.notice(&main, format!("Could not restore conversation: {error}")); }
+        && let Err(error) = channels.restore(&main) { core.notice(&main, format!("Could not restore conversation: {error}")); }
     core.refresh_branches(&main, core.request_branch_refresh(&main));
     let terminals = Arc::new(terminal::Terminals::default());
     let actions = Arc::new(actions::DesktopActions { settings: settings.clone(), workspace: config.workspace.clone(), relaunch: config.relaunch, exiting: AtomicBool::new(false), terminals: terminals.clone() });
@@ -117,14 +125,15 @@ pub fn run(
     });
     let exit_terminals = terminals.clone();
     let refresh_core = core.clone();
-    let refresh_view = main.clone();
     runtime.spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            let core = refresh_core.clone();
-            let view = refresh_view.clone();
-            let generation = core.request_branch_refresh(&view);
-            let _ = tokio::task::spawn_blocking(move || core.refresh_branches(&view, generation)).await;
+            // Every window lists the branches of its own project.
+            for view in refresh_core.view_ids() {
+                let core = refresh_core.clone();
+                let generation = core.request_branch_refresh(&view);
+                let _ = tokio::task::spawn_blocking(move || core.refresh_branches(&view, generation)).await;
+            }
         }
     });
     let event_actions = actions.clone();
@@ -153,11 +162,11 @@ pub fn run(
         .on_menu_event(move |app, event| {
             let id = event.id().as_ref();
             if let Some(action) = discard_core::action::Action::from_id(id) {
-                actions::run(app, &menu_core, &menu_actions, action, None);
+                actions::run(app, &menu_core, &menu_actions, &menu_core.focused_view(), action, None);
             } else if let Some(rest) = id.strip_prefix("plugin:")
                 && let Some((index, plugin)) = rest.split_once(':')
                 && let Ok(index) = index.parse()
-                && let Err(error) = menu_core.run_plugin_menu(&view::ViewId::main(), plugin, index, None)
+                && let Err(error) = menu_core.run_plugin_menu(&menu_core.focused_view(), plugin, index, None)
             { menu_core.plugin_failure(plugin, &error); }
         })
         .on_window_event(move |window, event| {

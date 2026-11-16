@@ -345,7 +345,7 @@ async fn world(fail_threads: bool) -> World {
     let core = Arc::new(AppCore::new(init));
     core.configure_read_marker(&ViewId::main(), dir.path(), &parent.id.0);
     let channels = Arc::new(Channels::new(core.clone(), store.clone(), tokio::runtime::Handle::current(), launch));
-    channels.select(&parent.id.0).unwrap();
+    channels.select(&ViewId::main(), &parent.id.0).unwrap();
     World { _dir: dir, store, core, channels, parent, agent, question, answer }
 }
 
@@ -358,7 +358,7 @@ async fn until(what: &str, mut done: impl FnMut() -> bool) {
 async fn start_thread_creates_the_thread_with_its_first_message_and_opens_it() {
     let w = world(false).await;
     assert!(w.core.history(&ViewId::main()).iter().all(|m| m.thread.is_none()));
-    let thread = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "Why  a\nthread?".into(), vec![], false).unwrap();
+    let thread = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.answer.0, "Why  a\nthread?".into(), vec![], false).unwrap();
     let info = w.store.lock().unwrap().thread_info(&ChannelId(thread.clone())).unwrap().expect("the thread row exists");
     assert_eq!((info.name.as_str(), info.parent_channel_id.clone(), info.anchor_message_id.clone(), info.followed), ("Why a thread?", w.parent.id.clone(), Some(w.answer.clone()), true));
     assert_eq!(info.kind, ThreadKind::Question);
@@ -382,19 +382,19 @@ async fn start_thread_creates_the_thread_with_its_first_message_and_opens_it() {
 #[tokio::test]
 async fn start_thread_surfaces_core_rejections_and_leaves_no_row() {
     let w = world(false).await;
-    let first = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
+    let first = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
     until("the first reply", || w.core.thread_history_snapshot(&ViewId::main()).is_some_and(|h| h.messages.len() == 2)).await;
-    let error = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "second".into(), vec![], false).unwrap_err();
+    let error = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.answer.0, "second".into(), vec![], false).unwrap_err();
     assert!(error.contains("already has a thread"), "{error}");
     assert_eq!(w.store.lock().unwrap().threads_for_channel(&w.parent.id).unwrap().len(), 1);
     // A thread cannot start a thread: the parent must be the selected channel.
-    let nested = w.channels.start_thread(&first, &w.answer.0, "nested".into(), vec![], false).unwrap_err();
+    let nested = w.channels.start_thread(&ViewId::main(), &first, &w.answer.0, "nested".into(), vec![], false).unwrap_err();
     assert!(nested.contains("channel changed"), "{nested}");
-    let empty = w.channels.start_thread(&w.parent.id.0, &w.question.0, "  ".into(), vec![], false).unwrap_err();
+    let empty = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.question.0, "  ".into(), vec![], false).unwrap_err();
     assert!(empty.contains("Enter a message"), "{empty}");
-    let unknown = w.channels.start_thread(&w.parent.id.0, "no-such-message", "hi".into(), vec![], false).unwrap_err();
+    let unknown = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, "no-such-message", "hi".into(), vec![], false).unwrap_err();
     assert!(unknown.contains("saved message"), "{unknown}");
-    let mention = w.channels.start_thread(&w.parent.id.0, &w.question.0, "@Nobody hi".into(), vec![], false).unwrap_err();
+    let mention = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.question.0, "@Nobody hi".into(), vec![], false).unwrap_err();
     assert!(mention.contains("Nobody"), "{mention}");
     assert_eq!(w.store.lock().unwrap().threads_for_channel(&w.parent.id).unwrap().len(), 1, "a refused start creates no thread");
 }
@@ -402,12 +402,12 @@ async fn start_thread_surfaces_core_rejections_and_leaves_no_row() {
 #[tokio::test]
 async fn a_failed_first_send_removes_the_new_thread() {
     let w = world(true).await;
-    let error = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "hi".into(), vec![], false).unwrap_err();
+    let error = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.answer.0, "hi".into(), vec![], false).unwrap_err();
     assert_eq!(error, "The provider is unavailable.");
     assert!(w.store.lock().unwrap().threads_for_channel(&w.parent.id).unwrap().is_empty(), "no empty thread stays in storage");
     assert!(w.core.snapshot(&ViewId::main()).open_thread.is_none());
     assert!(w.core.history(&ViewId::main()).iter().all(|m| m.thread.is_none()));
-    let retry = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "hi".into(), vec![], false).unwrap_err();
+    let retry = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.answer.0, "hi".into(), vec![], false).unwrap_err();
     assert_eq!(retry, "The provider is unavailable.", "the anchor is free for a new thread");
 }
 
@@ -417,7 +417,7 @@ async fn also_post_is_an_error_outside_a_thread_and_posts_the_first_message_in_o
     let error = w.channels.send_with_options(&w.parent.id.0, "hello".into(), vec![], true).unwrap_err();
     assert!(error.contains("Only a message in a thread"), "{error}");
     assert_eq!(w.core.history(&ViewId::main()).len(), 2, "nothing was sent");
-    let thread = w.channels.start_thread(&w.parent.id.0, &w.question.0, "share this".into(), vec![], true).unwrap();
+    let thread = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.question.0, "share this".into(), vec![], true).unwrap();
     until("the post", || w.core.history(&ViewId::main()).iter().any(|m| m.posted_from.is_some())).await;
     let history = w.core.history(&ViewId::main());
     let reference = history.last().unwrap();
@@ -434,7 +434,7 @@ async fn also_post_is_an_error_outside_a_thread_and_posts_the_first_message_in_o
 #[tokio::test]
 async fn sending_in_a_thread_keeps_it_followed_and_posts_on_request() {
     let w = world(false).await;
-    let thread = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
+    let thread = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
     until("the first reply", || w.core.thread_history_snapshot(&ViewId::main()).is_some_and(|h| h.messages.len() == 2) && !w.core.snapshot(&ViewId::main()).open_thread.is_some_and(|t| t.turn_running)).await;
     w.channels.set_thread_followed(&ChannelId(thread.clone()), false).unwrap();
     assert!(w.core.snapshot(&ViewId::main()).channels[0].threads.is_empty(), "leaving removes it from the channel bar");
@@ -457,7 +457,7 @@ async fn sending_in_a_thread_keeps_it_followed_and_posts_on_request() {
 #[tokio::test]
 async fn posting_a_thread_message_is_idempotent_and_works_for_any_role() {
     let w = world(false).await;
-    let thread = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
+    let thread = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
     until("the reply", || w.core.thread_history_snapshot(&ViewId::main()).is_some_and(|h| h.messages.len() == 2) && !w.core.snapshot(&ViewId::main()).open_thread.is_some_and(|t| t.turn_running)).await;
     assert!(!w.core.snapshot(&ViewId::main()).unread);
     let reply = w.core.thread_history_snapshot(&ViewId::main()).unwrap().messages[1].id.clone();
@@ -486,30 +486,30 @@ async fn posting_a_thread_message_is_idempotent_and_works_for_any_role() {
 #[tokio::test]
 async fn selecting_a_thread_selects_its_parent_and_opens_the_panel_after_a_restart() {
     let w = world(false).await;
-    let thread = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
+    let thread = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
     until("the reply", || w.core.thread_history_snapshot(&ViewId::main()).is_some_and(|h| h.messages.len() == 2) && !w.core.snapshot(&ViewId::main()).open_thread.is_some_and(|t| t.turn_running)).await;
     // Another channel is selected, the way the channel bar leaves it.
     let other = w.store.lock().unwrap().create_conversation(&w.agent, None, "other").unwrap();
-    w.channels.select(&other.id.0).unwrap();
+    w.channels.select(&ViewId::main(), &other.id.0).unwrap();
     assert_eq!(w.core.snapshot(&ViewId::main()).channel_id, other.id.0);
     assert!(w.core.snapshot(&ViewId::main()).open_thread.is_none());
-    assert_eq!(w.channels.select_thread(&ChannelId(thread.clone())).unwrap(), w.parent.id.0);
+    assert_eq!(w.channels.select_thread(&ViewId::main(), &ChannelId(thread.clone())).unwrap(), w.parent.id.0);
     assert_eq!(w.core.snapshot(&ViewId::main()).channel_id, w.parent.id.0);
     assert_eq!(w.core.snapshot(&ViewId::main()).open_thread.unwrap().channel_id, thread);
     // switch_channel with a thread id does the same, and a thread can never become the selected channel.
-    w.channels.select(&other.id.0).unwrap();
-    w.channels.select(&thread).unwrap();
+    w.channels.select(&ViewId::main(), &other.id.0).unwrap();
+    w.channels.select(&ViewId::main(), &thread).unwrap();
     assert_eq!((w.core.snapshot(&ViewId::main()).channel_id, w.core.snapshot(&ViewId::main()).open_thread.map(|t| t.channel_id)), (w.parent.id.0.clone(), Some(thread.clone())));
-    w.channels.open_thread(&ChannelId(thread.clone())).unwrap();
-    assert!(w.channels.open_thread(&ChannelId("nope".into())).is_err());
-    w.channels.select(&other.id.0).unwrap();
-    assert!(w.channels.open_thread(&ChannelId(thread)).is_err(), "the thread's channel is not selected");
+    w.channels.open_thread(&ViewId::main(), &ChannelId(thread.clone())).unwrap();
+    assert!(w.channels.open_thread(&ViewId::main(), &ChannelId("nope".into())).is_err());
+    w.channels.select(&ViewId::main(), &other.id.0).unwrap();
+    assert!(w.channels.open_thread(&ViewId::main(), &ChannelId(thread)).is_err(), "the thread's channel is not selected");
 }
 
 #[tokio::test]
 async fn a_new_process_loads_the_chips_from_storage_when_the_channel_is_selected() {
     let w = world(false).await;
-    let thread = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
+    let thread = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
     until("the reply", || w.core.thread_history_snapshot(&ViewId::main()).is_some_and(|h| h.messages.len() == 2) && !w.core.snapshot(&ViewId::main()).open_thread.is_some_and(|t| t.turn_running)).await;
     let reply = w.core.thread_history_snapshot(&ViewId::main()).unwrap().messages[1].id.clone();
     w.channels.post_thread_message(&reply).unwrap();
@@ -527,16 +527,16 @@ async fn a_new_process_loads_the_chips_from_storage_when_the_channel_is_selected
     assert!(history.last().unwrap().posted_from.is_some(), "the reference row links to its thread after a restart");
     assert_eq!(core.snapshot(&ViewId::main()).channels[0].threads.len(), 1);
     assert_eq!(channels.thread_links(&w.parent.id).unwrap().len(), 1);
-    channels.open_thread(&ChannelId(thread)).unwrap();
+    channels.open_thread(&ViewId::main(), &ChannelId(thread)).unwrap();
     assert_eq!(core.thread_history_snapshot(&ViewId::main()).unwrap().messages.len(), 2, "the thread transcript loads from storage");
 }
 
 #[derive(Default)]
 struct Recorder { snapshots: Mutex<Vec<(u64, String)>>, threads: Mutex<Vec<(String, u64, usize)>> }
 impl Emit for Recorder {
-    fn snapshot(&self, value: &discard_app::desktop::dto::SnapshotDto) { self.snapshots.lock().unwrap().push((value.rev, value.channel_id.clone())); }
-    fn history(&self, _: &discard_app::desktop::dto::HistoryDto) {}
-    fn thread_history(&self, value: &discard_app::desktop::dto::ThreadHistoryDto) { self.threads.lock().unwrap().push((value.channel_id.clone(), value.rev, value.messages.len())); }
+    fn snapshot(&self, _: &ViewId, value: &discard_app::desktop::dto::SnapshotDto) { self.snapshots.lock().unwrap().push((value.rev, value.channel_id.clone())); }
+    fn history(&self, _: &ViewId, _: &discard_app::desktop::dto::HistoryDto) {}
+    fn thread_history(&self, _: &ViewId, value: &discard_app::desktop::dto::ThreadHistoryDto) { self.threads.lock().unwrap().push((value.channel_id.clone(), value.rev, value.messages.len())); }
 }
 
 #[tokio::test]
@@ -592,7 +592,7 @@ async fn the_project_channel_list_carries_the_followed_threads_with_their_unread
     // Reading the thread clears the flag in the next listing.
     let reply = store.lock().unwrap().messages_for_channel(&followed.id).unwrap()[1].id.0.clone();
     channels.refresh_threads(&general.id).unwrap();
-    channels.open_thread(&followed.id).unwrap();
+    channels.open_thread(&ViewId::main(), &followed.id).unwrap();
     core.mark_read_in(Some(&followed.id.0), &reply).unwrap();
     assert!(!channels.list_project_channels(&project.id).unwrap().iter().find(|c| c.id == general.id.0).unwrap().threads[0].unread);
 }
@@ -616,9 +616,9 @@ fn idle(w: &World) -> impl FnMut() -> bool + '_ {
 async fn the_threads_list_holds_every_thread_latest_activity_first() {
     let w = world(false).await;
     assert!(w.core.snapshot(&ViewId::main()).channel_threads.is_empty(), "no thread, no list");
-    let first = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
+    let first = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
     until("the first reply", || w.core.thread_history_snapshot(&ViewId::main()).is_some_and(|h| h.messages.len() == 2) && idle(&w)()).await;
-    let second = w.channels.start_thread(&w.parent.id.0, &w.question.0, "second".into(), vec![], false).unwrap();
+    let second = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.question.0, "second".into(), vec![], false).unwrap();
     until("the second reply", || w.core.thread_history_snapshot(&ViewId::main()).is_some_and(|h| h.messages.len() == 2) && idle(&w)()).await;
     let ids = |w: &World| w.core.snapshot(&ViewId::main()).channel_threads.iter().map(|c| c.channel_id.clone()).collect::<Vec<_>>();
     assert_eq!(ids(&w), [second.clone(), first.clone()], "the newest thread is first");
@@ -633,16 +633,16 @@ async fn the_threads_list_holds_every_thread_latest_activity_first() {
     assert!(!w.core.snapshot(&ViewId::main()).channel_threads.iter().find(|c| c.channel_id == second).unwrap().followed);
     // A thread of another channel is not listed.
     let other = w.store.lock().unwrap().create_conversation(&w.agent, None, "other").unwrap();
-    w.channels.select(&other.id.0).unwrap();
+    w.channels.select(&ViewId::main(), &other.id.0).unwrap();
     assert!(w.core.snapshot(&ViewId::main()).channel_threads.is_empty());
-    w.channels.select(&w.parent.id.0).unwrap();
+    w.channels.select(&ViewId::main(), &w.parent.id.0).unwrap();
     assert_eq!(ids(&w).len(), 2);
 }
 
 #[tokio::test]
 async fn renaming_a_thread_updates_the_record_the_chip_the_panel_and_the_posted_label() {
     let w = world(false).await;
-    let thread = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
+    let thread = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
     until("the reply", || w.core.thread_history_snapshot(&ViewId::main()).is_some_and(|h| h.messages.len() == 2) && idle(&w)()).await;
     let reply = w.core.thread_history_snapshot(&ViewId::main()).unwrap().messages[1].id.clone();
     w.channels.post_thread_message(&reply).unwrap();
@@ -665,7 +665,7 @@ async fn renaming_a_thread_updates_the_record_the_chip_the_panel_and_the_posted_
 #[tokio::test]
 async fn deleting_a_thread_keeps_posted_messages_closes_the_panel_and_drops_the_marker() {
     let w = world(false).await;
-    let thread = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
+    let thread = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
     assert!(w.channels.delete_thread(&ChannelId(thread.clone())).unwrap_err().contains("turn runs"), "the first turn still runs");
     until("the reply", || w.core.thread_history_snapshot(&ViewId::main()).is_some_and(|h| h.messages.len() == 2) && idle(&w)()).await;
     let messages = w.core.thread_history_snapshot(&ViewId::main()).unwrap().messages;
@@ -695,13 +695,13 @@ async fn deleting_a_thread_keeps_posted_messages_closes_the_panel_and_drops_the_
     drop(store);
     assert!(w.channels.delete_thread(&ChannelId(thread)).is_err(), "it is gone");
     // The anchor can start a new thread.
-    w.channels.start_thread(&w.parent.id.0, &w.answer.0, "again".into(), vec![], false).unwrap();
+    w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.answer.0, "again".into(), vec![], false).unwrap();
 }
 
 #[tokio::test]
 async fn a_thread_with_a_pending_approval_or_a_running_sub_agent_task_cannot_be_deleted() {
     let w = world(false).await;
-    let thread = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
+    let thread = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
     until("the reply", || w.core.thread_history_snapshot(&ViewId::main()).is_some_and(|h| h.messages.len() == 2) && idle(&w)()).await;
     let approval = discard_core::event::ApprovalId("approval-1".into());
     w.core.apply_channel(&thread, Update::Event(Box::new(Event { id: EventId::new(), session_id: SessionId::new(), seq: 9, kind: EventKind::ApprovalRequest { kind: Default::default(), paths: vec![], approval_id: approval.clone(), call_id: "call-1".into(), tool: "Bash".into(), input: serde_json::json!({"command": "ls"}) }, raw: None })));
@@ -721,7 +721,7 @@ async fn a_thread_with_a_pending_approval_or_a_running_sub_agent_task_cannot_be_
 #[tokio::test]
 async fn removing_a_posted_message_from_the_channel_keeps_it_in_the_thread() {
     let w = world(false).await;
-    let thread = w.channels.start_thread(&w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
+    let thread = w.channels.start_thread(&ViewId::main(), &w.parent.id.0, &w.answer.0, "first".into(), vec![], false).unwrap();
     until("the reply", || w.core.thread_history_snapshot(&ViewId::main()).is_some_and(|h| h.messages.len() == 2) && idle(&w)()).await;
     let reply = w.core.thread_history_snapshot(&ViewId::main()).unwrap().messages[1].id.clone();
     let reference = w.channels.post_thread_message(&reply).unwrap();

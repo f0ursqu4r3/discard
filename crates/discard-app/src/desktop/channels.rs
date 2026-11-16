@@ -21,11 +21,11 @@ impl Channels {
     pub fn new(core: Arc<AppCore>, store: Arc<Mutex<Store>>, runtime: Handle, launch: Launcher) -> Self {
         Self { core, store, runtime, launch, operation: Mutex::new(()) }
     }
-    fn project_dir(&self) -> PathBuf { self.core.current_project(&ViewId::main()).path.into() }
+    fn project_dir(&self, view: &ViewId) -> PathBuf { self.core.current_project(view).path.into() }
     /// Caller holds the project-change guard. Prepare runtimes before replacing visible state.
-    pub fn activate_project(&self, id: &ProjectId) -> Result<String, String> {
+    pub fn activate_project(&self, view: &ViewId, id: &ProjectId) -> Result<String, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        self.core.can_switch_for_project(&ViewId::main())?;
+        self.core.can_switch_for_project(view)?;
         let (project, channel) = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
             let project = store.visible_projects().map_err(|e| e.to_string())?.into_iter().find(|p| p.id == *id).ok_or("Project unavailable")?;
@@ -41,16 +41,16 @@ impl Channels {
             let channel = store.project_channel_or_fallback(id, &main).map_err(|e| e.to_string())?;
             (project, channel)
         };
-        self.core.select_sidebar_project(&ViewId::main(), Some(&project));
-        self.select_inner_mode(&channel.id.0, true)?;
+        self.core.select_sidebar_project(view, Some(&project));
+        self.select_inner_mode(view, &channel.id.0, true)?;
         self.store.lock().unwrap_or_else(|e| e.into_inner()).select_project_channel(id, &channel.id).map_err(|e| e.to_string())?;
-        self.core.refresh_branches_in_background(&ViewId::main());
+        self.core.refresh_branches_in_background(view);
         Ok(channel.id.0)
     }
-    pub fn restore(&self) -> Result<(), String> {
+    pub fn restore(&self, view: &ViewId) -> Result<(), String> {
         if let Some(id) = self.core.saved_conversation()
             && self.store.lock().unwrap_or_else(|e| e.into_inner()).load_channel(&ChannelId(id.clone())).is_ok() {
-                self.select(&id)?;
+                self.select(view, &id)?;
             }
         Ok(())
     }
@@ -85,11 +85,7 @@ impl Channels {
         let generation = core.channel_runtime_generation(&id).ok_or("Conversation unavailable")?;
         self.runtime.spawn(async move {
             while let Some(update) = updates.recv().await {
-                if core.apply_runtime(&id, Some(generation), update) {
-                    let generation = core.request_branch_refresh(&ViewId::main());
-                    let core = core.clone();
-                    tokio::task::spawn_blocking(move || core.refresh_branches(&ViewId::main(), generation));
-                }
+                if core.apply_runtime(&id, Some(generation), update) { core.refresh_branches_selecting(&id); }
             }
             // The engine of a sub-agent thread ended without a final state: the task fails.
             if core.sub_agents().is_running(&id) { sub_agent_stream_closed(&core, &store, &id); }
@@ -101,31 +97,31 @@ impl Channels {
         self.store.lock().unwrap_or_else(|e| e.into_inner()).load_channel(&ChannelId(id.to_owned())).is_ok_and(|channel| channel.project_id.is_some())
     }
     /// Select a channel. A thread opens beside its parent channel, which becomes the selected channel.
-    pub fn select(&self, id: &str) -> Result<(), String> {
+    pub fn select(&self, view: &ViewId, id: &str) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let thread = self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(&ChannelId(id.to_owned())).map_err(|e| e.to_string())?;
-        if let Some(thread) = thread { return self.select_thread_inner(&thread); }
-        self.select_inner(id)
+        if let Some(thread) = thread { return self.select_thread_inner(view, &thread); }
+        self.select_inner(view, id)
     }
-    fn select_thread_inner(&self, thread: &discard_core::model::ThreadInfo) -> Result<(), String> {
-        if self.core.active_channel_id(&ViewId::main()) != thread.parent_channel_id.0 { self.select_inner(&thread.parent_channel_id.0)?; }
-        self.open_thread_inner(&thread.channel_id)
+    fn select_thread_inner(&self, view: &ViewId, thread: &discard_core::model::ThreadInfo) -> Result<(), String> {
+        if self.core.active_channel_id(view) != thread.parent_channel_id.0 { self.select_inner(view, &thread.parent_channel_id.0)?; }
+        self.open_thread_inner(view, &thread.channel_id)
     }
     /// Select the parent channel of a thread and open the thread beside it. Returns the parent channel ID.
-    pub fn select_thread(&self, thread: &ChannelId) -> Result<String, String> {
+    pub fn select_thread(&self, view: &ViewId, thread: &ChannelId) -> Result<String, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let info = self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(thread).map_err(|e| e.to_string())?.ok_or("This thread is unavailable.")?;
-        self.select_thread_inner(&info)?;
+        self.select_thread_inner(view, &info)?;
         Ok(info.parent_channel_id.0)
     }
     /// Show a thread of the selected channel beside it, loading its session first.
-    pub fn open_thread(&self, thread: &ChannelId) -> Result<(), String> {
+    pub fn open_thread(&self, view: &ViewId, thread: &ChannelId) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        self.open_thread_inner(thread)
+        self.open_thread_inner(view, thread)
     }
-    fn open_thread_inner(&self, thread: &ChannelId) -> Result<(), String> {
+    fn open_thread_inner(&self, view: &ViewId, thread: &ChannelId) -> Result<(), String> {
         self.load_thread(thread)?;
-        self.core.open_thread(&ViewId::main(), &thread.0)
+        self.core.open_thread(view, &thread.0)
     }
     /// Start or restart the session of a thread when it has none that works.
     fn load_thread(&self, thread: &ChannelId) -> Result<(), String> {
@@ -186,7 +182,7 @@ impl Channels {
     /// Start a thread on a saved message of the selected channel. The thread row, its session and its first
     /// message come together: a failure before the message is queued leaves no thread behind. The new thread opens
     /// beside the channel. Returns the thread channel ID.
-    pub fn start_thread(&self, parent: &str, anchor: &str, text: String, attachments: Vec<discard_core::attachments::Attachment>, also_post: bool) -> Result<String, String> {
+    pub fn start_thread(&self, view: &ViewId, parent: &str, anchor: &str, text: String, attachments: Vec<discard_core::attachments::Attachment>, also_post: bool) -> Result<String, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         if text.trim().is_empty() && attachments.is_empty() { return Err("Enter a message to start the thread.".into()); }
         if self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(&ChannelId(parent.to_owned())).map_err(|e| e.to_string())?.is_some_and(|thread| thread.kind == discard_core::model::ThreadKind::SubAgent) {
@@ -210,7 +206,7 @@ impl Channels {
             let _ = self.store.lock().unwrap_or_else(|e| e.into_inner()).discard_empty_thread(&thread.id);
             return Err(error);
         }
-        self.core.open_thread(&ViewId::main(), &thread.id.0)?;
+        self.core.open_thread(view, &thread.id.0)?;
         Ok(thread.id.0)
     }
     /// Show a thread message in the thread's parent channel. Posting again changes nothing. Returns the ID of the
@@ -328,7 +324,7 @@ impl Channels {
     pub fn invite_channel_member(&self, project: &ProjectId, channel: &ChannelId, agent: &discard_core::model::AgentId) -> Result<(), String> {
         self.with_active_project_channel(project, channel, |store| store.invite_agent_to_channel(project, channel, agent).map_err(|e| e.to_string()))
     }
-    pub fn select_canonical_branch(&self, project: &ProjectId, branch: &str, channel_id: &ChannelId) -> Result<(), String> {
+    pub fn select_canonical_branch(&self, view: &ViewId, project: &ProjectId, branch: &str, channel_id: &ChannelId) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let (target, metadata, _) = self.project_channel(project, channel_id, true)?;
         if target.project_id.as_ref() != Some(project) { return Err("Channel does not belong to this project.".into()); }
@@ -351,17 +347,17 @@ impl Channels {
                 && previous.id != target.id { self.core.channel_read_only(&previous.id.0, true, true); }
             if self.core.has_channel(&updated.id.0) && self.core.channel_session_closed(&updated.id.0) { self.start_mode(&updated, true)?; }
             else { self.refresh_channel_access(&updated)?; }
-            if previous.as_ref().is_some_and(|old| old.id != target.id && self.core.active_channel_id(&ViewId::main()) == old.id.0) {
+            if previous.as_ref().is_some_and(|old| old.id != target.id && self.core.active_channel_id(view) == old.id.0) {
                 if !self.core.has_channel(&updated.id.0) { self.start(&updated)?; }
-                self.select_inner(&updated.id.0)?;
+                self.select_inner(view, &updated.id.0)?;
             }
-            self.core.refresh_branches_in_background(&ViewId::main());
+            self.core.refresh_branches_in_background(view);
             Ok(())
         })();
         for id in begun { self.core.end_channel_change(&id); }
         result
     }
-    pub fn select_canonical_general(&self, project: &ProjectId, channel_id: &ChannelId) -> Result<(), String> {
+    pub fn select_canonical_general(&self, view: &ViewId, project: &ProjectId, channel_id: &ChannelId) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let (target, metadata, _) = self.project_channel(project, channel_id, true)?;
         if !target.name.eq_ignore_ascii_case("general") || metadata.kind != discard_core::model::ProjectChannelKind::ArchivedLegacy {
@@ -396,10 +392,10 @@ impl Channels {
                 }
             } else { self.start(&updated)?; }
             self.refresh_channel_access(&updated)?;
-            if previous.as_ref().is_some_and(|old| old.id != updated.id && self.core.active_channel_id(&ViewId::main()) == old.id.0) {
-                self.select_inner(&updated.id.0)?;
+            if previous.as_ref().is_some_and(|old| old.id != updated.id && self.core.active_channel_id(view) == old.id.0) {
+                self.select_inner(view, &updated.id.0)?;
             }
-            self.core.refresh_branches_in_background(&ViewId::main());
+            self.core.refresh_branches_in_background(view);
             Ok(())
         })();
         for id in begun { self.core.end_channel_change(&id); }
@@ -494,9 +490,9 @@ impl Channels {
         for id in begun { self.core.end_channel_change(&id); }
         result
     }
-    fn select_inner(&self, id: &str) -> Result<(), String> { self.select_inner_mode(id, false) }
-    fn select_inner_mode(&self, id: &str, project_change: bool) -> Result<(), String> {
-        if project_change { self.core.can_switch_for_project(&ViewId::main())?; } else { self.core.can_switch(&ViewId::main())?; }
+    fn select_inner(&self, view: &ViewId, id: &str) -> Result<(), String> { self.select_inner_mode(view, id, false) }
+    fn select_inner_mode(&self, view: &ViewId, id: &str, project_change: bool) -> Result<(), String> {
+        if project_change { self.core.can_switch_for_project(view)?; } else { self.core.can_switch(view)?; }
         let (channel, project) = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
             let channel = store.load_channel(&ChannelId(id.to_owned())).map_err(|e| e.to_string())?;
@@ -505,14 +501,14 @@ impl Channels {
         };
         let restart = self.core.has_channel(id) && self.core.channel_session_closed(id);
         if !self.core.has_channel(id) { self.start(&channel)?; }
-        if project_change { self.core.switch_channel_for_project(&ViewId::main(), id)?; } else { self.core.switch_channel(&ViewId::main(), id)?; }
+        if project_change { self.core.switch_channel_for_project(view, id)?; } else { self.core.switch_channel(view, id)?; }
         self.sync_muted(&channel.id);
-        if let Some(project) = project { self.core.configure_branch_source(&ViewId::main(), self.store.clone(), channel.id.clone(), channel.workspace_mode, project.path.into()); }
-        else { self.core.clear_branch_source(&ViewId::main()); }
+        if let Some(project) = project { self.core.configure_branch_source(view, self.store.clone(), channel.id.clone(), channel.workspace_mode, project.path.into()); }
+        else { self.core.clear_branch_source(view); }
         self.refresh_threads(&channel.id)?;
         self.core.clear_slots();
         // The rows are in state already. Mark the selected row from them. Git runs only in a refresh.
-        self.core.reselect_current_branch(&ViewId::main());
+        self.core.reselect_current_branch(view);
         if channel.project_id.is_none() {
             if let Err(error) = self.store.lock().unwrap_or_else(|e| e.into_inner()).add_direct_message(&channel.agent_id) {
                 self.core.append_channel_notice(id, format!("Chat opened, but could not save it to Direct Messages: {error}"));
@@ -529,7 +525,7 @@ impl Channels {
         }
         Ok(())
     }
-    pub fn reload_project(&self, id: &ProjectId) -> Result<(), String> {
+    pub fn reload_project(&self, view: &ViewId, id: &ProjectId) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let channels: Vec<_> = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -543,8 +539,8 @@ impl Channels {
         };
         self.core.invalidate_project_channels(id)?;
         for channel in channels { self.start_mode(&channel, true)?; }
-        if self.core.active_context(&ViewId::main()).1.as_ref() == Some(id) {
-            self.select_inner_mode(&self.core.active_channel_id(&ViewId::main()), true)?;
+        if self.core.active_context(view).1.as_ref() == Some(id) {
+            self.select_inner_mode(view, &self.core.active_channel_id(view), true)?;
         }
         Ok(())
     }
@@ -570,7 +566,7 @@ impl Channels {
                 failures.push(format!("{id}: {error}"));
             }
         }
-        self.core.refresh_branches_in_background(&ViewId::main());
+        for view in self.core.view_ids() { self.core.refresh_branches_in_background(&view); }
         if failures.is_empty() { Ok(()) } else { Err(failures.join("; ")) }
     }
     pub fn restore_conversation(&self, id: &str) -> Result<(), String> {
@@ -603,12 +599,12 @@ impl Channels {
         }
         Ok(())
     }
-    pub fn open_agent(&self, agent: &discard_core::model::AgentId) -> Result<String, String> {
+    pub fn open_agent(&self, view: &ViewId, agent: &discard_core::model::AgentId) -> Result<String, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let channel = self.store.lock().unwrap_or_else(|e| e.into_inner()).default_conversation(agent).map_err(|e| e.to_string())?;
-        self.select_inner(&channel.id.0)?; Ok(channel.id.0)
+        self.select_inner(view, &channel.id.0)?; Ok(channel.id.0)
     }
-    pub fn create_conversation(&self, agent: &discard_core::model::AgentId, project: Option<&ProjectId>, name: &str) -> Result<String, String> {
+    pub fn create_conversation(&self, view: &ViewId, agent: &discard_core::model::AgentId, project: Option<&ProjectId>, name: &str) -> Result<String, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(project) = project {
             if name.trim().to_lowercase() != "general" {
@@ -621,47 +617,47 @@ impl Channels {
                 if &main != agent { return Err("Choose the project's main agent to open its general channel.".into()); }
                 store.ensure_project_general_channel(project, &main).map_err(|e| e.to_string())?
             };
-            self.select_inner(&channel.id.0)?;
+            self.select_inner(view, &channel.id.0)?;
             return Ok(channel.id.0);
         }
-        self.core.can_switch(&ViewId::main())?;
+        self.core.can_switch(view)?;
         let channel = self.store.lock().unwrap_or_else(|e| e.into_inner()).create_conversation(agent, project, name).map_err(|e| e.to_string())?;
-        self.select_inner(&channel.id.0)?; Ok(channel.id.0)
+        self.select_inner(view, &channel.id.0)?; Ok(channel.id.0)
     }
-    pub fn create(&self, name: &str, mode: &str, source_channel: &str) -> Result<String, String> {
+    pub fn create(&self, view: &ViewId, name: &str, mode: &str, source_channel: &str) -> Result<String, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        self.core.can_switch(&ViewId::main())?;
-        if self.core.active_channel_id(&ViewId::main()) != source_channel { return Err("The channel changed. Open New channel again.".into()); }
-        if self.core.current_project(&ViewId::main()).id.0.is_empty() { return Err("Select a project first.".into()); }
+        self.core.can_switch(view)?;
+        if self.core.active_channel_id(view) != source_channel { return Err("The channel changed. Open New channel again.".into()); }
+        if self.core.current_project(view).id.0.is_empty() { return Err("Select a project first.".into()); }
         let _ = (name, mode);
         Err("Open a Git branch to start another project channel.".into())
     }
     /// Create a text channel for the current project, start it, and select it. Returns the channel ID.
-    pub fn create_text_channel(&self, project: &ProjectId, name: &str) -> Result<String, String> {
+    pub fn create_text_channel(&self, view: &ViewId, project: &ProjectId, name: &str) -> Result<String, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        self.core.can_switch(&ViewId::main())?;
-        if self.core.current_project(&ViewId::main()).id != *project { return Err("Open this project before you add a channel.".into()); }
+        self.core.can_switch(view)?;
+        if self.core.current_project(view).id != *project { return Err("Open this project before you add a channel.".into()); }
         let channel = self.store.lock().unwrap_or_else(|e| e.into_inner()).create_project_text_channel(project, name).map_err(|e| e.to_string())?;
         self.start(&channel)?;
-        self.select_inner(&channel.id.0)?;
+        self.select_inner(view, &channel.id.0)?;
         // A new channel changes the list. Refresh it without a wait.
-        self.core.refresh_branches_in_background(&ViewId::main());
+        self.core.refresh_branches_in_background(view);
         Ok(channel.id.0)
     }
-    fn create_inner(&self, name: String, row: &discard_core::branch_tree::TreeRow, repository: &str, repository_path: &std::path::Path) -> Result<String, String> {
-        let project = self.core.current_project(&ViewId::main()).id;
+    fn create_inner(&self, view: &ViewId, name: String, row: &discard_core::branch_tree::TreeRow, repository: &str, repository_path: &std::path::Path) -> Result<String, String> {
+        let project = self.core.current_project(view).id;
         let agent_id = self.store.lock().unwrap_or_else(|e| e.into_inner()).project_main_agent(&project).map_err(|e| e.to_string())?
             .ok_or("This project has no main agent. Open the project first.")?;
         let channel = Channel { id: ChannelId::new(), project_id: Some(project), name, agent_id, workspace_mode: WorkspaceMode::Worktree };
         let record = row.worktree.as_ref().map(|path| -> Result<WorktreeRecord, String> {
-            let manager = WorktreeManager::new(&self.project_dir());
+            let manager = WorktreeManager::new(&self.project_dir(view));
             let prepared = manager.recorded(repository_path, path, &row.name).map_err(|e| e.to_string())?;
             Ok(WorktreeRecord { channel_id: channel.id.clone(), path: path.to_string_lossy().into_owned(), branch: prepared.worktree.branch,
                 base_commit: prepared.worktree.base_commit, repo: repository_path.to_string_lossy().into_owned(), owned: false })
         }).transpose()?;
         {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-            let existing = store.channels_for_project(&self.core.current_project(&ViewId::main()).id).map_err(|e| e.to_string())?;
+            let existing = store.channels_for_project(&self.core.current_project(view).id).map_err(|e| e.to_string())?;
             if existing.iter().any(|c| c.name.eq_ignore_ascii_case(&channel.name)) { return Err("A channel with this name already exists.".into()); }
             // A detached commit is not a branch and must not claim a canonical branch channel.
             let branch = (!row.detached).then_some(row.name.as_str());
@@ -669,15 +665,16 @@ impl Channels {
             store.register_bootstrap_project_channel(&channel.id).map_err(|e| e.to_string())?;
         }
         self.start(&channel)?;
-        self.select_inner(&channel.id.0)?;
+        self.select_inner(view, &channel.id.0)?;
         // A new channel changes the list. Refresh it without a wait.
-        self.core.refresh_branches_in_background(&ViewId::main());
+        self.core.refresh_branches_in_background(view);
         Ok(channel.id.0)
     }
-    pub fn decide_write_request(&self, requests: &discard_core::write_requests::WriteRequests, workspace: &discard_core::workspace::GitWorkspace, grants: &discard_core::workspace_grants::MainCheckoutGrants, channel: &str, id: &str, approve: bool) -> Result<discard_core::write_requests::WriteRequest, String> {
+    #[expect(clippy::too_many_arguments, reason = "The services and the fields of the request come from the command.")]
+    pub fn decide_write_request(&self, view: &ViewId, requests: &discard_core::write_requests::WriteRequests, workspace: &discard_core::workspace::GitWorkspace, grants: &discard_core::workspace_grants::MainCheckoutGrants, channel: &str, id: &str, approve: bool) -> Result<discard_core::write_requests::WriteRequest, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         if approve {
-            if self.core.active_channel_id(&ViewId::main()) != channel { return Err("Open this channel before approving.".into()); }
+            if self.core.active_channel_id(view) != channel { return Err("Open this channel before approving.".into()); }
             self.core.begin_write_approval(channel)?;
         }
         let result: Result<_, String> = (|| {
@@ -714,7 +711,7 @@ impl Channels {
             };
             self.store.lock().unwrap_or_else(|e| e.into_inner()).insert_message(&message).map_err(|e| e.to_string())?;
             self.core.apply_channel(channel, discard_core::ui_state::Update::ConversationMarker(message));
-            self.core.refresh_branches_in_background(&ViewId::main());
+            self.core.refresh_branches_in_background(view);
             Ok((request, note))
         })();
         if approve { self.core.end_project_change(); }
@@ -793,9 +790,9 @@ impl Channels {
     // checks its own state again, so the webview state is never trusted. Each Git action starts a branch refresh.
 
     /// Resolve a repository of the current project. The webview names it by ID: empty for the project root.
-    fn repository(&self, project: &ProjectId, id: &str) -> Result<discard_core::worktree::DiscoveredRepository, String> {
-        if self.core.current_project(&ViewId::main()).id != *project { return Err("Open this project first.".into()); }
-        discard_core::worktree::discover_repositories(&self.project_dir()).map_err(|e| e.to_string())?
+    fn repository(&self, view: &ViewId, project: &ProjectId, id: &str) -> Result<discard_core::worktree::DiscoveredRepository, String> {
+        if self.core.current_project(view).id != *project { return Err("Open this project first.".into()); }
+        discard_core::worktree::discover_repositories(&self.project_dir(view)).map_err(|e| e.to_string())?
             .into_iter().find(|repository| repository.id == id).ok_or_else(|| "This repository is no longer available.".to_string())
     }
     fn branch_entries(&self, repository: &discard_core::worktree::DiscoveredRepository) -> Result<Vec<discard_core::worktree::BranchEntry>, String> {
@@ -819,7 +816,7 @@ impl Channels {
     }
     fn release(&self, held: Vec<String>) { for id in held { self.core.end_channel_change(&id); } }
     /// Show the new Git state: the branch list and the rows that depend on it.
-    fn after_git(&self) { self.core.refresh_branches_in_background(&ViewId::main()); }
+    fn after_git(&self, view: &ViewId) { self.core.refresh_branches_in_background(view); }
     /// The channels that use a working tree. The first list holds every channel with a saved worktree record at its
     /// path, archived or not. The second holds the active ones among them and the branch channel of the branch that the
     /// tree holds.
@@ -867,7 +864,7 @@ impl Channels {
     /// Archive the channel of a row with the rules, the confirm step and the store path of the menu bar item. Also
     /// refused for `#general`, for an archived channel, and for a busy channel. Returns the items that a forced archive
     /// would delete when the archive needs the second confirm. When the archived channel was open, `#general` opens.
-    pub fn archive_channel(&self, workspace: &discard_core::workspace::GitWorkspace, project: &ProjectId, channel: &ChannelId, force: bool) -> Result<super::dto::ArchiveChannelDto, String> {
+    pub fn archive_channel(&self, view: &ViewId, workspace: &discard_core::workspace::GitWorkspace, project: &ProjectId, channel: &ChannelId, force: bool) -> Result<super::dto::ArchiveChannelDto, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let threads = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -887,26 +884,26 @@ impl Channels {
             discard_core::workspace::ArchiveOutcome::Archived { .. } => {
                 self.core.channel_read_only(&channel.0, true, true);
                 for thread in threads.iter().filter(|thread| self.core.has_channel(thread)) { self.core.channel_read_only(thread, true, true); }
-                if self.core.active_channel_id(&ViewId::main()) == channel.0 { let _ = self.open_general(project); }
-                self.after_git();
+                if self.core.active_channel_id(view) == channel.0 { let _ = self.open_general(view, project); }
+                self.after_git(view);
                 Ok(super::dto::ArchiveChannelDto { archived: true, items: vec![] })
             }
         }
     }
     /// Open `#general` of a project.
-    fn open_general(&self, project: &ProjectId) -> Result<(), String> {
+    fn open_general(&self, view: &ViewId, project: &ProjectId) -> Result<(), String> {
         let general = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
             store.all_channels_for_project(project).map_err(|e| e.to_string())?.into_iter().filter(|(_, archived)| !archived).map(|(channel, _)| channel)
                 .find(|channel| store.project_channel_metadata(&channel.id).ok().flatten().is_some_and(|metadata| metadata.kind == discard_core::model::ProjectChannelKind::General))
         };
         let general = general.ok_or("This project has no #general channel.")?;
-        self.select_inner(&general.id.0)
+        self.select_inner(view, &general.id.0)
     }
 
     /// Check that a branch can get a worktree, and find its channel. A branch with no channel gets one at creation.
-    fn worktree_target(&self, project: &ProjectId, repository: &str, branch: &str) -> Result<(discard_core::worktree::DiscoveredRepository, Option<Channel>), String> {
-        let repo = self.repository(project, repository)?;
+    fn worktree_target(&self, view: &ViewId, project: &ProjectId, repository: &str, branch: &str) -> Result<(discard_core::worktree::DiscoveredRepository, Option<Channel>), String> {
+        let repo = self.repository(view, project, repository)?;
         let entries = self.branch_entries(&repo)?;
         let entry = entries.iter().find(|entry| entry.branch == branch && !entry.detached).ok_or("This branch no longer exists.")?;
         if entry.worktree.is_some() { return Err("This branch is checked out in a working tree.".into()); }
@@ -917,9 +914,9 @@ impl Channels {
         Ok((repo, channel))
     }
     /// Where Create Worktree… puts the worktree. The path follows the rule of owned worktrees.
-    pub fn worktree_plan(&self, workspace: &discard_core::workspace::GitWorkspace, project: &ProjectId, repository: &str, branch: &str) -> Result<super::dto::WorktreePlanDto, String> {
+    pub fn worktree_plan(&self, view: &ViewId, workspace: &discard_core::workspace::GitWorkspace, project: &ProjectId, repository: &str, branch: &str) -> Result<super::dto::WorktreePlanDto, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, channel) = self.worktree_target(project, repository, branch)?;
+        let (repo, channel) = self.worktree_target(view, project, repository, branch)?;
         let id = channel.map_or_else(ChannelId::new, |channel| channel.id);
         let path = workspace.target_for_branch(&repo.path, &id, branch)?;
         Ok(super::dto::WorktreePlanDto { path: path.to_string_lossy().into_owned(), channel_id: id.0 })
@@ -927,9 +924,9 @@ impl Channels {
     /// Create a linked worktree for a branch with `create_for_branch`. A branch with no channel gets a channel in the
     /// same transaction as the worktree record, under `new_channel` when that ID is free. A Git failure saves nothing.
     /// Returns the worktree path.
-    pub fn create_worktree(&self, workspace: &discard_core::workspace::GitWorkspace, project: &ProjectId, repository: &str, branch: &str, new_channel: Option<&str>) -> Result<String, String> {
+    pub fn create_worktree(&self, view: &ViewId, workspace: &discard_core::workspace::GitWorkspace, project: &ProjectId, repository: &str, branch: &str, new_channel: Option<&str>) -> Result<String, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, channel) = self.worktree_target(project, repository, branch)?;
+        let (repo, channel) = self.worktree_target(view, project, repository, branch)?;
         let record = match channel {
             Some(channel) => workspace.create_for_branch(&repo.path, &channel.id, branch)?,
             None => {
@@ -951,15 +948,15 @@ impl Channels {
                 workspace.create_channel_with_worktree(&repo.path, &repo.id, &channel, branch)?
             }
         };
-        self.after_git();
+        self.after_git(view);
         Ok(record.path)
     }
 
     /// Rename a local branch and move the channel binding to the new name. A checked-out branch works. The channel
     /// must be idle. When Git succeeds and the store fails, the branch gets its old name back. Returns the new name.
-    pub fn rename_branch(&self, project: &ProjectId, repository: &str, branch: &str, new_name: &str) -> Result<String, String> {
+    pub fn rename_branch(&self, view: &ViewId, project: &ProjectId, repository: &str, branch: &str, new_name: &str) -> Result<String, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        let repo = self.repository(project, repository)?;
+        let repo = self.repository(view, project, repository)?;
         if !self.branch_entries(&repo)?.iter().any(|entry| entry.branch == branch && !entry.detached) { return Err("This branch no longer exists.".into()); }
         let channel = self.branch_channel(project, &repo.id, branch)?;
         let held = self.hold(&channel.iter().map(|channel| channel.id.clone()).collect::<Vec<_>>())?;
@@ -978,22 +975,22 @@ impl Channels {
             Ok(new)
         })();
         self.release(held);
-        if result.is_ok() { self.after_git(); }
+        if result.is_ok() { self.after_git(view); }
         result
     }
 
     /// The unmerged commits that Delete Branch… would drop, or the reason the branch cannot be deleted. The dialog
     /// reads this when it opens.
-    pub fn branch_deletion_info(&self, project: &ProjectId, repository: &str, branch: &str) -> Result<usize, String> {
+    pub fn branch_deletion_info(&self, view: &ViewId, project: &ProjectId, repository: &str, branch: &str) -> Result<usize, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        let repo = self.repository(project, repository)?;
+        let repo = self.repository(view, project, repository)?;
         if let Some(channel) = self.branch_channel(project, &repo.id, branch)? && let Some(reason) = self.core.channel_busy_reason(&channel.id.0) { return Err(reason.into()); }
         discard_core::branch_actions::deletion_plan(&repo.path, branch)
     }
     /// Delete a local branch. The count of unmerged commits is read again here. Unmerged commits need `force`.
-    pub fn delete_branch(&self, project: &ProjectId, repository: &str, branch: &str, force: bool) -> Result<super::dto::BranchDeletionDto, String> {
+    pub fn delete_branch(&self, view: &ViewId, project: &ProjectId, repository: &str, branch: &str, force: bool) -> Result<super::dto::BranchDeletionDto, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        let repo = self.repository(project, repository)?;
+        let repo = self.repository(view, project, repository)?;
         let channel = self.branch_channel(project, &repo.id, branch)?;
         let held = self.hold(&channel.iter().map(|channel| channel.id.clone()).collect::<Vec<_>>())?;
         let result = discard_core::branch_actions::delete_branch(&repo.path, branch, force);
@@ -1002,15 +999,15 @@ impl Channels {
             discard_core::branch_actions::BranchDeletion::Deleted => super::dto::BranchDeletionDto { deleted: true, unmerged: 0 },
             discard_core::branch_actions::BranchDeletion::NeedsForce { unmerged } => super::dto::BranchDeletionDto { deleted: false, unmerged },
         };
-        if deletion.deleted { self.after_git(); }
+        if deletion.deleted { self.after_git(view); }
         Ok(deletion)
     }
 
     /// Start a new branch at the HEAD of a working tree and switch it to the branch. Uncommitted changes stay. No
     /// channel that uses the tree may be busy. Returns the new name.
-    pub fn create_branch(&self, project: &ProjectId, repository: &str, worktree: &str, name: &str) -> Result<String, String> {
+    pub fn create_branch(&self, view: &ViewId, project: &ProjectId, repository: &str, worktree: &str, name: &str) -> Result<String, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        let repo = self.repository(project, repository)?;
+        let repo = self.repository(view, project, repository)?;
         let (entry, root, _) = self.working_tree(&repo, worktree)?;
         let (_, users) = self.worktree_users(project, &repo.id, &entry, &root)?;
         let held = self.hold(&users)?;
@@ -1020,33 +1017,33 @@ impl Channels {
             Ok(name)
         })();
         self.release(held);
-        if result.is_ok() { self.after_git(); }
+        if result.is_ok() { self.after_git(view); }
         result
     }
 
     /// The files that Remove Worktree… would discard, or the reason the working tree cannot be removed.
-    pub fn worktree_removal_info(&self, project: &ProjectId, repository: &str, worktree: &str) -> Result<super::dto::WorktreeFilesDto, String> {
+    pub fn worktree_removal_info(&self, view: &ViewId, project: &ProjectId, repository: &str, worktree: &str) -> Result<super::dto::WorktreeFilesDto, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        let repo = self.repository(project, repository)?;
+        let repo = self.repository(view, project, repository)?;
         let (entry, root, main) = self.working_tree(&repo, worktree)?;
         if entry.is_main_checkout { return Err("The main checkout cannot be removed.".into()); }
         let (_, users) = self.worktree_users(project, &repo.id, &entry, &root)?;
         if let Some(reason) = users.iter().find_map(|id| self.core.channel_busy_reason(&id.0)) { return Err(reason.into()); }
-        let manager = WorktreeManager::new(&self.project_dir());
+        let manager = WorktreeManager::new(&self.project_dir(view));
         let files = manager.status(&discard_core::worktree::Worktree { root, branch: entry.branch, base_commit: String::new(), repo: main }).map_err(|e| e.to_string())?.files();
         Ok(super::dto::WorktreeFilesDto::of(files))
     }
     /// Remove a linked working tree with `git worktree remove`. The branch and its commits stay. The status is read
     /// again here. Files that would be lost need `force`. The saved worktree records of the channels that were bound to
     /// the path go. The channels stay.
-    pub fn remove_worktree(&self, project: &ProjectId, repository: &str, worktree: &str, force: bool) -> Result<super::dto::WorktreeRemovalDto, String> {
+    pub fn remove_worktree(&self, view: &ViewId, project: &ProjectId, repository: &str, worktree: &str, force: bool) -> Result<super::dto::WorktreeRemovalDto, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        let repo = self.repository(project, repository)?;
+        let repo = self.repository(view, project, repository)?;
         let (entry, root, main) = self.working_tree(&repo, worktree)?;
         if entry.is_main_checkout { return Err("The main checkout cannot be removed.".into()); }
         let (bound, users) = self.worktree_users(project, &repo.id, &entry, &root)?;
         let held = self.hold(&users)?;
-        let manager = WorktreeManager::new(&self.project_dir());
+        let manager = WorktreeManager::new(&self.project_dir(view));
         let outcome = manager.remove_checked(&discard_core::worktree::Worktree { root, branch: entry.branch, base_commit: String::new(), repo: main }, force).map_err(|e| e.to_string());
         let result = match outcome {
             Ok(discard_core::worktree::RemoveOutcome::Removed) => self.store.lock().unwrap_or_else(|e| e.into_inner()).delete_worktrees(&bound).map_err(|e| e.to_string())
@@ -1055,20 +1052,20 @@ impl Channels {
             Err(error) => Err(error),
         };
         self.release(held);
-        if result.as_ref().is_ok_and(|removal| removal.removed) { self.after_git(); }
+        if result.as_ref().is_ok_and(|removal| removal.removed) { self.after_git(view); }
         result
     }
-    pub fn open_branch(&self, key: &str) -> Result<String, String> {
+    pub fn open_branch(&self, view: &ViewId, key: &str) -> Result<String, String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        self.core.can_switch(&ViewId::main())?;
-        let project_id = self.core.current_project(&ViewId::main()).id;
+        self.core.can_switch(view)?;
+        let project_id = self.core.current_project(view).id;
         if project_id.0.is_empty() { return Err("Select a project first.".into()); }
         let repository_id = if key.starts_with('[') {
             let parts: Vec<String> = serde_json::from_str(key).map_err(|_| "Invalid repository row.")?;
             if !(2..=3).contains(&parts.len()) { return Err("Invalid repository row.".into()); }
             parts[0].clone()
         } else { String::new() };
-        let repository = discard_core::worktree::discover_repositories(&self.project_dir()).map_err(|e| e.to_string())?
+        let repository = discard_core::worktree::discover_repositories(&self.project_dir(view)).map_err(|e| e.to_string())?
             .into_iter().find(|repository| repository.id == repository_id).ok_or("This repository is no longer available.")?;
         let row = list_branch_tree(&repository.path).map_err(|e| e.to_string())?.into_iter()
             .find(|row| row.selection_key(&repository_id) == key).ok_or("This branch or worktree is no longer available.")?;
@@ -1097,7 +1094,7 @@ impl Channels {
             let main = self.store.lock().unwrap_or_else(|e| e.into_inner()).project_main_agent(&project_id).map_err(|e| e.to_string())?.ok_or("This project has no main agent. Open the project first.")?;
             self.store.lock().unwrap_or_else(|e| e.into_inner()).invite_agent_to_channel(&project_id, &channel.id, &main).map_err(|e| e.to_string())?;
             if !self.core.has_channel(&channel.id.0) { self.start(&channel)?; }
-            self.select_inner(&channel.id.0)?;
+            self.select_inner(view, &channel.id.0)?;
             return Ok(channel.id.0);
         }
         let name = {
@@ -1108,7 +1105,7 @@ impl Channels {
             while channels.iter().any(|c| c.name.eq_ignore_ascii_case(&name)) { name = format!("{base}-{suffix}"); suffix += 1; }
             name
         };
-        self.create_inner(name, &row, &repository.id, &repository.path)
+        self.create_inner(view, name, &row, &repository.id, &repository.path)
     }
 }
 
@@ -1197,12 +1194,12 @@ mod tests {
                 let core = Arc::new(AppCore::new(CoreInit { state: UiState::new(channel.id.clone(), vec![]), commands, project: "P".into(), channel: channel.name.clone(), agent: "A".into(), provider: "fake".into() }));
                 core.configure_targets(&ViewId::main(), project.id.0.clone(), &repo, agent.0.clone());
                 let channels = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
-                assert!(channels.decide_write_request(&requests, &workspace, &grants, "other", &request.id, true).is_err());
+                assert!(channels.decide_write_request(&ViewId::main(), &requests, &workspace, &grants, "other", &request.id, true).is_err());
                 core.send_to(Some(&channel.id.0), "initial request".into()).unwrap();
                 assert!(matches!(received.try_recv(), Ok(Command::Send(_))));
-                assert_eq!(channels.decide_write_request(&requests, &workspace, &grants, &channel.id.0, &request.id, true).unwrap_err(), "Wait for the current response to finish.");
+                assert_eq!(channels.decide_write_request(&ViewId::main(), &requests, &workspace, &grants, &channel.id.0, &request.id, true).unwrap_err(), "Wait for the current response to finish.");
                 core.apply(&ViewId::main(), Update::TurnFinished(discard_core::driver::TurnOutcome::Completed));
-                let result = channels.decide_write_request(&requests, &workspace, &grants, &channel.id.0, &request.id, approve).unwrap();
+                let result = channels.decide_write_request(&ViewId::main(), &requests, &workspace, &grants, &channel.id.0, &request.id, approve).unwrap();
                 assert_eq!(result.state, if approve { "completed" } else { "denied" });
                 if approve {
                     assert!(matches!(received.try_recv(), Ok(Command::Continue { agent: recipient, .. }) if recipient == agent));
@@ -1211,7 +1208,7 @@ mod tests {
                 }
                 assert!(received.try_recv().is_err());
                 core.apply(&ViewId::main(), Update::TurnFinished(discard_core::driver::TurnOutcome::Completed));
-                assert!(channels.decide_write_request(&requests, &workspace, &grants, &channel.id.0, &request.id, true).is_err());
+                assert!(channels.decide_write_request(&ViewId::main(), &requests, &workspace, &grants, &channel.id.0, &request.id, true).is_err());
                 assert!(received.try_recv().is_err());
                 let messages = store.lock().unwrap().messages_for_channel(&channel.id).unwrap();
                 assert_eq!(messages.len(), 1); assert_eq!(messages[0].role, discard_core::model::Role::System);
@@ -1236,16 +1233,16 @@ mod tests {
         let store = Arc::new(Mutex::new(store));
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
         core.begin_project_change().unwrap();
-        let second_general = service.activate_project(&second.id).unwrap();
+        let second_general = service.activate_project(&ViewId::main(), &second.id).unwrap();
         core.end_project_change();
         assert_eq!(core.current_project(&ViewId::main()).path, second.path);
         assert_eq!(core.active_channel_id(&ViewId::main()), second_general, "project activation opens its general channel");
-        let direct = service.create_conversation(&agent, None, "Direct chat").unwrap();
+        let direct = service.create_conversation(&ViewId::main(), &agent, None, "Direct chat").unwrap();
         let saved_second = store.lock().unwrap().last_project_channel(&second.id).unwrap().unwrap().id;
-        service.select(&direct).unwrap();
+        service.select(&ViewId::main(), &direct).unwrap();
         assert_eq!(store.lock().unwrap().last_project_channel(&second.id).unwrap().unwrap().id, saved_second, "direct chat selection does not change the saved project channel");
         core.begin_project_change().unwrap();
-        let restored_first = service.activate_project(&first.id).unwrap();
+        let restored_first = service.activate_project(&ViewId::main(), &first.id).unwrap();
         core.end_project_change();
         assert_eq!(restored_first, workspace.channel.id.0, "returning to A restores its saved channel");
         assert_eq!(core.active_channel_id(&ViewId::main()), workspace.channel.id.0);
@@ -1294,7 +1291,7 @@ mod tests {
         }));
         let store = Arc::new(Mutex::new(store));
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
-        service.activate_project(&project.id).unwrap();
+        service.activate_project(&ViewId::main(), &project.id).unwrap();
         settle(&core).await;
         let rows: Vec<_> = core.snapshot(&ViewId::main()).branches.into_iter().filter(|row| row.detached).collect();
         assert_eq!(rows.len(), 2);
@@ -1302,13 +1299,13 @@ mod tests {
         assert_ne!(rows[0].key, rows[1].key);
         // A real branch with the same short SHA must retain its own channel.
         git(&["branch", &rows[0].label]);
-        let branch_channel = service.open_branch(&rows[0].label).unwrap();
+        let branch_channel = service.open_branch(&ViewId::main(), &rows[0].label).unwrap();
         assert!(core.snapshot(&ViewId::main()).branches.iter().filter(|row| row.current).all(|row| !row.detached));
-        let first = service.open_branch(&rows[0].key).unwrap();
-        let second = service.open_branch(&rows[1].key).unwrap();
+        let first = service.open_branch(&ViewId::main(), &rows[0].key).unwrap();
+        let second = service.open_branch(&ViewId::main(), &rows[1].key).unwrap();
         assert_ne!(first, second);
         assert_ne!(first, branch_channel);
-        assert_eq!(service.open_branch(&rows[0].key).unwrap(), first);
+        assert_eq!(service.open_branch(&ViewId::main(), &rows[0].key).unwrap(), first);
         let selected: Vec<_> = core.snapshot(&ViewId::main()).branches.into_iter().filter(|row| row.current).collect();
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].key, rows[0].key);
@@ -1332,23 +1329,23 @@ mod tests {
         // Reopening the store retains the same path-bound conversations.
         let reopened = Arc::new(Mutex::new(Store::open(&database).unwrap()));
         let restored = Channels::new(core.clone(), reopened, Handle::current(), launcher());
-        assert_eq!(restored.open_branch(&rows[1].key).unwrap(), second);
+        assert_eq!(restored.open_branch(&ViewId::main(), &rows[1].key).unwrap(), second);
         // A stale key cannot silently open the same path on a different checkout.
         let path = rows[0].worktree.as_ref().unwrap();
         let output = discard_core::process::spawn_std(std::process::Command::new("git").args(["-C", path, "checkout", "-b", "changed"]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output()).unwrap();
         assert!(output.status.success());
-        assert!(restored.open_branch(&rows[0].key).is_err());
+        assert!(restored.open_branch(&ViewId::main(), &rows[0].key).is_err());
         assert!(workspace.prepare(&repo, &ChannelId(first), &rows[0].label).is_err());
         // The main checkout can also have detached HEAD, including in a nested repository.
         git(&["checkout", "--detach"]);
         let nested_project = store.lock().unwrap().import_project_folder(dir.path()).unwrap();
-        service.activate_project(&nested_project.id).unwrap();
+        service.activate_project(&ViewId::main(), &nested_project.id).unwrap();
         settle(&core).await;
         let main = core.snapshot(&ViewId::main()).branches.into_iter().find(|row| row.detached && row.kind == "main").unwrap();
         assert!(!main.repository.is_empty());
-        let main_channel = service.open_branch(&main.key).unwrap();
+        let main_channel = service.open_branch(&ViewId::main(), &main.key).unwrap();
         assert_eq!(workspace.conversation_directory(dir.path(), &ChannelId(main_channel.clone())).unwrap(), repo.canonicalize().unwrap());
-        assert_eq!(service.open_branch(&main.key).unwrap(), main_channel);
+        assert_eq!(service.open_branch(&ViewId::main(), &main.key).unwrap(), main_channel);
         assert_eq!(core.snapshot(&ViewId::main()).branches.iter().filter(|row| row.current).count(), 1);
     }
 
@@ -1377,16 +1374,16 @@ mod tests {
         }));
         let store = Arc::new(Mutex::new(store));
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
-        service.activate_project(&project.id).unwrap();
+        service.activate_project(&ViewId::main(), &project.id).unwrap();
         settle(&core).await;
         let snapshot = core.snapshot(&ViewId::main());
         assert_eq!(snapshot.repositories.len(), 2);
         let main_rows: Vec<_> = snapshot.branches.iter().filter(|row| row.label == "main").collect();
         assert_eq!(main_rows.len(), 2);
-        let first = service.open_branch(&main_rows[0].key).unwrap();
-        let second = service.open_branch(&main_rows[1].key).unwrap();
+        let first = service.open_branch(&ViewId::main(), &main_rows[0].key).unwrap();
+        let second = service.open_branch(&ViewId::main(), &main_rows[1].key).unwrap();
         assert_ne!(first, second);
-        assert_eq!(service.open_branch(&main_rows[0].key).unwrap(), first);
+        assert_eq!(service.open_branch(&ViewId::main(), &main_rows[0].key).unwrap(), first);
         assert_eq!(core.snapshot(&ViewId::main()).branches.iter().filter(|row| row.current).count(), 1);
         assert_eq!(core.snapshot(&ViewId::main()).branches.iter().find(|row| row.current).unwrap().key, main_rows[0].key);
         {
@@ -1404,7 +1401,7 @@ mod tests {
         let borrowed = workspace.prepare(dir.path(), &ChannelId(first.clone()), "main").unwrap();
         assert_eq!(borrowed.cwd, PathBuf::from(&main_rows[0].repository));
         let feature = snapshot.branches.iter().find(|row| row.label == "feature" && row.repository == main_rows[1].repository).unwrap();
-        let feature_id = service.open_branch(&feature.key).unwrap();
+        let feature_id = service.open_branch(&ViewId::main(), &feature.key).unwrap();
         assert!(store.lock().unwrap().worktree_for(&ChannelId(feature_id.clone())).unwrap().is_none(), "opening a branch does not create a worktree");
         assert_eq!(workspace.conversation_directory(dir.path(), &ChannelId(feature_id.clone())).unwrap(), PathBuf::from(&feature.repository));
         let prepared = workspace.prepare(dir.path(), &ChannelId(feature_id.clone()), "feature").unwrap();
@@ -1419,7 +1416,7 @@ mod tests {
         assert_eq!(reopened.project_repository_branch_channel(&project.id, &main_rows[1].repository, "main").unwrap().unwrap().id.0, second);
         assert!(reopened.project_branch_channel(&project.id, "main").unwrap().is_none());
         let unknown = discard_core::worktree::repository_branch_key("/outside-project", "main");
-        assert!(service.open_branch(&unknown).is_err());
+        assert!(service.open_branch(&ViewId::main(), &unknown).is_err());
     }
 
     #[tokio::test]
@@ -1447,7 +1444,7 @@ mod tests {
         }));
         let store = Arc::new(Mutex::new(store));
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
-        service.activate_project(&project.id).unwrap();
+        service.activate_project(&ViewId::main(), &project.id).unwrap();
         settle(&core).await;
         let snapshot = core.snapshot(&ViewId::main());
         assert_eq!(snapshot.branches.iter().map(|row| row.key.as_str()).collect::<Vec<_>>(), vec!["main", "feature"]);
@@ -1460,15 +1457,15 @@ mod tests {
         assert_eq!(core.snapshot(&ViewId::main()).branches.len(), 2);
         assert!(core.snapshot(&ViewId::main()).branches.iter().all(|row| !row.current));
         let stale = core.request_branch_refresh(&ViewId::main());
-        service.activate_project(&other_project.id).unwrap();
+        service.activate_project(&ViewId::main(), &other_project.id).unwrap();
         settle(&core).await;
         core.refresh_branches(&ViewId::main(), stale);
         assert!(core.snapshot(&ViewId::main()).branches.is_empty());
-        service.activate_project(&project.id).unwrap();
+        service.activate_project(&ViewId::main(), &project.id).unwrap();
         settle(&core).await;
         assert_eq!(core.snapshot(&ViewId::main()).branches.len(), 2);
         assert!(core.snapshot(&ViewId::main()).branches.iter().all(|row| !row.current), "the general channel does not highlight the main checkout");
-        service.open_branch("feature").unwrap();
+        service.open_branch(&ViewId::main(), "feature").unwrap();
         assert!(core.snapshot(&ViewId::main()).branches.iter().any(|row| row.key == "feature" && row.current), "canonical branch metadata highlights its branch without a worktree");
         core.select_sidebar_project(&ViewId::main(), None);
         core.refresh_branches(&ViewId::main(), core.request_branch_refresh(&ViewId::main()));
@@ -1496,19 +1493,19 @@ mod tests {
         }));
         let store = Arc::new(Mutex::new(store));
         let service = Channels::new(core.clone(), store, Handle::current(), launcher());
-        let general = service.activate_project(&project.id).unwrap();
+        let general = service.activate_project(&ViewId::main(), &project.id).unwrap();
         settle(&core).await;
-        let feature = service.open_branch("feature").unwrap();
+        let feature = service.open_branch(&ViewId::main(), "feature").unwrap();
         settle(&core).await;
         assert_eq!(core.snapshot(&ViewId::main()).branches.len(), 2);
         // Git is unavailable now. A refresh would replace the rows with an empty list.
         std::fs::rename(repo.path().join(".git"), repo.path().join(".git-hidden")).unwrap();
-        service.select(&general).unwrap();
+        service.select(&ViewId::main(), &general).unwrap();
         let snapshot = core.snapshot(&ViewId::main());
         assert_eq!(snapshot.channel_id, general);
         assert_eq!(snapshot.branches.len(), 2, "selecting a channel keeps the rows");
         assert!(snapshot.branches.iter().all(|row| !row.current));
-        service.select(&feature).unwrap();
+        service.select(&ViewId::main(), &feature).unwrap();
         settle(&core).await;
         let snapshot = core.snapshot(&ViewId::main());
         assert_eq!(snapshot.channel_id, feature);
@@ -1531,11 +1528,11 @@ mod tests {
         }));
         let store = Arc::new(Mutex::new(store));
         let service = Channels::new(core.clone(), store, Handle::current(), launcher());
-        service.activate_project(&project.id).unwrap();
+        service.activate_project(&ViewId::main(), &project.id).unwrap();
         settle(&core).await;
         assert_eq!(core.snapshot(&ViewId::main()).branches.len(), 1);
         git_in(repo.path(), &["branch", "later"]);
-        service.open_branch("later").unwrap();
+        service.open_branch(&ViewId::main(), "later").unwrap();
         settle(&core).await;
         let snapshot = core.snapshot(&ViewId::main());
         assert!(snapshot.branches.iter().any(|row| row.key == "later" && row.current), "creating a channel refreshes the rows");
@@ -1555,12 +1552,12 @@ mod tests {
         let store = Arc::new(Mutex::new(store));
         let core = core(&first, dir.path());
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
-        let created = service.activate_project(&project.id).unwrap();
+        let created = service.activate_project(&ViewId::main(), &project.id).unwrap();
         assert_eq!(created, first.id.0);
         assert_eq!(core.snapshot(&ViewId::main()).channel, "general");
-        assert!(service.create("Tests", "main_checkout", &created).unwrap_err().contains("Open a Git branch"));
-        assert!(service.create("old-ui", "main_checkout", &first.id.0).unwrap_err().contains("Open a Git branch"));
-        service.select(&first.id.0).unwrap();
+        assert!(service.create(&ViewId::main(), "Tests", "main_checkout", &created).unwrap_err().contains("Open a Git branch"));
+        assert!(service.create(&ViewId::main(), "old-ui", "main_checkout", &first.id.0).unwrap_err().contains("Open a Git branch"));
+        service.select(&ViewId::main(), &first.id.0).unwrap();
         assert_eq!(core.snapshot(&ViewId::main()).channel, "general");
         let reopened = Store::open(&path).unwrap();
         let rows = reopened.channels_for_project(&project.id).unwrap();
@@ -1568,8 +1565,8 @@ mod tests {
         assert_eq!(reopened.load_agent(&agent).unwrap().model.as_deref(), Some("agent-model"));
         let restored = tests::core(&first, dir.path());
         let service = Channels::new(restored.clone(), Arc::new(Mutex::new(reopened)), Handle::current(), launcher());
-        service.restore().unwrap();
-        service.select(&created).unwrap();
+        service.restore(&ViewId::main()).unwrap();
+        service.select(&ViewId::main(), &created).unwrap();
         assert_eq!(restored.snapshot(&ViewId::main()).channel, "general");
     }
 
@@ -1596,18 +1593,18 @@ mod tests {
         let store = Arc::new(Mutex::new(store));
         let core = core(&first, dir.path());
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
-        service.activate_project(&project.id).unwrap();
+        service.activate_project(&ViewId::main(), &project.id).unwrap();
         settle(&core).await;
         let direct_agent = store.lock().unwrap().create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Direct".into(), provider: "codex".into(), model: Some("direct-model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
-        service.open_agent(&direct_agent).unwrap();
+        service.open_agent(&ViewId::main(), &direct_agent).unwrap();
         git(&["checkout", "-b", "new"]);
-        let new = service.open_branch("new").unwrap();
+        let new = service.open_branch(&ViewId::main(), "new").unwrap();
         assert_ne!(new, first.id.0, "the changed checkout must not reuse the old session");
         assert_eq!(store.lock().unwrap().load_channel(&ChannelId(new.clone())).unwrap().agent_id, first.agent_id, "branch channels use the project main agent");
         assert!(store.lock().unwrap().channel_agents(&ChannelId(new.clone())).unwrap().contains(&first.agent_id));
-        service.open_agent(&direct_agent).unwrap();
-        assert_eq!(service.open_branch("new").unwrap(), new, "a compatible binding is reused");
-        let old = service.open_branch("old").unwrap();
+        service.open_agent(&ViewId::main(), &direct_agent).unwrap();
+        assert_eq!(service.open_branch(&ViewId::main(), "new").unwrap(), new, "a compatible binding is reused");
+        let old = service.open_branch(&ViewId::main(), "old").unwrap();
         assert_eq!(old, first.id.0, "the canonical branch channel is reused even when another direct agent was active");
         assert_eq!(store.lock().unwrap().channel_branch(&ChannelId(old)).unwrap().as_deref(), Some("old"));
     }
@@ -1671,7 +1668,7 @@ mod tests {
         let store = Arc::new(Mutex::new(migrated));
         let service = Channels::new(app_core.clone(), store.clone(), Handle::current(), launcher());
 
-        assert_eq!(service.activate_project(&project_id).unwrap(), general_id.0);
+        assert_eq!(service.activate_project(&ViewId::main(), &project_id).unwrap(), general_id.0);
         let unrelated = store.lock().unwrap().create_agent(&AgentConfig {
             workspace_write: false, sandbox_autorun: false, delegation: false,
             reasoning_effort: None,
@@ -1683,8 +1680,8 @@ mod tests {
             policy: ApprovalPolicy::Ask,
             plugin_write: false,
         }).unwrap();
-        service.open_agent(&unrelated).unwrap();
-        assert_eq!(service.open_branch("feature/persisted").unwrap(), branch_id.0);
+        service.open_agent(&ViewId::main(), &unrelated).unwrap();
+        assert_eq!(service.open_branch(&ViewId::main(), "feature/persisted").unwrap(), branch_id.0);
         assert_eq!(app_core.snapshot(&ViewId::main()).channel, "Feature");
         assert_eq!(store.lock().unwrap().channel_agents(&branch_id).unwrap(), vec![agent_id.clone()]);
         service.update_channel_topic(&project_id, &branch_id, 0, "Keep the migrated branch history").unwrap();
@@ -1709,7 +1706,7 @@ mod tests {
         let reopened_core = core(&reopened_general, dir.path());
         let reopened_store = Arc::new(Mutex::new(reopened));
         let reopened_service = Channels::new(reopened_core.clone(), reopened_store, Handle::current(), launcher());
-        assert_eq!(reopened_service.activate_project(&project_id).unwrap(), branch_id.0);
+        assert_eq!(reopened_service.activate_project(&ViewId::main(), &project_id).unwrap(), branch_id.0);
         assert_eq!(reopened_core.active_channel_id(&ViewId::main()), branch_id.0);
         assert_eq!(reopened_core.snapshot(&ViewId::main()).channel, "Feature");
     }
@@ -1722,7 +1719,7 @@ mod tests {
         let (commands, _) = mpsc::unbounded_channel();
         let core = Arc::new(AppCore::new(CoreInit { state: UiState::new(ChannelId(String::new()), vec![]), commands, project: String::new(), channel: String::new(), agent: String::new(), provider: String::new() }));
         let service = Channels::new(core, Arc::new(Mutex::new(store)), Handle::current(), launcher());
-        let error = service.activate_project(&project.id).unwrap_err();
+        let error = service.activate_project(&ViewId::main(), &project.id).unwrap_err();
         assert!(error.contains("Configure an agent"));
         assert!(service.store.lock().unwrap().channels_for_project(&project.id).unwrap().is_empty());
     }
@@ -1743,7 +1740,7 @@ mod tests {
         let core = core(&branch, dir.path());
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
         assert!(list_branch_tree(dir.path()).is_err(), "test project has no Git metadata");
-        assert_eq!(service.select(&branch.id.0).unwrap(), ());
+        assert_eq!(service.select(&ViewId::main(), &branch.id.0).unwrap(), ());
         assert_eq!(core.active_channel_id(&ViewId::main()), branch.id.0);
         assert_eq!(core.active_context(&ViewId::main()).0, agent);
         assert_eq!(store.lock().unwrap().project_channel_metadata(&branch.id).unwrap().unwrap().branch.as_deref(), Some("feature/x"));
@@ -1805,7 +1802,7 @@ mod tests {
         let store = Arc::new(Mutex::new(store));
         let core = core(&general, dir.path());
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
-        let id = service.create_text_channel(&project.id, "  Release Notes ").unwrap();
+        let id = service.create_text_channel(&ViewId::main(), &project.id, "  Release Notes ").unwrap();
         assert_eq!(core.active_channel_id(&ViewId::main()), id, "the new channel opens");
         assert!(core.has_channel(&id));
         let channels = service.list_project_channels(&project.id).unwrap();
@@ -1813,10 +1810,10 @@ mod tests {
         assert_eq!((text.kind.as_str(), text.name.as_str(), text.workspace_mode.as_str(), text.agent_id.as_str()), ("text", "release-notes", "main_checkout", agent.0.as_str()));
         assert!(!text.archived && !text.has_messages && text.branch.is_none() && text.worktree.is_none());
         assert_eq!(channels.iter().find(|channel| channel.id == general.id.0).unwrap().kind, "general");
-        assert_eq!(service.create_text_channel(&project.id, "RELEASE-notes").unwrap_err(), "A channel with this name already exists.");
-        assert_eq!(service.create_text_channel(&project.id, "General").unwrap_err(), "A channel with this name already exists.");
-        assert!(service.create_text_channel(&project.id, "bad/name").unwrap_err().starts_with("Use letters"));
-        assert!(service.create_text_channel(&ProjectId::new(), "other").unwrap_err().contains("Open this project"));
+        assert_eq!(service.create_text_channel(&ViewId::main(), &project.id, "RELEASE-notes").unwrap_err(), "A channel with this name already exists.");
+        assert_eq!(service.create_text_channel(&ViewId::main(), &project.id, "General").unwrap_err(), "A channel with this name already exists.");
+        assert!(service.create_text_channel(&ViewId::main(), &project.id, "bad/name").unwrap_err().starts_with("Use letters"));
+        assert!(service.create_text_channel(&ViewId::main(), &ProjectId::new(), "other").unwrap_err().contains("Open this project"));
         assert_eq!(service.list_project_channels(&project.id).unwrap().len(), 2, "a refused name creates no channel");
         // A saved message makes the channel show in Archived after its branch goes. A channel with none does not.
         store.lock().unwrap().insert_message(&discard_core::model::Message { id: MessageId::new(), channel_id: ChannelId(id.clone()), role: discard_core::model::Role::User, blocks: vec![discard_core::model::Block::Markdown { text: "question".into() }] }).unwrap();
@@ -1838,8 +1835,8 @@ mod tests {
         let store = Arc::new(Mutex::new(store));
         let core = core(&general, dir.path());
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
-        let plans = ChannelId(service.create_text_channel(&project.id, "plans").unwrap());
-        let notes = ChannelId(service.create_text_channel(&project.id, "notes").unwrap());
+        let plans = ChannelId(service.create_text_channel(&ViewId::main(), &project.id, "plans").unwrap());
+        let notes = ChannelId(service.create_text_channel(&ViewId::main(), &project.id, "notes").unwrap());
         assert_eq!(service.rename_text_channel(&project.id, &plans, "  Release Notes ").unwrap(), "release-notes");
         assert_eq!(store.lock().unwrap().load_channel(&plans).unwrap().name, "release-notes");
         let listed = service.list_project_channels(&project.id).unwrap();
@@ -1876,7 +1873,7 @@ mod tests {
             })
         };
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), kept);
-        let id = service.create_text_channel(&project.id, "plans").unwrap();
+        let id = service.create_text_channel(&ViewId::main(), &project.id, "plans").unwrap();
         let unloaded = store.lock().unwrap().create_project_text_channel(&project.id, "unloaded").unwrap();
         service.change_project_main_agent(&project.id, &new_agent).unwrap();
         assert_eq!(store.lock().unwrap().load_channel(&ChannelId(id.clone())).unwrap().agent_id, new_agent);
@@ -1991,7 +1988,7 @@ mod tests {
         assert_eq!(store.lock().unwrap().load_channel(&general.id).unwrap().agent_id, new_agent);
         assert!(core.snapshot(&ViewId::main()).notice.unwrap_or_default().contains("Select this channel again to retry"));
         assert!(core.send_to(Some(&general.id.0), "old agent must not accept this".into()).is_err());
-        service.select(&general.id.0).unwrap();
+        service.select(&ViewId::main(), &general.id.0).unwrap();
         assert_eq!(core.active_context(&ViewId::main()).0, new_agent);
         assert!(!core.send_to(Some(&general.id.0), "new agent is ready".into()).is_err());
     }
@@ -2042,7 +2039,7 @@ mod tests {
         let core = Arc::new(AppCore::new(initial));
         core.configure_targets(&ViewId::main(), first.id.0.clone(), first_dir.path(), old.0.clone());
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launch);
-        service.select(&second_general.id.0).unwrap();
+        service.select(&ViewId::main(), &second_general.id.0).unwrap();
         assert_eq!(core.active_channel_id(&ViewId::main()), second_general.id.0);
         assert!(core.has_channel(&first_general.id.0), "the first general remains parked");
         core.begin_agent_change(&old.0).unwrap();
@@ -2058,7 +2055,7 @@ mod tests {
         assert!(!core.channel_session_closed(&first_general.id.0));
         assert!(core.channel_session_closed(&second_general.id.0), "failed replacement stays closed and retryable");
         assert_eq!(receivers.lock().unwrap().len(), 3, "the failed channel has no live replacement receiver");
-        service.select(&second_general.id.0).unwrap();
+        service.select(&ViewId::main(), &second_general.id.0).unwrap();
         assert!(!core.channel_session_closed(&second_general.id.0));
         assert!(core.send_to(Some(&second_general.id.0), "replacement is ready".into()).is_ok());
     }
@@ -2077,7 +2074,7 @@ mod tests {
         let core = core(&current, dir.path());
         let store = Arc::new(Mutex::new(store));
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
-        service.select_canonical_branch(&project.id, "feature/shared", &archived.id).unwrap();
+        service.select_canonical_branch(&ViewId::main(), &project.id, "feature/shared", &archived.id).unwrap();
         assert_eq!(core.active_channel_id(&ViewId::main()), archived.id.0);
         assert!(!store.lock().unwrap().channel_archived(&archived.id).unwrap());
         assert!(store.lock().unwrap().channel_archived(&current.id).unwrap());
@@ -2106,7 +2103,7 @@ mod tests {
         let core = Arc::new(AppCore::new(init));
         core.configure_targets(&ViewId::main(), project.id.0.clone(), dir.path(), agent.0.clone());
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launch);
-        service.select_canonical_branch(&project.id, "feature", &channel.id).unwrap();
+        service.select_canonical_branch(&ViewId::main(), &project.id, "feature", &channel.id).unwrap();
         assert!(core.snapshot(&ViewId::main()).composer_disabled, "canonical selection preserves archived-agent read-only state");
         assert!(core.send_to(Some(&channel.id.0), "must not be sent".into()).is_err());
         assert!(matches!(receivers.lock().unwrap()[0].try_recv(), Err(mpsc::error::TryRecvError::Empty)));
@@ -2172,7 +2169,7 @@ mod navigation_action_tests {
         core.configure_targets(&ViewId::main(), project.id.0.clone(), &repo, agent.0.clone());
         core.configure_read_marker(&ViewId::main(), dir.path(), &general.id.0);
         let service = Channels::new(core.clone(), store.clone(), Handle::current(), launch);
-        service.activate_project(&project.id).unwrap();
+        service.activate_project(&ViewId::main(), &project.id).unwrap();
         settle(&core).await;
         let workspace = GitWorkspace::new(&dir.path().join("worktrees"), store.clone());
         Rig { dir, repo, store, core, service, workspace, project, general, agent, _receivers: receivers }
@@ -2187,13 +2184,13 @@ mod navigation_action_tests {
         fn idle(&self, channel: &str) { self.core.apply_channel(channel, Update::TurnFinished(discard_core::driver::TurnOutcome::Completed)); }
         fn branch_channel(&self, branch: &str) -> Option<Channel> { self.store.lock().unwrap().project_branch_channel(&self.project.id, branch).unwrap() }
         fn worktree_record(&self, channel: &ChannelId) -> Option<WorktreeRecord> { self.store.lock().unwrap().worktree_for(channel).unwrap() }
-        fn create_worktree(&self, branch: &str) -> String { self.service.create_worktree(&self.workspace, &self.project.id, "", branch, None).unwrap() }
+        fn create_worktree(&self, branch: &str) -> String { self.service.create_worktree(&ViewId::main(), &self.workspace, &self.project.id, "", branch, None).unwrap() }
     }
 
     #[tokio::test]
     async fn mute_follows_the_store_the_listing_and_the_unread_marker() {
         let r = rig().await;
-        let plans = ChannelId(r.service.create_text_channel(&r.project.id, "plans").unwrap());
+        let plans = ChannelId(r.service.create_text_channel(&ViewId::main(), &r.project.id, "plans").unwrap());
         let muted = |r: &Rig, id: &ChannelId| r.service.list_project_channels(&r.project.id).unwrap().into_iter().find(|c| c.id == id.0).unwrap().muted;
         assert!(!muted(&r, &plans));
         r.service.set_channel_muted(&r.project.id, &plans, true).unwrap();
@@ -2214,42 +2211,42 @@ mod navigation_action_tests {
     #[tokio::test]
     async fn a_muted_channel_loads_muted_after_the_service_restarts_it() {
         let r = rig().await;
-        let plans = ChannelId(r.service.create_text_channel(&r.project.id, "plans").unwrap());
+        let plans = ChannelId(r.service.create_text_channel(&ViewId::main(), &r.project.id, "plans").unwrap());
         r.service.set_channel_muted(&r.project.id, &plans, true).unwrap();
-        r.service.select(&r.general.id.0).unwrap();
+        r.service.select(&ViewId::main(), &r.general.id.0).unwrap();
         // Forget the loaded state and load the channel again from storage.
         r.core.set_channel_muted(&plans.0, false);
-        r.service.select(&plans.0).unwrap();
+        r.service.select(&ViewId::main(), &plans.0).unwrap();
         assert!(r.core.snapshot(&ViewId::main()).channels.iter().find(|c| c.id == plans.0).unwrap().muted, "selection copies the saved flag");
     }
 
     #[tokio::test]
     async fn archive_from_a_row_refuses_general_archived_and_busy_channels() {
         let r = rig().await;
-        let notes = ChannelId(r.service.create_text_channel(&r.project.id, "notes").unwrap());
-        assert_eq!(r.service.archive_channel(&r.workspace, &r.project.id, &r.general.id, false).unwrap_err(), "#general cannot be archived.");
-        assert!(r.service.archive_channel(&r.workspace, &discard_core::model::ProjectId::new(), &notes, false).is_err(), "the channel must belong to the project");
+        let notes = ChannelId(r.service.create_text_channel(&ViewId::main(), &r.project.id, "notes").unwrap());
+        assert_eq!(r.service.archive_channel(&ViewId::main(), &r.workspace, &r.project.id, &r.general.id, false).unwrap_err(), "#general cannot be archived.");
+        assert!(r.service.archive_channel(&ViewId::main(), &r.workspace, &discard_core::model::ProjectId::new(), &notes, false).is_err(), "the channel must belong to the project");
         r.busy(&notes.0);
-        assert!(r.service.archive_channel(&r.workspace, &r.project.id, &notes, false).unwrap_err().contains("A turn runs"));
+        assert!(r.service.archive_channel(&ViewId::main(), &r.workspace, &r.project.id, &notes, false).unwrap_err().contains("A turn runs"));
         assert!(!r.store.lock().unwrap().channel_archived(&notes).unwrap(), "a refusal changes nothing");
         r.idle(&notes.0);
         // The open channel archives, and #general opens.
         assert_eq!(r.core.active_channel_id(&ViewId::main()), notes.0);
-        let outcome = r.service.archive_channel(&r.workspace, &r.project.id, &notes, false).unwrap();
+        let outcome = r.service.archive_channel(&ViewId::main(), &r.workspace, &r.project.id, &notes, false).unwrap();
         assert_eq!(outcome, super::super::dto::ArchiveChannelDto { archived: true, items: vec![] });
         assert!(r.store.lock().unwrap().channel_archived(&notes).unwrap());
         assert_eq!(r.core.active_channel_id(&ViewId::main()), r.general.id.0, "the app opens #general of the same project");
-        assert_eq!(r.service.archive_channel(&r.workspace, &r.project.id, &notes, false).unwrap_err(), "This channel is already archived.");
+        assert_eq!(r.service.archive_channel(&ViewId::main(), &r.workspace, &r.project.id, &notes, false).unwrap_err(), "This channel is already archived.");
     }
 
     #[tokio::test]
     async fn archiving_a_channel_that_is_not_open_leaves_the_open_channel_alone() {
         let r = rig().await;
-        let notes = ChannelId(r.service.create_text_channel(&r.project.id, "notes").unwrap());
-        r.service.select(&r.general.id.0).unwrap();
-        assert!(r.service.archive_channel(&r.workspace, &r.project.id, &notes, false).unwrap().archived);
+        let notes = ChannelId(r.service.create_text_channel(&ViewId::main(), &r.project.id, "notes").unwrap());
+        r.service.select(&ViewId::main(), &r.general.id.0).unwrap();
+        assert!(r.service.archive_channel(&ViewId::main(), &r.workspace, &r.project.id, &notes, false).unwrap().archived);
         assert_eq!(r.core.active_channel_id(&ViewId::main()), r.general.id.0);
-        assert!(r.service.select(&notes.0).is_ok(), "an archived channel stays readable");
+        assert!(r.service.select(&ViewId::main(), &notes.0).is_ok(), "an archived channel stays readable");
     }
 
     #[tokio::test]
@@ -2259,10 +2256,10 @@ mod navigation_action_tests {
         let path = r.create_worktree("feature");
         let channel = r.branch_channel("feature").expect("the worktree gave the branch a channel");
         std::fs::write(std::path::Path::new(&path).join("wip.txt"), "wip").unwrap();
-        let first = r.service.archive_channel(&r.workspace, &r.project.id, &channel.id, false).unwrap();
+        let first = r.service.archive_channel(&ViewId::main(), &r.workspace, &r.project.id, &channel.id, false).unwrap();
         assert!(!first.archived && first.items.iter().any(|item| item.contains("wip.txt")), "{first:?}");
         assert!(std::path::Path::new(&path).exists() && !r.store.lock().unwrap().channel_archived(&channel.id).unwrap());
-        assert!(r.service.archive_channel(&r.workspace, &r.project.id, &channel.id, true).unwrap().archived);
+        assert!(r.service.archive_channel(&ViewId::main(), &r.workspace, &r.project.id, &channel.id, true).unwrap().archived);
         assert!(!std::path::Path::new(&path).exists());
         assert!(r.branches().contains(&"feature".to_string()), "the branch is kept");
         assert!(r.worktree_record(&channel.id).is_none());
@@ -2272,9 +2269,9 @@ mod navigation_action_tests {
     async fn create_worktree_plans_a_path_then_creates_the_channel_and_record_together() {
         let r = rig().await;
         r.git(&["branch", "feature"]);
-        let plan = r.service.worktree_plan(&r.workspace, &r.project.id, "", "feature").unwrap();
+        let plan = r.service.worktree_plan(&ViewId::main(), &r.workspace, &r.project.id, "", "feature").unwrap();
         assert!(plan.path.starts_with(r.dir.path().join("worktrees").to_str().unwrap()) && plan.path.contains("feature"), "{}", plan.path);
-        let path = r.service.create_worktree(&r.workspace, &r.project.id, "", "feature", Some(&plan.channel_id)).unwrap();
+        let path = r.service.create_worktree(&ViewId::main(), &r.workspace, &r.project.id, "", "feature", Some(&plan.channel_id)).unwrap();
         assert_eq!(path, plan.path, "the path of the dialog is the path of the worktree");
         let channel = r.branch_channel("feature").unwrap();
         assert_eq!(channel.id.0, plan.channel_id);
@@ -2285,33 +2282,33 @@ mod navigation_action_tests {
         settle(&r.core).await;
         assert!(r.core.snapshot(&ViewId::main()).branches.iter().any(|row| row.worktree.as_deref().is_some_and(|w| std::path::Path::new(w).canonicalize().ok().as_ref() == Some(&created))), "a branch refresh shows the new worktree");
         // The branch is checked out now, so a second request is refused.
-        assert!(r.service.create_worktree(&r.workspace, &r.project.id, "", "feature", None).unwrap_err().contains("checked out"));
+        assert!(r.service.create_worktree(&ViewId::main(), &r.workspace, &r.project.id, "", "feature", None).unwrap_err().contains("checked out"));
     }
 
     #[tokio::test]
     async fn create_worktree_is_refused_for_a_checked_out_branch_a_bound_channel_and_a_missing_branch() {
         let r = rig().await;
-        assert!(r.service.create_worktree(&r.workspace, &r.project.id, "", "main", None).unwrap_err().contains("checked out"));
-        assert!(r.service.create_worktree(&r.workspace, &r.project.id, "", "nope", None).unwrap_err().contains("no longer exists"));
+        assert!(r.service.create_worktree(&ViewId::main(), &r.workspace, &r.project.id, "", "main", None).unwrap_err().contains("checked out"));
+        assert!(r.service.create_worktree(&ViewId::main(), &r.workspace, &r.project.id, "", "nope", None).unwrap_err().contains("no longer exists"));
         r.git(&["branch", "bound"]);
         let channel = Channel { id: ChannelId::new(), project_id: Some(r.project.id.clone()), name: "bound".into(), agent_id: r.agent.clone(), workspace_mode: WorkspaceMode::Worktree };
         let record = WorktreeRecord { channel_id: channel.id.clone(), path: "/elsewhere".into(), branch: "bound".into(), base_commit: "abc".into(), repo: r.repo.to_string_lossy().into(), owned: false };
         r.store.lock().unwrap().create_named_repository_channel(&channel, "", Some("bound"), Some(&record)).unwrap();
-        assert_eq!(r.service.create_worktree(&r.workspace, &r.project.id, "", "bound", None).unwrap_err(), "This channel already has a worktree.");
+        assert_eq!(r.service.create_worktree(&ViewId::main(), &r.workspace, &r.project.id, "", "bound", None).unwrap_err(), "This channel already has a worktree.");
         assert_eq!(r.worktree_record(&channel.id).unwrap().path, "/elsewhere", "a refusal saves no record");
-        assert!(r.service.create_worktree(&r.workspace, &discard_core::model::ProjectId::new(), "", "bound", None).is_err());
-        assert!(r.service.create_worktree(&r.workspace, &r.project.id, "missing-repo", "bound", None).unwrap_err().contains("repository"));
+        assert!(r.service.create_worktree(&ViewId::main(), &r.workspace, &discard_core::model::ProjectId::new(), "", "bound", None).is_err());
+        assert!(r.service.create_worktree(&ViewId::main(), &r.workspace, &r.project.id, "missing-repo", "bound", None).unwrap_err().contains("repository"));
     }
 
     #[tokio::test]
     async fn a_git_failure_in_create_worktree_saves_no_channel_and_no_record() {
         let r = rig().await;
         r.git(&["branch", "feature"]);
-        let plan = r.service.worktree_plan(&r.workspace, &r.project.id, "", "feature").unwrap();
+        let plan = r.service.worktree_plan(&ViewId::main(), &r.workspace, &r.project.id, "", "feature").unwrap();
         // The target folder exists, so Git cannot add the worktree.
         std::fs::create_dir_all(&plan.path).unwrap();
         std::fs::write(std::path::Path::new(&plan.path).join("keep"), "keep").unwrap();
-        assert!(r.service.create_worktree(&r.workspace, &r.project.id, "", "feature", Some(&plan.channel_id)).is_err());
+        assert!(r.service.create_worktree(&ViewId::main(), &r.workspace, &r.project.id, "", "feature", Some(&plan.channel_id)).is_err());
         assert!(r.branch_channel("feature").is_none());
         assert!(r.store.lock().unwrap().load_channel(&ChannelId(plan.channel_id)).is_err());
         assert_eq!(std::fs::read_to_string(std::path::Path::new(&plan.path).join("keep")).unwrap(), "keep");
@@ -2321,21 +2318,21 @@ mod navigation_action_tests {
     async fn rename_branch_checks_the_name_moves_the_binding_and_keeps_the_history() {
         let r = rig().await;
         r.git(&["branch", "feature"]);
-        let channel = ChannelId(r.service.open_branch("feature").unwrap());
+        let channel = ChannelId(r.service.open_branch(&ViewId::main(), "feature").unwrap());
         let message = Message { id: MessageId::new(), channel_id: channel.clone(), role: Role::User, blocks: vec![Block::Markdown { text: "keep".into() }] };
         r.store.lock().unwrap().insert_message(&message).unwrap();
         r.git(&["branch", "taken"]);
         for (name, reason) in [("", "Enter a branch name"), ("feature", "not the current name"), ("taken", "already exists"), ("bad name", "not a valid branch name")] {
-            assert!(r.service.rename_branch(&r.project.id, "", "feature", name).unwrap_err().contains(reason), "{name}");
+            assert!(r.service.rename_branch(&ViewId::main(), &r.project.id, "", "feature", name).unwrap_err().contains(reason), "{name}");
         }
         assert_eq!(r.branches(), ["feature", "main", "taken"], "a refusal changes nothing");
-        assert_eq!(r.service.rename_branch(&r.project.id, "", "feature", " feature-2 ").unwrap(), "feature-2");
+        assert_eq!(r.service.rename_branch(&ViewId::main(), &r.project.id, "", "feature", " feature-2 ").unwrap(), "feature-2");
         assert_eq!(r.branches(), ["feature-2", "main", "taken"]);
         let moved = r.branch_channel("feature-2").unwrap();
         assert_eq!(moved.id, channel);
         assert!(r.branch_channel("feature").is_none());
         assert_eq!(r.store.lock().unwrap().messages_for_channel(&channel).unwrap().len(), 1);
-        assert!(r.service.rename_branch(&r.project.id, "", "gone", "other").unwrap_err().contains("no longer exists"));
+        assert!(r.service.rename_branch(&ViewId::main(), &r.project.id, "", "gone", "other").unwrap_err().contains("no longer exists"));
     }
 
     #[tokio::test]
@@ -2344,10 +2341,10 @@ mod navigation_action_tests {
         r.git(&["branch", "feature"]);
         let path = r.create_worktree("feature");
         let channel = r.branch_channel("feature").unwrap();
-        assert_eq!(r.service.rename_branch(&r.project.id, "", "feature", "feature-2").unwrap(), "feature-2");
+        assert_eq!(r.service.rename_branch(&ViewId::main(), &r.project.id, "", "feature", "feature-2").unwrap(), "feature-2");
         assert_eq!(run(std::path::Path::new(&path), &["rev-parse", "--abbrev-ref", "HEAD"]), "feature-2");
         assert_eq!(r.worktree_record(&channel.id).unwrap().branch, "feature-2");
-        assert_eq!(r.service.rename_branch(&r.project.id, "", "main", "trunk").unwrap(), "trunk");
+        assert_eq!(r.service.rename_branch(&ViewId::main(), &r.project.id, "", "main", "trunk").unwrap(), "trunk");
         assert_eq!(r.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "trunk");
     }
 
@@ -2355,23 +2352,23 @@ mod navigation_action_tests {
     async fn rename_branch_is_refused_while_its_channel_is_busy() {
         let r = rig().await;
         r.git(&["branch", "feature"]);
-        let channel = ChannelId(r.service.open_branch("feature").unwrap());
+        let channel = ChannelId(r.service.open_branch(&ViewId::main(), "feature").unwrap());
         r.busy(&channel.0);
-        assert!(r.service.rename_branch(&r.project.id, "", "feature", "other").unwrap_err().contains("A turn runs"));
+        assert!(r.service.rename_branch(&ViewId::main(), &r.project.id, "", "feature", "other").unwrap_err().contains("A turn runs"));
         assert_eq!(r.branches(), ["feature", "main"]);
         r.idle(&channel.0);
-        assert!(r.service.rename_branch(&r.project.id, "", "feature", "other").is_ok());
+        assert!(r.service.rename_branch(&ViewId::main(), &r.project.id, "", "feature", "other").is_ok());
     }
 
     #[tokio::test]
     async fn a_store_failure_after_the_git_rename_renames_the_branch_back() {
         let r = rig().await;
         r.git(&["branch", "feature"]);
-        let channel = ChannelId(r.service.open_branch("feature").unwrap());
+        let channel = ChannelId(r.service.open_branch(&ViewId::main(), "feature").unwrap());
         // A stale channel still holds the name `taken` in the store, but Git has no such branch.
         let stale = Channel { id: ChannelId::new(), project_id: Some(r.project.id.clone()), name: "taken".into(), agent_id: r.agent.clone(), workspace_mode: WorkspaceMode::Worktree };
         r.store.lock().unwrap().create_named_repository_channel(&stale, "", Some("taken"), None).unwrap();
-        let error = r.service.rename_branch(&r.project.id, "", "feature", "taken").unwrap_err();
+        let error = r.service.rename_branch(&ViewId::main(), &r.project.id, "", "feature", "taken").unwrap_err();
         assert!(error.contains("old name again"), "{error}");
         assert_eq!(r.branches(), ["feature", "main"], "Git has the old name again");
         assert_eq!(r.store.lock().unwrap().channel_branch(&channel).unwrap().as_deref(), Some("feature"));
@@ -2385,21 +2382,21 @@ mod navigation_action_tests {
         r.git(&["commit", "-q", "--allow-empty", "-m", "one"]);
         r.git(&["commit", "-q", "--allow-empty", "-m", "two"]);
         r.git(&["checkout", "-q", "main"]);
-        assert_eq!(r.service.branch_deletion_info(&r.project.id, "", "wip").unwrap(), 2);
-        assert_eq!(r.service.branch_deletion_info(&r.project.id, "", "merged").unwrap(), 0);
-        let refused = r.service.delete_branch(&r.project.id, "", "wip", false).unwrap();
+        assert_eq!(r.service.branch_deletion_info(&ViewId::main(), &r.project.id, "", "wip").unwrap(), 2);
+        assert_eq!(r.service.branch_deletion_info(&ViewId::main(), &r.project.id, "", "merged").unwrap(), 0);
+        let refused = r.service.delete_branch(&ViewId::main(), &r.project.id, "", "wip", false).unwrap();
         assert_eq!((refused.deleted, refused.unmerged), (false, 2));
         assert!(r.branches().contains(&"wip".to_string()), "the backend refuses without the force choice");
-        assert!(r.service.delete_branch(&r.project.id, "", "merged", false).unwrap().deleted);
+        assert!(r.service.delete_branch(&ViewId::main(), &r.project.id, "", "merged", false).unwrap().deleted);
         // A commit that lands after the dialog opened is counted again at confirm time.
         r.git(&["checkout", "-q", "-b", "late"]);
         r.git(&["checkout", "-q", "main"]);
-        assert_eq!(r.service.branch_deletion_info(&r.project.id, "", "late").unwrap(), 0);
+        assert_eq!(r.service.branch_deletion_info(&ViewId::main(), &r.project.id, "", "late").unwrap(), 0);
         r.git(&["checkout", "-q", "late"]);
         r.git(&["commit", "-q", "--allow-empty", "-m", "late commit"]);
         r.git(&["checkout", "-q", "main"]);
-        assert!(!r.service.delete_branch(&r.project.id, "", "late", false).unwrap().deleted);
-        let forced = r.service.delete_branch(&r.project.id, "", "wip", true).unwrap();
+        assert!(!r.service.delete_branch(&ViewId::main(), &r.project.id, "", "late", false).unwrap().deleted);
+        let forced = r.service.delete_branch(&ViewId::main(), &r.project.id, "", "wip", true).unwrap();
         assert_eq!((forced.deleted, forced.unmerged), (true, 0));
         assert_eq!(r.branches(), ["late", "main"]);
     }
@@ -2407,20 +2404,20 @@ mod navigation_action_tests {
     #[tokio::test]
     async fn delete_branch_is_refused_for_the_default_a_checked_out_branch_and_a_busy_channel() {
         let r = rig().await;
-        assert!(r.service.delete_branch(&r.project.id, "", "main", true).unwrap_err().contains("default branch"));
-        assert!(r.service.branch_deletion_info(&r.project.id, "", "main").is_err());
+        assert!(r.service.delete_branch(&ViewId::main(), &r.project.id, "", "main", true).unwrap_err().contains("default branch"));
+        assert!(r.service.branch_deletion_info(&ViewId::main(), &r.project.id, "", "main").is_err());
         r.git(&["branch", "feature"]);
         let path = r.create_worktree("feature");
-        assert!(r.service.delete_branch(&r.project.id, "", "feature", true).unwrap_err().contains("checked out"));
+        assert!(r.service.delete_branch(&ViewId::main(), &r.project.id, "", "feature", true).unwrap_err().contains("checked out"));
         assert!(std::path::Path::new(&path).exists());
-        r.service.remove_worktree(&r.project.id, "", &path, false).unwrap();
+        r.service.remove_worktree(&ViewId::main(), &r.project.id, "", &path, false).unwrap();
         let channel = r.branch_channel("feature").unwrap();
-        r.service.select(&channel.id.0).unwrap();
+        r.service.select(&ViewId::main(), &channel.id.0).unwrap();
         r.busy(&channel.id.0);
-        assert!(r.service.delete_branch(&r.project.id, "", "feature", true).unwrap_err().contains("A turn runs"));
-        assert!(r.service.branch_deletion_info(&r.project.id, "", "feature").unwrap_err().contains("A turn runs"));
+        assert!(r.service.delete_branch(&ViewId::main(), &r.project.id, "", "feature", true).unwrap_err().contains("A turn runs"));
+        assert!(r.service.branch_deletion_info(&ViewId::main(), &r.project.id, "", "feature").unwrap_err().contains("A turn runs"));
         r.idle(&channel.id.0);
-        assert!(r.service.delete_branch(&r.project.id, "", "feature", false).unwrap().deleted);
+        assert!(r.service.delete_branch(&ViewId::main(), &r.project.id, "", "feature", false).unwrap().deleted);
         assert!(r.store.lock().unwrap().load_channel(&channel.id).is_ok(), "the channel stays. The list moves it to Archived when it has a conversation");
     }
 
@@ -2431,15 +2428,15 @@ mod navigation_action_tests {
         let head = r.git(&["rev-parse", "HEAD"]);
         let root = r.repo.to_string_lossy().into_owned();
         for (name, reason) in [("", "Enter a branch name"), ("main", "already exists"), ("two words", "not a valid branch name")] {
-            assert!(r.service.create_branch(&r.project.id, "", &root, name).unwrap_err().contains(reason), "{name}");
+            assert!(r.service.create_branch(&ViewId::main(), &r.project.id, "", &root, name).unwrap_err().contains(reason), "{name}");
         }
-        assert_eq!(r.service.create_branch(&r.project.id, "", &root, "topic/new").unwrap(), "topic/new");
+        assert_eq!(r.service.create_branch(&ViewId::main(), &r.project.id, "", &root, "topic/new").unwrap(), "topic/new");
         assert_eq!(r.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "topic/new");
         assert_eq!(r.git(&["rev-parse", "HEAD"]), head);
         assert_eq!(std::fs::read_to_string(r.repo.join("a.txt")).unwrap(), "edited\n");
         settle(&r.core).await;
         assert!(r.core.snapshot(&ViewId::main()).branches.iter().any(|row| row.label == "topic/new"), "a branch refresh lists the new branch");
-        assert!(r.service.create_branch(&r.project.id, "", "/not/a/worktree", "x").unwrap_err().contains("no longer available"));
+        assert!(r.service.create_branch(&ViewId::main(), &r.project.id, "", "/not/a/worktree", "x").unwrap_err().contains("no longer available"));
     }
 
     #[tokio::test]
@@ -2448,12 +2445,12 @@ mod navigation_action_tests {
         r.git(&["branch", "feature"]);
         let path = r.create_worktree("feature");
         let channel = r.branch_channel("feature").unwrap();
-        r.service.select(&channel.id.0).unwrap();
+        r.service.select(&ViewId::main(), &channel.id.0).unwrap();
         r.busy(&channel.id.0);
-        assert!(r.service.create_branch(&r.project.id, "", &path, "topic").unwrap_err().contains("A turn runs"));
+        assert!(r.service.create_branch(&ViewId::main(), &r.project.id, "", &path, "topic").unwrap_err().contains("A turn runs"));
         assert_eq!(run(std::path::Path::new(&path), &["rev-parse", "--abbrev-ref", "HEAD"]), "feature");
         r.idle(&channel.id.0);
-        assert_eq!(r.service.create_branch(&r.project.id, "", &path, "topic").unwrap(), "topic");
+        assert_eq!(r.service.create_branch(&ViewId::main(), &r.project.id, "", &path, "topic").unwrap(), "topic");
     }
 
     #[tokio::test]
@@ -2462,14 +2459,14 @@ mod navigation_action_tests {
         r.git(&["branch", "feature"]);
         let path = r.create_worktree("feature");
         let channel = r.branch_channel("feature").unwrap();
-        assert_eq!(r.service.worktree_removal_info(&r.project.id, "", &path).unwrap().files, Vec::<String>::new());
-        let removal = r.service.remove_worktree(&r.project.id, "", &path, false).unwrap();
+        assert_eq!(r.service.worktree_removal_info(&ViewId::main(), &r.project.id, "", &path).unwrap().files, Vec::<String>::new());
+        let removal = r.service.remove_worktree(&ViewId::main(), &r.project.id, "", &path, false).unwrap();
         assert!(removal.removed && removal.files.is_empty());
         assert!(!std::path::Path::new(&path).exists());
         assert!(r.branches().contains(&"feature".to_string()), "the branch stays");
         assert!(r.worktree_record(&channel.id).is_none(), "the record goes");
         assert!(r.store.lock().unwrap().load_channel(&channel.id).is_ok(), "the channel stays");
-        assert!(r.service.remove_worktree(&r.project.id, "", &path, false).unwrap_err().contains("no longer available"));
+        assert!(r.service.remove_worktree(&ViewId::main(), &r.project.id, "", &path, false).unwrap_err().contains("no longer available"));
     }
 
     #[tokio::test]
@@ -2480,13 +2477,13 @@ mod navigation_action_tests {
         let root = std::path::Path::new(&path);
         for index in 0..12 { std::fs::write(root.join(format!("new-{index:02}.txt")), "x").unwrap(); }
         std::fs::write(root.join("a.txt"), "edited\n").unwrap();
-        let info = r.service.worktree_removal_info(&r.project.id, "", &path).unwrap();
+        let info = r.service.worktree_removal_info(&ViewId::main(), &r.project.id, "", &path).unwrap();
         assert_eq!((info.files.len(), info.more), (10, 3));
-        let refused = r.service.remove_worktree(&r.project.id, "", &path, false).unwrap();
+        let refused = r.service.remove_worktree(&ViewId::main(), &r.project.id, "", &path, false).unwrap();
         assert!(!refused.removed);
         assert_eq!((refused.files.len(), refused.more), (10, 3), "the refusal returns the file list");
         assert!(root.exists(), "the backend refuses without the force choice");
-        assert!(r.service.remove_worktree(&r.project.id, "", &path, true).unwrap().removed);
+        assert!(r.service.remove_worktree(&ViewId::main(), &r.project.id, "", &path, true).unwrap().removed);
         assert!(!root.exists());
     }
 
@@ -2494,15 +2491,15 @@ mod navigation_action_tests {
     async fn remove_worktree_is_refused_for_the_main_checkout_and_a_busy_channel() {
         let r = rig().await;
         let main = r.repo.to_string_lossy().into_owned();
-        assert!(r.service.remove_worktree(&r.project.id, "", &main, true).unwrap_err().contains("main checkout"));
-        assert!(r.service.worktree_removal_info(&r.project.id, "", &main).unwrap_err().contains("main checkout"));
+        assert!(r.service.remove_worktree(&ViewId::main(), &r.project.id, "", &main, true).unwrap_err().contains("main checkout"));
+        assert!(r.service.worktree_removal_info(&ViewId::main(), &r.project.id, "", &main).unwrap_err().contains("main checkout"));
         r.git(&["branch", "feature"]);
         let path = r.create_worktree("feature");
         let channel = r.branch_channel("feature").unwrap();
-        r.service.select(&channel.id.0).unwrap();
+        r.service.select(&ViewId::main(), &channel.id.0).unwrap();
         r.busy(&channel.id.0);
-        assert!(r.service.remove_worktree(&r.project.id, "", &path, true).unwrap_err().contains("A turn runs"));
-        assert!(r.service.worktree_removal_info(&r.project.id, "", &path).unwrap_err().contains("A turn runs"));
+        assert!(r.service.remove_worktree(&ViewId::main(), &r.project.id, "", &path, true).unwrap_err().contains("A turn runs"));
+        assert!(r.service.worktree_removal_info(&ViewId::main(), &r.project.id, "", &path).unwrap_err().contains("A turn runs"));
         assert!(std::path::Path::new(&path).exists() && r.worktree_record(&channel.id).is_some());
     }
 
@@ -2516,7 +2513,7 @@ mod navigation_action_tests {
         let borrower = Channel { id: ChannelId::new(), project_id: Some(r.project.id.clone()), name: "borrower".into(), agent_id: r.agent.clone(), workspace_mode: WorkspaceMode::Worktree };
         let record = WorktreeRecord { channel_id: borrower.id.clone(), path: path.clone(), branch: "feature".into(), base_commit: "abc".into(), repo: r.repo.to_string_lossy().into(), owned: false };
         r.store.lock().unwrap().create_named_channel(&borrower, None, Some(&record)).unwrap();
-        assert!(r.service.remove_worktree(&r.project.id, "", &path, false).unwrap().removed);
+        assert!(r.service.remove_worktree(&ViewId::main(), &r.project.id, "", &path, false).unwrap().removed);
         assert!(r.worktree_record(&owner.id).is_none() && r.worktree_record(&borrower.id).is_none());
         assert!(r.store.lock().unwrap().load_channel(&borrower.id).is_ok());
     }

@@ -9,6 +9,7 @@ import {
   type AgentRequest,
 } from './api'
 import { applyTheme } from './theme'
+import { currentWindowLabel } from './window'
 import type {
   HistoryDto,
   MessageDto,
@@ -139,13 +140,18 @@ export function useStore() {
   }
   onMounted(async () => {
     try {
+      // A listener with the default target receives the events that the core sends to another window. These three
+      // events belong to the view of one window, so the store listens for its own window only.
+      const target = { kind: 'WebviewWindow', label: currentWindowLabel() } as const
       for (const [name, callback] of [
         ['discard://snapshot', (payload: SnapshotDto) => acceptSnapshot(payload)],
         ['discard://history', (payload: HistoryDto) => acceptHistory(payload)],
         ['discard://thread-history', (payload: ThreadHistoryDto) => acceptThreadHistory(payload)],
       ] as const) {
-        const stop = await listen(name, (event) =>
-          callback(event.payload as SnapshotDto & HistoryDto & ThreadHistoryDto),
+        const stop = await listen(
+          name,
+          (event) => callback(event.payload as SnapshotDto & HistoryDto & ThreadHistoryDto),
+          { target },
         )
         if (disposed) {
           stop()
