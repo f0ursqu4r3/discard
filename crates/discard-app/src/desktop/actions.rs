@@ -85,7 +85,7 @@ pub fn run(app: &AppHandle, core: &Arc<AppCore>, actions: &DesktopActions, view:
         Plan::CancelTurn => match channel { Some(id) => core.cancel_in(Some(id)), None => core.cancel(view) },
         Plan::ToggleTerminal => { let _ = app.emit_to(view.label(), "discard://toggle-terminal", ()); }
         Plan::ToggleMemberList => { let _ = core.set_member_list_visible(view, !core.snapshot(view).member_list_visible); }
-        Plan::Ask(ending) => core.ask(ending),
+        Plan::Ask(ending) => super::windows::ask_visibly(app, core, ending),
         Plan::Perform(ending) => perform(app, core, actions, ending),
         Plan::Minimize => if let Some(window) = app.get_webview_window(view.label()) { let _ = window.minimize(); },
         Plan::Zoom => if let Some(window) = app.get_webview_window(view.label()) { if window.is_maximized().unwrap_or(false) { let _ = window.unmaximize(); } else { let _ = window.maximize(); } },

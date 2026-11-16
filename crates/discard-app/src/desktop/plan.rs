@@ -79,10 +79,37 @@ pub fn window_kind(label: &str) -> WindowKind {
     }
 }
 
+/// The visible app windows besides the window with label `closing`, in order. A label that is not an app window, such
+/// as Settings, is left out.
+pub fn other_app_labels(visible: &[String], closing: &str) -> Vec<String> {
+    let mut labels: Vec<String> = visible.iter().filter(|label| label.as_str() != closing && super::view::ViewId::from_label(label).is_some()).cloned().collect();
+    labels.sort();
+    labels
+}
+
 /// How many app windows stay open when the window with label `closing` closes. `visible` lists the labels of the
 /// visible windows. A label that is not an app window, such as Settings, does not count.
-pub fn other_app_windows(visible: &[String], closing: &str) -> usize {
-    visible.iter().filter(|label| label.as_str() != closing && super::view::ViewId::from_label(label).is_some()).count()
+pub fn other_app_windows(visible: &[String], closing: &str) -> usize { other_app_labels(visible, closing).len() }
+
+/// What the app does so that the focused view belongs to a window the user can see.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refocus {
+    /// Focus this view. Its window is visible.
+    Focus(super::view::ViewId),
+    /// No app window is visible: show the main window and focus its view.
+    ShowMain,
+}
+
+/// Choose how to keep the focus on a visible window. `visible` lists the visible app windows. `None` when the focused
+/// view has a visible window. The menu, the shortcuts, and the quit question follow the focused view, so they must
+/// not go to a hidden window. The core cannot see the windows: the caller passes what it sees.
+pub fn refocus(visible: &[String], focused: &super::view::ViewId) -> Option<Refocus> {
+    let visible = other_app_labels(visible, "");
+    if visible.iter().any(|label| label == focused.label()) { return None; }
+    Some(match visible.first().and_then(|label| super::view::ViewId::from_label(label)) {
+        Some(view) => Refocus::Focus(view),
+        None => Refocus::ShowMain,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,7 +208,7 @@ pub fn plugin_item_notice(plugin: &str, error: &str) -> String { format!("{plugi
 
 #[cfg(test)]
 mod tests {
-    use super::{ArchiveStep, Close, Confirm, Plan, TargetedPlan, WindowKind, archive_step, channel_target_allowed, close_plan, other_app_windows, plan, plan_targeted, prepare_exit, window_kind};
+    use super::{ArchiveStep, Close, Confirm, Plan, TargetedPlan, Refocus, WindowKind, archive_step, channel_target_allowed, close_plan, other_app_labels, other_app_windows, refocus, plan, plan_targeted, prepare_exit, window_kind};
     use discard_core::workspace::ArchiveOutcome;
     use discard_core::action::Action;
     use discard_core::settings_page::SettingsPage;
@@ -364,6 +391,43 @@ mod tests {
         assert_eq!(other_app_windows(&labels(&["main", "settings", "other"]), "main"), 0, "Settings is not an app window");
         assert_eq!(other_app_windows(&labels(&["main", "project-a", "project-b"]), "project-a"), 2);
         assert_eq!(other_app_windows(&[], "project-a"), 0);
+    }
+
+    fn labels(items: &[&str]) -> Vec<String> { items.iter().map(|label| (*label).to_owned()).collect() }
+    fn project(label: &str) -> crate::desktop::view::ViewId { crate::desktop::view::ViewId::from_label(label).unwrap() }
+    fn main_view() -> crate::desktop::view::ViewId { crate::desktop::view::ViewId::main() }
+
+    #[test]
+    fn the_windows_that_stay_are_listed_in_order() {
+        assert_eq!(other_app_labels(&labels(&["main", "project-b", "settings", "project-a"]), "project-a"), labels(&["main", "project-b"]));
+        assert!(other_app_labels(&labels(&["project-a"]), "project-a").is_empty());
+    }
+
+    #[test]
+    fn a_project_window_that_closes_with_the_main_window_hidden_shows_the_main_window() {
+        // A project window removes its own project while the main window is hidden: the main window is not visible.
+        let stay = other_app_labels(&labels(&["project-a"]), "project-a");
+        assert_eq!(refocus(&stay, &project("project-a")), Some(Refocus::ShowMain));
+        // The same close with another window visible shows nothing.
+        let stay = other_app_labels(&labels(&["project-a", "project-b"]), "project-a");
+        assert_eq!(refocus(&stay, &project("project-b")), None);
+    }
+
+    #[test]
+    fn the_focus_moves_to_a_visible_window_when_the_focused_window_is_gone_or_hidden() {
+        // The main window hides and a project window stays: the focus moves there.
+        assert_eq!(refocus(&labels(&["project-a"]), &main_view()), Some(Refocus::Focus(project("project-a"))));
+        // A project window closes and the main window stays.
+        assert_eq!(refocus(&labels(&["main", "project-b"]), &project("project-a")), Some(Refocus::Focus(main_view())));
+        // The focused window is visible: nothing changes.
+        assert_eq!(refocus(&labels(&["main", "project-a"]), &project("project-a")), None);
+        assert_eq!(refocus(&labels(&["main"]), &main_view()), None);
+    }
+
+    #[test]
+    fn a_question_with_no_visible_app_window_shows_the_main_window() {
+        assert_eq!(refocus(&[], &main_view()), Some(Refocus::ShowMain));
+        assert_eq!(refocus(&labels(&["settings"]), &main_view()), Some(Refocus::ShowMain), "Settings is not an app window");
     }
 
     #[test]

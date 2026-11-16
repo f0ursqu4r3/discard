@@ -346,8 +346,6 @@ pub fn run(
         ])
         .build(tauri::generate_context!())?;
     app.run(move |handle, event| {
-        #[cfg(not(target_os = "macos"))]
-        let _ = handle;
         if let tauri::RunEvent::Exit = event { exit_terminals.close_all(); }
         // A click on the Dock icon brings the main window back when no app window shows.
         #[cfg(target_os = "macos")]
@@ -358,7 +356,7 @@ pub fn run(
             // An exit request is a quit, so the Quit rule decides, with no other app window and no background mode.
             if let plan::Close::Ask(ending) = plan::close_plan(plan::WindowKind::Main, 0, false, exit_core.any_running(), exit_actions.confirms()) {
                 api.prevent_exit();
-                exit_core.ask(ending);
+                windows::ask_visibly(handle, &exit_core, ending);
             } else if exit_core.any_running() { exit_core.cancel_all(); }
         }
     });
