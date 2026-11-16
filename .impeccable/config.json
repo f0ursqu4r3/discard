@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "broken-image",
+        "value": "*",
+        "files": [
+          "web/src/plugin/plugin.test.ts"
+        ],
+        "createdAt": "2026-11-08T01:34:57.587Z",
+        "reason": "Codex: existing hostile-text fixtures verify that plugin strings never create HTML images."
+      }
+    ]
+  }
+}
