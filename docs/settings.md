@@ -13,7 +13,7 @@ version = 1
 [general]
 default_provider = "claude"       # claude or codex
 confirm_while_working = true      # ask before Quit or Safe Mode while a turn runs
-keep_running_in_background = true  # true: the app goes on when the last window closes
+keep_running_in_background = true  # true: the app goes on when the last window closes. Default false on Linux
 
 [appearance]
 theme_source = "default"          # default, ghostty, or custom
@@ -33,7 +33,7 @@ zoom = "cmd-shift-k"
 | `version` | integer | none. Discard writes `1` the first time it writes the file. |
 | `general.default_provider` | `"claude"` or `"codex"` | `"claude"` |
 | `general.confirm_while_working` | `true` or `false` | `true` |
-| `general.keep_running_in_background` | `true` or `false` | `true` |
+| `general.keep_running_in_background` | `true` or `false` | `true`. On Linux: `false` |
 | `appearance.theme_source` | `"default"`, `"ghostty"`, or `"custom"` | `"default"` |
 | `appearance.theme` | A Ghostty `theme` value: `Name` or `light:X,dark:Y` | `"light:Catppuccin Latte,dark:Catppuccin Mocha"` |
 | `appearance.ignore_plugin_themes` | `true` or `false` | `false` |
@@ -545,12 +545,12 @@ window.
 ## Closing the main window
 
 Closing an app window (the main window or a project window) closes that window only. The main window hides, and
-agents continue. When `keep_running_in_background` is `true` (the default), the close of the last app window does not
+agents continue. When `keep_running_in_background` is `true` (the default on macOS and Windows), the close of the last app window does not
 end the app. On macOS the Dock icon shows the main window again. On Windows and Linux a tray icon has the items
 `Main Window` and `Quit Discard`, and on Windows a left click on the icon shows the main window. If the tray icon cannot
 be created, the app does not run in the background in that session, and the General page says why.
 
-When `keep_running_in_background` is `false`, or the tray icon is not available, the close of the last app window
+When `keep_running_in_background` is `false` (the default on Linux), or the tray icon is not available, the close of the last app window
 quits the app. While a turn runs and `confirm_while_working` is `true`, the focused app window shows the Quit notice
 first. The main window shows first when no app window is visible.
 

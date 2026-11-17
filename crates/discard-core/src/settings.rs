@@ -113,12 +113,15 @@ pub struct GeneralSettings {
     pub keep_running_in_background: bool,
 }
 
+/// The default of `keep_running_in_background`. Off on Linux: a tray icon is not available on every Linux desktop.
+pub fn keep_running_in_background_default(linux: bool) -> bool { !linux }
+
 impl Default for GeneralSettings {
     fn default() -> Self {
         GeneralSettings {
             default_provider: "claude".to_string(),
             confirm_while_working: true,
-            keep_running_in_background: true,
+            keep_running_in_background: keep_running_in_background_default(cfg!(target_os = "linux")),
         }
     }
 }
@@ -660,28 +663,38 @@ mod tests {
     }
 
     #[test]
-    fn keep_running_in_background_defaults_to_on_and_saves() {
+    fn keep_running_in_background_defaults_to_off_on_linux_only() {
+        assert!(!keep_running_in_background_default(true));
+        assert!(keep_running_in_background_default(false));
+        let default = keep_running_in_background_default(cfg!(target_os = "linux"));
+        assert_eq!(GeneralSettings::default().keep_running_in_background, default);
         let dir = tempfile::tempdir().unwrap();
-        let path = path_in(&dir);
-        let mut store = SettingsStore::open(&path);
-        assert!(store.settings().general.keep_running_in_background);
-        assert!(GeneralSettings::default().keep_running_in_background);
-        store.apply(Change::KeepRunningInBackground(false)).unwrap();
-        assert!(!store.settings().general.keep_running_in_background);
-        let text = fs::read_to_string(&path).unwrap();
-        assert!(text.contains("keep_running_in_background = false"), "{text}");
-        let reopened = SettingsStore::open(&path);
-        assert!(!reopened.settings().general.keep_running_in_background);
-        assert!(reopened.issues().is_empty());
+        assert_eq!(SettingsStore::open(&path_in(&dir)).settings().general.keep_running_in_background, default);
     }
 
     #[test]
-    fn keep_running_in_background_with_a_wrong_type_falls_back_to_on() {
+    fn keep_running_in_background_saves_each_value() {
+        for on in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = path_in(&dir);
+            let mut store = SettingsStore::open(&path);
+            store.apply(Change::KeepRunningInBackground(on)).unwrap();
+            assert_eq!(store.settings().general.keep_running_in_background, on);
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(text.contains(&format!("keep_running_in_background = {on}")), "{text}");
+            let reopened = SettingsStore::open(&path);
+            assert_eq!(reopened.settings().general.keep_running_in_background, on);
+            assert!(reopened.issues().is_empty());
+        }
+    }
+
+    #[test]
+    fn keep_running_in_background_with_a_wrong_type_falls_back_to_the_default() {
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(&dir);
         fs::write(&path, "version = 1\n[general]\nkeep_running_in_background = \"no\"\n").unwrap();
         let store = SettingsStore::open(&path);
-        assert!(store.settings().general.keep_running_in_background);
+        assert_eq!(store.settings().general.keep_running_in_background, GeneralSettings::default().keep_running_in_background);
         assert_eq!(store.issues().len(), 1);
         assert_eq!(store.issues()[0].key, "general.keep_running_in_background");
     }

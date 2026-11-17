@@ -90,7 +90,7 @@ mod background_tests {
 
     #[test]
     fn the_general_page_reports_the_background_setting_and_the_tray_problem() {
-        let general = GeneralSettings::default();
+        let general = GeneralSettings { keep_running_in_background: true, ..GeneralSettings::default() };
         let page = general_page(&general, &[], serde_json::json!([]), None);
         assert_eq!(page["keepRunningInBackground"], serde_json::json!(true));
         assert_eq!(page["backgroundUnavailable"], serde_json::Value::Null);
