@@ -152,6 +152,22 @@ test('a session that ended before the panel attached opens as exited', () => {
   expect(statusLine(view)).toBe('The shell stopped (Hangup).')
 })
 
+test('a moved session shows the notice and cannot restart or be killed from this window', () => {
+  const running = opened(connecting(), {
+    sessionId: 's',
+    cwd: '/work',
+    scrollback: '',
+    running: true,
+    exitCode: null,
+    signal: null,
+  })
+  const view = applyEvent(running, { kind: 'moved' })
+  expect(view.phase).toBe('moved')
+  expect(statusLine(view)).toBe('This terminal is open in another window.')
+  expect(canRestart(view)).toBe(false)
+  expect(canKill(view)).toBe(false)
+})
+
 test('a closed or failed session shows its reason and can restart', () => {
   const closed = applyEvent(connecting(), { kind: 'closed', reason: 'The folder was removed.' })
   expect(closed.phase).toBe('closed')

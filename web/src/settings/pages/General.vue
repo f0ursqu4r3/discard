@@ -11,6 +11,8 @@ import SettingsCard from '../ui/SettingsCard.vue'
 type General = {
   defaultProvider: string
   confirmWhileWorking: boolean
+  keepRunningInBackground: boolean
+  backgroundUnavailable: string | null
   providers: string[]
   issues: string[]
   themeProblems: string[]
@@ -79,6 +81,22 @@ onUnmounted(() => stop?.())
           aria-label="Confirm while working"
           :model-value="value.confirmWhileWorking"
           @update:model-value="patch({ confirmWhileWorking: $event })"
+        />
+      </SettingsRow>
+    </SettingsCard>
+    <SettingsCard title="Background">
+      <SettingsRow
+        label="Keep running in the background when all windows are closed"
+        label-for="keep-running-in-background"
+        :help="value.backgroundUnavailable ?? 'Agents continue while no window is open'"
+        help-id="keep-running-in-background-help"
+      >
+        <Switch
+          id="keep-running-in-background"
+          aria-label="Keep running in the background when all windows are closed"
+          aria-describedby="keep-running-in-background-help"
+          :model-value="value.keepRunningInBackground"
+          @update:model-value="patch({ keepRunningInBackground: $event })"
         />
       </SettingsRow>
     </SettingsCard>

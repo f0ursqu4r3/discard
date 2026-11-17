@@ -24,7 +24,7 @@ fn sink(heard: &Arc<Mutex<Heard>>) -> Sink {
         match event {
             Event::Output(bytes) => heard.output.extend(bytes),
             Event::Exit(exit) => heard.exit = Some(exit),
-            Event::Closed(_) => {}
+            Event::Moved | Event::Closed(_) => {}
         }
         true
     })
@@ -56,7 +56,7 @@ fn a_shell_runs_a_command_and_its_output_comes_back() {
     let (session, created) = terminals.open("channel-1", "project-1", shell_spec(dir.path().to_path_buf())).unwrap();
     assert!(created);
     let heard = Arc::new(Mutex::new(Heard::default()));
-    session.attach(sink(&heard));
+    session.attach("main", sink(&heard));
 
     session.write(b"echo hello\n".to_vec()).unwrap();
     wait_for("the echo output", || contains(&heard.lock().unwrap().output, "hello"));
@@ -68,7 +68,7 @@ fn a_shell_runs_a_command_and_its_output_comes_back() {
 
     // A listener that attaches later gets the earlier output as scrollback, then the new output.
     let late = Arc::new(Mutex::new(Heard::default()));
-    let attached = session.attach(sink(&late));
+    let attached = session.attach("main", sink(&late));
     assert!(contains(&attached.scrollback, "hello"));
     session.write(b"echo again\n".to_vec()).unwrap();
     wait_for("the later output", || contains(&late.lock().unwrap().output, "again"));
@@ -84,7 +84,7 @@ fn the_shell_starts_in_the_given_folder() {
     let terminals = Terminals::default();
     let (session, _) = terminals.open("channel-1", "project-1", shell_spec(dir.path().to_path_buf())).unwrap();
     let heard = Arc::new(Mutex::new(Heard::default()));
-    session.attach(sink(&heard));
+    session.attach("main", sink(&heard));
     session.write(b"pwd -P\n".to_vec()).unwrap();
     let expected = dir.path().canonicalize().unwrap().to_string_lossy().into_owned();
     wait_for("the working folder", || contains(&heard.lock().unwrap().output, &expected));
@@ -97,7 +97,7 @@ fn the_exit_code_arrives_after_the_output_and_the_session_stays() {
     let terminals = Terminals::default();
     let (session, _) = terminals.open("channel-1", "project-1", shell_spec(dir.path().to_path_buf())).unwrap();
     let heard = Arc::new(Mutex::new(Heard::default()));
-    session.attach(sink(&heard));
+    session.attach("main", sink(&heard));
     session.write(b"echo bye; exit 3\n".to_vec()).unwrap();
     wait_for("the exit notice", || heard.lock().unwrap().exit.is_some());
     let heard = heard.lock().unwrap();
@@ -106,7 +106,7 @@ fn the_exit_code_arrives_after_the_output_and_the_session_stays() {
     drop(heard);
     // The exited session keeps its output until it closes.
     assert!(terminals.get("channel-1").is_some());
-    assert!(contains(&session.attach(sink(&Arc::new(Mutex::new(Heard::default())))).scrollback, "bye"));
+    assert!(contains(&session.attach("main", sink(&Arc::new(Mutex::new(Heard::default())))).scrollback, "bye"));
     assert_eq!(session.exit().unwrap().code, Some(3));
     assert!(session.write(b"x".to_vec()).is_err());
     terminals.close_channel("channel-1", None);
@@ -118,7 +118,7 @@ fn closing_a_session_kills_its_process_group() {
     let terminals = Terminals::default();
     let (session, _) = terminals.open("channel-1", "project-1", shell_spec(dir.path().to_path_buf())).unwrap();
     let heard = Arc::new(Mutex::new(Heard::default()));
-    session.attach(sink(&heard));
+    session.attach("main", sink(&heard));
     // A background child that would outlive a shell that only the shell pid receives a signal.
     session.write(b"sleep 60 & echo child=$!\n".to_vec()).unwrap();
     wait_for("the child pid", || String::from_utf8_lossy(&heard.lock().unwrap().output).contains("child="));

@@ -15,6 +15,8 @@ import { useMediaQuery } from '@vueuse/core';
 import { ScanEye, GitPullRequest, ListChecks } from '@lucide/vue';
 import { toast } from 'vue-sonner';
 import { useStore } from './bridge/store';
+import { currentWindowLabel } from './bridge/window';
+import { windowMode } from './lib/window-mode';
 import { useWebShortcuts } from './bridge/shortcuts';
 import {
   setMemberListVisible,
@@ -45,6 +47,8 @@ import {
   getConversations,
   selectProject,
   removeProject,
+  openProjectWindow,
+  showMainWindow,
   revealProject,
   restoreConversation,
   openAgentChat,
@@ -137,6 +141,8 @@ import type { TranscriptPosition } from './components/workspace/transcript';
 // Match the macOS overlay in tauri.conf.json; browser previews keep their normal inset.
 const integratedTitlebar = isTauri() && /mac/i.test(navigator.platform);
 const store = useStore();
+// A project window has no project rail. The window mode is read once, from the hash that the window opened with.
+const projectWindow = windowMode(location.hash).kind === 'project';
 const mainPanel = ref<HTMLElement | null>(null);
 const agentAvatar = useAgentAvatar(() => store.snapshot?.agentId);
 const activeAgent = computed(
@@ -240,7 +246,10 @@ async function loadRailLayout() {
   }
 }
 async function refreshProjects() {
-  const [list, layout] = await Promise.all([getProjects(), loadRailLayout()]);
+  const [list, layout] = await Promise.all([
+    getProjects(),
+    projectWindow ? null : loadRailLayout(),
+  ]);
   projects.value = list;
   railLayout.value = layout;
 }
@@ -359,11 +368,28 @@ const navigationPage = computed<WorkspacePage>(() =>
 let stopConversationOpened: UnlistenFn | undefined;
 let stopAgentProfile: UnlistenFn | undefined;
 let stopToggleTerminal: UnlistenFn | undefined;
+let stopNavigate: UnlistenFn | undefined;
 let disposed = false;
+// A listener with the default target receives the events that the core sends to another window. These events belong
+// to this window, so each listener names it.
+const windowTarget = {
+  target: { kind: 'WebviewWindow', label: currentWindowLabel() },
+} as const;
+const workspacePages: readonly string[] = [
+  'conversation',
+  'overview',
+  'agents',
+  'memory',
+  'artifacts',
+  'direct-messages',
+  'project-settings',
+] satisfies WorkspacePage[];
 onMounted(async () => {
   try {
-    const stop = await listen('discard://conversation-opened', () =>
-      navigate('conversation')
+    const stop = await listen(
+      'discard://conversation-opened',
+      () => navigate('conversation'),
+      windowTarget
     );
     if (disposed) stop();
     else stopConversationOpened = stop;
@@ -373,17 +399,35 @@ onMounted(async () => {
         if (profileBusy.value) return;
         if (event.payload) profileId.value = event.payload;
         else navigate('direct-messages');
-      }
+      },
+      windowTarget
     );
     if (disposed) stopProfile();
     else stopAgentProfile = stopProfile;
+    // The core sends this event to the main window only: a project window shows a page of the main window with it.
+    if (!projectWindow) {
+      const stopPage = await listen<string>(
+        'discard://navigate',
+        (event) => {
+          if (workspacePages.includes(event.payload))
+            navigate(event.payload as WorkspacePage);
+        },
+        windowTarget
+      );
+      if (disposed) stopPage();
+      else stopNavigate = stopPage;
+    }
   } catch (error) {
     toast.error(String(error));
   }
 });
 onMounted(async () => {
   try {
-    const stop = await listen('discard://toggle-terminal', toggleTerminal);
+    const stop = await listen(
+      'discard://toggle-terminal',
+      toggleTerminal,
+      windowTarget
+    );
     if (disposed) stop();
     else stopToggleTerminal = stop;
   } catch (error) {
@@ -395,6 +439,7 @@ onUnmounted(() => {
   stopToggleTerminal?.();
   stopConversationOpened?.();
   stopAgentProfile?.();
+  stopNavigate?.();
   stopProjectCatalogue?.();
   stopProjectProfiles?.();
 });
@@ -482,11 +527,12 @@ const branchless = computed(() => {
 const appearance = useAppearanceSettings((error) => {
   store.error = error;
 });
-const railWidth = computed(
-  () =>
-    (appearance.value.miniProjectRail ? 48 : 72) *
-    (store.snapshot?.theme.spacingScale ?? 1) *
-    (store.snapshot?.theme.fontScale ?? 1)
+const railWidth = computed(() =>
+  projectWindow
+    ? 0
+    : (appearance.value.miniProjectRail ? 48 : 72) *
+      (store.snapshot?.theme.spacingScale ?? 1) *
+      (store.snapshot?.theme.fontScale ?? 1)
 );
 const currentLayout = ref<number[]>([]);
 const heading = computed(() =>
@@ -542,13 +588,23 @@ const tools = computed(() => {
   );
 });
 function navigate(value: WorkspacePage) {
+  // A project window has no direct messages. The main window shows them, and this window keeps its page.
+  if (projectWindow && value === 'direct-messages') {
+    showMainWindow(value).catch((error) =>
+      toast.error('Could not show the main window', {
+        description: String(error),
+      })
+    );
+    navigationOpen.value = false;
+    return;
+  }
   page.value = value;
   if (value !== 'conversation') contextOpen.value = false;
   navigationOpen.value = false;
   if (value === 'conversation') conversationTab.value = 'conversation';
 }
 async function navigateFromSidebar(value: WorkspacePage) {
-  if (value !== 'direct-messages') {
+  if (value !== 'direct-messages' || projectWindow) {
     navigate(value);
     return;
   }
@@ -659,6 +715,17 @@ async function action(id: string) {
   }
 }
 async function projectAction(id: ProjectMenuAction, project: ProjectEntry) {
+  if (id === 'open-window') {
+    // This action opens another window and changes nothing here, so a busy navigation does not block it.
+    try {
+      await openProjectWindow(project.id);
+    } catch (error) {
+      toast.error('Could not complete project action', {
+        description: String(error),
+      });
+    }
+    return;
+  }
   if (switching.value) return;
   switching.value = true;
   try {
@@ -1276,6 +1343,7 @@ watch(
         @rail-change="railChange"
         :projects="projects"
         :rail-layout="railLayout"
+        :rail="!projectWindow"
         v-if="isCompact"
         class="shrink-0"
         compact
@@ -1313,6 +1381,7 @@ watch(
               @rail-change="railChange"
               :projects="projects"
               :rail-layout="railLayout"
+              :rail="!projectWindow"
               :snapshot="store.snapshot"
               :project-channels="projectChannels"
               :page="navigationPage"

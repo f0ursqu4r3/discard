@@ -109,6 +109,8 @@ impl Default for AppearanceSettings {
 pub struct GeneralSettings {
     pub default_provider: String,
     pub confirm_while_working: bool,
+    /// Keep the app running when the last app window closes. The tray icon, or the Dock on macOS, is the way back.
+    pub keep_running_in_background: bool,
 }
 
 impl Default for GeneralSettings {
@@ -116,6 +118,7 @@ impl Default for GeneralSettings {
         GeneralSettings {
             default_provider: "claude".to_string(),
             confirm_while_working: true,
+            keep_running_in_background: true,
         }
     }
 }
@@ -135,6 +138,7 @@ pub enum Change {
     ResetKeybinding(Action),
     DefaultProvider(String),
     ConfirmWhileWorking(bool),
+    KeepRunningInBackground(bool),
     ThemeSource(ThemeSource),
     /// A Ghostty `theme` value: `Name` or `light:X,dark:Y`.
     Theme(String),
@@ -436,6 +440,15 @@ fn evaluate(doc: &DocumentMut) -> (Settings, Vec<SettingsIssue>) {
                         ),
                     }
                 }
+                if let Some(item) = general.get("keep_running_in_background") {
+                    match item.as_bool() {
+                        Some(on) => settings.general.keep_running_in_background = on,
+                        None => issue(
+                            "general.keep_running_in_background",
+                            "must be true or false".to_string(),
+                        ),
+                    }
+                }
             }
         },
     }
@@ -545,6 +558,9 @@ fn edit_doc(doc: &mut DocumentMut, change: Change) {
         Change::ConfirmWhileWorking(on) => {
             ("general", "confirm_while_working", Value::from(on))
         }
+        Change::KeepRunningInBackground(on) => {
+            ("general", "keep_running_in_background", Value::from(on))
+        }
         Change::ThemeSource(source) => {
             ("appearance", "theme_source", Value::from(source.as_str()))
         }
@@ -641,6 +657,33 @@ mod tests {
         assert!(store.settings().general.confirm_while_working);
         assert_eq!(store.issues().len(), 1);
         assert_eq!(store.issues()[0].key, "general.confirm_while_working");
+    }
+
+    #[test]
+    fn keep_running_in_background_defaults_to_on_and_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        let mut store = SettingsStore::open(&path);
+        assert!(store.settings().general.keep_running_in_background);
+        assert!(GeneralSettings::default().keep_running_in_background);
+        store.apply(Change::KeepRunningInBackground(false)).unwrap();
+        assert!(!store.settings().general.keep_running_in_background);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("keep_running_in_background = false"), "{text}");
+        let reopened = SettingsStore::open(&path);
+        assert!(!reopened.settings().general.keep_running_in_background);
+        assert!(reopened.issues().is_empty());
+    }
+
+    #[test]
+    fn keep_running_in_background_with_a_wrong_type_falls_back_to_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        fs::write(&path, "version = 1\n[general]\nkeep_running_in_background = \"no\"\n").unwrap();
+        let store = SettingsStore::open(&path);
+        assert!(store.settings().general.keep_running_in_background);
+        assert_eq!(store.issues().len(), 1);
+        assert_eq!(store.issues()[0].key, "general.keep_running_in_background");
     }
 
     #[test]

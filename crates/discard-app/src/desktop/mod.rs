@@ -7,6 +7,7 @@ pub mod dto;
 pub mod pump;
 pub mod terminal;
 pub mod threads;
+pub mod view;
 
 use core::{AppCore, CoreInit};
 use discard_core::ghostty::{live::LiveTheme, spec::Appearance};
@@ -31,9 +32,10 @@ struct WebEmit {
     settings: Arc<Mutex<SettingsStore>>,
     menu_state: Mutex<Option<(discard_core::action::MenuContext, discard_core::keymap::Keymap)>>,
 }
-impl Emit for WebEmit {
-    fn snapshot(&self, value: &SnapshotDto) {
-        let ctx = self.core.menu_context();
+impl WebEmit {
+    /// Rebuild the native menu when its context or the keymap changed.
+    fn update_menu(&self, view: &view::ViewId) {
+        let ctx = self.core.menu_context(view);
         let map = self.settings.lock().unwrap_or_else(|e| e.into_inner()).settings().keymap.clone();
         let mut previous = self.menu_state.lock().unwrap_or_else(|e| e.into_inner());
         if previous.as_ref() != Some(&(ctx.clone(), map.clone())) {
@@ -45,13 +47,20 @@ impl Emit for WebEmit {
                 Err(error) => tracing::warn!(%error, "cannot update native menu"),
             }
         }
-        let _ = self.app.emit("discard://snapshot", value);
     }
-    fn history(&self, value: &HistoryDto) {
-        let _ = self.app.emit("discard://history", value);
+}
+// A view event goes to the window of the view. The web store listens with the label of its window as the target.
+impl Emit for WebEmit {
+    fn snapshot(&self, view: &view::ViewId, value: &SnapshotDto) {
+        // The native menu follows the focused view. Each tick sends every view its snapshot, so a change of focus reaches it.
+        if *view == self.core.focused_view() { self.update_menu(view); }
+        let _ = self.app.emit_to(view.label(), "discard://snapshot", value);
     }
-    fn thread_history(&self, value: &ThreadHistoryDto) {
-        let _ = self.app.emit("discard://thread-history", value);
+    fn history(&self, view: &view::ViewId, value: &HistoryDto) {
+        let _ = self.app.emit_to(view.label(), "discard://history", value);
+    }
+    fn thread_history(&self, view: &view::ViewId, value: &ThreadHistoryDto) {
+        let _ = self.app.emit_to(view.label(), "discard://thread-history", value);
     }
     fn conversations(&self) {
         let _ = self.app.emit("discard://conversations", ());
@@ -89,20 +98,21 @@ pub fn run(
     core.set_plugins(plugins.clone());
     core.set_load_report(config.load_report.clone());
     let project_dir: PathBuf = config.sidebar_project.as_ref().map(|p| p.path.clone().into()).unwrap_or_default();
-    core.configure_window(&data_dir, &project_dir, None);
-    core.select_sidebar_project(config.sidebar_project.as_ref());
+    let main = view::ViewId::main();
+    core.configure_window(&main, &data_dir, &project_dir, None);
+    core.select_sidebar_project(&main, config.sidebar_project.as_ref());
     if let Some(channel) = &config.startup_channel {
-        core.configure_targets(channel.project_id.as_ref().map(|p| p.0.clone()).unwrap_or_default(), &project_dir, channel.agent_id.0.clone());
-        core.configure_read_marker(&data_dir, &channel.id.0);
-        if channel.project_id.is_some() { core.configure_branch_source(config.store.clone(), channel.id.clone(), channel.workspace_mode, project_dir.clone()); }
+        core.configure_targets(&main, channel.project_id.as_ref().map(|p| p.0.clone()).unwrap_or_default(), &project_dir, channel.agent_id.0.clone());
+        core.configure_read_marker(&main, &data_dir, &channel.id.0);
+        if channel.project_id.is_some() { core.configure_branch_source(&main, config.store.clone(), channel.id.clone(), channel.workspace_mode, project_dir.clone()); }
     }
     (config.on_ready)(&core);
     let channels = Arc::new(channels::Channels::new(core.clone(), config.store.clone(), runtime.clone(), config.launcher));
     config.delegation.delegator.install(Arc::new(delegation::AppDelegator::new(Arc::downgrade(&channels))));
-    if let Some(channel) = &config.startup_channel && let Err(error) = channels.refresh_threads(&channel.id) { core.notice(format!("Could not load threads: {error}")); }
+    if let Some(channel) = &config.startup_channel && let Err(error) = channels.refresh_threads(&channel.id) { core.notice(&main, format!("Could not load threads: {error}")); }
     if config.startup_channel.is_none()
-        && let Err(error) = channels.restore() { core.notice(format!("Could not restore conversation: {error}")); }
-    core.refresh_branches(core.request_branch_refresh());
+        && let Err(error) = channels.restore(&main) { core.notice(&main, format!("Could not restore conversation: {error}")); }
+    core.refresh_branches(&main, core.request_branch_refresh(&main));
     let terminals = Arc::new(terminal::Terminals::default());
     let actions = Arc::new(actions::DesktopActions { settings: settings.clone(), workspace: config.workspace.clone(), relaunch: config.relaunch, exiting: AtomicBool::new(false), terminals: terminals.clone() });
     let sweep_terminals = terminals.clone();
@@ -118,9 +128,12 @@ pub fn run(
     runtime.spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            let core = refresh_core.clone();
-            let generation = core.request_branch_refresh();
-            let _ = tokio::task::spawn_blocking(move || core.refresh_branches(generation)).await;
+            // Every window lists the branches of its own project.
+            for view in refresh_core.view_ids() {
+                let core = refresh_core.clone();
+                let generation = core.request_branch_refresh(&view);
+                let _ = tokio::task::spawn_blocking(move || core.refresh_branches(&view, generation)).await;
+            }
         }
     });
     let event_actions = actions.clone();
@@ -145,25 +158,28 @@ pub fn run(
         .manage(actions.clone())
         .manage(terminals)
         .manage(windows::SettingsRoute::default())
+        .manage(windows::ProjectWindows::default())
         .manage(settings::SettingsContext { home: data_dir.clone(), plugins: plugins.clone(), providers: config.providers, recheck: config.recheck, store: config.store, memory: config.memory, core: core.clone(), load_report: config.load_report, trusted_reviews: Mutex::new(std::collections::HashSet::new()), logs: Mutex::new(settings::logs::LogState::open(&data_dir)) })
         .on_menu_event(move |app, event| {
             let id = event.id().as_ref();
             if let Some(action) = discard_core::action::Action::from_id(id) {
-                actions::run(app, &menu_core, &menu_actions, action, None);
+                actions::run(app, &menu_core, &menu_actions, &menu_core.focused_view(), action, None);
             } else if let Some(rest) = id.strip_prefix("plugin:")
                 && let Some((index, plugin)) = rest.split_once(':')
                 && let Ok(index) = index.parse()
-                && let Err(error) = menu_core.run_plugin_menu(plugin, index, None)
+                && let Err(error) = menu_core.run_plugin_menu(&menu_core.focused_view(), plugin, index, None)
             { menu_core.plugin_failure(plugin, &error); }
         })
         .on_window_event(move |window, event| {
             if let tauri::WindowEvent::ThemeChanged(value) = event {
                 event_dark.store(*value == tauri::Theme::Dark, Ordering::Relaxed);
             }
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if windows::request_main_close(&event_core, window.label() == "main", event_actions.confirms()) {
-                    api.prevent_close();
-                } else if window.label() == "main" && event_core.any_running() { event_core.cancel_all(); }
+            // The last app window that had focus decides the view of the menu, the quit question, and the plugins.
+            if let tauri::WindowEvent::Focused(true) = event && let Some(view) = view::ViewId::from_label(window.label()) {
+                event_core.set_focused_view(&view);
+            }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event && windows::on_close_requested(window, &event_core, &event_actions) {
+                api.prevent_close();
             }
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)) {
                 let generation = geometry_generation.fetch_add(1, Ordering::Relaxed) + 1;
@@ -215,6 +231,11 @@ pub fn run(
                 plugin_theme,
             );
             core.set_theme(theme::theme_dto(&theme_state, mode));
+            // Windows and Linux get a tray icon: it is the way back to an app with no window (spec T2). macOS has the Dock.
+            // The code compiles on every platform. The app decides at run time.
+            let tray_state = if cfg!(target_os = "macos") { Ok(()) } else { tray::create(app.handle()) };
+            if let Err(error) = &tray_state { tracing::warn!(%error, "cannot create the tray icon: the app quits when the last window closes"); }
+            app.manage(tray::TrayState(tray_state));
             let mut applied_icon = appearance.app_icon;
             app_icon::apply(app.handle(), applied_icon);
             let icon_app = app.handle().clone();
@@ -267,7 +288,7 @@ pub fn run(
             commands::get_write_requests, commands::decide_write_request,
             commands::get_agent_requests, commands::decide_agent_request,
             commands::get_always_allow_rules, commands::revoke_always_allow_rule,
-            commands::get_snapshot, commands::choose_project_folder, commands::get_projects, commands::update_project_profile, commands::set_project_show_archived, commands::get_rail_layout, commands::move_rail_project, commands::group_rail_projects, commands::create_rail_group, commands::move_rail_group, commands::rename_rail_group, commands::set_rail_group_color, commands::set_rail_group_collapsed, commands::ungroup_rail_group, commands::select_project, commands::remove_project,
+            commands::get_snapshot, commands::choose_project_folder, commands::get_projects, commands::update_project_profile, commands::set_project_show_archived, commands::get_rail_layout, commands::move_rail_project, commands::group_rail_projects, commands::create_rail_group, commands::move_rail_group, commands::rename_rail_group, commands::set_rail_group_color, commands::set_rail_group_collapsed, commands::ungroup_rail_group, commands::select_project, commands::remove_project, commands::open_project_window, commands::show_main_window,
             commands::get_project_channels, commands::get_project_members, commands::get_channel_details, commands::update_channel_topic, commands::set_project_main_agent,
             commands::invite_channel_member, commands::select_canonical_branch, commands::select_canonical_project_channel,
             commands::search_agent_history, commands::restore_conversation, commands::get_conversations, commands::create_conversation, commands::open_agent_chat,
@@ -329,12 +350,20 @@ pub fn run(
             settings::logs::settings_logs
         ])
         .build(tauri::generate_context!())?;
-    app.run(move |_handle, event| {
+    app.run(move |handle, event| {
         if let tauri::RunEvent::Exit = event { exit_terminals.close_all(); }
+        // A click on the Dock icon brings the main window back when no app window shows.
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event && windows::reopen_shows_main(has_visible_windows, windows::visible_app_windows(handle)) {
+            windows::show_main_window(handle);
+        }
         if let tauri::RunEvent::ExitRequested { api, .. } = event && !exit_actions.exiting.load(Ordering::SeqCst) {
-            if let plan::Close::Ask(ending) = plan::close_plan(true, exit_core.any_running(), exit_actions.confirms()) {
+            // Tauri raises this event with code `None` when every window is destroyed, and with a code after `app.exit`.
+            // The close of a window never gets here: the main window hides. So the Quit rule decides, with no other app
+            // window and no background mode.
+            if let plan::Close::Ask(ending) = plan::close_plan(plan::WindowKind::Main, 0, false, exit_core.any_running(), exit_actions.confirms()) {
                 api.prevent_exit();
-                exit_core.ask(ending);
+                windows::ask_visibly(handle, &exit_core, ending);
             } else if exit_core.any_running() { exit_core.cancel_all(); }
         }
     });
@@ -355,6 +384,8 @@ pub mod menu;
 pub mod actions;
 
 pub mod app_icon;
+
+pub mod tray;
 
 mod slash;
 

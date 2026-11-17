@@ -258,3 +258,20 @@ test('agent requests load for the selected channel and after its turn ends, and 
   expect(store.agentRequests).toHaveLength(1)
   wrapper.unmount()
 })
+test('the store listens for the view events of its own window only', async () => {
+  invoke.mockImplementation((name: string) =>
+    Promise.resolve(
+      name === 'get_snapshot' ? snapshot : { channelId: snapshot.channelId, rev: 0, messages: [] },
+    ),
+  )
+  const { wrapper } = setup()
+  await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('get_snapshot'))
+  // Under Vitest there is no Tauri window, so the page is the main window.
+  const target = { kind: 'WebviewWindow', label: 'main' }
+  for (const name of ['snapshot', 'history', 'thread-history']) {
+    const calls = listen.mock.calls.filter(([type]) => type === `discard://${name}`)
+    expect(calls).toHaveLength(1)
+    expect(calls[0][2]).toEqual({ target })
+  }
+  wrapper.unmount()
+})

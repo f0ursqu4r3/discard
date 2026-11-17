@@ -57,6 +57,7 @@ test('busy projects block navigation and removal but retain copy and reveal', ()
     'remove',
   ])
   expect(actions.filter((entry) => !entry.disabled).map((entry) => entry.action)).toEqual([
+    'open-window',
     'reveal',
     'group-new',
     'move-first',
@@ -142,6 +143,19 @@ test('remove requires confirmation and uses the clicked project', async () => {
   confirm!.click()
   await nextTick()
   expect(wrapper.emitted('action')).toEqual([['remove', second]])
+})
+
+test('Open in New Window reaches the rail while the menu is busy', async () => {
+  const wrapper = mount(ProjectContextMenu, {
+    attachTo: document.body,
+    props: { project: second, busy: true },
+    slots: { default: '<button>Second</button>' },
+  })
+  wrappers.push(wrapper)
+  await wrapper.get('button').trigger('contextmenu', { button: 2 })
+  await flushPromises()
+  wrapper.getComponent(ProjectMenuItems).vm.$emit('action', 'open-window')
+  expect(wrapper.emitted('action')).toEqual([['open-window', second]])
 })
 
 test('Shift+F10 opens a focused project menu and nested groups remain inspectable', async () => {
@@ -262,4 +276,16 @@ test('the group menu has real actions, a planned Mark Group as Read, and swatche
     expect.not.objectContaining({ label: 'Default', arg: expect.anything() }),
   )
   expect(labels(groupMenu(true))).toContain('Expand')
+})
+
+test('Open in New Window sits directly above Reveal in Finder and is always enabled', () => {
+  for (const busy of [false, true]) {
+    const labels = projectMenu(busy).map((entry) => ('label' in entry ? entry.label : entry.kind))
+    expect(labels.indexOf('Open in New Window')).toBe(labels.indexOf('Reveal in Finder') - 1)
+    const entry = projectMenu(busy).find(
+      (item) => item.kind === 'action' && item.action === 'open-window',
+    )
+    expect(entry).toMatchObject({ kind: 'action', label: 'Open in New Window' })
+    expect(entry).not.toHaveProperty('disabled')
+  }
 })

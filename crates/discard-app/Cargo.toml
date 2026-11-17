@@ -13,7 +13,7 @@ discard-core.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["image-png"] }
+tauri = { version = "2", features = ["image-png", "tray-icon"] }
 discard-core.workspace = true
 discard-lua = { path = "../discard-lua" }
 discard-mcp = { path = "../discard-mcp" }

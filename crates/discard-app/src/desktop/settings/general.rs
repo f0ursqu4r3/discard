@@ -10,6 +10,28 @@ pub fn issue_lines(issues: &[discard_core::settings::SettingsIssue]) -> Vec<Stri
     issues.iter().map(|issue| format!("{}: {}", issue.key, issue.message)).collect()
 }
 
+/// The `general` page of Settings. `background_unavailable` is the line that says why the tray icon is missing, if it is.
+pub fn general_page(general: &discard_core::settings::GeneralSettings, issues: &[String], theme_problems: serde_json::Value, background_unavailable: Option<String>) -> serde_json::Value {
+    serde_json::json!({
+        "defaultProvider": general.default_provider,
+        "confirmWhileWorking": general.confirm_while_working,
+        "keepRunningInBackground": general.keep_running_in_background,
+        "backgroundUnavailable": background_unavailable,
+        "providers": discard_core::bootstrap::PROVIDERS,
+        "issues": issues,
+        "themeProblems": theme_problems,
+    })
+}
+
+/// The changes that a patch of the `general` page asks for, in the order of the page.
+pub fn general_changes(patch: super::GeneralPatch) -> Vec<Change> {
+    let mut changes = Vec::new();
+    if let Some(value) = patch.default_provider { changes.push(Change::DefaultProvider(value)); }
+    if let Some(value) = patch.confirm_while_working { changes.push(Change::ConfirmWhileWorking(value)); }
+    if let Some(value) = patch.keep_running_in_background { changes.push(Change::KeepRunningInBackground(value)); }
+    changes
+}
+
 /// Reload outside edits before saving.
 pub fn apply_change(store: &mut SettingsStore, change: Change) -> Result<(), String> {
     store.reload_if_changed();
@@ -58,5 +80,48 @@ mod parity_tests {
         apply_change(&mut store, Change::ConfirmWhileWorking(false)).unwrap();
         assert_eq!(store.settings().general.default_provider, "codex");
         assert!(std::fs::read_to_string(path).unwrap().contains("codex"));
+    }
+}
+
+#[cfg(test)]
+mod background_tests {
+    use super::*;
+    use discard_core::settings::GeneralSettings;
+
+    #[test]
+    fn the_general_page_reports_the_background_setting_and_the_tray_problem() {
+        let general = GeneralSettings::default();
+        let page = general_page(&general, &[], serde_json::json!([]), None);
+        assert_eq!(page["keepRunningInBackground"], serde_json::json!(true));
+        assert_eq!(page["backgroundUnavailable"], serde_json::Value::Null);
+        assert_eq!(page["confirmWhileWorking"], serde_json::json!(true));
+        assert_eq!(page["defaultProvider"], serde_json::json!("claude"));
+        let general = GeneralSettings { keep_running_in_background: false, ..GeneralSettings::default() };
+        let line = crate::desktop::tray::unavailable_line("no appindicator");
+        let page = general_page(&general, &["problem".into()], serde_json::json!(["theme"]), Some(line.clone()));
+        assert_eq!(page["keepRunningInBackground"], serde_json::json!(false));
+        assert_eq!(page["backgroundUnavailable"], serde_json::json!(line));
+        assert_eq!(page["issues"], serde_json::json!(["problem"]));
+        assert_eq!(page["themeProblems"], serde_json::json!(["theme"]));
+    }
+
+    #[test]
+    fn a_general_patch_with_the_background_key_changes_that_setting_only() {
+        let patch: crate::desktop::settings::GeneralPatch = serde_json::from_str(r#"{"keepRunningInBackground":false}"#).unwrap();
+        assert_eq!(patch.keep_running_in_background, Some(false));
+        assert_eq!(patch.confirm_while_working, None);
+        assert_eq!(patch.default_provider, None);
+        let changes = general_changes(patch);
+        assert_eq!(changes, vec![Change::KeepRunningInBackground(false)]);
+    }
+
+    #[test]
+    fn saving_the_background_change_writes_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let mut store = SettingsStore::open(&path);
+        apply_change(&mut store, Change::KeepRunningInBackground(false)).unwrap();
+        assert!(!store.settings().general.keep_running_in_background);
+        assert!(std::fs::read_to_string(path).unwrap().contains("keep_running_in_background = false"));
     }
 }

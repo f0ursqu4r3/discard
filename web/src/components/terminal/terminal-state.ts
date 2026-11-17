@@ -75,7 +75,10 @@ export function useTerminalVisibility(): { visible: Ref<boolean>; toggle: () => 
   return { visible, toggle: () => (visible.value = !visible.value) }
 }
 
-export type Phase = 'connecting' | 'running' | 'exited' | 'closed' | 'failed'
+export type Phase = 'connecting' | 'running' | 'exited' | 'closed' | 'failed' | 'moved'
+
+/** The notice of a window whose session another window took. */
+export const MOVED_NOTICE = 'This terminal is open in another window.'
 
 export interface SessionView {
   phase: Phase
@@ -116,6 +119,7 @@ export function applyEvent(view: SessionView, event: TerminalEvent): SessionView
   if (event.kind === 'exit')
     return { ...view, phase: 'exited', exitCode: event.exitCode, signal: event.signal }
   if (event.kind === 'closed') return { ...view, phase: 'closed', message: event.reason }
+  if (event.kind === 'moved') return { ...view, phase: 'moved' }
   return view
 }
 
@@ -137,5 +141,6 @@ export function statusLine(view: SessionView): string {
       : `The shell exited with code ${view.exitCode}.`
   }
   if (view.phase === 'closed' || view.phase === 'failed') return view.message
+  if (view.phase === 'moved') return MOVED_NOTICE
   return ''
 }

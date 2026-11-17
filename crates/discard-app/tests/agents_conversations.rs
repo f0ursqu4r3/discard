@@ -1,5 +1,6 @@
 //! Desktop lifecycle behavior with real Store and memory persistence, without a webview.
 use discard_app::desktop::{
+    view::ViewId,
     channels::{Channels, Launcher},
     core::{AppCore, CoreInit},
 };
@@ -39,7 +40,7 @@ fn empty_core(data: &Path) -> Arc<AppCore> {
         agent: String::new(),
         provider: String::new(),
     }));
-    core.configure_window(data, Path::new(""), None);
+    core.configure_window(&ViewId::main(), data, Path::new(""), None);
     core
 }
 fn service(core: Arc<AppCore>, store: Arc<Mutex<Store>>) -> Channels {
@@ -81,43 +82,43 @@ async fn fresh_navigation_direct_chats_fixed_projects_and_saved_selection_are_in
     let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
     let core = empty_core(dir.path());
     let channels = service(core.clone(), store.clone());
-    channels.restore().unwrap();
-    assert!(core.snapshot().composer_disabled);
-    assert!(core.active_channel_id().is_empty());
+    channels.restore(&ViewId::main()).unwrap();
+    assert!(core.snapshot(&ViewId::main()).composer_disabled);
+    assert!(core.active_channel_id(&ViewId::main()).is_empty());
     assert!(store.lock().unwrap().all_agents().unwrap().is_empty());
     assert!(store.lock().unwrap().list_projects().unwrap().is_empty());
     let agent = store.lock().unwrap().create_agent(&config()).unwrap();
     assert!(store.lock().unwrap().direct_message_agents().unwrap().is_empty());
-    let direct = channels.open_agent(&agent).unwrap();
+    let direct = channels.open_agent(&ViewId::main(), &agent).unwrap();
     assert_eq!(store.lock().unwrap().direct_message_agents().unwrap(), vec![agent.clone()]);
-    assert_eq!(core.active_context(), (agent.clone(), None));
-    assert!(!core.snapshot().composer_disabled);
+    assert_eq!(core.active_context(&ViewId::main()), (agent.clone(), None));
+    assert!(!core.snapshot(&ViewId::main()).composer_disabled);
     let project_dir = tempfile::tempdir().unwrap();
     let project = store
         .lock()
         .unwrap()
         .import_project_folder(project_dir.path())
         .unwrap();
-    let project_one = channels.activate_project(&project.id).unwrap();
-    assert_ne!(core.active_channel_id(), direct);
-    assert_eq!(core.snapshot().channel, "general");
+    let project_one = channels.activate_project(&ViewId::main(), &project.id).unwrap().1;
+    assert_ne!(core.active_channel_id(&ViewId::main()), direct);
+    assert_eq!(core.snapshot(&ViewId::main()).channel, "general");
     assert_eq!(store.lock().unwrap().channels_for_project(&project.id).unwrap().len(), 1);
-    assert!(channels.create_conversation(&agent, Some(&project.id), "Second project chat").unwrap_err().contains("general channel"));
+    assert!(channels.create_conversation(&ViewId::main(), &agent, Some(&project.id), "Second project chat").unwrap_err().contains("general channel"));
     let direct_two = channels
-        .create_conversation(&agent, None, "Another direct chat")
+        .create_conversation(&ViewId::main(), &agent, None, "Another direct chat")
         .unwrap();
-    assert_eq!(core.active_context(), (agent.clone(), None));
-    assert_eq!(core.current_project().id, project.id);
-    channels.select(&project_one).unwrap();
-    assert_eq!(core.active_context().1, Some(project.id.clone()));
-    channels.select(&direct_two).unwrap();
+    assert_eq!(core.active_context(&ViewId::main()), (agent.clone(), None));
+    assert_eq!(core.current_project(&ViewId::main()).id, project.id);
+    channels.select(&ViewId::main(), &project_one).unwrap();
+    assert_eq!(core.active_context(&ViewId::main()).1, Some(project.id.clone()));
+    channels.select(&ViewId::main(), &direct_two).unwrap();
     assert_eq!(store.lock().unwrap().last_project_channel(&project.id).unwrap().unwrap().id.0, project_one, "direct selection leaves saved project navigation unchanged");
     assert_ne!(direct, direct_two);
     let restored = empty_core(dir.path());
     let reopen = service(restored.clone(), store.clone());
-    reopen.restore().unwrap();
-    assert_eq!(restored.active_channel_id(), direct_two);
-    assert_eq!(restored.active_context(), (agent, None));
+    reopen.restore(&ViewId::main()).unwrap();
+    assert_eq!(restored.active_channel_id(&ViewId::main()), direct_two);
+    assert_eq!(restored.active_context(&ViewId::main()), (agent, None));
     assert_eq!(
         store
             .lock()
@@ -141,19 +142,19 @@ async fn project_navigation_keeps_active_and_background_responses_running() {
     let second = store.lock().unwrap().import_project_folder(second_dir.path()).unwrap();
     let core = empty_core(dir.path());
     let channels = service(core.clone(), store.clone());
-    let first_channel = channels.activate_project(&first.id).unwrap();
+    let first_channel = channels.activate_project(&ViewId::main(), &first.id).unwrap().1;
     core.send_to(Some(&first_channel), "First response".into()).unwrap();
     let first_generation = core.channel_runtime_generation(&first_channel).unwrap();
 
     assert!(core.begin_project_change().is_err(), "folder changes remain blocked");
-    core.begin_project_navigation().unwrap();
-    assert!(core.begin_project_navigation().is_err(), "navigation remains serialized");
-    let second_channel = channels.activate_project(&second.id).unwrap();
-    core.end_project_change();
-    assert_eq!(core.current_project().id, second.id);
+    core.begin_project_navigation(&ViewId::main()).unwrap();
+    assert!(core.begin_project_navigation(&ViewId::main()).is_err(), "navigation remains serialized");
+    let second_channel = channels.activate_project(&ViewId::main(), &second.id).unwrap().1;
+    core.end_project_navigation(&ViewId::main());
+    assert_eq!(core.current_project(&ViewId::main()).id, second.id);
     assert_eq!(core.channel_runtime_generation(&first_channel), Some(first_generation));
     assert!(!core.channel_session_closed(&first_channel));
-    assert!(core.snapshot().channels.iter().find(|c| c.id == first_channel).unwrap().running);
+    assert!(core.snapshot(&ViewId::main()).channels.iter().find(|c| c.id == first_channel).unwrap().running);
     core.send_to(Some(&second_channel), "Second response".into()).unwrap();
 
     let reply = Message {
@@ -163,14 +164,14 @@ async fn project_navigation_keeps_active_and_background_responses_running() {
     store.lock().unwrap().insert_message(&reply).unwrap();
     core.apply_runtime(&first_channel, Some(first_generation), Update::ResponseCompleted(reply.clone()));
     core.apply_runtime(&first_channel, Some(first_generation), Update::TurnFinished(TurnOutcome::Completed));
-    assert!(core.snapshot().turn_running, "background completion must not finish the current response");
-    assert!(!core.history().iter().any(|message| message.id == reply.id.0));
+    assert!(core.snapshot(&ViewId::main()).turn_running, "background completion must not finish the current response");
+    assert!(!core.history(&ViewId::main()).iter().any(|message| message.id == reply.id.0));
 
-    core.begin_project_navigation().unwrap();
-    assert_eq!(channels.activate_project(&first.id).unwrap(), first_channel);
-    core.end_project_change();
-    assert!(core.history().iter().any(|message| message.id == reply.id.0));
-    assert!(core.snapshot().channels.iter().find(|c| c.id == second_channel).unwrap().running);
+    core.begin_project_navigation(&ViewId::main()).unwrap();
+    assert_eq!(channels.activate_project(&ViewId::main(), &first.id).unwrap().1, first_channel);
+    core.end_project_navigation(&ViewId::main());
+    assert!(core.history(&ViewId::main()).iter().any(|message| message.id == reply.id.0));
+    assert!(core.snapshot(&ViewId::main()).channels.iter().find(|c| c.id == second_channel).unwrap().running);
     assert!(!core.channel_session_closed(&second_channel));
     assert!(core.begin_project_change().is_err(), "a parked response still blocks destructive changes");
 }
@@ -207,9 +208,9 @@ async fn labels_refresh_running_guards_archive_restore_and_deleted_history_are_e
     store.lock().unwrap().insert_message(&message).unwrap();
     let core = empty_core(dir.path());
     let channels = service(core.clone(), store.clone());
-    channels.open_agent(&agent).unwrap();
+    channels.open_agent(&ViewId::main(), &agent).unwrap();
     let second = channels
-        .create_conversation(&agent, None, "Second")
+        .create_conversation(&ViewId::main(), &agent, None, "Second")
         .unwrap();
     core.send_to(Some(&second), "Hello".into()).unwrap();
     assert!(
@@ -223,7 +224,7 @@ async fn labels_refresh_running_guards_archive_restore_and_deleted_history_are_e
     store.lock().unwrap().update_agent(&agent, &cfg).unwrap();
     core.refresh_agent(&agent.0, &cfg, false);
     assert!(
-        core.snapshot()
+        core.snapshot(&ViewId::main())
             .channels
             .iter()
             .filter(|c| c.agent_id == agent.0)
@@ -242,24 +243,24 @@ async fn labels_refresh_running_guards_archive_restore_and_deleted_history_are_e
         .set_agent_archived(&agent, true)
         .unwrap();
     channels.reload_agent(&agent.0).unwrap();
-    assert!(core.snapshot().composer_disabled);
+    assert!(core.snapshot(&ViewId::main()).composer_disabled);
     assert!(core.send_to(Some(&second), "Blocked".into()).is_err());
-    channels.select(&direct.id.0).unwrap();
-    assert_eq!(core.history_snapshot().messages[0].id, message.id.0);
+    channels.select(&ViewId::main(), &direct.id.0).unwrap();
+    assert_eq!(core.history_snapshot(&ViewId::main()).messages[0].id, message.id.0);
     store
         .lock()
         .unwrap()
         .set_agent_archived(&agent, false)
         .unwrap();
     channels.reload_agent(&agent.0).unwrap();
-    assert!(!core.snapshot().composer_disabled);
+    assert!(!core.snapshot(&ViewId::main()).composer_disabled);
     store.lock().unwrap().archive_channel(&direct.id).unwrap();
     channels.reload_agent(&agent.0).unwrap();
-    assert!(core.snapshot().archived);
-    assert!(core.snapshot().composer_disabled);
-    assert_eq!(core.history_snapshot().messages[0].id, message.id.0);
+    assert!(core.snapshot(&ViewId::main()).archived);
+    assert!(core.snapshot(&ViewId::main()).composer_disabled);
+    assert_eq!(core.history_snapshot(&ViewId::main()).messages[0].id, message.id.0);
     channels.restore_conversation(&direct.id.0).unwrap();
-    assert!(!core.snapshot().composer_disabled);
+    assert!(!core.snapshot(&ViewId::main()).composer_disabled);
     store
         .lock()
         .unwrap()
@@ -272,16 +273,16 @@ async fn labels_refresh_running_guards_archive_restore_and_deleted_history_are_e
         )
         .unwrap();
     channels.reload_agent(&agent.0).unwrap();
-    assert!(core.snapshot().composer_disabled);
-    assert_eq!(core.snapshot().agent, "Deleted agent");
-    assert_eq!(core.history_snapshot().messages[0].id, message.id.0);
-    channels.select(&other_project.id.0).unwrap();
-    assert!(!core.snapshot().composer_disabled);
-    assert_eq!(core.active_context().1, Some(project.id));
-    channels.open_agent(&other).unwrap();
-    assert!(!core.snapshot().composer_disabled);
-    channels.select(&direct.id.0).unwrap();
-    assert_eq!(core.history_snapshot().messages[0].id, message.id.0);
+    assert!(core.snapshot(&ViewId::main()).composer_disabled);
+    assert_eq!(core.snapshot(&ViewId::main()).agent, "Deleted agent");
+    assert_eq!(core.history_snapshot(&ViewId::main()).messages[0].id, message.id.0);
+    channels.select(&ViewId::main(), &other_project.id.0).unwrap();
+    assert!(!core.snapshot(&ViewId::main()).composer_disabled);
+    assert_eq!(core.active_context(&ViewId::main()).1, Some(project.id));
+    channels.open_agent(&ViewId::main(), &other).unwrap();
+    assert!(!core.snapshot(&ViewId::main()).composer_disabled);
+    channels.select(&ViewId::main(), &direct.id.0).unwrap();
+    assert_eq!(core.history_snapshot(&ViewId::main()).messages[0].id, message.id.0);
 }
 
 #[test]
@@ -472,8 +473,8 @@ async fn restoring_agent_rebuilds_only_closed_history_and_keeps_usable_unsaved_r
     store.lock().unwrap().archive_channel(&history.id).unwrap();
     let core = empty_core(dir.path());
     let channels = service(core.clone(), store.clone());
-    channels.select(&history.id.0).unwrap();
-    channels.select(&active.id.0).unwrap();
+    channels.select(&ViewId::main(), &history.id.0).unwrap();
+    channels.select(&ViewId::main(), &active.id.0).unwrap();
     core.send_to(Some(&active.id.0), "Question".into()).unwrap();
     core.apply_channel(
         &active.id.0,
@@ -492,8 +493,8 @@ async fn restoring_agent_rebuilds_only_closed_history_and_keeps_usable_unsaved_r
         Update::ResponseSaveFailed("Copy the reply before sending again.".into()),
     );
     core.apply_channel(&active.id.0, Update::TurnFinished(TurnOutcome::Failed));
-    let before = core.snapshot();
-    let before_history = core.history_snapshot();
+    let before = core.snapshot(&ViewId::main());
+    let before_history = core.history_snapshot(&ViewId::main());
     assert!(core.agent_sessions_closed(&agent.0));
     store
         .lock()
@@ -507,25 +508,25 @@ async fn restoring_agent_rebuilds_only_closed_history_and_keeps_usable_unsaved_r
         .set_agent_archived(&agent, false)
         .unwrap();
     channels.reload_agent(&agent.0).unwrap();
-    let after = core.snapshot();
+    let after = core.snapshot(&ViewId::main());
     assert_eq!(after.channel_id, before.channel_id);
     assert_eq!(
         after.live_blocks, before.live_blocks,
         "restoring parked history must not discard a usable conversation's reply"
     );
     assert_eq!(after.notice, before.notice);
-    assert_eq!(core.history_snapshot().messages, before_history.messages);
+    assert_eq!(core.history_snapshot(&ViewId::main()).messages, before_history.messages);
     assert!(
         core.has_channel(&history.id.0),
         "the parked history must remain cached"
     );
-    channels.select(&history.id.0).unwrap();
-    assert!(core.snapshot().composer_disabled);
+    channels.select(&ViewId::main(), &history.id.0).unwrap();
+    assert!(core.snapshot(&ViewId::main()).composer_disabled);
     channels.restore_conversation(&history.id.0).unwrap();
-    assert!(!core.snapshot().composer_disabled);
-    channels.select(&active.id.0).unwrap();
-    assert_eq!(core.snapshot().live_blocks, before.live_blocks);
-    assert_eq!(core.snapshot().notice, before.notice);
+    assert!(!core.snapshot(&ViewId::main()).composer_disabled);
+    channels.select(&ViewId::main(), &active.id.0).unwrap();
+    assert_eq!(core.snapshot(&ViewId::main()).live_blocks, before.live_blocks);
+    assert_eq!(core.snapshot(&ViewId::main()).notice, before.notice);
 }
 
 #[tokio::test]
@@ -629,11 +630,11 @@ async fn folder_reload_preserves_unsaved_replies_and_only_restarts_affected_tran
                 }],
             })
             .unwrap();
-        channels.select(&channel.id.0).unwrap();
+        channels.select(&ViewId::main(), &channel.id.0).unwrap();
         core.send_to(Some(&channel.id.0), "Question".into())
             .unwrap();
         assert!(core.begin_project_change().is_err());
-        core.apply(Update::Event(Box::new(Event {
+        core.apply(&ViewId::main(), Update::Event(Box::new(Event {
             id: EventId::new(),
             session_id: SessionId::new(),
             seq: 1,
@@ -642,15 +643,15 @@ async fn folder_reload_preserves_unsaved_replies_and_only_restarts_affected_tran
             },
             raw: None,
         })));
-        core.apply(Update::ResponseSaveFailed(
+        core.apply(&ViewId::main(), Update::ResponseSaveFailed(
             "Copy the reply before sending again.".into(),
         ));
-        core.apply(Update::TurnFinished(TurnOutcome::Failed));
+        core.apply(&ViewId::main(), Update::TurnFinished(TurnOutcome::Failed));
         retained.push((
             channel.id.0.clone(),
-            core.snapshot(),
-            core.history_snapshot(),
-            core.runtime_generation(),
+            core.snapshot(&ViewId::main()),
+            core.history_snapshot(&ViewId::main()),
+            core.runtime_generation(&ViewId::main()),
         ));
     }
     assert!(
@@ -667,28 +668,28 @@ async fn folder_reload_preserves_unsaved_replies_and_only_restarts_affected_tran
         .unwrap()
         .change_project_folder(&project.id, replacement.path())
         .unwrap();
-    channels.activate_project(&project.id).unwrap();
+    channels.activate_project(&ViewId::main(), &project.id).unwrap();
     channels.reload_project(&project.id).unwrap();
-    assert_eq!(core.active_channel_id(), affected.id.0);
+    assert_eq!(core.active_channel_id(&ViewId::main()), affected.id.0);
     core.end_project_change();
     for (id, before, history, old_generation) in retained {
-        channels.select(&id).unwrap();
+        channels.select(&ViewId::main(), &id).unwrap();
         assert_eq!(
-            core.snapshot().live_blocks,
+            core.snapshot(&ViewId::main()).live_blocks,
             before.live_blocks,
             "retained reply for {id}"
         );
-        assert_eq!(core.snapshot().notice, before.notice);
-        assert_eq!(core.history_snapshot().messages, history.messages);
+        assert_eq!(core.snapshot(&ViewId::main()).notice, before.notice);
+        assert_eq!(core.history_snapshot(&ViewId::main()).messages, history.messages);
         let is_affected = id == affected.id.0 || id == parked.id.0;
-        assert_eq!(core.runtime_generation() == old_generation, !is_affected);
+        assert_eq!(core.runtime_generation(&ViewId::main()) == old_generation, !is_affected);
         core.apply_runtime(
             &id,
             Some(old_generation),
             Update::ResponseSaveFailed("late old transport".into()),
         );
         assert_eq!(
-            core.snapshot().notice.as_deref() == Some("late old transport"),
+            core.snapshot(&ViewId::main()).notice.as_deref() == Some("late old transport"),
             !is_affected
         );
     }
@@ -705,7 +706,7 @@ async fn folder_reload_preserves_unsaved_replies_and_only_restarts_affected_tran
     }
     drop(launches);
     // A launch failure closes only affected transports and leaves their cached replies reachable.
-    channels.select(&direct.id.0).unwrap();
+    channels.select(&ViewId::main(), &direct.id.0).unwrap();
     fail_launch.store(true, std::sync::atomic::Ordering::SeqCst);
     core.begin_project_change().unwrap();
     assert!(
@@ -715,43 +716,43 @@ async fn folder_reload_preserves_unsaved_replies_and_only_restarts_affected_tran
             .contains("test replacement")
     );
     core.end_project_change();
-    assert_eq!(core.active_channel_id(), direct.id.0);
+    assert_eq!(core.active_channel_id(&ViewId::main()), direct.id.0);
     assert!(!core.channel_session_closed(&direct.id.0));
     assert!(core.channel_session_closed(&parked.id.0));
-    let direct_notice = core.snapshot().notice;
-    assert!(channels.select("missing-history").is_err());
+    let direct_notice = core.snapshot(&ViewId::main()).notice;
+    assert!(channels.select(&ViewId::main(), "missing-history").is_err());
     assert_eq!(
-        core.active_channel_id(),
+        core.active_channel_id(&ViewId::main()),
         direct.id.0,
         "failed history selection must not open another conversation"
     );
-    assert_eq!(core.snapshot().notice, direct_notice);
-    channels.select(&parked.id.0).unwrap();
+    assert_eq!(core.snapshot(&ViewId::main()).notice, direct_notice);
+    channels.select(&ViewId::main(), &parked.id.0).unwrap();
     assert_eq!(
-        core.active_channel_id(),
+        core.active_channel_id(&ViewId::main()),
         parked.id.0,
         "failed retry must still open retained history"
     );
-    assert!(!core.snapshot().live_blocks.is_empty());
+    assert!(!core.snapshot(&ViewId::main()).live_blocks.is_empty());
     assert_eq!(
-        core.history_snapshot().messages.len(),
+        core.history_snapshot(&ViewId::main()).messages.len(),
         2,
         "saved reply and current question stay visible"
     );
-    let retained = core.snapshot();
+    let retained = core.snapshot(&ViewId::main());
     let notice = retained.notice.as_deref().unwrap();
     assert!(notice.contains("Copy the reply before sending again."));
     assert!(notice.contains("test replacement launch failure"));
     assert!(notice.contains("Conversation history is open"));
-    channels.select(&parked.id.0).unwrap();
+    channels.select(&ViewId::main(), &parked.id.0).unwrap();
     assert_eq!(
-        core.snapshot().notice,
+        core.snapshot(&ViewId::main()).notice,
         retained.notice,
         "repeated restart failure must not duplicate the notice"
     );
     fail_launch.store(false, std::sync::atomic::Ordering::SeqCst);
-    channels.select(&parked.id.0).unwrap();
+    channels.select(&ViewId::main(), &parked.id.0).unwrap();
     assert!(!core.channel_session_closed(&parked.id.0));
-    assert_eq!(core.snapshot().live_blocks, retained.live_blocks);
-    assert_eq!(core.snapshot().notice, retained.notice);
+    assert_eq!(core.snapshot(&ViewId::main()).live_blocks, retained.live_blocks);
+    assert_eq!(core.snapshot(&ViewId::main()).notice, retained.notice);
 }
