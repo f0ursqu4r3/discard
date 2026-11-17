@@ -458,7 +458,7 @@ pub fn open_project_window(app: &tauri::AppHandle, channels: &std::sync::Arc<sup
                 if drops {
                     let core = app.state::<std::sync::Arc<super::core::AppCore>>();
                     core.drop_view(&view);
-                    refocus_after_close(&app, &core, view.label());
+                    refocus_after_close(&app, &core, view.label(), super::plan::CloseCause::User);
                 }
             });
         }
@@ -466,11 +466,10 @@ pub fn open_project_window(app: &tauri::AppHandle, channels: &std::sync::Arc<sup
     Ok(())
 }
 
-/// Keep the focused view on a window that the user can see. `visible` lists the visible app windows. With none, the
-/// main window shows again: the menu, the shortcuts, and a quit question need a window.
-fn apply_refocus(app: &tauri::AppHandle, core: &super::core::AppCore, visible: &[String]) {
+/// Carry out a focus decision: focus a visible view, or show the main window and focus its view.
+fn apply_focus(app: &tauri::AppHandle, core: &super::core::AppCore, step: Option<super::plan::Refocus>) {
     use super::plan::Refocus;
-    match super::plan::refocus(visible, &core.focused_view()) {
+    match step {
         None => {}
         Some(Refocus::Focus(view)) => core.set_focused_view(&view),
         Some(Refocus::ShowMain) => {
@@ -479,24 +478,21 @@ fn apply_refocus(app: &tauri::AppHandle, core: &super::core::AppCore, visible: &
         }
     }
 }
+/// Keep the focused view on a window that the user can see. `visible` lists the visible app windows. With none, the
+/// main window shows again: the menu, the shortcuts, and a quit question need a window.
+fn apply_refocus(app: &tauri::AppHandle, core: &super::core::AppCore, visible: &[String]) {
+    apply_focus(app, core, super::plan::refocus(visible, &core.focused_view()));
+}
 /// A window closed that no close request handled: the window of a project, by command or by its own close. Its view is
-/// dropped already. The focus moves to a window that stays, and the main window shows when none stays, unless the app
-/// runs in the background (spec T1) or exits. The closing window is still in the list of windows when this runs, so it
-/// is left out.
-fn refocus_after_close(app: &tauri::AppHandle, core: &super::core::AppCore, closing: &str) {
-    use super::plan::Refocus;
+/// dropped already. The focus moves to a window that stays. When none stays, the main window shows, unless the user
+/// closed the window while the app runs in the background (spec T1), or the app exits. A command never leaves the app
+/// with no visible window. The closing window is still in the list of windows when this runs, so it is left out.
+fn refocus_after_close(app: &tauri::AppHandle, core: &super::core::AppCore, closing: &str, cause: super::plan::CloseCause) {
     use tauri::Manager;
     let actions = app.state::<std::sync::Arc<super::actions::DesktopActions>>();
     let visible = super::plan::other_app_labels(&visible_app_window_labels(app), closing);
     let exiting = actions.exiting.load(std::sync::atomic::Ordering::SeqCst);
-    match super::plan::refocus_after_close(&visible, &core.focused_view(), background_enabled(app, &actions), exiting) {
-        None => {}
-        Some(Refocus::Focus(view)) => core.set_focused_view(&view),
-        Some(Refocus::ShowMain) => {
-            show_main_window(app);
-            core.set_focused_view(&super::view::ViewId::main());
-        }
-    }
+    apply_focus(app, core, super::plan::refocus_after_close(&visible, &core.focused_view(), background_enabled(app, &actions), exiting, cause));
 }
 /// Ask a question about ending the app in a window that the user can see. It shows in the focused window, so the focus
 /// goes to a visible window first, and the main window shows when no app window is visible.
@@ -506,8 +502,8 @@ pub fn ask_visibly(app: &tauri::AppHandle, core: &super::core::AppCore, ending: 
 }
 
 /// Close the project window of `project` and drop its view. The window closes with no confirmation. A turn goes on,
-/// and the channels stay loaded. This skips the close rule, so it moves the focus and shows the main window when no
-/// other app window is visible.
+/// and the channels stay loaded. A command closes it, not the user: this skips the close rule, moves the focus, and
+/// shows the main window when no other app window is visible, in background mode too.
 pub fn close_project_window(app: &tauri::AppHandle, core: &super::core::AppCore, project: &discard_core::model::ProjectId) {
     use tauri::Manager;
     let view = super::view::ViewId::project(project);
@@ -518,7 +514,7 @@ pub fn close_project_window(app: &tauri::AppHandle, core: &super::core::AppCore,
     if let Some(window) = app.get_webview_window(view.label()) { let _ = window.destroy(); }
     // The refocus runs window operations. It must not hold the lock of the registry.
     drop(registry);
-    refocus_after_close(app, core, view.label());
+    refocus_after_close(app, core, view.label(), super::plan::CloseCause::Command);
 }
 
 /// Handle the close request of a window. Returns true when the window must stay open. `Hide` hides the main window

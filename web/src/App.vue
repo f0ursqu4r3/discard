@@ -595,6 +595,7 @@ function navigate(value: WorkspacePage) {
         description: String(error),
       })
     );
+    navigationOpen.value = false;
     return;
   }
   page.value = value;

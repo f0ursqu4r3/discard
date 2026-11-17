@@ -117,7 +117,7 @@ changes. The Safe Mode check mark reflects the mode the app started in.
 | Discard | Quit Discard | Quits. May ask first. See "Safe mode, relaunch, and confirm". |
 | File | New Channel… | Greyed, "Soon". |
 | File | Archive Channel… | Archives the current channel when no turn runs. |
-| File | Close Window | Closes the focused window. Closing the main window quits, so it may ask first. Closing Settings never asks and does not quit. |
+| File | Close Window | Closes the focused window. The main window hides when another app window is open or the app runs in the background. The last app window follows the Quit rule only when the app does not run in the background, so it may ask first. Closing Settings never asks and does not quit. |
 | File | Cancel Turn | Cancels the running turn. Greyed when no turn runs. |
 | Edit | Undo, Redo, Cut, Copy, Paste, Select All | Standard items. The OS and the text input handle them. |
 | View | Switch Channel… | Greyed, "Soon". |
@@ -511,15 +511,17 @@ reason.
 
 ### The confirm notice
 
-When a turn runs and `confirm_while_working` is `true`, Quit and the Safe Mode relaunch do not act at once. The main
-window comes to the front and shows a notice with **Cancel** and **Confirm** buttons:
+When a turn runs and `confirm_while_working` is `true`, Quit and the Safe Mode relaunch do not act at once. The focused
+app window comes to the front and shows a notice with **Cancel** and **Confirm** buttons. When no app window is
+visible, the main window shows first and shows the notice:
 
 - "The agent is working. Quit Discard and stop the turn?"
 - "The agent is working. Relaunch in safe mode and stop the turn?"
 - "The agent is working. Relaunch normally and stop the turn?"
 
-Closing the main window (the red close button, `Cmd+W`, or File > Close Window) follows the Quit rule and shows the
-Quit notice. Closing the Settings window never asks.
+Closing the last app window (the red close button, `Cmd+W`, or File > Close Window) follows the Quit rule and shows
+the Quit notice, but only when the app does not run in the background. Otherwise the window closes or hides and the
+app goes on. See "Closing the main window". Closing the Settings window never asks.
 
 Confirm sends Cancel to the engine and ends the process. Cancel clears the notice. With
 `confirm_while_working = false`, or with no turn running, the action runs at once. Cancel Turn, opening Settings,
@@ -549,7 +551,8 @@ end the app. On macOS the Dock icon shows the main window again. On Windows and 
 be created, the app does not run in the background in that session, and the General page says why.
 
 When `keep_running_in_background` is `false`, or the tray icon is not available, the close of the last app window
-quits the app. While a turn runs and `confirm_while_working` is `true`, the main window shows the Quit notice first.
+quits the app. While a turn runs and `confirm_while_working` is `true`, the focused app window shows the Quit notice
+first. The main window shows first when no app window is visible.
 
 ## Limits you should know
 
@@ -558,8 +561,8 @@ quits the app. While a turn runs and `confirm_while_working` is `true`, the main
   one to exit. Windows is out of scope for v1.
 - The relaunched process has no input or standard output. `relaunch.rs` sets them to null. Its stderr is inherited,
   so the relaunched Discard writes its logs where the first one did.
-- The confirm notice comes from the Quit action (`Cmd+Q` and Quit Discard), closing the main window, and the Safe
-  Mode relaunch. Discard has no hook that can stop a Quit from the Dock or the system, so those do not ask. They end
+- The confirm notice comes from the Quit action (`Cmd+Q` and Quit Discard), closing the last app window when the app
+  does not run in the background, and the Safe Mode relaunch. Discard has no hook that can stop a Quit from the Dock or the system, so those do not ask. They end
   the process. Discard sends Cancel to the engine when the app quits, but the process gets only a short time to run quit handlers.
 - Provider processes can outlive Discard. On macOS a quit ends the process with `exit()`, so no cleanup code runs.
   Discard sends Cancel to the engine before it quits, on a best-effort basis only. A quit or relaunch during a running

@@ -282,6 +282,25 @@ test('a moved event shows the notice and Show Here, and no keystroke or resize l
   expect(calls('terminal_resize')).toHaveLength(0)
 })
 
+test('a moved terminal offers only Show Here: no Kill and no Restart, whatever the phase before', async () => {
+  const view = show()
+  await flushPromises()
+  // From running.
+  stream().onmessage({ kind: 'moved' })
+  await flushPromises()
+  expect(view.find('[data-testid="terminal-kill"]').exists()).toBe(false)
+  expect(view.find('[data-testid="terminal-restart"]').exists()).toBe(false)
+  expect(view.find('[data-testid="terminal-show-here"]').exists()).toBe(true)
+  // From an ended session, which would offer Restart.
+  stream().onmessage({ kind: 'exited', exitCode: 0, signal: null })
+  await flushPromises()
+  stream().onmessage({ kind: 'moved' })
+  await flushPromises()
+  expect(view.find('[data-testid="terminal-restart"]').exists()).toBe(false)
+  expect(view.find('[data-testid="terminal-kill"]').exists()).toBe(false)
+  expect(calls('terminal_close')).toHaveLength(0)
+})
+
 test('Show Here opens the terminal of the channel again and removes the notice', async () => {
   vi.mocked(invoke).mockImplementation(async (command) =>
     command === 'terminal_open' ? opened({ scrollback: bytes('kept') }) : undefined,

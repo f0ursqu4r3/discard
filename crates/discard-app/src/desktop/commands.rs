@@ -353,7 +353,7 @@ pub fn run_action(app: tauri::AppHandle, window: tauri::WebviewWindow, core: Sta
     if action_id == "relaunch" {
         let ctx = core.menu_context(&view);
         let ending = super::plan::Confirm::Relaunch { safe_mode: ctx.safe_mode };
-        if core.any_running() && actions.confirms() { core.ask(ending); }
+        if core.any_running() && actions.confirms() { super::windows::ask_visibly(&app, &core, ending); }
         else { super::actions::perform(&app, &core, &actions, ending); }
         return None;
     }

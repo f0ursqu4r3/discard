@@ -112,11 +112,23 @@ pub fn refocus(visible: &[String], focused: &super::view::ViewId) -> Option<Refo
     })
 }
 
-/// Choose how to keep the focus after an app window closed that no close request handled. It is `refocus`, with two
-/// exceptions that show nothing: the app exits, or the app runs in the background and no app window is visible (spec
-/// T1). A quit question needs no such exception: it shows the main window through `refocus` itself (spec T6).
-pub fn refocus_after_close(visible: &[String], focused: &super::view::ViewId, background: bool, exiting: bool) -> Option<Refocus> {
-    if exiting || (background && other_app_labels(visible, "").is_empty()) { return None; }
+/// Why an app window closed without a close request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseCause {
+    /// The user closed the window: the close button, Cmd+W, or the system.
+    User,
+    /// A command closed the window: Remove project, or a project that leaves the app.
+    Command,
+}
+
+/// Choose how to keep the focus after an app window closed that no close request handled. It is `refocus`, with these
+/// exceptions that show nothing: the app exits, or the user closed the window while the app runs in the background and
+/// no app window is visible (spec T1). A command that closes a window is not a close by the user: the app must not
+/// be left with no visible window, so the main window shows in both modes. A quit question needs no exception: it shows
+/// the main window through `refocus` itself (spec T6).
+pub fn refocus_after_close(visible: &[String], focused: &super::view::ViewId, background: bool, exiting: bool, cause: CloseCause) -> Option<Refocus> {
+    let user_close_in_background = cause == CloseCause::User && background;
+    if exiting || (user_close_in_background && other_app_labels(visible, "").is_empty()) { return None; }
     refocus(visible, focused)
 }
 
@@ -216,6 +228,7 @@ pub fn plugin_item_notice(plugin: &str, error: &str) -> String { format!("{plugi
 
 #[cfg(test)]
 mod tests {
+    use super::CloseCause::{Command, User};
     use super::{ArchiveStep, Close, Confirm, Plan, TargetedPlan, Refocus, WindowKind, archive_step, channel_target_allowed, close_plan, other_app_labels, other_app_windows, refocus, refocus_after_close, plan, plan_targeted, prepare_exit, window_kind};
     use discard_core::workspace::ArchiveOutcome;
     use discard_core::action::Action;
@@ -435,23 +448,39 @@ mod tests {
     #[test]
     fn a_close_shows_the_main_window_only_when_the_app_does_not_run_in_the_background() {
         // No app window stays. Without background mode the main window shows again (decision 7).
-        assert_eq!(refocus_after_close(&[], &project("project-a"), false, false), Some(Refocus::ShowMain));
+        assert_eq!(refocus_after_close(&[], &project("project-a"), false, false, User), Some(Refocus::ShowMain));
         // In background mode the app stays with no window (spec T1).
-        assert_eq!(refocus_after_close(&[], &project("project-a"), true, false), None);
-        assert_eq!(refocus_after_close(&labels(&["settings"]), &main_view(), true, false), None, "Settings is not an app window");
-        assert_eq!(refocus_after_close(&labels(&["settings"]), &main_view(), false, false), Some(Refocus::ShowMain));
+        assert_eq!(refocus_after_close(&[], &project("project-a"), true, false, User), None);
+        assert_eq!(refocus_after_close(&labels(&["settings"]), &main_view(), true, false, User), None, "Settings is not an app window");
+        assert_eq!(refocus_after_close(&labels(&["settings"]), &main_view(), false, false, User), Some(Refocus::ShowMain));
         // A window stays: the focus rule is the same in both modes.
         for background in [false, true] {
-            assert_eq!(refocus_after_close(&labels(&["main", "project-b"]), &project("project-a"), background, false), Some(Refocus::Focus(main_view())));
-            assert_eq!(refocus_after_close(&labels(&["main"]), &main_view(), background, false), None);
+            assert_eq!(refocus_after_close(&labels(&["main", "project-b"]), &project("project-a"), background, false, User), Some(Refocus::Focus(main_view())));
+            assert_eq!(refocus_after_close(&labels(&["main"]), &main_view(), background, false, User), None);
         }
+    }
+
+    #[test]
+    fn a_command_that_closes_a_window_never_leaves_the_app_with_no_visible_window() {
+        // Remove project in a project window, with the main window hidden: both modes show the main window.
+        for background in [false, true] {
+            assert_eq!(refocus_after_close(&[], &project("project-a"), background, false, Command), Some(Refocus::ShowMain));
+            assert_eq!(refocus_after_close(&labels(&["settings"]), &project("project-a"), background, false, Command), Some(Refocus::ShowMain), "Settings is not an app window");
+            // Another app window is visible: the focus goes to it and the main window stays hidden.
+            assert_eq!(refocus_after_close(&labels(&["project-b"]), &project("project-a"), background, false, Command), Some(Refocus::Focus(project("project-b"))));
+            assert_eq!(refocus_after_close(&labels(&["main"]), &project("project-a"), background, false, Command), Some(Refocus::Focus(main_view())));
+        }
+        // A close by the user in background mode still shows nothing.
+        assert_eq!(refocus_after_close(&[], &project("project-a"), true, false, User), None);
     }
 
     #[test]
     fn nothing_shows_while_the_app_exits() {
         for background in [false, true] {
-            assert_eq!(refocus_after_close(&[], &project("project-a"), background, true), None);
-            assert_eq!(refocus_after_close(&labels(&["project-b"]), &main_view(), background, true), None);
+            for cause in [User, Command] {
+                assert_eq!(refocus_after_close(&[], &project("project-a"), background, true, cause), None);
+                assert_eq!(refocus_after_close(&labels(&["project-b"]), &main_view(), background, true, cause), None);
+            }
         }
     }
 

@@ -45,6 +45,7 @@ import App from '../App.vue'
 import NavigationPanel from '../components/workspace/NavigationPanel.vue'
 import ServerRail from '../components/ServerRail.vue'
 import UserBar from '../components/workspace/UserBar.vue'
+import { Sheet } from '../components/ui/sheet'
 
 const project = { id: 'p1', name: 'Project one', path: '/one' }
 const window = { kind: 'WebviewWindow' }
@@ -134,6 +135,19 @@ test('a direct messages navigation in a project window shows the main window and
   expect(mocks.getConversations).not.toHaveBeenCalled()
   expect(mocks.switchChannel).not.toHaveBeenCalled()
   expect(panel.props('page')).toBe('conversation')
+})
+
+test('a direct messages navigation in a project window closes the compact navigation sheet', async () => {
+  const wrapper = projectMode()
+  await flushPromises()
+  // The first sheet is the navigation sheet of a compact window.
+  wrapper.findAllComponents(Sheet)[0]!.vm.$emit('update:open', true)
+  await flushPromises()
+  expect(wrapper.findAllComponents(Sheet)[0]!.props('open')).toBe(true)
+  wrapper.getComponent(NavigationPanel).vm.$emit('navigate', 'direct-messages')
+  await flushPromises()
+  expect(mocks.showMainWindow).toHaveBeenCalledWith('direct-messages')
+  expect(wrapper.findAllComponents(Sheet)[0]!.props('open')).toBe(false)
 })
 
 test('an agent profile event with no agent shows the main window in a project window', async () => {
