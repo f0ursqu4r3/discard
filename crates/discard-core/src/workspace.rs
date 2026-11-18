@@ -13,6 +13,54 @@ pub struct GitWorkspace {
     store: Arc<Mutex<Store>>,
 }
 
+/// The target a moderator names for a conversation move. Exactly one of `channel` and `new_branch` is set.
+#[derive(Debug, Clone, Copy)]
+pub struct MoveTargetArgs<'a> {
+    pub channel: Option<&'a str>,
+    pub new_branch: Option<&'a str>,
+    pub base: Option<&'a str>,
+}
+
+/// Check that this agent may move this conversation. Return the source channel.
+fn move_gate(store: &Store, channel: &ChannelId, agent: &crate::model::AgentId, project: Option<&crate::model::ProjectId>) -> Result<crate::model::Channel, String> {
+    let source = store.load_channel(channel).map_err(|e| e.to_string())?;
+    if project.is_none() || source.project_id.as_ref() != project { return Err("Conversation moves require this conversation's project.".into()); }
+    if store.thread_info(channel).map_err(|e| e.to_string())?.is_some() { return Err("A conversation cannot move from a thread.".into()); }
+    if store.channel_archived(channel).map_err(|e| e.to_string())? || store.agent_archived(agent).map_err(|e| e.to_string())? { return Err("This agent or channel is archived.".into()); }
+    if store.project_main_agent(project.ok_or("Project unavailable.")?).map_err(|e| e.to_string())?.as_ref() != Some(agent) {
+        return Err("Only this project's Primary / Moderator agent can move a conversation. Suggest the move in your reply.".into());
+    }
+    Ok(source)
+}
+
+/// Find the active project channel with this name. Threads and the source channel are never targets.
+fn resolve_channel_target(store: &Store, source: &crate::model::Channel, input: &str) -> Result<crate::write_requests::MoveTarget, String> {
+    use crate::model::ProjectChannelKind::{Branch, General, Legacy, Text};
+    let shown = input.trim().trim_start_matches('#').trim();
+    let wanted = shown.to_lowercase();
+    let project = source.project_id.as_ref().ok_or("Project unavailable.")?;
+    let mut active = Vec::new();
+    for (candidate, archived) in store.all_channels_for_project(project).map_err(|e| e.to_string())? {
+        if archived { continue; }
+        let kind = store.project_channel_metadata(&candidate.id).map_err(|e| e.to_string())?.map(|m| m.kind);
+        if matches!(kind, Some(General | Text | Branch | Legacy)) { active.push(candidate); }
+    }
+    let matches: Vec<_> = active.iter().filter(|c| c.name.to_lowercase() == wanted).collect();
+    match matches.as_slice() {
+        [found] if found.id == source.id => Err(format!("The conversation is already in #{}.", found.name)),
+        [found] => Ok(crate::write_requests::MoveTarget::Channel { channel_id: found.id.0.clone(), name: found.name.clone() }),
+        [] => {
+            let mut names: Vec<_> = active.iter().filter(|c| c.id != source.id).map(|c| c.name.as_str()).collect();
+            names.sort_by_key(|name| (name.to_lowercase(), *name));
+            names.dedup();
+            if names.is_empty() { return Err(format!("No active channel is named #{shown}.")); }
+            let list: Vec<_> = names.iter().take(30).map(|name| format!("#{name}")).collect();
+            Err(format!("No active channel is named #{shown}. Active channels: {}.", list.join(", ")))
+        }
+        _ => Err(format!("More than one channel is named #{shown}. Ask the user which one.")),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArchiveOutcome {
     /// The channel is archived. If it had a worktree, the directory is gone and the branch was kept.
@@ -119,7 +167,53 @@ impl GitWorkspace {
                 }
                 Ok((repo, branch, root))
             },
+            crate::write_requests::WriteRequestKind::ConversationMove => Err("Use move_request_target for a conversation move.".into()),
         }
+    }
+
+    /// The moderator gate for a conversation move. It reads saved facts only. It does not look at messages and it does
+    /// not need `workspace_write`.
+    pub fn move_source(&self, channel: &ChannelId, agent: &crate::model::AgentId, project: Option<&crate::model::ProjectId>) -> Result<(), String> {
+        move_gate(&self.store(), channel, agent, project).map(|_| ())
+    }
+
+    /// Resolve where a conversation moves. Saved facts resolve under the store lock. Git runs outside it. A new branch
+    /// is only checked here. Nothing is created until the user approves.
+    pub fn move_request_target(&self, channel: &ChannelId, agent: &crate::model::AgentId, project: Option<&crate::model::ProjectId>, args: &MoveTargetArgs) -> Result<(crate::write_requests::MoveTarget, crate::model::MessageId), String> {
+        use crate::write_requests::MoveTarget;
+        match (args.channel, args.new_branch) {
+            (Some(_), Some(_)) | (None, None) => { self.move_source(channel, agent, project)?; return Err("Give exactly one of `channel` or `new_branch`.".into()); }
+            (Some(_), None) if args.base.is_some() => { self.move_source(channel, agent, project)?; return Err("`base` applies only to `new_branch`.".into()); }
+            _ => {}
+        }
+        let (message, branch_repo) = {
+            let store = self.store();
+            let source = move_gate(&store, channel, agent, project)?;
+            let message = store.last_user_message_id(channel).map_err(|e| e.to_string())?.ok_or("This channel has no user message to move.")?;
+            if let Some(name) = args.channel {
+                return resolve_channel_target(&store, &source, name).map(|target| (target, message));
+            }
+            let metadata = store.project_channel_metadata(channel).map_err(|e| e.to_string())?;
+            let repository = metadata.map(|m| m.repository).unwrap_or_default();
+            let path = if repository.is_empty() {
+                store.list_projects().map_err(|e| e.to_string())?.into_iter().find(|p| Some(&p.id) == project).ok_or("Project unavailable.")?.path
+            } else { repository.clone() };
+            (message, (repository, PathBuf::from(path)))
+        };
+        let (repository, repo) = branch_repo;
+        let entries = crate::worktree::list_branches(&repo).map_err(|e| match e {
+            WorktreeError::NotARepo(_) => "This channel's repository is not a Git repository.".to_string(),
+            WorktreeError::Git(message) => message,
+            other => other.to_string(),
+        })?;
+        let branch = crate::branch_actions::validate_branch_name(&repo, args.new_branch.unwrap_or_default(), None)?;
+        let base = match args.base.map(str::trim) {
+            Some(base) if entries.iter().any(|e| e.branch == base && !e.detached) => base.to_owned(),
+            Some(base) => return Err(format!("Base branch `{base}` does not exist.")),
+            None => crate::branch_actions::default_branch(&entries).ok_or("The main checkout has a detached HEAD. Name a `base` branch.")?.to_owned(),
+        };
+        let base_commit = crate::branch_actions::branch_commit(&repo, &base)?;
+        Ok((MoveTarget::NewBranch { repository, repo_path: repo.to_string_lossy().into_owned(), branch, base, base_commit }, message))
     }
 
     pub fn archive(&self, channel: &ChannelId, force: bool) -> Result<ArchiveOutcome, String> {
@@ -427,5 +521,184 @@ mod tests {
         git(&prepared.cwd, &["checkout", "-b", "changed-outside-discard"]);
         let error = r.ws.prepare(&r.repo, &r.channel.id, "work").unwrap_err();
         assert!(error.contains("different branch"), "{error}");
+    }
+
+    struct MoveRig {
+        ws: GitWorkspace,
+        store: Arc<Mutex<Store>>,
+        repo: PathBuf,
+        project: Project,
+        main: AgentId,
+        general: Channel,
+        _dir: tempfile::TempDir,
+    }
+
+    fn move_rig() -> MoveRig {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        let store = Store::open_in_memory().unwrap();
+        let config = AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Main".into(), avatar: None, provider: "claude".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false };
+        let main = store.create_agent(&config).unwrap();
+        let project = store.import_project_folder(&repo).unwrap();
+        let general = store.ensure_project_general_channel(&project.id, &main).unwrap();
+        assert_eq!(store.project_main_agent(&project.id).unwrap(), Some(main.clone()));
+        let store = Arc::new(Mutex::new(store));
+        let ws = GitWorkspace::new(&dir.path().join("worktrees"), Arc::clone(&store));
+        MoveRig { ws, store, repo, project, main, general, _dir: dir }
+    }
+    fn say(r: &MoveRig, channel: &ChannelId) -> crate::model::MessageId {
+        use crate::model::{Block, Message, MessageId, Role};
+        let message = Message { id: MessageId::new(), channel_id: channel.clone(), role: Role::User, blocks: vec![Block::Markdown { text: "hello".into() }] };
+        r.store.lock().unwrap().insert_message(&message).unwrap();
+        message.id
+    }
+    fn text_channel(r: &MoveRig, name: &str) -> Channel { r.store.lock().unwrap().create_project_text_channel(&r.project.id, name).unwrap() }
+    fn target(r: &MoveRig, args: &MoveTargetArgs) -> Result<(crate::write_requests::MoveTarget, crate::model::MessageId), String> {
+        r.ws.move_request_target(&r.general.id, &r.main, Some(&r.project.id), args)
+    }
+    fn to_channel(name: &str) -> MoveTargetArgs<'_> { MoveTargetArgs { channel: Some(name), new_branch: None, base: None } }
+    fn to_branch<'a>(name: &'a str, base: Option<&'a str>) -> MoveTargetArgs<'a> { MoveTargetArgs { channel: None, new_branch: Some(name), base } }
+
+    #[test]
+    fn only_the_project_main_agent_passes_the_move_gate() {
+        let r = move_rig();
+        assert_eq!(r.ws.move_source(&r.general.id, &r.main, Some(&r.project.id)), Ok(()));
+        let other = r.store.lock().unwrap().create_agent(&AgentConfig { workspace_write: true, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Other".into(), avatar: None, provider: "claude".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        assert_eq!(r.ws.move_source(&r.general.id, &other, Some(&r.project.id)).unwrap_err(), "Only this project's Primary / Moderator agent can move a conversation. Suggest the move in your reply.");
+    }
+    #[test]
+    fn move_gate_refuses_threads_archived_channels_and_other_projects() {
+        let r = move_rig();
+        let anchor = say(&r, &r.general.id);
+        let thread = r.store.lock().unwrap().create_thread(&r.general.id, &anchor, "side", &r.main).unwrap();
+        assert_eq!(r.ws.move_source(&thread.id, &r.main, Some(&r.project.id)).unwrap_err(), "A conversation cannot move from a thread.");
+        let docs = text_channel(&r, "docs");
+        r.store.lock().unwrap().archive_channel(&docs.id).unwrap();
+        assert_eq!(r.ws.move_source(&docs.id, &r.main, Some(&r.project.id)).unwrap_err(), "This agent or channel is archived.");
+        let refused = "Conversation moves require this conversation's project.";
+        assert_eq!(r.ws.move_source(&r.general.id, &r.main, None).unwrap_err(), refused);
+        let elsewhere = r._dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let other = r.store.lock().unwrap().import_project_folder(&elsewhere).unwrap();
+        assert_eq!(r.ws.move_source(&r.general.id, &r.main, Some(&other.id)).unwrap_err(), refused);
+        r.store.lock().unwrap().set_agent_archived(&r.main, true).unwrap();
+        assert_eq!(r.ws.move_source(&r.general.id, &r.main, Some(&r.project.id)).unwrap_err(), "This agent or channel is archived.");
+    }
+    #[test]
+    fn a_move_gate_does_not_need_file_writes() {
+        let r = move_rig();
+        assert!(!r.store.lock().unwrap().load_agent(&r.main).unwrap().workspace_write);
+        assert_eq!(r.ws.move_source(&r.general.id, &r.main, Some(&r.project.id)), Ok(()));
+    }
+    #[test]
+    fn a_move_request_needs_a_user_message() {
+        let r = move_rig(); text_channel(&r, "docs");
+        assert_eq!(r.ws.move_source(&r.general.id, &r.main, Some(&r.project.id)), Ok(()));
+        assert_eq!(target(&r, &to_channel("docs")).unwrap_err(), "This channel has no user message to move.");
+        let id = say(&r, &r.general.id);
+        assert_eq!(target(&r, &to_channel("docs")).unwrap().1, id);
+    }
+    #[test]
+    fn channel_target_resolves_by_name() {
+        let r = move_rig(); say(&r, &r.general.id);
+        let feature = text_channel(&r, "feature");
+        for name in ["#Feature", "feature", " FEATURE "] {
+            let (found, _) = target(&r, &to_channel(name)).unwrap();
+            assert_eq!(found, crate::write_requests::MoveTarget::Channel { channel_id: feature.id.0.clone(), name: "feature".into() }, "{name}");
+        }
+    }
+    #[test]
+    fn channel_target_refuses_the_source_unknown_and_archived_names() {
+        let r = move_rig(); say(&r, &r.general.id);
+        text_channel(&r, "feature"); text_channel(&r, "docs");
+        let old = text_channel(&r, "old");
+        r.store.lock().unwrap().archive_channel(&old.id).unwrap();
+        assert_eq!(target(&r, &to_channel("general")).unwrap_err(), "The conversation is already in #general.");
+        let unknown = "No active channel is named #nope. Active channels: #docs, #feature.";
+        assert_eq!(target(&r, &to_channel("#nope")).unwrap_err(), unknown);
+        assert_eq!(target(&r, &to_channel("old")).unwrap_err(), "No active channel is named #old. Active channels: #docs, #feature.");
+        for name in ["x", "x"] {
+            let channel = Channel { id: ChannelId::new(), project_id: Some(r.project.id.clone()), name: "x".into(), agent_id: r.main.clone(), workspace_mode: WorkspaceMode::Worktree };
+            let repository = format!("repo-{}", channel.id.0);
+            r.store.lock().unwrap().create_named_repository_channel(&channel, &repository, Some(&format!("b-{name}-{}", channel.id.0)), None).unwrap();
+        }
+        assert_eq!(target(&r, &to_channel("x")).unwrap_err(), "More than one channel is named #x. Ask the user which one.");
+    }
+    #[test]
+    fn channel_targets_leave_out_threads() {
+        let r = move_rig();
+        let anchor = say(&r, &r.general.id);
+        r.store.lock().unwrap().create_thread(&r.general.id, &anchor, "side", &r.main).unwrap();
+        assert_eq!(target(&r, &to_channel("side")).unwrap_err(), "No active channel is named #side.");
+    }
+    #[test]
+    fn target_arguments_must_name_exactly_one_target() {
+        let r = move_rig(); say(&r, &r.general.id); text_channel(&r, "docs");
+        let one = "Give exactly one of `channel` or `new_branch`.";
+        assert_eq!(target(&r, &MoveTargetArgs { channel: Some("docs"), new_branch: Some("b"), base: None }).unwrap_err(), one);
+        assert_eq!(target(&r, &MoveTargetArgs { channel: None, new_branch: None, base: None }).unwrap_err(), one);
+        assert_eq!(target(&r, &MoveTargetArgs { channel: Some("docs"), new_branch: None, base: Some("main") }).unwrap_err(), "`base` applies only to `new_branch`.");
+    }
+    #[test]
+    fn new_branch_target_uses_the_default_branch_and_records_its_commit() {
+        let r = move_rig(); let id = say(&r, &r.general.id);
+        let (found, message) = target(&r, &to_branch("  feat/x ", None)).unwrap();
+        assert_eq!(message, id);
+        assert_eq!(found, crate::write_requests::MoveTarget::NewBranch { repository: String::new(), repo_path: r.project.path.clone(), branch: "feat/x".into(), base: "main".into(), base_commit: git(&r.repo, &["rev-parse", "refs/heads/main"]) });
+        assert!(!git(&r.repo, &["branch", "--list", "feat/x"]).contains("feat/x"), "resolving a target creates no branch");
+    }
+    #[test]
+    fn new_branch_target_accepts_a_named_base_and_refuses_a_missing_one() {
+        let r = move_rig(); say(&r, &r.general.id);
+        git(&r.repo, &["branch", "release"]);
+        std::fs::write(r.repo.join("b.txt"), "two\n").unwrap();
+        git(&r.repo, &["add", "-A"]); git(&r.repo, &["commit", "-q", "-m", "two"]);
+        let (found, _) = target(&r, &to_branch("feat", Some("release"))).unwrap();
+        let crate::write_requests::MoveTarget::NewBranch { base, base_commit, .. } = found else { panic!("expected a new branch") };
+        assert_eq!(base, "release");
+        assert_eq!(base_commit, git(&r.repo, &["rev-parse", "refs/heads/release"]));
+        assert_ne!(base_commit, git(&r.repo, &["rev-parse", "refs/heads/main"]));
+        assert_eq!(target(&r, &to_branch("feat", Some("nope"))).unwrap_err(), "Base branch `nope` does not exist.");
+    }
+    #[test]
+    fn new_branch_target_refuses_an_existing_or_invalid_name() {
+        let r = move_rig(); say(&r, &r.general.id);
+        git(&r.repo, &["branch", "taken"]);
+        assert_eq!(target(&r, &to_branch("taken", None)).unwrap_err(), "A branch named `taken` already exists.");
+        assert_eq!(target(&r, &to_branch("has space", None)).unwrap_err(), "`has space` is not a valid branch name.");
+        assert_eq!(target(&r, &to_branch("  ", None)).unwrap_err(), "Enter a branch name.");
+    }
+    #[test]
+    fn new_branch_target_needs_a_default_branch() {
+        let r = move_rig(); say(&r, &r.general.id);
+        git(&r.repo, &["checkout", "-q", "--detach"]);
+        assert_eq!(target(&r, &to_branch("feat", None)).unwrap_err(), "The main checkout has a detached HEAD. Name a `base` branch.");
+        let (found, _) = target(&r, &to_branch("feat", Some("main"))).unwrap();
+        assert!(matches!(found, crate::write_requests::MoveTarget::NewBranch { base, .. } if base == "main"));
+    }
+    #[test]
+    fn new_branch_target_uses_the_repository_of_a_branch_channel() {
+        let r = move_rig();
+        let other = r._dir.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        git(&other, &["init", "-q", "-b", "trunk"]);
+        git(&other, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let channel = Channel { id: ChannelId::new(), project_id: Some(r.project.id.clone()), name: "side".into(), agent_id: r.main.clone(), workspace_mode: WorkspaceMode::Worktree };
+        let repository = other.to_string_lossy().into_owned();
+        r.store.lock().unwrap().create_named_repository_channel(&channel, &repository, Some("trunk"), None).unwrap();
+        say(&r, &channel.id);
+        let (found, _) = r.ws.move_request_target(&channel.id, &r.main, Some(&r.project.id), &to_branch("feat", None)).unwrap();
+        assert_eq!(found, crate::write_requests::MoveTarget::NewBranch { repository: repository.clone(), repo_path: repository, branch: "feat".into(), base: "trunk".into(), base_commit: git(&other, &["rev-parse", "refs/heads/trunk"]) });
+    }
+    #[test]
+    fn new_branch_target_needs_a_git_repository() {
+        let r = move_rig(); say(&r, &r.general.id);
+        std::fs::remove_dir_all(r.repo.join(".git")).unwrap();
+        assert_eq!(target(&r, &to_branch("feat", None)).unwrap_err(), "This channel's repository is not a Git repository.");
     }
 }

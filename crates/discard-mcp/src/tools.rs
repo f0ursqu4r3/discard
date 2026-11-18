@@ -39,6 +39,9 @@ impl McpHandler {
                     if workspace.write_request_target(channel, &identity.agent, identity.project.as_ref(), discard_core::write_requests::WriteRequestKind::WorktreeCreate).is_ok() {
                         tools.push(creation_tool());
                     }
+                    if workspace.move_source(channel, &identity.agent, identity.project.as_ref()).is_ok() {
+                        tools.push(move_tool());
+                    }
                     if identity.main_checkout_requests && workspace.write_request_target(channel, &identity.agent, identity.project.as_ref(), discard_core::write_requests::WriteRequestKind::MainCheckoutWrite).is_ok() {
                         tools.push(main_checkout_tool());
                     }
@@ -113,6 +116,24 @@ impl McpHandler {
         let (_, branch, path) = workspace.write_request_target(channel, &identity.agent, identity.project.as_ref(), kind)?;
         let request = requests.request(kind, channel, &identity.agent, branch, path.to_string_lossy().into_owned())?;
         Ok(json!({"approvalRequired":true,"request":request,"message":if name == "worktree_request_creation" { "Worktree creation is pending in the app. No folder exists yet. You cannot approve this request." } else { "Main-checkout write access is pending in the app. You cannot approve this request." }}).to_string())
+    }
+
+    fn run_move_request(&self, identity: &Identity, args: &Value) -> Result<String, String> {
+        use discard_core::{workspace::MoveTargetArgs, write_requests::{Handoff, MoveDetails}};
+        const TARGET_SHAPE: &str = "`target` must be an object with `channel`, or `new_branch` and an optional `base`.";
+        let (requests, workspace) = self.writes.as_ref().ok_or("Write requests are unavailable.")?;
+        if !identity.can_write { return Err("Conversation moves are unavailable during summarization.".into()); }
+        let channel = identity.source_conversation.as_ref().ok_or("A project channel is required.")?;
+        let args = args.as_object().ok_or("Arguments must be an object.")?;
+        if args.keys().any(|k| !matches!(k.as_str(), "target" | "goal" | "constraints" | "decisions" | "open_questions")) { return Err("Only `target`, `goal`, `constraints`, `decisions`, and `open_questions` are accepted.".into()); }
+        let target = args.get("target").and_then(Value::as_object).filter(|t| t.keys().all(|k| matches!(k.as_str(), "channel" | "new_branch" | "base"))).ok_or(TARGET_SHAPE)?;
+        let text = |key: &str| -> Result<Option<&str>, String> { match target.get(key) { None => Ok(None), Some(Value::String(s)) => Ok(Some(s.as_str())), Some(_) => Err(TARGET_SHAPE.into()) } };
+        let target_args = MoveTargetArgs { channel: text("channel")?, new_branch: text("new_branch")?, base: text("base")? };
+        workspace.move_source(channel, &identity.agent, identity.project.as_ref())?;
+        let handoff = Handoff::from_args(args)?;
+        let (target, message) = workspace.move_request_target(channel, &identity.agent, identity.project.as_ref(), &target_args)?;
+        let request = requests.request_move(channel, &identity.agent, MoveDetails { target, handoff, source_message_id: message.0 })?;
+        Ok(json!({"approvalRequired":true,"request":request,"message":"The move is pending in the app. Nothing has moved. You cannot approve this request. After approval, the conversation continues in the target channel. End your reply here."}).to_string())
     }
 
     fn run_worktree_tool(&self, identity: &Identity, name: &str, args: &Value) -> Result<String, String> {
@@ -220,7 +241,7 @@ impl McpHandler {
     fn call(&self, identity: &Identity, id: &Value, params: &Value) -> Value {
         let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
         let known = match identity.surface {
-            Surface::Memory => (DELEGATION_TOOLS.contains(&name) && self.delegation.is_some() && identity.delegation && identity.can_write) || (matches!(name, "worktree_request_creation" | "main_checkout_request_write") && self.writes.is_some() && identity.can_write && identity.project.is_some()) || ALL_TOOLS.contains(&name) || (self.worktrees.is_some() && identity.project.is_some() && identity.can_write && (WORKTREE_TOOLS.contains(&name) || PROJECT_TOOLS.contains(&name))),
+            Surface::Memory => (DELEGATION_TOOLS.contains(&name) && self.delegation.is_some() && identity.delegation && identity.can_write) || (matches!(name, "worktree_request_creation" | "main_checkout_request_write" | "conversation_request_move") && self.writes.is_some() && identity.can_write && identity.project.is_some()) || ALL_TOOLS.contains(&name) || (self.worktrees.is_some() && identity.project.is_some() && identity.can_write && (WORKTREE_TOOLS.contains(&name) || PROJECT_TOOLS.contains(&name))),
             Surface::Plugins => self.plugins.is_some() && PLUGIN_ALL_TOOLS.contains(&name),
         };
         if !known {
@@ -229,6 +250,7 @@ impl McpHandler {
         let args = params.get("arguments").unwrap_or(&Value::Null);
         let outcome = match identity.surface {
             Surface::Memory if DELEGATION_TOOLS.contains(&name) => self.run_delegation_tool(identity, name, args),
+            Surface::Memory if name == "conversation_request_move" => self.run_move_request(identity, args),
             Surface::Memory if matches!(name, "worktree_request_creation" | "main_checkout_request_write") => self.run_write_request(identity, name, args),
             Surface::Memory if PROJECT_TOOLS.contains(&name) => self.run_project_tool(identity, name, args),
             Surface::Memory if WORKTREE_TOOLS.contains(&name) => self.run_worktree_tool(identity, name, args),
@@ -638,6 +660,20 @@ fn main_checkout_tool() -> Value {
     json!({"name":"main_checkout_request_write","description":"Ask the user to let you write in the main checkout for one response. Does nothing until the user approves in the app.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}})
 }
 
+fn move_tool() -> Value {
+    json!({"name":"conversation_request_move","description":"Ask the user to move this conversation to another channel or to a new branch. Only this project's Primary / Moderator agent has this tool. Give the target and a handoff: the goal, and any constraints, decisions, and open questions. Does nothing until the user approves in the app. After approval, the app posts the handoff and the user's latest message in the target and starts a response there. This channel's transcript is not copied, so the handoff must stand alone.","inputSchema":{"type":"object","properties":{
+        "target":{"type":"object","description":"Give exactly one of channel or new_branch.","properties":{
+            "channel":{"type":"string","description":"The name of an existing channel in this project, with or without #."},
+            "new_branch":{"type":"string","description":"The name of a branch to create. The app also creates its worktree and channel."},
+            "base":{"type":"string","description":"With new_branch only: the local branch to start from. Leave out to use the default branch."}},
+            "additionalProperties":false},
+        "goal":{"type":"string","description":"What the work in the target must achieve. At most 600 characters."},
+        "constraints":{"type":"array","items":{"type":"string"},"maxItems":12},
+        "decisions":{"type":"array","items":{"type":"string"},"maxItems":12},
+        "open_questions":{"type":"array","items":{"type":"string"},"maxItems":12}},
+        "required":["target","goal"],"additionalProperties":false}})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -825,6 +861,103 @@ mod tests {
         let reply = call(&r, &who, "worktree_request_creation", json!({}));
         assert!(is_error(&reply));
         assert!(reply.to_string().contains("This branch is checked out in the main checkout. Use main_checkout_request_write instead."));
+    }
+
+    /// The first agent is the project main agent, a second agent is a plain member, and the channel holds one user message.
+    fn move_rig() -> (Rig, Identity, Identity, Arc<std::sync::Mutex<discard_core::store::Store>>, tempfile::TempDir) {
+        use discard_core::model::{Block, Message, MessageId, Role};
+        let (r, main, store, dir) = creation_rig(false);
+        let other = {
+            let store = store.lock().unwrap();
+            store.set_project_main_agent(main.project.as_ref().unwrap(), &main.agent).unwrap();
+            let config = discard_core::agent::AgentConfig::from_toml("name='B'\nprovider='fake'\nmodel='test'\npolicy='ask'\nworkspace_write=true").unwrap();
+            let other = store.create_agent(&config).unwrap();
+            store.insert_message(&Message { id: MessageId::new(), channel_id: main.source_conversation.clone().unwrap(), role: Role::User, blocks: vec![Block::Markdown { text: "Please continue this on a branch.".into() }] }).unwrap();
+            other
+        };
+        let mut second = main.clone(); second.agent = other;
+        (r, main, second, store, dir)
+    }
+    fn tool_listed(r: &Rig, who: &Identity, name: &str) -> bool {
+        r.handler.handle(who, &rpc("tools/list", json!({}))).unwrap()["result"]["tools"].as_array().unwrap().iter().any(|t| t["name"] == name)
+    }
+    fn move_args() -> Value { json!({"target": {"new_branch": "feat/x"}, "goal": "Ship the feature", "constraints": ["No new crates"], "open_questions": ["Which base?"]}) }
+    fn pending(r: &Rig, who: &Identity) -> usize { r.handler.writes.as_ref().unwrap().0.list(who.source_conversation.as_ref().unwrap()).len() }
+
+    #[test]
+    fn move_tool_is_listed_only_for_the_project_main_agent() {
+        let (r, mut who, second, store, _dir) = move_rig();
+        assert!(tool_listed(&r, &who, "conversation_request_move"));
+        assert!(!tool_listed(&r, &second, "conversation_request_move"));
+        who.can_write = false; assert!(!tool_listed(&r, &who, "conversation_request_move")); who.can_write = true;
+        let project = who.project.take(); assert!(!tool_listed(&r, &who, "conversation_request_move")); who.project = project;
+        assert!(tool_listed(&r, &who, "conversation_request_move"));
+        store.lock().unwrap().set_project_main_agent(who.project.as_ref().unwrap(), &second.agent).unwrap();
+        assert!(!tool_listed(&r, &who, "conversation_request_move"));
+        assert!(tool_listed(&r, &second, "conversation_request_move"));
+    }
+
+    #[test]
+    fn move_tool_refuses_a_caller_that_is_not_the_moderator() {
+        let (r, _who, second, _store, _dir) = move_rig();
+        let reply = call(&r, &second, "conversation_request_move", move_args());
+        assert!(is_error(&reply), "{reply}");
+        assert_eq!(text(&reply), "Only this project's Primary / Moderator agent can move a conversation. Suggest the move in your reply.");
+        assert_eq!(pending(&r, &second), 0);
+    }
+
+    #[test]
+    fn move_tool_creates_one_pending_request_with_the_handoff() {
+        let (r, who, _second, _store, _dir) = move_rig();
+        let reply = call(&r, &who, "conversation_request_move", move_args());
+        assert!(!is_error(&reply), "{reply}");
+        let body: Value = serde_json::from_str(&text(&reply)).unwrap();
+        assert_eq!(body["approvalRequired"], true);
+        assert_eq!(body["request"]["kind"], "conversation_move");
+        assert_eq!(body["message"], "The move is pending in the app. Nothing has moved. You cannot approve this request. After approval, the conversation continues in the target channel. End your reply here.");
+        assert_eq!(pending(&r, &who), 1);
+        let again = call(&r, &who, "conversation_request_move", move_args());
+        assert!(is_error(&again));
+        assert_eq!(text(&again), "A move request is already pending in the app. The user must decide it first.");
+        assert_eq!(pending(&r, &who), 1);
+    }
+
+    #[test]
+    fn move_tool_refuses_bad_arguments() {
+        let (r, who, _second, _store, _dir) = move_rig();
+        let keys = "Only `target`, `goal`, `constraints`, `decisions`, and `open_questions` are accepted.";
+        let target = "`target` must be an object with `channel`, or `new_branch` and an optional `base`.";
+        for (args, expected) in [
+            (json!({"target": {"new_branch": "feat/x"}, "goal": "g", "approve": true}), keys),
+            (json!({"target": {"new_branch": "feat/x", "approve": true}, "goal": "g"}), target),
+            (json!({"target": {"new_branch": 3}, "goal": "g"}), target),
+            (json!({"target": "feat/x", "goal": "g"}), target),
+            (json!({"goal": "g"}), target),
+            (json!({"target": {"channel": "docs", "new_branch": "feat/x"}, "goal": "g"}), "Give exactly one of `channel` or `new_branch`."),
+            (json!({"target": {"new_branch": "feat/x"}}), "`goal` is required."),
+        ] {
+            let reply = call(&r, &who, "conversation_request_move", args.clone());
+            assert!(is_error(&reply), "{args}: {reply}");
+            assert_eq!(text(&reply), expected, "{args}");
+        }
+        assert_eq!(pending(&r, &who), 0);
+        let mut summary = who.clone(); summary.can_write = false;
+        assert!(call(&r, &summary, "conversation_request_move", move_args())["error"].is_object());
+        let mut direct = who.clone(); direct.project = None;
+        assert!(call(&r, &direct, "conversation_request_move", move_args())["error"].is_object());
+        assert_eq!(pending(&r, &who), 0);
+    }
+
+    #[test]
+    fn move_tool_refuses_a_channel_with_no_user_message() {
+        let (r, who, _second, store, _dir) = move_rig();
+        use discard_core::model::{Channel, ChannelId, WorkspaceMode};
+        let empty = Channel { id: ChannelId::new(), project_id: who.project.clone(), name: "empty".into(), agent_id: who.agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+        store.lock().unwrap().create_named_channel(&empty, Some("empty"), None).unwrap();
+        let mut bare = who.clone(); bare.source_conversation = Some(empty.id);
+        let reply = call(&r, &bare, "conversation_request_move", move_args());
+        assert!(is_error(&reply));
+        assert_eq!(text(&reply), "This channel has no user message to move.");
     }
 
     #[test]

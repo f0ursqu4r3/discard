@@ -261,6 +261,20 @@ pub enum Block {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         decided_by: Option<DecidedBy>,
     },
+    /// A link between two channels of one conversation move. Rendered by the app.
+    ChannelLink {
+        direction: LinkDirection,
+        channel_id: String,
+        channel_name: String,
+    },
+}
+
+/// Which way a `ChannelLink` points from the channel that holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkDirection {
+    MovedTo,
+    MovedFrom,
 }
 
 /// The saved outcome of an approval request.
@@ -321,4 +335,16 @@ pub struct Message {
     pub channel_id: ChannelId,
     pub role: Role,
     pub blocks: Vec<Block>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn channel_link_block_round_trips() {
+        let json = serde_json::json!({"type":"channel_link","direction":"moved_to","channel_id":"c","channel_name":"feature"});
+        let block: Block = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(block, Block::ChannelLink { direction: LinkDirection::MovedTo, channel_id: "c".into(), channel_name: "feature".into() });
+        assert_eq!(serde_json::to_value(&block).unwrap(), json);
+    }
 }

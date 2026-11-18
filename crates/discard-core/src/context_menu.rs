@@ -39,7 +39,7 @@ pub fn context_menu(target: &ContextTarget, ctx: &MenuContext) -> Vec<MenuEntry>
 }
 
 pub fn message_text(blocks: &[Block]) -> String {
-    blocks.iter().filter_map(|block| match block { Block::Markdown { text } | Block::Code { text, .. } | Block::Diff { text } => Some(text.as_str()), Block::Attachment { .. } | Block::ToolCall { .. } | Block::Approval { .. } | Block::Changes { .. } => None }).collect::<Vec<_>>().join("\n\n")
+    blocks.iter().filter_map(|block| match block { Block::Markdown { text } | Block::Code { text, .. } | Block::Diff { text } => Some(text.as_str()), Block::Attachment { .. } | Block::ToolCall { .. } | Block::Approval { .. } | Block::Changes { .. } | Block::ChannelLink { .. } => None }).collect::<Vec<_>>().join("\n\n")
 }
 
 pub fn resolve_copy(messages: &[Message], channel_name: &str, target: &ContextTarget, action: Action) -> Option<String> {

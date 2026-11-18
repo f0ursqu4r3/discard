@@ -3,10 +3,27 @@ import { shortPath } from '@/settings/paths'
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { getWriteRequests, decideWriteRequest, type WriteRequest } from '@/bridge/api'
 import { Button } from '../ui/button'
+import MoveRequestDetails from './MoveRequestDetails.vue'
 const props = defineProps<{ channelId: string; running: boolean }>()
 const requests = ref<WriteRequest[]>([])
 const busy = ref<string | null>(null)
 const error = ref('')
+function title(request: WriteRequest) {
+  if (request.kind === 'conversation_move') return 'Move this conversation?'
+  return request.kind === 'worktree_create'
+    ? 'Create a worktree for this branch?'
+    : 'Write in the main checkout for one response?'
+}
+function approveLabel(request: WriteRequest) {
+  if (request.kind === 'conversation_move') return 'Move'
+  return request.kind === 'worktree_create' ? 'Create worktree' : 'Allow once'
+}
+function moveExplanation(request: WriteRequest) {
+  const target = request.move?.target
+  if (target?.kind === 'channel')
+    return `Approval posts this handoff and your latest message in #${target.name} and starts a response there. This transcript is not copied. You stay in this channel.`
+  return 'Approval creates the branch, a worktree, and a channel. It posts this handoff and your latest message there and starts a response. This transcript is not copied. You stay in this channel.'
+}
 const buttonClass =
   'border-[var(--protected-border)] bg-[var(--protected-bg)] text-[var(--protected-fg)] hover:bg-[var(--protected-bg)] hover:text-[var(--protected-fg)] focus-visible:ring-[var(--protected-border)]'
 let disposed = false
@@ -74,20 +91,19 @@ onUnmounted(() => {
       class="flex flex-col gap-3 rounded-md border border-[var(--protected-border)] bg-[var(--protected-bg)] p-4 text-sm text-[var(--protected-fg)]"
       aria-label="Write access approval"
     >
-      <p class="font-semibold">
-        {{
-          request.kind === 'worktree_create'
-            ? 'Create a worktree for this branch?'
-            : 'Write in the main checkout for one response?'
-        }}
-      </p>
-      <dl class="grid min-w-0 gap-1">
+      <p class="font-semibold">{{ title(request) }}</p>
+      <MoveRequestDetails
+        v-if="request.kind === 'conversation_move' && request.move"
+        :details="request.move"
+      />
+      <dl v-else class="grid min-w-0 gap-1">
         <dt class="font-medium">Path</dt>
         <dd class="break-all font-mono">{{ shortPath(request.path) }}</dd>
         <dt class="mt-2 font-medium">Branch</dt>
         <dd class="break-all font-mono">{{ request.branch }}</dd>
       </dl>
       <template v-if="request.state === 'pending'">
+        <p v-if="request.kind === 'conversation_move'">{{ moveExplanation(request) }}</p>
         <p>
           Approval applies once and expires after 10 minutes. Restarting Discard cancels pending
           requests.
@@ -108,13 +124,7 @@ onUnmounted(() => {
             :disabled="!!busy || running"
             @click="decide(request, true)"
           >
-            {{
-              busy === request.id
-                ? 'Working…'
-                : request.kind === 'worktree_create'
-                  ? 'Create worktree'
-                  : 'Allow once'
-            }}
+            {{ busy === request.id ? 'Working…' : approveLabel(request) }}
           </Button>
         </div>
       </template>

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const WORKSPACE_TOOLS: &[&str] = &["worktree_commit"];
 
-pub(crate) const MEMORY_TOOLS: &[&str] = &["memory_search", "memory_list", "memory_read", "memory_save", "memory_edit", "memory_forget", "worktree_inspect", "worktree_request_removal", "worktree_request_creation", "main_checkout_request_write", "project_list_files", "project_read_file", "project_search", "project_git_branches", "project_git_log", "project_git_compare"];
+pub(crate) const MEMORY_TOOLS: &[&str] = &["memory_search", "memory_list", "memory_read", "memory_save", "memory_edit", "memory_forget", "worktree_inspect", "worktree_request_removal", "worktree_request_creation", "main_checkout_request_write", "conversation_request_move", "project_list_files", "project_read_file", "project_search", "project_git_branches", "project_git_log", "project_git_compare"];
 
 /// Discard's delegation tools. A session may call them only when its MCP config carries the delegation timeout.
 pub(crate) const DELEGATION_TOOLS: &[&str] = &["delegate", "agents_list", "agent_request_add"];

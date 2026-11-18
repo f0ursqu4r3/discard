@@ -109,6 +109,24 @@ pub fn create_branch(worktree: &Path, name: &str) -> Result<()> {
     git(worktree, &["switch", "-c", name]).map(|_| ()).map_err(message)
 }
 
+/// The full commit ID of `refs/heads/<branch>`.
+pub fn branch_commit(repo: &Path, branch: &str) -> Result<String> {
+    let reference = format!("refs/heads/{branch}^{{commit}}");
+    git(repo, &["rev-parse", "--verify", "--quiet", &reference]).map_err(message)
+}
+
+/// Start a new branch at `commit` with `git branch`. No working tree changes. The caller validates the name first.
+pub fn create_branch_at(repo: &Path, name: &str, commit: &str) -> Result<()> {
+    git(repo, &["branch", "--", name, commit]).map(|_| ()).map_err(message)
+}
+
+/// Whether `commit` names a commit that the repository holds. A value that starts with `-` names none, so Git cannot
+/// read it as an option.
+pub fn commit_exists(repo: &Path, commit: &str) -> bool {
+    if commit.is_empty() || commit.starts_with('-') { return false; }
+    git(repo, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +307,30 @@ mod tests {
         run(&tree.root, &["commit", "-q", "--allow-empty", "-m", "kept"]);
         assert_eq!(manager.remove_checked(&tree, false).unwrap(), RemoveOutcome::Removed);
         assert_eq!(unmerged_commits(&r.repo, "main", "side").unwrap(), 1, "the commit stays on the branch");
+    }
+
+    #[test]
+    fn create_branch_at_starts_a_branch_without_switching() {
+        let r = rig();
+        let first = run(&r.repo, &["rev-parse", "HEAD"]);
+        run(&r.repo, &["commit", "-q", "--allow-empty", "-m", "second"]);
+        assert_ne!(branch_commit(&r.repo, "main").unwrap(), first);
+        create_branch_at(&r.repo, "from-first", &first).unwrap();
+        assert_eq!(run(&r.repo, &["rev-parse", "refs/heads/from-first"]), first);
+        assert_eq!(branch_commit(&r.repo, "from-first").unwrap(), first);
+        assert_eq!(run(&r.repo, &["rev-parse", "--abbrev-ref", "HEAD"]), "main", "the main checkout stays on its branch");
+        assert!(create_branch_at(&r.repo, "from-first", &first).is_err(), "git refuses an existing name");
+        assert!(create_branch_at(&r.repo, "--delete", &first).is_err());
+        assert!(branch_commit(&r.repo, "missing").is_err());
+    }
+
+    #[test]
+    fn commit_exists_names_a_commit_that_the_repository_holds() {
+        let r = rig();
+        let head = run(&r.repo, &["rev-parse", "HEAD"]);
+        assert!(commit_exists(&r.repo, &head));
+        assert!(!commit_exists(&r.repo, &"0".repeat(40)), "a well-formed ID can name no object");
+        assert!(!commit_exists(&r.repo, "--version"), "Git must not read the commit as an option");
+        assert!(!commit_exists(&r.repo, ""));
     }
 }

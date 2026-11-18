@@ -169,6 +169,9 @@ impl MemoryRuntime {
                 "\nThis branch is checked out in the main checkout. This agent's provider cannot write there. If the user asks for changes, explain this once.\n"
             });
         }
+        if can_write && let Some((_, workspace)) = &self.writes && workspace.move_source(source, agent, project).is_ok() {
+            system_prompt.push_str("\nYou are this project's Primary / Moderator agent. When the user asks to move this conversation to another channel or to a new branch, call conversation_request_move with the target and a handoff. Do not save the handoff to memory instead. Other agents cannot move a conversation.\n");
+        }
         if delegation {
             system_prompt.push_str("\nDelegation: delegate starts read-only sub-agents in threads and returns their results in the same call. Sub-agents cannot see this conversation, so write each brief so it stands alone. Run independent research as up to 4 tasks in one call. agents_list shows the agents you can name, and agent_request_add asks the user to add one that is not a project member.\n");
         }

@@ -246,3 +246,34 @@ async fn a_thread_of_a_worktree_channel_reads_the_parents_worktree_and_gets_no_w
     for token in [&own.token, &unbound_turn.token, &prepared.token] { runtime.finish(token); }
     runtime.shutdown().await;
 }
+
+#[tokio::test]
+async fn moderator_prompt_names_the_move_tool() {
+    use discard_core::{workspace::GitWorkspace, write_requests::WriteRequests};
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo"); std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]); git(&repo, &["commit", "--allow-empty", "-m", "initial"]);
+    let store = Store::open_in_memory().unwrap();
+    let config = |name: &str| AgentConfig { workspace_write: true, sandbox_autorun: false, delegation: false, name: name.into(), provider: "fake".into(), model: Some("test".into()), avatar: None, reasoning_effort: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false };
+    let main = store.create_agent(&config("Main")).unwrap();
+    let other = store.create_agent(&config("Other")).unwrap();
+    let project = store.import_project_folder(&repo).unwrap();
+    store.set_project_main_agent(&project.id, &main).unwrap();
+    let channel = store.ensure_project_general_channel(&project.id, &main).unwrap();
+    let direct = Channel { id: ChannelId::new(), project_id: None, name: "Main".into(), agent_id: main.clone(), workspace_mode: WorkspaceMode::Worktree };
+    store.insert_channel(&direct).unwrap();
+    let store = Arc::new(Mutex::new(store));
+    let access = Arc::new(WorktreeAccess::new(store.clone()));
+    let workspace = Arc::new(GitWorkspace::new(&dir.path().join("worktrees"), store.clone()));
+    let memory = Arc::new(MemoryStore::open_in_memory_index(&dir.path().join("memory")).unwrap());
+    let runtime = MemoryRuntime::start_with_write_services(memory, &dir.path().join("runtime"), None, Some(access), Some((Arc::new(WriteRequests::default()), workspace))).await.unwrap();
+    let line = "\nYou are this project's Primary / Moderator agent. When the user asks to move this conversation to another channel or to a new branch, call conversation_request_move with the target and a handoff. Do not save the handoff to memory instead. Other agents cannot move a conversation.\n";
+    let moderator = runtime.prepare_turn(&main, Some(&project.id), &channel.id, None, false, "move this").unwrap();
+    assert!(moderator.system_prompt.contains(line), "{}", moderator.system_prompt);
+    let member = runtime.prepare_turn(&other, Some(&project.id), &channel.id, None, false, "move this").unwrap();
+    assert!(!member.system_prompt.contains("conversation_request_move"), "{}", member.system_prompt);
+    let chat = runtime.prepare_turn(&main, None, &direct.id, None, false, "move this").unwrap();
+    assert!(!chat.system_prompt.contains("conversation_request_move"), "{}", chat.system_prompt);
+    for token in [&moderator.token, &member.token, &chat.token] { runtime.finish(token); }
+    runtime.shutdown().await;
+}

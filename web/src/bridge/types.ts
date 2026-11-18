@@ -21,6 +21,12 @@ export type BlockDto =
       truncated: boolean
     }
   | { type: 'attachment'; attachment: AttachmentDto }
+  | {
+      type: 'channel_link'
+      direction: 'moved_to' | 'moved_from'
+      channel_id: string
+      channel_name: string
+    }
   | { type: 'markdown' | 'diff'; text: string }
   | { type: 'code'; language: string | null; text: string }
   | {

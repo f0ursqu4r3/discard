@@ -1,6 +1,6 @@
 # Project channel foundation status
 
-Updated: 2026-11-12
+Updated: 2026-11-17
 
 The project-channel foundation is implemented. It adds durable project channel identities, saved project navigation, a project main-agent setting, channel memberships, versioned topics, project navigation and details, and topic context in Conversation-mode prompts. The approved design in `docs/superpowers/specs/2026-11-05-project-channel-orchestration-design.md` describes a larger orchestration system. This status page describes the implemented foundation only.
 
@@ -33,11 +33,11 @@ These items are later implementation slices:
 
 - Concurrent multi-agent replies, structured mention tokens, and agent-initiated delegation.
 - A durable task graph, queued steering, bounded delegation, project concurrency, and task orchestration locks.
-- Main-agent tools for branch and channel creation, topic handoffs, progress links, and integration.
+- Main-agent tools for progress links and integration.
 - Descendant cancellation, restart reconciliation, paused-task recovery, and branch lifecycle detection.
 - Provider-cache-aware input and context retrieval that retains required evidence.
 
-The current main-agent setting assigns the general channel's responder. It does not schedule specialists. Conversation tools can inspect a bound worktree and request app-approved removal. They do not expose general shell access, and the app does not claim full task orchestration or recovery.
+The current main-agent setting assigns the general channel's responder. It does not schedule specialists. Conversation tools can inspect a bound worktree and request app-approved removal. The Primary / Moderator agent can also request an app-approved conversation move. These tools do not expose general shell access, and the app does not claim full task orchestration or recovery.
 
 ## Agent workspace writes
 
@@ -58,9 +58,12 @@ approvals retain the full-access fallback.
 
 Sandbox autorun is implemented for Claude and confirmed by a live probe on Claude Code 2.1.321. Codex autorun passed its spike on codex-cli 0.166.0 (macOS, linked worktree); see [Codex autorun spike results](provider-codex.md#autorun-spike-results). See [worktree writes](worktrees.md#agent-workspace-writes-slices-a-and-b).
 
-Slice C remains planned: conversation moves, new-branch targets, and branch
-creation for detached worktrees. Native provider resume per agent is also planned.
-This does not implement multi-agent task orchestration.
+Slice C is implemented: conversation moves and new-branch targets. The project's
+Primary / Moderator agent can ask to move a conversation to an existing channel or
+to a new branch. The user approves on a card. See
+[conversation moves](worktrees.md#conversation-moves-slice-c). "Create a branch
+here" for detached worktrees (decision 17) and native provider resume per agent
+remain planned. This does not implement multi-agent task orchestration.
 
 ## Terminal
 

@@ -8,6 +8,7 @@ import DiffBlock from './DiffBlock.vue'
 import ToolCallBlock from './ToolCallBlock.vue'
 import ApprovalMark from './ApprovalMark.vue'
 import ChangesCard from './ChangesCard.vue'
+import ChannelLinkCard from './ChannelLinkCard.vue'
 import ContextMenuHost from './ContextMenuHost.vue'
 import type { ContextTargetDto } from '../bridge/types'
 import type { PromptDto } from '../bridge/types'
@@ -50,6 +51,7 @@ const standalone = computed(() => {
 <template>
   <ContextMenuHost :target="target">
     <ChangesCard v-if="block.type === 'changes'" :block="block" />
+    <ChannelLinkCard v-else-if="block.type === 'channel_link'" :block="block" />
     <AttachmentCard v-else-if="block.type === 'attachment'" :attachment="block.attachment" />
     <SafeMarkdown v-else-if="block.type === 'markdown'" :text="block.text" :inline="inline" />
     <DiffBlock

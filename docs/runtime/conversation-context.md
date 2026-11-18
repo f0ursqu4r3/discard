@@ -206,3 +206,16 @@ Command rules match parsed word prefixes. Host rules match exact normalized host
 The audit uses `Policy("always_allow:<id>")`. Saving a rule sends a single Approve
 to the provider. Coding keeps its provider-session Always allow behavior. Rules do
 not approve sandbox escapes or app-owned write requests.
+
+## Conversation moves
+
+An approved move gives the target two replayed messages. The handoff is an agent message
+authored by the project main agent. The user's latest message, with its attachments,
+is a normal user message. Both are saved in the target and enter its replay. The
+source transcript is not copied.
+
+A new channel also gets the handoff as its topic. An existing target channel keeps
+its topic.
+
+The "Moved from" and "Moved to" link blocks are `System` messages. They never enter
+replay. See [conversation moves](../worktrees.md#conversation-moves-slice-c).

@@ -385,15 +385,38 @@ export const getAlwaysAllowRules = (projectId: string) =>
 export const revokeAlwaysAllowRule = (projectId: string, ruleId: string) =>
   invoke<boolean>('revoke_always_allow_rule', { projectId, ruleId })
 
+export interface MoveHandoff {
+  goal: string
+  constraints: string[]
+  decisions: string[]
+  openQuestions: string[]
+}
+export type MoveTarget =
+  | { kind: 'channel'; channelId: string; name: string }
+  | {
+      kind: 'new_branch'
+      repository: string
+      repoPath: string
+      branch: string
+      base: string
+      baseCommit: string
+    }
+export interface MoveDetails {
+  target: MoveTarget
+  handoff: MoveHandoff
+  sourceMessageId: string
+}
 export interface WriteRequest {
   id: string
-  kind: 'worktree_create' | 'main_checkout_write'
+  kind: 'worktree_create' | 'main_checkout_write' | 'conversation_move'
   channelId: string
   agentId: string
   branch: string
   path: string
   state: string
   result: string | null
+  /** Set only when `kind` is `conversation_move`. */
+  move?: MoveDetails
 }
 export const getWriteRequests = (channelId: string) =>
   invoke<WriteRequest[]>('get_write_requests', { channelId })

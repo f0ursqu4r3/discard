@@ -767,38 +767,54 @@ impl Channels {
         }
         let result: Result<_, String> = (|| {
             let channel_id = ChannelId(channel.into());
+            if approve { self.refuse_busy_move_target(requests, &channel_id, id)?; }
             let request = requests.begin(&channel_id, id, approve)?;
             let mut note = None;
-            let request = if approve {
-                let action = (|| {
-                    let project = self.store.lock().unwrap_or_else(|e| e.into_inner()).load_channel(&channel_id).map_err(|e| e.to_string())?.project_id;
-                    let (repo, branch, path) = workspace.write_request_target(&channel_id, &AgentId(request.agent_id.clone()), project.as_ref(), request.kind)?;
-                    if request.branch != branch || std::path::Path::new(&request.path) != path { return Err("The request target changed. Ask again.".into()); }
-                    match request.kind {
-                        discard_core::write_requests::WriteRequestKind::WorktreeCreate => {
-                            let record = workspace.create_for_branch(&repo, &channel_id, &branch)?;
-                            note = Some(format!("Discard created a worktree for {branch} at {}.", record.path));
-                            Ok(format!("Created a worktree for `{branch}` at `{}`.", record.path))
-                        }
-                        discard_core::write_requests::WriteRequestKind::MainCheckoutWrite => {
-                            note = Some("The user allowed writes in the main checkout for one response.".into());
-                            Ok("The user allowed writes in the main checkout for one response.".into())
-                        }
+            let request = if !approve { request } else {
+                use discard_core::write_requests::WriteRequestKind::{ConversationMove, MainCheckoutWrite, WorktreeCreate};
+                match request.kind {
+                    ConversationMove => {
+                        let action = self.approve_move(view, workspace, &channel_id, &request).map_err(|error| format!("Conversation move failed: {error}"));
+                        requests.finish(id, action)
                     }
-                })().map_err(|error: String| match request.kind {
-                    discard_core::write_requests::WriteRequestKind::WorktreeCreate => format!("Worktree creation failed: {error}"),
-                    discard_core::write_requests::WriteRequestKind::MainCheckoutWrite => format!("Main-checkout write access failed: {error}"),
-                });
-                requests.finish(id, action)
-            } else { request };
-            let message = discard_core::model::Message {
-                id: discard_core::model::MessageId::new(),
-                channel_id,
-                role: discard_core::model::Role::System,
-                blocks: vec![discard_core::model::Block::Markdown { text: request.result.clone().unwrap_or_else(|| request.state.clone()) }],
+                    WorktreeCreate | MainCheckoutWrite => {
+                        let action = (|| {
+                            let project = self.store.lock().unwrap_or_else(|e| e.into_inner()).load_channel(&channel_id).map_err(|e| e.to_string())?.project_id;
+                            let (repo, branch, path) = workspace.write_request_target(&channel_id, &AgentId(request.agent_id.clone()), project.as_ref(), request.kind)?;
+                            if request.branch != branch || std::path::Path::new(&request.path) != path { return Err("The request target changed. Ask again.".into()); }
+                            match request.kind {
+                                WorktreeCreate => {
+                                    let record = workspace.create_for_branch(&repo, &channel_id, &branch)?;
+                                    note = Some(format!("Discard created a worktree for {branch} at {}.", record.path));
+                                    Ok(format!("Created a worktree for `{branch}` at `{}`.", record.path))
+                                }
+                                MainCheckoutWrite => {
+                                    note = Some("The user allowed writes in the main checkout for one response.".into());
+                                    Ok("The user allowed writes in the main checkout for one response.".into())
+                                }
+                                ConversationMove => Err("Conversation moves use their own approval path.".into()),
+                            }
+                        })().map_err(|error: String| match request.kind {
+                            WorktreeCreate => format!("Worktree creation failed: {error}"),
+                            MainCheckoutWrite => format!("Main-checkout write access failed: {error}"),
+                            ConversationMove => format!("Conversation move failed: {error}"),
+                        });
+                        requests.finish(id, action)
+                    }
+                }
             };
-            self.store.lock().unwrap_or_else(|e| e.into_inner()).insert_message(&message).map_err(|e| e.to_string())?;
-            self.core.apply_channel(channel, discard_core::ui_state::Update::ConversationMarker(message));
+            // A move that succeeded leaves a link in the source, not a note.
+            let moved = request.kind == discard_core::write_requests::WriteRequestKind::ConversationMove && request.state == "completed";
+            if !moved {
+                let message = discard_core::model::Message {
+                    id: discard_core::model::MessageId::new(),
+                    channel_id,
+                    role: discard_core::model::Role::System,
+                    blocks: vec![discard_core::model::Block::Markdown { text: request.result.clone().unwrap_or_else(|| request.state.clone()) }],
+                };
+                self.store.lock().unwrap_or_else(|e| e.into_inner()).insert_message(&message).map_err(|e| e.to_string())?;
+                self.core.apply_channel(channel, discard_core::ui_state::Update::ConversationMarker(message));
+            }
             self.core.refresh_branches_in_background(view);
             Ok((request, note))
         })();
@@ -815,6 +831,109 @@ impl Channels {
             }
         }
         Ok(request)
+    }
+
+    /// Before an approval takes a pending move request, refuse a target channel that is loaded and busy. The request
+    /// stays pending, so the user can approve it again when the channel is idle.
+    fn refuse_busy_move_target(&self, requests: &discard_core::write_requests::WriteRequests, source: &ChannelId, id: &str) -> Result<(), String> {
+        use discard_core::write_requests::{MoveDetails, MoveTarget};
+        let request = requests.list(source).into_iter().find(|request| request.id == id && request.state == "pending");
+        let Some(MoveDetails { target: MoveTarget::Channel { channel_id, name }, .. }) = request.and_then(|request| request.details) else { return Ok(()) };
+        if !self.core.has_channel(&channel_id) { return Ok(()); }
+        match self.core.channel_busy_reason(&channel_id) {
+            Some(reason) => Err(format!("#{name} is busy: {reason}")),
+            None => Ok(()),
+        }
+    }
+    /// Carry out an approved move. Every check that can fail runs before the first message of the target is saved. A
+    /// new branch, its worktree, and its channel exist before that point by necessity. Returns the result text.
+    fn approve_move(&self, view: &ViewId, workspace: &discard_core::workspace::GitWorkspace, source: &ChannelId, request: &discard_core::write_requests::WriteRequest) -> Result<String, String> {
+        use discard_core::model::{Block, LinkDirection, Message, Role};
+        let details = request.details.clone().ok_or("The request has no move details. Ask again.")?;
+        let agent = AgentId(request.agent_id.clone());
+        let source_channel = self.store.lock().unwrap_or_else(|e| e.into_inner()).load_channel(source).map_err(|e| e.to_string())?;
+        // The workspace takes the store lock itself.
+        workspace.move_source(source, &agent, source_channel.project_id.as_ref())?;
+        let (text, attachments) = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            let message = store.messages_for_channel(source).map_err(|e| e.to_string())?.into_iter()
+                .find(|message| message.id.0 == details.source_message_id && message.role == Role::User)
+                .ok_or("The message to move is no longer available. Ask again.")?;
+            // The card says that the latest message moves. A newer user message makes the request stale.
+            if store.last_user_message_id(source).map_err(|e| e.to_string())?.is_some_and(|latest| latest != message.id) { return Err("You sent another message after this request. Ask for the move again.".into()); }
+            let text = message.blocks.iter().filter_map(|block| match block { Block::Markdown { text } => Some(text.as_str()), _ => None }).collect::<Vec<_>>().join("\n\n");
+            let attachments: Vec<_> = message.blocks.iter().filter_map(|block| match block { Block::Attachment { attachment } => Some(attachment.clone()), _ => None }).collect();
+            (text, attachments)
+        };
+        let project = source_channel.project_id.clone().ok_or("Conversation moves require this conversation's project.")?;
+        let target = self.resolve_move_target(view, workspace, &source_channel, &project, &agent, &details)?;
+        let (recipient, moderator) = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            let id = discard_core::mentions::recipient(&store, &target.id, &text)?;
+            if store.agent_archived(&id).map_err(|e| e.to_string())? { return Err("This agent is archived. Restore it before sending a message.".into()); }
+            let config = store.load_agent(&id).map_err(|e| e.to_string())?;
+            let recipient = discard_core::model::MessageAuthor { agent_id: id, name: config.name, provider: config.provider, avatar: config.avatar };
+            let config = store.load_agent(&agent).map_err(|e| e.to_string())?;
+            (recipient, discard_core::model::MessageAuthor { agent_id: agent.clone(), name: config.name, provider: config.provider, avatar: config.avatar })
+        };
+        // The send runs after the inserts. Check it first, so a refused send leaves nothing in the target.
+        self.core.can_send_in_background(&target.id.0, Some(&recipient))?;
+        let link = Message { id: MessageId::new(), channel_id: target.id.clone(), role: Role::System, blocks: vec![Block::ChannelLink { direction: LinkDirection::MovedFrom, channel_id: source.0.clone(), channel_name: source_channel.name.clone() }] };
+        let handoff = Message { id: MessageId::new(), channel_id: target.id.clone(), role: Role::Agent, blocks: vec![Block::Markdown { text: format!("Handoff from #{}\n\n{}", source_channel.name, details.handoff.markdown()) }] };
+        {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            store.insert_message(&link).map_err(|e| e.to_string())?;
+            store.insert_authored_message(&handoff, &moderator).map_err(|e| e.to_string())?;
+        }
+        let handoff_id = handoff.id.clone();
+        self.core.apply_channel(&target.id.0, discard_core::ui_state::Update::ConversationMarker(link));
+        self.core.apply_channel(&target.id.0, discard_core::ui_state::Update::ConversationMarker(handoff));
+        self.core.set_message_author(&target.id.0, handoff_id, moderator);
+        self.core.send_in_background(&target.id.0, text, Some(recipient), attachments)?;
+        let moved = Message { id: MessageId::new(), channel_id: source.clone(), role: Role::System, blocks: vec![Block::ChannelLink { direction: LinkDirection::MovedTo, channel_id: target.id.0.clone(), channel_name: target.name.clone() }] };
+        // The target has the conversation now. A storage error on the link must not fail the move.
+        match self.store.lock().unwrap_or_else(|e| e.into_inner()).insert_message(&moved) {
+            Ok(()) => { self.core.apply_channel(&source.0, discard_core::ui_state::Update::ConversationMarker(moved)); }
+            Err(error) => tracing::warn!(%error, "could not save the link of a moved conversation"),
+        }
+        Ok(format!("Moved to #{}.", target.name))
+    }
+    /// The loaded channel that a move goes to: an active channel of the project, or a new branch channel with its
+    /// branch and worktree.
+    fn resolve_move_target(&self, view: &ViewId, workspace: &discard_core::workspace::GitWorkspace, source: &Channel, project: &ProjectId, agent: &AgentId, details: &discard_core::write_requests::MoveDetails) -> Result<Channel, String> {
+        use discard_core::write_requests::MoveTarget;
+        match &details.target {
+            MoveTarget::Channel { channel_id, .. } => {
+                let found = self.store.lock().unwrap_or_else(|e| e.into_inner()).all_channels_for_project(project).map_err(|e| e.to_string())?
+                    .into_iter().find(|(channel, archived)| channel.id.0 == *channel_id && channel.id != source.id && !archived).map(|(channel, _)| channel)
+                    .ok_or("The target channel is no longer available.")?;
+                self.start(&found)?;
+                Ok(found)
+            }
+            MoveTarget::NewBranch { repository, repo_path, branch, base_commit, .. } => {
+                let repo = std::path::Path::new(repo_path);
+                let label = if repository.is_empty() { None } else { Some(self.repository(view, project, repository)?.label) };
+                discard_core::branch_actions::validate_branch_name(repo, branch, None)?;
+                let name = {
+                    let existing = self.store.lock().unwrap_or_else(|e| e.into_inner()).channels_for_project(project).map_err(|e| e.to_string())?;
+                    let base = label.map_or_else(|| branch.clone(), |label| format!("{label}/{branch}"));
+                    let (mut name, mut suffix) = (base.clone(), 2);
+                    while existing.iter().any(|channel| channel.name.eq_ignore_ascii_case(&name)) { name = format!("{base}-{suffix}"); suffix += 1; }
+                    name
+                };
+                if !discard_core::branch_actions::commit_exists(repo, base_commit) { return Err("The base commit is no longer available. Ask again.".into()); }
+                discard_core::branch_actions::create_branch_at(repo, branch, base_commit)?;
+                let channel = Channel { id: ChannelId::new(), project_id: Some(project.clone()), name, agent_id: agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+                if let Err(error) = workspace.create_channel_with_worktree(repo, repository, &channel, branch) {
+                    // A failed worktree leaves no branch behind.
+                    if let Err(rollback) = discard_core::branch_actions::delete_branch(repo, branch, true) { tracing::warn!(error = %rollback, branch = %branch, "could not remove the branch of a failed conversation move"); }
+                    return Err(error);
+                }
+                self.start(&channel)?;
+                self.store.lock().unwrap_or_else(|e| e.into_inner()).save_channel_topic(&channel.id, 0, &details.handoff.markdown(), discard_core::model::TopicAuthorKind::Agent, Some(agent)).map_err(|e| e.to_string())?;
+                Ok(channel)
+            }
+        }
     }
 
     /// Decide a request to add an agent to the project. Adding makes the agent a project member and continues the
@@ -2222,6 +2341,10 @@ mod navigation_action_tests {
         general: Channel,
         agent: AgentId,
         _receivers: Arc<Mutex<Vec<mpsc::UnboundedReceiver<Command>>>>,
+        /// The channel of each receiver, in the same order.
+        launched: Arc<Mutex<Vec<String>>>,
+        requests: discard_core::write_requests::WriteRequests,
+        grants: discard_core::workspace_grants::MainCheckoutGrants,
     }
 
     fn run(dir: &std::path::Path, args: &[&str]) -> String {
@@ -2249,11 +2372,14 @@ mod navigation_action_tests {
         let general = store.ensure_project_general_channel(&project.id, &agent).unwrap();
         let store = Arc::new(Mutex::new(store));
         let receivers = Arc::new(Mutex::new(Vec::new()));
+        let launched = Arc::new(Mutex::new(Vec::new()));
         let launch: Launcher = {
             let receivers = receivers.clone();
+            let launched = launched.clone();
             Arc::new(move |channel| {
                 let (commands, receiver) = mpsc::unbounded_channel();
                 receivers.lock().unwrap().push(receiver);
+                launched.lock().unwrap().push(channel.id.0.clone());
                 let (_, updates) = mpsc::unbounded_channel();
                 Ok((CoreInit { state: UiState::new(channel.id.clone(), vec![]), commands, project: "Project".into(), channel: channel.name.clone(), agent: "Builder".into(), provider: "codex".into() }, updates))
             })
@@ -2266,7 +2392,7 @@ mod navigation_action_tests {
         service.activate_project(&ViewId::main(), &project.id).unwrap();
         settle(&core).await;
         let workspace = GitWorkspace::new(&dir.path().join("worktrees"), store.clone());
-        Rig { dir, repo, store, core, service, workspace, project, general, agent, _receivers: receivers }
+        Rig { dir, repo, store, core, service, workspace, project, general, agent, _receivers: receivers, launched, requests: Default::default(), grants: Default::default() }
     }
     impl Rig {
         fn git(&self, args: &[&str]) -> String { run(&self.repo, args) }
@@ -2279,6 +2405,68 @@ mod navigation_action_tests {
         fn branch_channel(&self, branch: &str) -> Option<Channel> { self.store.lock().unwrap().project_branch_channel(&self.project.id, branch).unwrap() }
         fn worktree_record(&self, channel: &ChannelId) -> Option<WorktreeRecord> { self.store.lock().unwrap().worktree_for(channel).unwrap() }
         fn create_worktree(&self, branch: &str) -> String { self.service.create_worktree(&ViewId::main(), &self.workspace, &self.project.id, "", branch, None).unwrap() }
+        /// The commands that the engine of a channel received since the last call.
+        fn received(&self, channel: &ChannelId) -> Vec<Command> {
+            let Some(index) = self.launched.lock().unwrap().iter().rposition(|id| *id == channel.0) else { return Vec::new() };
+            let mut receivers = self._receivers.lock().unwrap();
+            std::iter::from_fn(|| receivers[index].try_recv().ok()).collect()
+        }
+        fn messages(&self, channel: &ChannelId) -> Vec<Message> { self.store.lock().unwrap().messages_for_channel(channel).unwrap() }
+        /// A user message in #general.
+        fn say(&self, blocks: Vec<Block>) -> MessageId {
+            let message = Message { id: MessageId::new(), channel_id: self.general.id.clone(), role: Role::User, blocks };
+            self.store.lock().unwrap().insert_message(&message).unwrap();
+            message.id
+        }
+        /// A text channel. #general stays the open channel.
+        fn text_channel(&self, name: &str) -> ChannelId {
+            let id = ChannelId(self.service.create_text_channel(&ViewId::main(), &self.project.id, name).unwrap());
+            self.service.select(&ViewId::main(), &self.general.id.0).unwrap();
+            id
+        }
+        fn handoff() -> discard_core::write_requests::Handoff {
+            discard_core::write_requests::Handoff { goal: "Ship the importer".into(), constraints: vec!["Keep the CLI".into()], decisions: vec![], open_questions: vec!["Which delimiter?".into()] }
+        }
+        /// A pending move request of the project main agent in #general.
+        fn move_request(&self, target: discard_core::write_requests::MoveTarget, source_message_id: &MessageId) -> discard_core::write_requests::WriteRequest {
+            let details = discard_core::write_requests::MoveDetails { target, handoff: Self::handoff(), source_message_id: source_message_id.0.clone() };
+            self.requests.request_move(&self.general.id, &self.agent, details).unwrap()
+        }
+        fn to_channel(&self, id: &ChannelId, name: &str) -> discard_core::write_requests::MoveTarget { discard_core::write_requests::MoveTarget::Channel { channel_id: id.0.clone(), name: name.into() } }
+        fn to_branch(&self, branch: &str, base_commit: &str) -> discard_core::write_requests::MoveTarget {
+            discard_core::write_requests::MoveTarget::NewBranch { repository: String::new(), repo_path: self.repo.to_string_lossy().into_owned(), branch: branch.into(), base: "main".into(), base_commit: base_commit.into() }
+        }
+        fn decide(&self, id: &str, approve: bool) -> Result<discard_core::write_requests::WriteRequest, String> {
+            self.service.decide_write_request(&ViewId::main(), &self.requests, &self.workspace, &self.grants, &self.general.id.0, id, approve)
+        }
+        fn channel_count(&self) -> usize { self.store.lock().unwrap().channels_for_project(&self.project.id).unwrap().len() }
+        /// The two messages that a move posts in the target, before the user message.
+        fn assert_handoff_posted(&self, target: &ChannelId) {
+            let messages = self.messages(target);
+            assert_eq!(messages.len(), 2, "{messages:?}");
+            assert_eq!((messages[0].role, &messages[0].blocks[..]), (Role::System, &[Block::ChannelLink { direction: discard_core::model::LinkDirection::MovedFrom, channel_id: self.general.id.0.clone(), channel_name: "general".into() }][..]));
+            assert_eq!(messages[1].role, Role::Agent);
+            assert_eq!(messages[1].blocks, vec![Block::Markdown { text: format!("Handoff from #general\n\n{}", Self::handoff().markdown()) }]);
+            let author = self.store.lock().unwrap().message_author(&messages[1].id).unwrap().expect("the handoff has an author");
+            assert_eq!((author.agent_id, author.name), (self.agent.clone(), "Project agent".to_string()));
+        }
+        /// An approval that fails after the checks: the request fails, the source gets the note, and the targets get nothing.
+        fn assert_failed(&self, id: &str, error: &str, targets: &[&ChannelId]) {
+            let done = self.decide(id, true).unwrap();
+            let text = format!("Conversation move failed: {error}");
+            assert_eq!((done.state.as_str(), done.result.as_deref()), ("failed", Some(text.as_str())));
+            let last = self.messages(&self.general.id).pop().unwrap();
+            assert_eq!((last.role, last.blocks), (Role::System, vec![Block::Markdown { text }]));
+            for target in targets {
+                assert!(self.messages(target).is_empty(), "a failed move posts nothing in the target");
+                assert!(self.received(target).is_empty(), "a failed move sends nothing to the target");
+            }
+            assert!(self.received(&self.general.id).is_empty());
+        }
+        fn assert_moved_to(&self, target: &ChannelId, name: &str) {
+            let last = self.messages(&self.general.id).pop().unwrap();
+            assert_eq!((last.role, last.blocks), (Role::System, vec![Block::ChannelLink { direction: discard_core::model::LinkDirection::MovedTo, channel_id: target.0.clone(), channel_name: name.into() }]));
+        }
     }
 
     #[tokio::test]
@@ -2974,5 +3162,238 @@ mod navigation_action_tests {
         r.service.leave_removed_project(&p).unwrap();
         assert_eq!(r.core.current_project(&ViewId::main()).id.0, "");
         assert_eq!((r.core.current_project(&p_view).id, r.core.active_channel_id(&p_view)), (p, r.general.id.0.clone()), "a project view never moves to no project");
+    }
+
+    // Conversation moves: the approval of a request that the project main agent made.
+
+    #[tokio::test]
+    async fn move_to_an_existing_channel_posts_the_handoff_and_starts_the_target() {
+        let r = rig().await;
+        let feature = r.text_channel("feature");
+        let topic = r.store.lock().unwrap().channel_topic(&feature).unwrap();
+        let message = r.say(vec![Block::Markdown { text: "Please ship the importer".into() }]);
+        let request = r.move_request(r.to_channel(&feature, "feature"), &message);
+        r.received(&feature);
+        let done = r.decide(&request.id, true).unwrap();
+        assert_eq!((done.state.as_str(), done.result.as_deref()), ("completed", Some("Moved to #feature.")));
+        r.assert_handoff_posted(&feature);
+        assert_eq!(r.received(&feature), vec![Command::Send("Please ship the importer".into())]);
+        r.assert_moved_to(&feature, "feature");
+        assert_eq!(r.messages(&r.general.id).len(), 2, "the source holds its user message and the link only");
+        assert!(r.received(&r.general.id).is_empty(), "no response starts in the source");
+        assert_eq!(r.core.active_channel_id(&ViewId::main()), r.general.id.0);
+        assert_eq!(r.store.lock().unwrap().channel_topic(&feature).unwrap(), topic);
+        assert_eq!(r.requests.list(&r.general.id)[0].state, "completed");
+    }
+
+    #[tokio::test]
+    async fn move_with_attachments_sends_them_to_the_target() {
+        let r = rig().await;
+        let feature = r.text_channel("feature");
+        let attachment = discard_core::attachments::Attachment { id: "att-1".into(), name: "notes.txt".into(), media_type: "text/plain".into(), size: 3, path: r.dir.path().join("notes.txt"), text: Some("abc".into()) };
+        let message = r.say(vec![Block::Attachment { attachment: attachment.clone() }]);
+        let request = r.move_request(r.to_channel(&feature, "feature"), &message);
+        r.received(&feature);
+        assert_eq!(r.decide(&request.id, true).unwrap().state, "completed");
+        let commands = r.received(&feature);
+        assert!(matches!(commands.as_slice(), [Command::SendAttachments { text, attachments }] if text.is_empty() && attachments.len() == 1 && attachments[0].id == "att-1"), "{commands:?}");
+    }
+
+    #[tokio::test]
+    async fn move_to_a_new_branch_creates_the_branch_worktree_channel_and_topic() {
+        let r = rig().await;
+        let base = r.git(&["rev-parse", "HEAD"]);
+        r.git(&["commit", "--allow-empty", "-qm", "second"]);
+        assert_ne!(r.git(&["rev-parse", "HEAD"]), base);
+        let message = r.say(vec![Block::Markdown { text: "Start the importer".into() }]);
+        let request = r.move_request(r.to_branch("importer", &base), &message);
+        let done = r.decide(&request.id, true).unwrap();
+        assert_eq!((done.state.as_str(), done.result.as_deref()), ("completed", Some("Moved to #importer.")));
+        assert_eq!(r.git(&["rev-parse", "refs/heads/importer"]), base);
+        let channel = r.branch_channel("importer").expect("the branch has a channel");
+        assert_eq!((channel.name.as_str(), channel.workspace_mode, &channel.agent_id), ("importer", WorkspaceMode::Worktree, &r.agent));
+        let record = r.worktree_record(&channel.id).expect("the channel owns a worktree");
+        assert!(record.owned && record.branch == "importer" && record.base_commit == base, "{record:?}");
+        assert!(std::path::Path::new(&record.path).join("a.txt").exists());
+        let topic = r.store.lock().unwrap().channel_topic_history(&channel.id).unwrap();
+        assert_eq!((topic.len(), topic[0].version, &topic[0].text, topic[0].author_kind, topic[0].author_id.as_ref()), (1, 1, &Rig::handoff().markdown(), discard_core::model::TopicAuthorKind::Agent, Some(&r.agent)));
+        r.assert_handoff_posted(&channel.id);
+        assert_eq!(r.received(&channel.id), vec![Command::Send("Start the importer".into())]);
+        r.assert_moved_to(&channel.id, "importer");
+        assert!(r.core.has_channel(&channel.id.0));
+        assert_eq!(r.core.active_channel_id(&ViewId::main()), r.general.id.0);
+        assert!(r.received(&r.general.id).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_new_branch_channel_takes_a_free_name() {
+        let r = rig().await;
+        r.text_channel("importer");
+        let base = r.git(&["rev-parse", "HEAD"]);
+        let message = r.say(vec![Block::Markdown { text: "Start".into() }]);
+        let request = r.move_request(r.to_branch("importer", &base), &message);
+        assert_eq!(r.decide(&request.id, true).unwrap().result.as_deref(), Some("Moved to #importer-2."));
+        assert_eq!(r.branch_channel("importer").unwrap().name, "importer-2");
+    }
+
+    #[tokio::test]
+    async fn a_denied_move_posts_a_note_and_changes_nothing() {
+        let r = rig().await;
+        let feature = r.text_channel("feature");
+        let base = r.git(&["rev-parse", "HEAD"]);
+        let message = r.say(vec![Block::Markdown { text: "Start the importer".into() }]);
+        let request = r.move_request(r.to_branch("importer", &base), &message);
+        let channels = r.channel_count();
+        r.received(&feature);
+        let done = r.decide(&request.id, false).unwrap();
+        assert_eq!((done.state.as_str(), done.result.as_deref()), ("denied", Some("Conversation move denied.")));
+        let last = r.messages(&r.general.id).pop().unwrap();
+        assert_eq!((last.role, last.blocks), (Role::System, vec![Block::Markdown { text: "Conversation move denied.".into() }]));
+        assert!(!r.branches().contains(&"importer".to_string()));
+        assert_eq!(r.channel_count(), channels);
+        assert!(r.messages(&feature).is_empty());
+        assert!(r.received(&feature).is_empty() && r.received(&r.general.id).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_move_waits_for_the_source_and_the_target() {
+        let r = rig().await;
+        let feature = r.text_channel("feature");
+        let message = r.say(vec![Block::Markdown { text: "Please ship the importer".into() }]);
+        let request = r.move_request(r.to_channel(&feature, "feature"), &message);
+        // A turn runs in the source.
+        r.busy(&r.general.id.0);
+        assert_eq!(r.decide(&request.id, true).unwrap_err(), "Wait for the current response to finish.");
+        r.idle(&r.general.id.0);
+        // A turn runs in the target. Open it to start the turn, then open the source again.
+        r.service.select(&ViewId::main(), &feature.0).unwrap();
+        r.busy(&feature.0);
+        r.service.select(&ViewId::main(), &r.general.id.0).unwrap();
+        assert_eq!(r.decide(&request.id, true).unwrap_err(), "#feature is busy: A turn runs in this channel. Stop it first.");
+        assert_eq!(r.requests.list(&r.general.id)[0].state, "pending");
+        assert!(r.messages(&feature).is_empty(), "a refusal posts nothing");
+        assert!(!r.core.project_change_running(), "a refusal releases the guard");
+        r.idle(&feature.0);
+        r.received(&feature);
+        assert_eq!(r.decide(&request.id, true).unwrap().state, "completed");
+        r.assert_handoff_posted(&feature);
+        assert_eq!(r.received(&feature), vec![Command::Send("Please ship the importer".into())]);
+    }
+
+    #[tokio::test]
+    async fn a_move_is_approved_once() {
+        let r = rig().await;
+        let feature = r.text_channel("feature");
+        let message = r.say(vec![Block::Markdown { text: "Please ship the importer".into() }]);
+        let request = r.move_request(r.to_channel(&feature, "feature"), &message);
+        assert_eq!(r.decide(&request.id, true).unwrap().state, "completed");
+        assert_eq!(r.decide(&request.id, true).unwrap_err(), "This request is no longer pending.");
+        r.assert_handoff_posted(&feature);
+        assert_eq!(r.received(&feature).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_move_fails_cleanly_when_state_changed() {
+        let gate = "Only this project's Primary / Moderator agent can move a conversation. Suggest the move in your reply.";
+        // The main agent changed.
+        let r = rig().await;
+        let feature = r.text_channel("feature");
+        let message = r.say(vec![Block::Markdown { text: "Move this".into() }]);
+        let request = r.move_request(r.to_channel(&feature, "feature"), &message);
+        let other = r.store.lock().unwrap().create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Other".into(), provider: "codex".into(), model: Some("model".into()), avatar: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        r.store.lock().unwrap().set_project_main_agent(&r.project.id, &other).unwrap();
+        r.assert_failed(&request.id, gate, &[&feature]);
+        // The target channel was archived.
+        let r = rig().await;
+        let feature = r.text_channel("feature");
+        let message = r.say(vec![Block::Markdown { text: "Move this".into() }]);
+        let request = r.move_request(r.to_channel(&feature, "feature"), &message);
+        r.store.lock().unwrap().archive_channel(&feature).unwrap();
+        r.assert_failed(&request.id, "The target channel is no longer available.", &[&feature]);
+        // The source message was deleted: the request names no message.
+        let r = rig().await;
+        let feature = r.text_channel("feature");
+        let request = r.move_request(r.to_channel(&feature, "feature"), &MessageId::new());
+        r.assert_failed(&request.id, "The message to move is no longer available. Ask again.", &[&feature]);
+        // The new branch name was taken.
+        let r = rig().await;
+        let base = r.git(&["rev-parse", "HEAD"]);
+        let message = r.say(vec![Block::Markdown { text: "Move this".into() }]);
+        let request = r.move_request(r.to_branch("x", &base), &message);
+        r.git(&["branch", "x"]);
+        let channels = r.channel_count();
+        r.assert_failed(&request.id, "A branch named `x` already exists.", &[]);
+        assert_eq!(r.channel_count(), channels);
+    }
+
+    #[tokio::test]
+    async fn a_move_is_refused_after_a_newer_user_message() {
+        let r = rig().await;
+        let feature = r.text_channel("feature");
+        let message = r.say(vec![Block::Markdown { text: "Please ship the importer".into() }]);
+        let request = r.move_request(r.to_channel(&feature, "feature"), &message);
+        r.say(vec![Block::Markdown { text: "Wait, one more thing".into() }]);
+        r.assert_failed(&request.id, "You sent another message after this request. Ask for the move again.", &[&feature]);
+        assert_eq!(r.requests.list(&r.general.id)[0].state, "failed");
+    }
+
+    #[tokio::test]
+    async fn a_move_fails_cleanly_when_the_base_commit_is_gone() {
+        let r = rig().await;
+        let message = r.say(vec![Block::Markdown { text: "Start the importer".into() }]);
+        let request = r.move_request(r.to_branch("importer", &"0".repeat(40)), &message);
+        let channels = r.channel_count();
+        r.assert_failed(&request.id, "The base commit is no longer available. Ask again.", &[]);
+        assert!(!r.branches().contains(&"importer".to_string()), "{:?}", r.branches());
+        assert_eq!(r.channel_count(), channels);
+        assert!(r.branch_channel("importer").is_none());
+    }
+
+    #[tokio::test]
+    async fn move_to_an_existing_channel_that_is_not_loaded_starts_it() {
+        let r = rig().await;
+        // The store holds the channel, but the pool does not.
+        let feature = r.store.lock().unwrap().create_project_text_channel(&r.project.id, "feature").unwrap().id;
+        assert!(!r.core.has_channel(&feature.0));
+        assert!(!r.launched.lock().unwrap().contains(&feature.0));
+        let message = r.say(vec![Block::Markdown { text: "Please ship the importer".into() }]);
+        let request = r.move_request(r.to_channel(&feature, "feature"), &message);
+        let done = r.decide(&request.id, true).unwrap();
+        assert_eq!((done.state.as_str(), done.result.as_deref()), ("completed", Some("Moved to #feature.")));
+        assert!(r.launched.lock().unwrap().contains(&feature.0), "the approval launched the channel");
+        assert!(r.core.has_channel(&feature.0));
+        r.assert_handoff_posted(&feature);
+        assert_eq!(r.received(&feature), vec![Command::Send("Please ship the importer".into())]);
+        r.assert_moved_to(&feature, "feature");
+    }
+
+    #[tokio::test]
+    async fn a_move_to_a_target_that_cannot_take_a_send_posts_nothing() {
+        let r = rig().await;
+        let feature = r.text_channel("feature");
+        let message = r.say(vec![Block::Markdown { text: "Please ship the importer".into() }]);
+        let request = r.move_request(r.to_channel(&feature, "feature"), &message);
+        r.core.channel_read_only(&feature.0, true, false);
+        r.assert_failed(&request.id, "This channel cannot send a message right now.", &[&feature]);
+        assert_eq!(r.requests.list(&r.general.id)[0].state, "failed");
+    }
+
+    #[tokio::test]
+    async fn a_failed_worktree_leaves_no_branch_and_no_channel() {
+        let r = rig().await;
+        let base = r.git(&["rev-parse", "HEAD"]);
+        let message = r.say(vec![Block::Markdown { text: "Move this".into() }]);
+        let request = r.move_request(r.to_branch("importer", &base), &message);
+        std::fs::write(r.dir.path().join("worktrees"), "not a folder").unwrap();
+        let channels = r.channel_count();
+        let done = r.decide(&request.id, true).unwrap();
+        assert_eq!(done.state, "failed");
+        assert!(done.result.as_deref().unwrap().starts_with("Conversation move failed: "), "{done:?}");
+        assert!(!r.branches().contains(&"importer".to_string()), "{:?}", r.branches());
+        assert_eq!(r.channel_count(), channels);
+        assert!(r.branch_channel("importer").is_none());
+        let last = r.messages(&r.general.id).pop().unwrap();
+        assert_eq!((last.role, last.blocks), (Role::System, vec![Block::Markdown { text: done.result.unwrap() }]));
+        assert!(r.received(&r.general.id).is_empty());
     }
 }

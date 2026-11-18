@@ -145,6 +145,73 @@ minutes, and are cancelled by app restart. The agent, plugins, and Always-allow
 rules cannot approve them. The user must wait for the current response to finish
 before approving.
 
-Slice C remains planned: conversation moves, new-branch targets, and creating a
-branch for a detached worktree. Native provider resume per agent is also planned.
 Slices A and B do not change the `--builder` Coding path.
+
+## Conversation moves (slice C)
+
+The project's Primary / Moderator agent (the project main agent) can ask to move a
+conversation. It calls `conversation_request_move`. No other agent has this tool.
+Discard checks the agent when it lists the tool, when the agent calls it, and again
+at approval. Other agents can suggest a move in text.
+
+The call names one target:
+
+- **Existing channel.** The agent gives the channel name.
+- **New branch.** The agent gives the branch name and, optionally, a base branch.
+  The default is the default branch. Discard creates the new branch in the
+  repository of the source channel.
+
+The call also gives a handoff. The handoff must stand alone, because Discard does
+not copy the source transcript. It has these fields and limits:
+
+- `goal` is required. It has at most 600 characters.
+- `constraints`, `decisions`, and `open_questions` are optional lists. Each list
+  has at most 12 items. Each item has at most 400 characters.
+- The whole handoff has at most 4096 bytes.
+
+The request uses the write-request store of slice B. It expires after ten minutes,
+is single-use, and is cancelled by an app restart. Only the user approves. The
+protected card appears in the source channel and shows the target and the handoff as
+plain text.
+
+Approval runs these steps in order:
+
+1. Discard checks the moderator gate, the source message, and the target.
+2. For a new branch, Discard creates the branch at the base commit shown on the card.
+   It then creates an owned worktree and a branch channel. The handoff becomes the
+   topic of the channel. The worktree record keeps the branch name and the base
+   commit.
+3. In the target, Discard posts a "Moved from" link. It then posts the handoff as a
+   message authored by the moderator.
+4. Discard sends the user's latest message, with its attachments, to the target as a
+   normal user message. This starts a response in the target.
+5. In the source, Discard posts a "Moved to" link.
+
+Discard does not copy the source transcript. The user's view stays in the source
+channel. No response starts in the source.
+
+Discard refuses approval while a response runs in the source. It also refuses
+approval when the target is busy (a running turn or a waiting approval). In both
+cases the request stays pending, and the user can approve again before the request
+expires.
+
+Two more refusals fail the move:
+
+- The user sent another message in the source after the request. The card moves
+  the latest message, so the agent must ask again.
+- The base commit of a new branch no longer exists. The agent must ask again.
+
+In both cases the request fails and the source gets a note.
+
+When a step fails, the source gets the note "Conversation move failed: <error>". If
+Discard cannot create the worktree, it deletes the new branch again. No branch or
+channel remains. Denial adds the note "Conversation move denied." to the source.
+Nothing else changes.
+
+Not built:
+
+- "Create a branch here" for detached worktrees (spec decision 17). It needs a
+  different gate.
+- A move to an existing branch that has no channel.
+
+Native provider resume per agent is also planned.

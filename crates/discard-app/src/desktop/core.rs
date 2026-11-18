@@ -1434,25 +1434,61 @@ impl AppCore {
             return Ok(());
         }
         let Some(channel) = channel else { return Err("Name the channel to send to.".into()) };
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(active) = shown_channel(&s, channel) else { return Err("The channel changed. Send the message again.".into()) };
-        if active.read_only || s.changing_agents.contains(&active.agent_id) || s.changing_channels.contains(&active.channel_id) || busy_for(&s, channel) || active.ui.turn_running() || active.archived || active.archive_busy || active.archive.is_some() {
+        self.send_user_message(channel, text, recipient, attachments, false)
+    }
+    /// Send a user message to a loaded channel that no view needs to show. It has the checks and the effects of
+    /// `send_to_agent_with_attachments`.
+    pub fn send_in_background(&self, channel: &str, text: String, recipient: Option<discard_core::model::MessageAuthor>, attachments: Vec<discard_core::attachments::Attachment>) -> Result<(), String> {
+        if text.trim().is_empty() && attachments.is_empty() {
+            return Ok(());
+        }
+        self.send_user_message(channel, text, recipient, attachments, true)
+    }
+    /// The checks of a user message. The channel is the one that a view shows, or with `background` any loaded
+    /// channel that is not a thread. One predicate serves the check and the send, so they cannot differ.
+    fn send_blocked(s: &State, channel: &str, recipient: Option<&discard_core::model::MessageAuthor>, background: bool) -> Result<(), String> {
+        let found = if background { channel_state(s, channel).filter(|c| c.thread_parent.is_none()) } else { shown_channel(s, channel) };
+        let Some(active) = found else { return Err("The channel changed. Send the message again.".into()) };
+        // A background send belongs to an action that holds the app-wide guard itself, such as a move approval.
+        let guarded = if background { s.views.values().any(|v| v.navigation_busy && v.selected == channel) } else { busy_for(s, channel) };
+        if active.read_only || s.changing_agents.contains(&active.agent_id) || s.changing_channels.contains(&active.channel_id) || guarded || active.ui.turn_running() || active.archived || active.archive_busy || active.archive.is_some() {
             return Err("This channel cannot send a message right now.".into());
         }
-        if recipient.as_ref().is_some_and(|agent| s.changing_agents.contains(&agent.agent_id.0)) {
+        if recipient.is_some_and(|agent| s.changing_agents.contains(&agent.agent_id.0)) {
             return Err("The mentioned agent is being updated. Try again.".into());
         }
+        Ok(())
+    }
+    /// Check that `send_in_background` would pass its checks now. Only a closed engine session can still refuse it.
+    pub fn can_send_in_background(&self, channel: &str, recipient: Option<&discard_core::model::MessageAuthor>) -> Result<(), String> {
+        Self::send_blocked(&self.state.lock().unwrap_or_else(|e| e.into_inner()), channel, recipient, true)
+    }
+    fn send_user_message(&self, channel: &str, text: String, recipient: Option<discard_core::model::MessageAuthor>, attachments: Vec<discard_core::attachments::Attachment>, background: bool) -> Result<(), String> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        Self::send_blocked(&s, channel, recipient.as_ref(), background)?;
+        let active = channel_state(&s, channel).expect("checked under lock");
         let command = if attachments.is_empty() { Command::Send(text.clone()) } else { Command::SendAttachments { text: text.clone(), attachments: attachments.clone() } };
         if active.commands.send(command).is_ok() {
-            let active = shown_channel_mut(&mut s, channel).expect("checked under lock");
+            let shown = is_shown(&s, channel);
+            let active = s.channels.get_mut(channel).expect("checked under lock");
             active.new_anchor = None;
             active.ui.user_sent_with_attachments(&text, &attachments);
             if let Some(author) = recipient { active.ui.apply(Update::Responding(author)); }
             s.rev += 1;
-            s.history_rev += 1;
+            if shown { s.history_rev += 1; }
             self.changed.notify_one();
         } else { return Err("The agent session is unavailable.".into()); }
         Ok(())
+    }
+    /// Record the author of a message of a loaded channel, such as a handoff that an agent posted.
+    pub fn set_message_author(&self, channel: &str, message: discard_core::model::MessageId, author: discard_core::model::MessageAuthor) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let shown = is_shown(&s, channel);
+        let Some(target) = s.channels.get_mut(channel) else { return };
+        target.ui.set_author(message, author);
+        s.rev += 1;
+        if shown { s.history_rev += 1; }
+        self.changed.notify_one();
     }
     pub fn continue_in(&self, channel: &str, agent: AgentId, note: String) -> Result<(), String> {
         self.continue_with(channel, agent, note, false)
@@ -2045,6 +2081,62 @@ mod read_tests {
         view
     }
     fn main() -> ViewId { ViewId::main() }
+    /// A core with the loaded channels `a` (shown) and `b` (not shown). It returns the command receiver of `b`.
+    fn core_with_hidden_channel() -> (AppCore, tokio::sync::mpsc::UnboundedReceiver<Command>) {
+        let init = |id: &str| {
+            let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+            (CoreInit { state: UiState::new(ChannelId(id.into()), vec![]), commands, project: "p".into(), channel: id.into(), agent: "a".into(), provider: "fake".into() }, receiver)
+        };
+        let (first, first_receiver) = init("a");
+        std::mem::forget(first_receiver);
+        let core = AppCore::new(first);
+        let (second, receiver) = init("b");
+        core.add_channel(second, &discard_core::model::Channel { id: ChannelId("b".into()), agent_id: AgentId::new(), project_id: None, name: "b".into(), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout });
+        (core, receiver)
+    }
+    #[test]
+    fn send_in_background_reaches_a_loaded_channel_that_no_view_shows() {
+        let (core, mut receiver) = core_with_hidden_channel();
+        core.send_in_background("b", "hello".into(), None, vec![]).unwrap();
+        assert_eq!(receiver.try_recv().unwrap(), Command::Send("hello".into()));
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(core.active_channel_id(&main()), "a", "the view still shows the other channel");
+        assert!(core.channel_busy_reason("b").is_some(), "the turn runs in the channel");
+        let (core, mut receiver) = core_with_hidden_channel();
+        let attachment = discard_core::attachments::Attachment { id: "att".into(), name: "n.txt".into(), media_type: "text/plain".into(), size: 1, path: "/n.txt".into(), text: Some("x".into()) };
+        core.send_in_background("b", String::new(), None, vec![attachment.clone()]).unwrap();
+        assert_eq!(receiver.try_recv().unwrap(), Command::SendAttachments { text: String::new(), attachments: vec![attachment] });
+        // The app-wide guard of the calling action does not block the send.
+        let (core, mut receiver) = core_with_hidden_channel();
+        core.begin_project_change().unwrap();
+        core.send_in_background("b", "guarded".into(), None, vec![]).unwrap();
+        assert_eq!(receiver.try_recv().unwrap(), Command::Send("guarded".into()));
+    }
+    #[test]
+    fn send_in_background_refuses_a_running_or_read_only_channel() {
+        let refused = "This channel cannot send a message right now.";
+        let (core, mut receiver) = core_with_hidden_channel();
+        core.send_in_background("b", "first".into(), None, vec![]).unwrap();
+        assert_eq!(core.send_in_background("b", "second".into(), None, vec![]).unwrap_err(), refused);
+        assert_eq!(receiver.try_recv().unwrap(), Command::Send("first".into()));
+        assert!(receiver.try_recv().is_err(), "the refused message sent no command");
+        let (core, mut receiver) = core_with_hidden_channel();
+        core.channel_read_only("b", true, false);
+        assert_eq!(core.send_in_background("b", "text".into(), None, vec![]).unwrap_err(), refused);
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(core.send_in_background("missing", "text".into(), None, vec![]).unwrap_err(), "The channel changed. Send the message again.");
+    }
+    #[test]
+    fn a_background_message_author_shows_in_the_history_of_a_loaded_channel() {
+        let (core, _receiver) = core_with_hidden_channel();
+        let message = MessageId::new();
+        let author = discard_core::model::MessageAuthor { agent_id: AgentId("agent".into()), name: "Moderator".into(), provider: "fake".into(), avatar: None };
+        core.apply_channel("b", Update::ConversationMarker(Message { id: message.clone(), channel_id: ChannelId("b".into()), role: Role::Agent, blocks: vec![] }));
+        core.set_message_author("b", message.clone(), author.clone());
+        core.set_message_author("missing", message.clone(), author.clone());
+        let state = core.state.lock().unwrap();
+        assert_eq!(state.channels["b"].ui.authors().get(&message), Some(&author));
+    }
     #[test]
     fn a_switch_keeps_both_channels_in_the_pool() {
         let core = core_with_channels(&["a", "b"]);
