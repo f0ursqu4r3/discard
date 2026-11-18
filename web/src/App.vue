@@ -1,23 +1,15 @@
 <script setup lang="ts">
-import {
-  computed,
-  nextTick,
-  onMounted,
-  onUnmounted,
-  reactive,
-  ref,
-  watch,
-} from 'vue';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { useAppearanceSettings } from '@/bridge/appearance';
-import { isTauri } from '@tauri-apps/api/core';
-import { useMediaQuery } from '@vueuse/core';
-import { ScanEye, GitPullRequest, ListChecks } from '@lucide/vue';
-import { toast } from 'vue-sonner';
-import { useStore } from './bridge/store';
-import { currentWindowLabel } from './bridge/window';
-import { windowMode } from './lib/window-mode';
-import { useWebShortcuts } from './bridge/shortcuts';
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { useAppearanceSettings } from '@/bridge/appearance'
+import { isTauri } from '@tauri-apps/api/core'
+import { useMediaQuery } from '@vueuse/core'
+import { ScanEye, GitPullRequest, ListChecks } from '@lucide/vue'
+import { toast } from 'vue-sonner'
+import { useStore } from './bridge/store'
+import { currentWindowLabel } from './bridge/window'
+import { windowMode } from './lib/window-mode'
+import { useWebShortcuts } from './bridge/shortcuts'
 import {
   setMemberListVisible,
   setPanels,
@@ -55,115 +47,84 @@ import {
   type ProjectEntry,
   type RailLayoutDto,
   type HistoryMatch,
-} from './bridge/api';
+} from './bridge/api'
 import {
   createReply,
   joinReply,
   parseMessageSource,
   type MessageSource,
   type PendingReply,
-} from './components/reply';
-import type {
-  AttachmentDto,
-  MessageDto,
-  ProjectChannelDto,
-} from './bridge/types';
-import ChannelList from './components/ChannelList.vue';
-import ChannelHeader from './components/ChannelHeader.vue';
-import MessageList from './components/MessageList.vue';
-import Composer from './components/Composer.vue';
-import TerminalPanel from './components/terminal/TerminalPanel.vue';
-import {
-  terminalAvailability,
-  useTerminalVisibility,
-} from './components/terminal/terminal-state';
-import { useActionShortcut } from './bridge/terminal';
-import { unescapeSlash } from './components/slash';
-import Notices from './components/Notices.vue';
-import ApprovalDock from './components/ApprovalDock.vue';
-import ChangesView from './components/changes/ChangesView.vue';
-import ToolCallBlock from './components/ToolCallBlock.vue';
-import BrailleSpinner from './components/BrailleSpinner.vue';
-import StatusLine from './components/StatusLine.vue';
-import { channelBranch } from './components/workspace/channel-branch';
-import { useAgentIdentity } from './components/agents/useAgentIdentity';
-import { agentIdentity, mixedAgentMark } from './components/agents/agent-icon';
-import { activeTheme } from './bridge/theme';
-import { changeEntries, thinkingLine } from './components/messages';
-import { selectedChannelApprovals } from './components/threads';
-import {
-  navigationWidth,
-  panelWidths,
-  savePanelWidths,
-} from './components/layout';
-import PluginElement from './plugin/PluginElement.vue';
-import {
-  ResizableHandle,
-  ResizablePanel,
-  ResizablePanelGroup,
-} from './components/ui/resizable';
-import { Tabs, TabsList, TabsTrigger } from './components/ui/tabs';
-import {
-  Sheet,
-  SheetContent,
-  SheetTitle,
-  SheetDescription,
-} from './components/ui/sheet';
-import {
-  Empty,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-  EmptyDescription,
-} from './components/ui/empty';
-import { Button } from './components/ui/button';
-import { Badge } from './components/ui/badge';
-import { Toaster } from './components/ui/sonner';
-import NavigationPanel from './components/workspace/NavigationPanel.vue';
-import DirectMessageSidebar from './components/workspace/DirectMessageSidebar.vue';
-import ContextPanel from './components/workspace/ContextPanel.vue';
-import ThreadPanel from './components/workspace/ThreadPanel.vue';
-import ThreadActionDialogs from './components/workspace/ThreadActionDialogs.vue';
-import WorkspacePageView from './components/workspace/WorkspacePage.vue';
-import UiInspector from './components/workspace/UiInspector.vue';
-import FriendsList from './components/agents/FriendsList.vue';
-import AddAgentDialog from './components/agents/AddAgentDialog.vue';
-import AgentHistorySearch from './components/agents/AgentHistorySearch.vue';
-import AgentProfileDialog from './components/agents/AgentProfileDialog.vue';
-import {
-  agentAvatars,
-  useAgentAvatar,
-} from './components/agents/useAgentAvatar';
-import type { WorkspacePage } from './components/workspace/types';
-import type { ProjectMenuAction } from './components/project-menu';
-import type { RailChange } from './components/rail-layout';
-import type { TranscriptPosition } from './components/workspace/transcript';
+} from './components/reply'
+import type { AttachmentDto, MessageDto, ProjectChannelDto } from './bridge/types'
+import ChannelList from './components/ChannelList.vue'
+import ChannelHeader from './components/ChannelHeader.vue'
+import MessageList from './components/MessageList.vue'
+import Composer from './components/Composer.vue'
+import TerminalPanel from './components/terminal/TerminalPanel.vue'
+import { terminalAvailability, useTerminalVisibility } from './components/terminal/terminal-state'
+import { useActionShortcut } from './bridge/terminal'
+import { unescapeSlash } from './components/slash'
+import Notices from './components/Notices.vue'
+import ApprovalDock from './components/ApprovalDock.vue'
+import ChangesView from './components/changes/ChangesView.vue'
+import ToolCallBlock from './components/ToolCallBlock.vue'
+import BrailleSpinner from './components/BrailleSpinner.vue'
+import StatusLine from './components/StatusLine.vue'
+import { channelBranch } from './components/workspace/channel-branch'
+import { useAgentIdentity } from './components/agents/useAgentIdentity'
+import { agentIdentity, mixedAgentMark } from './components/agents/agent-icon'
+import { activeTheme } from './bridge/theme'
+import { changeEntries, thinkingLine } from './components/messages'
+import { selectedChannelApprovals } from './components/threads'
+import { navigationWidth, panelWidths, savePanelWidths } from './components/layout'
+import PluginElement from './plugin/PluginElement.vue'
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from './components/ui/resizable'
+import { Tabs, TabsList, TabsTrigger } from './components/ui/tabs'
+import { Sheet, SheetContent, SheetTitle, SheetDescription } from './components/ui/sheet'
+import { Empty, EmptyHeader, EmptyMedia, EmptyTitle, EmptyDescription } from './components/ui/empty'
+import { Button } from './components/ui/button'
+import { Badge } from './components/ui/badge'
+import { Toaster } from './components/ui/sonner'
+import NavigationPanel from './components/workspace/NavigationPanel.vue'
+import DirectMessageSidebar from './components/workspace/DirectMessageSidebar.vue'
+import ContextPanel from './components/workspace/ContextPanel.vue'
+import ThreadPanel from './components/workspace/ThreadPanel.vue'
+import ThreadActionDialogs from './components/workspace/ThreadActionDialogs.vue'
+import WorkspacePageView from './components/workspace/WorkspacePage.vue'
+import UiInspector from './components/workspace/UiInspector.vue'
+import FriendsList from './components/agents/FriendsList.vue'
+import AddAgentDialog from './components/agents/AddAgentDialog.vue'
+import AgentHistorySearch from './components/agents/AgentHistorySearch.vue'
+import AgentProfileDialog from './components/agents/AgentProfileDialog.vue'
+import { agentAvatars, useAgentAvatar } from './components/agents/useAgentAvatar'
+import type { WorkspacePage } from './components/workspace/types'
+import type { ProjectMenuAction } from './components/project-menu'
+import type { RailChange } from './components/rail-layout'
+import type { TranscriptPosition } from './components/workspace/transcript'
 // Match the macOS overlay in tauri.conf.json; browser previews keep their normal inset.
-const integratedTitlebar = isTauri() && /mac/i.test(navigator.platform);
-const store = useStore();
+const integratedTitlebar = isTauri() && /mac/i.test(navigator.platform)
+const store = useStore()
 // A project window has no project rail. The window mode is read once, from the hash that the window opened with.
-const projectWindow = windowMode(location.hash).kind === 'project';
-const mainPanel = ref<HTMLElement | null>(null);
-const agentAvatar = useAgentAvatar(() => store.snapshot?.agentId);
+const projectWindow = windowMode(location.hash).kind === 'project'
+const mainPanel = ref<HTMLElement | null>(null)
+const agentAvatar = useAgentAvatar(() => store.snapshot?.agentId)
 const activeAgent = computed(
   () =>
     store.snapshot?.responder ?? {
       agentId: store.snapshot?.agentId ?? '',
       name: store.snapshot?.agent ?? '',
       avatar: agentAvatar.value,
-    }
-);
+    },
+)
 const activeAgentIdentity = useAgentIdentity(
   () => activeAgent.value.agentId,
-  () => activeAgent.value.avatar
-);
+  () => activeAgent.value.avatar,
+)
 // The agents named in the thinking line of the open channel. The spinner color is a mix of their colors.
-const thinkingAgents = computed(() =>
-  store.snapshot?.turnRunning ? [activeAgent.value] : []
-);
+const thinkingAgents = computed(() => (store.snapshot?.turnRunning ? [activeAgent.value] : []))
 const thinkingColor = computed(() =>
-  mixedAgentMark(thinkingAgents.value, activeTheme.value?.tokens ?? {})
-);
+  mixedAgentMark(thinkingAgents.value, activeTheme.value?.tokens ?? {}),
+)
 const workingChannels = computed(() =>
   (store.snapshot?.channels ?? []).map((channel) =>
     channel.id === store.snapshot?.channelId && store.snapshot?.turnRunning
@@ -173,208 +134,185 @@ const workingChannels = computed(() =>
           agent: activeAgent.value.name,
           running: true,
         }
-      : channel
-  )
-);
-const projects = ref<ProjectEntry[]>([]);
-const railLayout = ref<RailLayoutDto | null>(null);
-const projectChannels = ref<ProjectChannelDto[]>([]);
+      : channel,
+  ),
+)
+const projects = ref<ProjectEntry[]>([])
+const railLayout = ref<RailLayoutDto | null>(null)
+const projectChannels = ref<ProjectChannelDto[]>([])
 const statusBranch = computed(() =>
-  store.snapshot ? channelBranch(store.snapshot, projectChannels.value) : null
-);
+  store.snapshot ? channelBranch(store.snapshot, projectChannels.value) : null,
+)
 const workingAgents = computed(() => {
-  const snapshot = store.snapshot;
-  if (!snapshot) return [];
-  const agents = new Map<
-    string,
-    { id: string; name: string; avatar: string | null }
-  >();
+  const snapshot = store.snapshot
+  if (!snapshot) return []
+  const agents = new Map<string, { id: string; name: string; avatar: string | null }>()
   for (const channel of workingChannels.value) {
     if (channel.running)
       agents.set(channel.agentId, {
         id: channel.agentId,
         name: channel.agent,
         avatar: agentAvatars.value[channel.agentId] ?? null,
-      });
+      })
   }
   if (snapshot.turnRunning)
     agents.set(activeAgent.value.agentId, {
       id: activeAgent.value.agentId,
       name: activeAgent.value.name,
       avatar: activeAgent.value.avatar,
-    });
-  return [...agents.values()];
-});
-let projectChannelRequest = 0;
+    })
+  return [...agents.values()]
+})
+let projectChannelRequest = 0
 // The project that owns `projectChannels`. A refresh keeps the list of the same project on screen.
-let projectChannelsProject: string | null = null;
+let projectChannelsProject: string | null = null
 async function refreshProjectChannels(projectId: string | null) {
-  const request = ++projectChannelRequest;
+  const request = ++projectChannelRequest
   if (projectId !== projectChannelsProject) {
     // Never show the channels of another project while the new list loads.
-    projectChannels.value = [];
-    projectChannelsProject = projectId;
+    projectChannels.value = []
+    projectChannelsProject = projectId
   }
-  if (!projectId) return;
+  if (!projectId) return
   try {
-    const channels = await getProjectChannels(projectId);
-    if (
-      request === projectChannelRequest &&
-      store.snapshot?.projectId === projectId
-    )
-      projectChannels.value = channels;
+    const channels = await getProjectChannels(projectId)
+    if (request === projectChannelRequest && store.snapshot?.projectId === projectId)
+      projectChannels.value = channels
   } catch (error) {
     if (request === projectChannelRequest)
       toast.error('Could not load project channels', {
         description: String(error),
-      });
+      })
   }
 }
 async function refreshProjectContext() {
-  await store.refresh();
-  await refreshProjects();
-  await refreshProjectChannels(store.snapshot?.projectId || null);
+  await store.refresh()
+  await refreshProjects()
+  await refreshProjectChannels(store.snapshot?.projectId || null)
 }
 async function loadRailLayout() {
   try {
-    return (await getRailLayout()) ?? null;
+    return (await getRailLayout()) ?? null
   } catch (error) {
     toast.error('Could not load the project rail', {
       description: String(error),
-    });
-    return null;
+    })
+    return null
   }
 }
 async function refreshProjects() {
-  const [list, layout] = await Promise.all([
-    getProjects(),
-    projectWindow ? null : loadRailLayout(),
-  ]);
-  projects.value = list;
-  railLayout.value = layout;
+  const [list, layout] = await Promise.all([getProjects(), projectWindow ? null : loadRailLayout()])
+  projects.value = list
+  railLayout.value = layout
 }
 watch(
   () => store.snapshot?.projectId,
   (projectId) => void refreshProjectChannels(projectId || null),
-  { immediate: true }
-);
-let stopProjectCatalogue: UnlistenFn | undefined;
-let stopProjectProfiles: UnlistenFn | undefined;
+  { immediate: true },
+)
+let stopProjectCatalogue: UnlistenFn | undefined
+let stopProjectProfiles: UnlistenFn | undefined
 onMounted(async () => {
   try {
     const stop = await listen(
       'discard://conversations',
-      () => void refreshProjectChannels(store.snapshot?.projectId || null)
-    );
-    if (disposed) stop();
-    else stopProjectCatalogue = stop;
+      () => void refreshProjectChannels(store.snapshot?.projectId || null),
+    )
+    if (disposed) stop()
+    else stopProjectCatalogue = stop
     const stopProfiles = await listen('discard://projects', () => {
-      void refreshProjects().catch((error) => toast.error(String(error)));
-    });
-    if (disposed) stopProfiles();
-    else stopProjectProfiles = stopProfiles;
+      void refreshProjects().catch((error) => toast.error(String(error)))
+    })
+    if (disposed) stopProfiles()
+    else stopProjectProfiles = stopProfiles
   } catch (error) {
-    toast.error(String(error));
+    toast.error(String(error))
   }
-});
+})
 watch(
   () => store.snapshot?.projectId,
   () => {
-    void refreshProjects().catch((error) => toast.error(String(error)));
+    void refreshProjects().catch((error) => toast.error(String(error)))
   },
-  { immediate: true }
-);
-useWebShortcuts();
-const { visible: terminalVisible, toggle: toggleTerminalVisible } =
-  useTerminalVisibility();
-const terminalShortcut = useActionShortcut('toggle_terminal');
-const composer = ref<InstanceType<typeof Composer> | null>(null);
-const drafts = reactive<Record<string, string>>({});
+  { immediate: true },
+)
+useWebShortcuts()
+const { visible: terminalVisible, toggle: toggleTerminalVisible } = useTerminalVisibility()
+const terminalShortcut = useActionShortcut('toggle_terminal')
+const composer = ref<InstanceType<typeof Composer> | null>(null)
+const drafts = reactive<Record<string, string>>({})
 // The reply that waits for each composer. It uses the keys of `drafts`.
-const replies = reactive<Record<string, PendingReply>>({});
-const attachmentDrafts = reactive<
-  Record<string, import('./bridge/types').AttachmentDto[]>
->({});
-const transcriptPositions = reactive<Record<string, TranscriptPosition>>({});
-const page = ref<WorkspacePage>('conversation');
+const replies = reactive<Record<string, PendingReply>>({})
+const attachmentDrafts = reactive<Record<string, import('./bridge/types').AttachmentDto[]>>({})
+const transcriptPositions = reactive<Record<string, TranscriptPosition>>({})
+const page = ref<WorkspacePage>('conversation')
 const terminalAccess = computed(() =>
-  terminalAvailability(
-    store.snapshot ? { ...store.snapshot, page: page.value } : null
-  )
-);
-const terminalShown = computed(
-  () => terminalVisible.value && terminalAccess.value.available
-);
+  terminalAvailability(store.snapshot ? { ...store.snapshot, page: page.value } : null),
+)
+const terminalShown = computed(() => terminalVisible.value && terminalAccess.value.available)
 function toggleTerminal() {
-  if (terminalAccess.value.available) toggleTerminalVisible();
-  else toast(terminalAccess.value.reason);
+  if (terminalAccess.value.available) toggleTerminalVisible()
+  else toast(terminalAccess.value.reason)
 }
-const lastDirectMessageKey = 'discard:last-direct-message';
-let lastDirectMessage: string | null = null;
+const lastDirectMessageKey = 'discard:last-direct-message'
+let lastDirectMessage: string | null = null
 try {
-  lastDirectMessage = localStorage.getItem(lastDirectMessageKey);
+  lastDirectMessage = localStorage.getItem(lastDirectMessageKey)
 } catch {
   // Keep navigation usable when browser storage is unavailable.
 }
 function rememberDirectMessage(id: string | null) {
-  lastDirectMessage = id;
+  lastDirectMessage = id
   try {
-    if (id) localStorage.setItem(lastDirectMessageKey, id);
-    else localStorage.removeItem(lastDirectMessageKey);
+    if (id) localStorage.setItem(lastDirectMessageKey, id)
+    else localStorage.removeItem(lastDirectMessageKey)
   } catch {
     // The last DM still remains available for this session.
   }
 }
 watch(
-  () =>
-    [
-      page.value,
-      store.snapshot?.channelId,
-      store.snapshot?.activeProjectId,
-    ] as const,
+  () => [page.value, store.snapshot?.channelId, store.snapshot?.activeProjectId] as const,
   ([currentPage, channelId, projectId]) => {
     if (currentPage === 'conversation' && channelId && projectId === null)
-      rememberDirectMessage(channelId);
+      rememberDirectMessage(channelId)
   },
-  { immediate: true }
-);
+  { immediate: true },
+)
 const addAgentOpen = ref(false),
   profileId = ref<string | null>(null),
-  profileBusy = ref(false);
-const conversationTab = ref('conversation');
-const sidebarMode = ref<'profile' | 'search'>('profile');
+  profileBusy = ref(false)
+const conversationTab = ref('conversation')
+const sidebarMode = ref<'profile' | 'search'>('profile')
 const historyQuery = ref(''),
   historyRevision = ref(0),
-  profileRequest = ref(0);
-const searchAgent = ref<{ id: string; name: string } | null>(null);
+  profileRequest = ref(0)
+const searchAgent = ref<{ id: string; name: string } | null>(null)
 const messageJump = ref<{
-  channelId: string;
-  messageId: string;
-  request: number;
-} | null>(null);
-let jumpRequest = 0;
+  channelId: string
+  messageId: string
+  request: number
+} | null>(null)
+let jumpRequest = 0
 /** A thread panel that has no thread yet: the anchor and a composer. The first send creates the thread. */
-const draftThread = ref<{ parentChannelId: string; anchor: MessageDto } | null>(
-  null
-);
-const threadPanel = ref<InstanceType<typeof ThreadPanel> | null>(null);
-const threadJump = ref<{ messageId: string; request: number } | null>(null);
+const draftThread = ref<{ parentChannelId: string; anchor: MessageDto } | null>(null)
+const threadPanel = ref<InstanceType<typeof ThreadPanel> | null>(null)
+const threadJump = ref<{ messageId: string; request: number } | null>(null)
 
 const navigationPage = computed<WorkspacePage>(() =>
   page.value === 'conversation' && !store.snapshot?.activeProjectId
     ? 'direct-messages'
-    : page.value
-);
-let stopConversationOpened: UnlistenFn | undefined;
-let stopAgentProfile: UnlistenFn | undefined;
-let stopToggleTerminal: UnlistenFn | undefined;
-let stopNavigate: UnlistenFn | undefined;
-let disposed = false;
+    : page.value,
+)
+let stopConversationOpened: UnlistenFn | undefined
+let stopAgentProfile: UnlistenFn | undefined
+let stopToggleTerminal: UnlistenFn | undefined
+let stopNavigate: UnlistenFn | undefined
+let disposed = false
 // A listener with the default target receives the events that the core sends to another window. These events belong
 // to this window, so each listener names it.
 const windowTarget = {
   target: { kind: 'WebviewWindow', label: currentWindowLabel() },
-} as const;
+} as const
 const workspacePages: readonly string[] = [
   'conversation',
   'overview',
@@ -383,121 +321,102 @@ const workspacePages: readonly string[] = [
   'artifacts',
   'direct-messages',
   'project-settings',
-] satisfies WorkspacePage[];
+] satisfies WorkspacePage[]
 onMounted(async () => {
   try {
     const stop = await listen(
       'discard://conversation-opened',
       () => navigate('conversation'),
-      windowTarget
-    );
-    if (disposed) stop();
-    else stopConversationOpened = stop;
+      windowTarget,
+    )
+    if (disposed) stop()
+    else stopConversationOpened = stop
     const stopProfile = await listen<string>(
       'discard://agent-profile',
       (event) => {
-        if (profileBusy.value) return;
-        if (event.payload) profileId.value = event.payload;
-        else navigate('direct-messages');
+        if (profileBusy.value) return
+        if (event.payload) profileId.value = event.payload
+        else navigate('direct-messages')
       },
-      windowTarget
-    );
-    if (disposed) stopProfile();
-    else stopAgentProfile = stopProfile;
+      windowTarget,
+    )
+    if (disposed) stopProfile()
+    else stopAgentProfile = stopProfile
     // The core sends this event to the main window only: a project window shows a page of the main window with it.
     if (!projectWindow) {
       const stopPage = await listen<string>(
         'discard://navigate',
         (event) => {
-          if (workspacePages.includes(event.payload))
-            navigate(event.payload as WorkspacePage);
+          if (workspacePages.includes(event.payload)) navigate(event.payload as WorkspacePage)
         },
-        windowTarget
-      );
-      if (disposed) stopPage();
-      else stopNavigate = stopPage;
+        windowTarget,
+      )
+      if (disposed) stopPage()
+      else stopNavigate = stopPage
     }
   } catch (error) {
-    toast.error(String(error));
+    toast.error(String(error))
   }
-});
+})
 onMounted(async () => {
   try {
-    const stop = await listen(
-      'discard://toggle-terminal',
-      toggleTerminal,
-      windowTarget
-    );
-    if (disposed) stop();
-    else stopToggleTerminal = stop;
+    const stop = await listen('discard://toggle-terminal', toggleTerminal, windowTarget)
+    if (disposed) stop()
+    else stopToggleTerminal = stop
   } catch (error) {
-    toast.error(String(error));
+    toast.error(String(error))
   }
-});
+})
 onUnmounted(() => {
-  disposed = true;
-  stopToggleTerminal?.();
-  stopConversationOpened?.();
-  stopAgentProfile?.();
-  stopNavigate?.();
-  stopProjectCatalogue?.();
-  stopProjectProfiles?.();
-});
+  disposed = true
+  stopToggleTerminal?.()
+  stopConversationOpened?.()
+  stopAgentProfile?.()
+  stopNavigate?.()
+  stopProjectCatalogue?.()
+  stopProjectProfiles?.()
+})
 const switching = ref(false),
-  sending = ref(false);
-const inspector = ref(false);
-const isWide = useMediaQuery('(min-width: 1280px)');
-const isCompact = useMediaQuery('(max-width: 639px)');
+  sending = ref(false)
+const inspector = ref(false)
+const isWide = useMediaQuery('(min-width: 1280px)')
+const isCompact = useMediaQuery('(max-width: 639px)')
 const navigationOpen = ref(false),
-  contextOpen = ref(false);
+  contextOpen = ref(false)
 const showContextPanel = computed(
   () =>
     isWide.value &&
     page.value === 'conversation' &&
     !!store.snapshot?.channelId &&
-    !!store.snapshot?.memberListVisible
-);
+    !!store.snapshot?.memberListVisible,
+)
 // The thread panel takes the right panel slot and the right sheet while it is open.
-const threadActive = computed(
-  () => !!draftThread.value || !!store.snapshot?.openThread
-);
+const threadActive = computed(() => !!draftThread.value || !!store.snapshot?.openThread)
 const threadVisible = computed(
-  () =>
-    page.value === 'conversation' &&
-    !!store.snapshot?.channelId &&
-    threadActive.value
-);
-const showThreadPanel = computed(() => isWide.value && threadVisible.value);
-const threadSheetOpen = computed(() => !isWide.value && threadVisible.value);
-const showRightPanel = computed(
-  () => showContextPanel.value || showThreadPanel.value
-);
+  () => page.value === 'conversation' && !!store.snapshot?.channelId && threadActive.value,
+)
+const showThreadPanel = computed(() => isWide.value && threadVisible.value)
+const threadSheetOpen = computed(() => !isWide.value && threadVisible.value)
+const showRightPanel = computed(() => showContextPanel.value || showThreadPanel.value)
 // Draft text and attachments of the thread composer, kept apart from the channel composer.
 const threadKey = computed(() =>
   draftThread.value
     ? `thread-draft:${draftThread.value.anchor.id}`
-    : (store.snapshot?.openThread?.channelId ?? '')
-);
-const openThreadView = computed(() =>
-  draftThread.value ? null : store.snapshot?.openThread
-);
+    : (store.snapshot?.openThread?.channelId ?? ''),
+)
+const openThreadView = computed(() => (draftThread.value ? null : store.snapshot?.openThread))
 const threadParentName = computed(() =>
-  store.snapshot?.activeProjectId
-    ? store.snapshot.channel
-    : (store.snapshot?.agent ?? '')
-);
+  store.snapshot?.activeProjectId ? store.snapshot.channel : (store.snapshot?.agent ?? ''),
+)
 const threadPanelProps = computed(() => {
-  const snapshot = store.snapshot;
-  const open = openThreadView.value ?? null;
+  const snapshot = store.snapshot
+  const open = openThreadView.value ?? null
   return {
     thread: open,
     history: store.threadHistory ?? null,
     draftAnchor: draftThread.value?.anchor,
     parentChannelId:
-      draftThread.value?.parentChannelId ??
-      open?.parentChannelId ??
-      snapshot?.channelId ??
-      '',
+      draftThread.value?.parentChannelId ?? open?.parentChannelId ?? snapshot?.channelId ?? '',
     parentName: threadParentName.value,
     directMessage: !snapshot?.activeProjectId,
     projectId: snapshot?.activeProjectId,
@@ -509,32 +428,31 @@ const threadPanelProps = computed(() => {
     draft: drafts[threadKey.value],
     attachments: attachmentDrafts[threadKey.value] ?? [],
     jumpTo: threadJump.value ?? undefined,
-  };
-});
+  }
+})
 const archivedLegacy = computed(
   () =>
-    projectChannels.value.find(
-      (channel) => channel.id === store.snapshot?.channelId
-    )?.kind === 'archived_legacy'
-);
+    projectChannels.value.find((channel) => channel.id === store.snapshot?.channelId)?.kind ===
+    'archived_legacy',
+)
 // A general or text channel has no branch. Its agent works in the main checkout.
 const branchless = computed(() => {
   const kind = projectChannels.value.find(
-    (channel) => channel.id === store.snapshot?.channelId
-  )?.kind;
-  return kind === 'general' || kind === 'text';
-});
+    (channel) => channel.id === store.snapshot?.channelId,
+  )?.kind
+  return kind === 'general' || kind === 'text'
+})
 const appearance = useAppearanceSettings((error) => {
-  store.error = error;
-});
+  store.error = error
+})
 const railWidth = computed(() =>
   projectWindow
     ? 0
     : (appearance.value.miniProjectRail ? 48 : 72) *
       (store.snapshot?.theme.spacingScale ?? 1) *
-      (store.snapshot?.theme.fontScale ?? 1)
-);
-const currentLayout = ref<number[]>([]);
+      (store.snapshot?.theme.fontScale ?? 1),
+)
+const currentLayout = ref<number[]>([])
 const heading = computed(() =>
   page.value === 'conversation'
     ? store.snapshot?.channelId
@@ -550,16 +468,13 @@ const heading = computed(() =>
           memory: 'Project memory',
           artifacts: 'Artifacts',
           'project-settings': 'Project settings',
-        }[page.value]
-);
-const changes = computed(() => changeEntries(store.history));
-const showChangesTab = computed(
-  () => !branchless.value || changes.value.length > 0
-);
+        }[page.value],
+)
+const changes = computed(() => changeEntries(store.history))
+const showChangesTab = computed(() => !branchless.value || changes.value.length > 0)
 watch(showChangesTab, (shown) => {
-  if (!shown && conversationTab.value === 'changes')
-    conversationTab.value = 'conversation';
-});
+  if (!shown && conversationTab.value === 'changes') conversationTab.value = 'conversation'
+})
 const tools = computed(() => {
   const rows = [
     ...store.history.map((message) => ({
@@ -572,7 +487,7 @@ const tools = computed(() => {
       author: store.snapshot?.responder,
       running: !!store.snapshot?.turnRunning,
     },
-  ];
+  ]
   return rows.flatMap((row) =>
     row.blocks
       .filter((block) => block.type === 'tool_call')
@@ -582,312 +497,288 @@ const tools = computed(() => {
         identity: agentIdentity(
           row.author ? row.author.avatar : agentAvatar.value,
           row.author?.agentId ?? store.snapshot?.agentId ?? '',
-          activeTheme.value?.tokens ?? {}
+          activeTheme.value?.tokens ?? {},
         ),
-      }))
-  );
-});
+      })),
+  )
+})
 function navigate(value: WorkspacePage) {
   // A project window has no direct messages. The main window shows them, and this window keeps its page.
   if (projectWindow && value === 'direct-messages') {
     showMainWindow(value).catch((error) =>
       toast.error('Could not show the main window', {
         description: String(error),
-      })
-    );
-    navigationOpen.value = false;
-    return;
+      }),
+    )
+    navigationOpen.value = false
+    return
   }
-  page.value = value;
-  if (value !== 'conversation') contextOpen.value = false;
-  navigationOpen.value = false;
-  if (value === 'conversation') conversationTab.value = 'conversation';
+  page.value = value
+  if (value !== 'conversation') contextOpen.value = false
+  navigationOpen.value = false
+  if (value === 'conversation') conversationTab.value = 'conversation'
 }
 async function navigateFromSidebar(value: WorkspacePage) {
   if (value !== 'direct-messages' || projectWindow) {
-    navigate(value);
-    return;
+    navigate(value)
+    return
   }
-  if (switching.value) return;
-  const snapshot = store.snapshot;
+  if (switching.value) return
+  const snapshot = store.snapshot
   if (snapshot?.channelId && snapshot.activeProjectId === null) {
-    navigate('conversation');
-    return;
+    navigate('conversation')
+    return
   }
   if (!lastDirectMessage) {
-    navigate('direct-messages');
-    return;
+    navigate('direct-messages')
+    return
   }
-  switching.value = true;
+  switching.value = true
   try {
-    const conversations = await getConversations();
-    if (disposed) return;
+    const conversations = await getConversations()
+    if (disposed) return
     const previous = conversations.find(
-      (conversation) =>
-        conversation.id === lastDirectMessage && conversation.projectId === null
-    );
+      (conversation) => conversation.id === lastDirectMessage && conversation.projectId === null,
+    )
     if (!previous) {
-      rememberDirectMessage(null);
-      navigate('direct-messages');
-      return;
+      rememberDirectMessage(null)
+      navigate('direct-messages')
+      return
     }
-    await switchChannel(previous.id);
-    await store.refresh();
-    if (!disposed) navigate('conversation');
+    await switchChannel(previous.id)
+    await store.refresh()
+    if (!disposed) navigate('conversation')
   } catch (error) {
     toast.error('Could not open direct message', {
       description: String(error),
-    });
+    })
   } finally {
-    switching.value = false;
+    switching.value = false
   }
 }
 function openProviderConnections() {
-  addAgentOpen.value = false;
-  void action('open_provider_settings');
+  addAgentOpen.value = false
+  void action('open_provider_settings')
 }
 async function action(id: string) {
   try {
     if (id === 'add_agent') {
-      addAgentOpen.value = true;
-      return;
+      addAgentOpen.value = true
+      return
     }
     if (id === 'show_friends') {
-      navigate('direct-messages');
-      return;
+      navigate('direct-messages')
+      return
     }
     if (id === 'open_agent_settings' || id.startsWith('view_agent_profile:')) {
-      if (profileBusy.value) return;
+      if (profileBusy.value) return
       const agentId = id.startsWith('view_agent_profile:')
         ? id.slice('view_agent_profile:'.length)
-        : store.snapshot?.agentId;
-      if (agentId) profileId.value = agentId;
-      else navigate('direct-messages');
-      return;
+        : store.snapshot?.agentId
+      if (agentId) profileId.value = agentId
+      else navigate('direct-messages')
+      return
     }
     if (id.startsWith('message_agent:')) {
-      if (switching.value) return;
-      switching.value = true;
+      if (switching.value) return
+      switching.value = true
       try {
-        const channelId = await openAgentChat(
-          id.slice('message_agent:'.length)
-        );
-        await switchChannel(channelId);
-        await store.refresh();
-        profileId.value = null;
-        navigate('conversation');
+        const channelId = await openAgentChat(id.slice('message_agent:'.length))
+        await switchChannel(channelId)
+        await store.refresh()
+        profileId.value = null
+        navigate('conversation')
       } finally {
-        switching.value = false;
+        switching.value = false
       }
-      return;
+      return
     }
     if (id === 'import_project' || id === 'change_project_folder') {
-      await chooseProjectFolder(id === 'change_project_folder');
-      await store.refresh();
-      await refreshProjects();
-      return;
+      await chooseProjectFolder(id === 'change_project_folder')
+      await store.refresh()
+      await refreshProjects()
+      return
     }
     if (id.startsWith('select_project:')) {
-      if (switching.value) return;
-      switching.value = true;
+      if (switching.value) return
+      switching.value = true
       try {
-        const channelId = await selectProject(
-          id.slice('select_project:'.length)
-        );
-        await store.refresh();
-        await refreshProjectChannels(store.snapshot?.projectId || null);
-        if (channelId) navigate('conversation');
+        const channelId = await selectProject(id.slice('select_project:'.length))
+        await store.refresh()
+        await refreshProjectChannels(store.snapshot?.projectId || null)
+        if (channelId) navigate('conversation')
       } finally {
-        switching.value = false;
+        switching.value = false
       }
-      return;
+      return
     }
     if (id === 'remove_project' && store.snapshot) {
-      await removeProject(store.snapshot.projectId);
-      await store.refresh();
-      await refreshProjects();
-      navigate('conversation');
-      return;
+      await removeProject(store.snapshot.projectId)
+      await store.refresh()
+      await refreshProjects()
+      navigate('conversation')
+      return
     }
-    await runAction(id);
+    await runAction(id)
   } catch (error) {
-    toast.error('Could not complete action', { description: String(error) });
+    toast.error('Could not complete action', { description: String(error) })
   }
 }
 async function projectAction(id: ProjectMenuAction, project: ProjectEntry) {
   if (id === 'open-window') {
     // This action opens another window and changes nothing here, so a busy navigation does not block it.
     try {
-      await openProjectWindow(project.id);
+      await openProjectWindow(project.id)
     } catch (error) {
       toast.error('Could not complete project action', {
         description: String(error),
-      });
+      })
     }
-    return;
+    return
   }
-  if (switching.value) return;
-  switching.value = true;
+  if (switching.value) return
+  switching.value = true
   try {
     if (id === 'copy-name' || id === 'copy-path' || id === 'copy-id') {
       await navigator.clipboard.writeText(
-        id === 'copy-name'
-          ? project.name
-          : id === 'copy-path'
-            ? project.path
-            : project.id
-      );
+        id === 'copy-name' ? project.name : id === 'copy-path' ? project.path : project.id,
+      )
     } else if (id === 'reveal') {
-      await revealProject(project.path);
+      await revealProject(project.path)
     } else if (id === 'remove') {
-      const wasSelected = store.snapshot?.projectId === project.id;
-      await removeProject(project.id);
-      await store.refresh();
-      await refreshProjects();
-      if (wasSelected) navigate('conversation');
+      const wasSelected = store.snapshot?.projectId === project.id
+      await removeProject(project.id)
+      await store.refresh()
+      await refreshProjects()
+      if (wasSelected) navigate('conversation')
     } else {
       if (store.snapshot?.projectId !== project.id) {
-        await selectProject(project.id);
-        await store.refresh();
-        await refreshProjectChannels(store.snapshot?.projectId || null);
+        await selectProject(project.id)
+        await store.refresh()
+        await refreshProjectChannels(store.snapshot?.projectId || null)
       }
       if (store.snapshot?.projectId !== project.id)
-        throw new Error('Project selection did not complete');
-      if (id === 'settings') navigate('project-settings');
+        throw new Error('Project selection did not complete')
+      if (id === 'settings') navigate('project-settings')
     }
   } catch (error) {
     toast.error('Could not complete project action', {
       description: String(error),
-    });
+    })
   } finally {
-    switching.value = false;
+    switching.value = false
   }
 }
 // The backend emits `discard://projects` after each change, which reloads the rail.
 async function railChange(change: RailChange) {
   try {
     if (change.type === 'move-project')
-      await moveRailProject(change.projectId, change.groupId, change.index);
+      await moveRailProject(change.projectId, change.groupId, change.index)
     else if (change.type === 'group-projects')
-      await groupRailProjects(change.draggedId, change.targetId);
+      await groupRailProjects(change.draggedId, change.targetId)
     else if (change.type === 'create-group')
-      change.created?.(await createRailGroup(change.projectId));
-    else if (change.type === 'move-group')
-      await moveRailGroup(change.groupId, change.index);
-    else if (change.type === 'rename-group')
-      await renameRailGroup(change.groupId, change.name);
-    else if (change.type === 'color-group')
-      await setRailGroupColor(change.groupId, change.color);
+      change.created?.(await createRailGroup(change.projectId))
+    else if (change.type === 'move-group') await moveRailGroup(change.groupId, change.index)
+    else if (change.type === 'rename-group') await renameRailGroup(change.groupId, change.name)
+    else if (change.type === 'color-group') await setRailGroupColor(change.groupId, change.color)
     else if (change.type === 'collapse-group')
-      await setRailGroupCollapsed(change.groupId, change.collapsed);
-    else await ungroupRailGroup(change.groupId);
+      await setRailGroupCollapsed(change.groupId, change.collapsed)
+    else await ungroupRailGroup(change.groupId)
   } catch (error) {
     toast.error('Could not update the project rail', {
       description: String(error),
-    });
+    })
   }
 }
 async function searchHistory(query: string) {
-  const snapshot = store.snapshot;
-  if (!snapshot?.agentId || snapshot.activeProjectId || !query.trim()) return;
-  await closeThreadPanel();
-  searchAgent.value = { id: snapshot.agentId, name: snapshot.agent };
-  historyQuery.value = query.trim();
-  historyRevision.value++;
-  sidebarMode.value = 'search';
+  const snapshot = store.snapshot
+  if (!snapshot?.agentId || snapshot.activeProjectId || !query.trim()) return
+  await closeThreadPanel()
+  searchAgent.value = { id: snapshot.agentId, name: snapshot.agent }
+  historyQuery.value = query.trim()
+  historyRevision.value++
+  sidebarMode.value = 'search'
   try {
-    if (isWide.value) await setMemberListVisible(true);
-    else contextOpen.value = true;
+    if (isWide.value) await setMemberListVisible(true)
+    else contextOpen.value = true
   } catch (error) {
-    toast.error(String(error));
+    toast.error(String(error))
   }
 }
-const missingSourceNotice = 'Original message is not available.';
+const missingSourceNotice = 'Original message is not available.'
 async function selectHistoryMatch(
   match: Pick<HistoryMatch, 'channelId' | 'messageId'>,
-  missing?: string
+  missing?: string,
 ) {
-  if (switching.value) return;
-  switching.value = true;
+  if (switching.value) return
+  switching.value = true
   try {
-    if (store.snapshot?.channelId !== match.channelId)
-      await switchChannel(match.channelId);
-    await store.refresh();
-    await nextTick();
+    if (store.snapshot?.channelId !== match.channelId) await switchChannel(match.channelId)
+    await store.refresh()
+    await nextTick()
     // A reply link can point to a message that is gone. Open the channel, skip the jump, and say so.
-    const found =
-      !missing || store.history.some((item) => item.id === match.messageId);
+    const found = !missing || store.history.some((item) => item.id === match.messageId)
     if (found)
       messageJump.value = {
         channelId: match.channelId,
         messageId: match.messageId,
         request: ++jumpRequest,
-      };
-    navigate('conversation');
-    if (!isWide.value) contextOpen.value = false;
-    if (!found && missing) toast.error(missing);
+      }
+    navigate('conversation')
+    if (!isWide.value) contextOpen.value = false
+    if (!found && missing) toast.error(missing)
   } catch (error) {
-    if (missing) toast.error(missing, { description: String(error) });
-    else toast.error('Could not open message', { description: String(error) });
+    if (missing) toast.error(missing, { description: String(error) })
+    else toast.error('Could not open message', { description: String(error) })
   } finally {
-    switching.value = false;
+    switching.value = false
   }
 }
 async function toggleMembers() {
-  profileRequest.value++;
+  profileRequest.value++
   if (threadActive.value) {
     // The thread panel holds the slot. Closing it restores the context panel when that was shown.
-    await closeThreadPanel();
-    if (
-      isWide.value &&
-      store.snapshot?.memberListVisible &&
-      sidebarMode.value === 'profile'
-    )
-      return;
+    await closeThreadPanel()
+    if (isWide.value && store.snapshot?.memberListVisible && sidebarMode.value === 'profile') return
   }
-  if (
-    sidebarMode.value === 'search' &&
-    (showContextPanel.value || contextOpen.value)
-  ) {
-    sidebarMode.value = 'profile';
-    return;
+  if (sidebarMode.value === 'search' && (showContextPanel.value || contextOpen.value)) {
+    sidebarMode.value = 'profile'
+    return
   }
-  sidebarMode.value = 'profile';
+  sidebarMode.value = 'profile'
   if (!isWide.value) {
-    contextOpen.value = !contextOpen.value;
-    return;
+    contextOpen.value = !contextOpen.value
+    return
   }
   try {
-    await setMemberListVisible(!store.snapshot!.memberListVisible);
+    await setMemberListVisible(!store.snapshot!.memberListVisible)
   } catch {
-    toast.error('Could not change panel visibility');
+    toast.error('Could not change panel visibility')
   }
 }
 async function savePanels() {
-  await nextTick();
-  const snapshot = store.snapshot;
+  await nextTick()
+  const snapshot = store.snapshot
   if (
     !snapshot ||
     isCompact.value ||
     !savePanelWidths(showRightPanel.value, currentLayout.value.length)
   )
-    return;
+    return
   // The thread panel has its own size. Only the context panel size is saved.
   const [channel, member] = panelWidths(
-    showThreadPanel.value
-      ? currentLayout.value.slice(0, 2)
-      : currentLayout.value,
+    showThreadPanel.value ? currentLayout.value.slice(0, 2) : currentLayout.value,
     railWidth.value,
-    snapshot.panels.memberList
-  );
+    snapshot.panels.memberList,
+  )
   try {
-    await setPanels(channel, member);
+    await setPanels(channel, member)
   } catch {
-    toast.error('Could not save panel sizes');
+    toast.error('Could not save panel sizes')
   }
 }
 function resizeFinished(dragging: boolean) {
-  if (!dragging) void savePanels();
+  if (!dragging) void savePanels()
 }
 const replyDisabled = computed(
   () =>
@@ -897,357 +788,315 @@ const replyDisabled = computed(
     switching.value ||
     sending.value ||
     store.snapshot.archiveBusy ||
-    !!store.snapshot.banners.archive
-);
+    !!store.snapshot.banners.archive,
+)
 function reply(message: MessageDto) {
-  const snapshot = store.snapshot;
-  if (!snapshot || replyDisabled.value) return;
-  const source = store.history.find((item) => item.id === message.id);
-  if (!source) return;
-  const pending = createReply(source, snapshot.channelId, snapshot.agent);
-  if (!pending) return;
-  replies[snapshot.channelId] = pending;
-  void composer.value?.focusEnd?.();
+  const snapshot = store.snapshot
+  if (!snapshot || replyDisabled.value) return
+  const source = store.history.find((item) => item.id === message.id)
+  if (!source) return
+  const pending = createReply(source, snapshot.channelId, snapshot.agent)
+  if (!pending) return
+  replies[snapshot.channelId] = pending
+  void composer.value?.focusEnd?.()
 }
 function cancelReply(key: string) {
-  delete replies[key];
+  delete replies[key]
 }
 function jumpToSource(source: MessageSource) {
-  const thread = store.snapshot?.openThread;
+  const thread = store.snapshot?.openThread
   if (source.channelId === thread?.channelId) {
     // A reply to a thread message stays in the thread panel.
-    const history = store.threadHistory;
-    if (
-      history &&
-      !history.messages.some((item) => item.id === source.messageId)
-    ) {
-      toast.error(missingSourceNotice);
-      return;
+    const history = store.threadHistory
+    if (history && !history.messages.some((item) => item.id === source.messageId)) {
+      toast.error(missingSourceNotice)
+      return
     }
-    threadJump.value = { messageId: source.messageId, request: ++jumpRequest };
-    return;
+    threadJump.value = { messageId: source.messageId, request: ++jumpRequest }
+    return
   }
-  conversationTab.value = 'conversation';
-  void selectHistoryMatch(source, missingSourceNotice);
+  conversationTab.value = 'conversation'
+  void selectHistoryMatch(source, missingSourceNotice)
 }
 function openMessageSource(event: MouseEvent) {
-  const anchor =
-    event.target instanceof Element ? event.target.closest('a') : null;
-  const source = parseMessageSource(anchor?.getAttribute('href') ?? '');
-  if (!source) return;
-  event.preventDefault();
-  jumpToSource(source);
+  const anchor = event.target instanceof Element ? event.target.closest('a') : null
+  const source = parseMessageSource(anchor?.getAttribute('href') ?? '')
+  if (!source) return
+  event.preventDefault()
+  jumpToSource(source)
 }
-async function send(
-  text: string,
-  attachments: import('./bridge/types').AttachmentDto[] = []
-) {
-  const id = store.snapshot?.channelId;
-  if (!id || switching.value || sending.value) return;
-  sending.value = true;
-  const pending = replies[id];
+async function send(text: string, attachments: import('./bridge/types').AttachmentDto[] = []) {
+  const id = store.snapshot?.channelId
+  if (!id || switching.value || sending.value) return
+  sending.value = true
+  const pending = replies[id]
   try {
     await sendMessage(
       id,
-      pending
-        ? joinReply(pending.prefix, unescapeSlash(text))
-        : unescapeSlash(text),
-      attachments.map((file) => file.id)
-    );
+      pending ? joinReply(pending.prefix, unescapeSlash(text)) : unescapeSlash(text),
+      attachments.map((file) => file.id),
+    )
     // `text` is the typed text. The draft never holds the reply prefix.
-    if (drafts[id]?.trim() === text) drafts[id] = '';
-    if (replies[id] === pending) delete replies[id];
-    const sentIds = new Set(attachments.map((file) => file.id));
-    attachmentDrafts[id] = (attachmentDrafts[id] ?? []).filter(
-      (file) => !sentIds.has(file.id)
-    );
+    if (drafts[id]?.trim() === text) drafts[id] = ''
+    if (replies[id] === pending) delete replies[id]
+    const sentIds = new Set(attachments.map((file) => file.id))
+    attachmentDrafts[id] = (attachmentDrafts[id] ?? []).filter((file) => !sentIds.has(file.id))
   } catch (error) {
-    toast.error('Message was not sent', { description: String(error) });
+    toast.error('Message was not sent', { description: String(error) })
   } finally {
-    sending.value = false;
+    sending.value = false
   }
 }
 const threadStartDisabled = computed(
-  () =>
-    !store.snapshot?.channelId ||
-    store.snapshot.composerDisabled ||
-    store.snapshot.archived
-);
+  () => !store.snapshot?.channelId || store.snapshot.composerDisabled || store.snapshot.archived,
+)
 const threadReplyDisabled = computed(() => {
-  const open = openThreadView.value;
+  const open = openThreadView.value
   // A sub-agent thread has no composer to take a reply. Its reply goes to the channel composer.
-  if (open?.kind === 'sub_agent') return replyDisabled.value;
+  if (open?.kind === 'sub_agent') return replyDisabled.value
   return (
     !threadActive.value ||
     (open ? open.composerDisabled : threadStartDisabled.value) ||
     switching.value ||
     sending.value
-  );
-});
-function startThreadDraft(message: MessageDto) {
-  const snapshot = store.snapshot;
-  if (
-    !snapshot ||
-    threadStartDisabled.value ||
-    message.thread ||
-    message.postedFrom
   )
-    return;
-  draftThread.value = { parentChannelId: snapshot.channelId, anchor: message };
+})
+function startThreadDraft(message: MessageDto) {
+  const snapshot = store.snapshot
+  if (!snapshot || threadStartDisabled.value || message.thread || message.postedFrom) return
+  draftThread.value = { parentChannelId: snapshot.channelId, anchor: message }
   // One thread panel at a time: the open thread closes while the draft shows.
-  if (snapshot.openThread) void closeThreadPanel(true);
+  if (snapshot.openThread) void closeThreadPanel(true)
 }
 async function openThreadById(id: string) {
-  draftThread.value = null;
+  draftThread.value = null
   try {
-    await openThread(id);
-    await store.refresh();
+    await openThread(id)
+    await store.refresh()
   } catch (error) {
-    toast.error('Could not open thread', { description: String(error) });
+    toast.error('Could not open thread', { description: String(error) })
   }
 }
 async function closeThreadPanel(keepDraft = false) {
   if (!keepDraft && draftThread.value) {
-    delete drafts[threadKey.value];
-    delete replies[threadKey.value];
-    delete attachmentDrafts[threadKey.value];
-    draftThread.value = null;
+    delete drafts[threadKey.value]
+    delete replies[threadKey.value]
+    delete attachmentDrafts[threadKey.value]
+    draftThread.value = null
   }
-  if (!store.snapshot?.openThread) return;
+  if (!store.snapshot?.openThread) return
   try {
-    await closeThread();
-    await store.refresh();
+    await closeThread()
+    await store.refresh()
   } catch (error) {
-    toast.error('Could not close thread', { description: String(error) });
+    toast.error('Could not close thread', { description: String(error) })
   }
 }
 async function openThreadFromBar(id: string) {
-  if (switching.value) return;
-  switching.value = true;
-  draftThread.value = null;
+  if (switching.value) return
+  switching.value = true
+  draftThread.value = null
   try {
-    await selectThread(id);
-    await store.refresh();
-    await refreshProjectChannels(store.snapshot?.projectId || null);
-    navigate('conversation');
+    await selectThread(id)
+    await store.refresh()
+    await refreshProjectChannels(store.snapshot?.projectId || null)
+    navigate('conversation')
   } catch (error) {
-    toast.error('Could not open thread', { description: String(error) });
+    toast.error('Could not open thread', { description: String(error) })
   } finally {
-    switching.value = false;
+    switching.value = false
   }
 }
 async function leaveThreadFromBar(id: string) {
   try {
-    await leaveThread(id);
-    await store.refresh();
-    await refreshProjectChannels(store.snapshot?.projectId || null);
+    await leaveThread(id)
+    await store.refresh()
+    await refreshProjectChannels(store.snapshot?.projectId || null)
   } catch (error) {
-    toast.error('Could not leave thread', { description: String(error) });
+    toast.error('Could not leave thread', { description: String(error) })
   }
 }
-async function sendThread(
-  text: string,
-  attachments: AttachmentDto[],
-  alsoPost: boolean
-) {
-  if (switching.value || sending.value) return;
-  const draft = draftThread.value;
-  const open = draft ? null : store.snapshot?.openThread;
-  const key = threadKey.value;
-  if (!draft && !open) return;
-  sending.value = true;
-  const pending = replies[key];
+async function sendThread(text: string, attachments: AttachmentDto[], alsoPost: boolean) {
+  if (switching.value || sending.value) return
+  const draft = draftThread.value
+  const open = draft ? null : store.snapshot?.openThread
+  const key = threadKey.value
+  if (!draft && !open) return
+  sending.value = true
+  const pending = replies[key]
   try {
-    const ids = attachments.map((file) => file.id);
-    const typed = unescapeSlash(text);
-    const body = pending ? joinReply(pending.prefix, typed) : typed;
+    const ids = attachments.map((file) => file.id)
+    const typed = unescapeSlash(text)
+    const body = pending ? joinReply(pending.prefix, typed) : typed
     if (draft) {
       // No thread exists before this call. It creates the thread and opens it.
-      await startThread(
-        draft.parentChannelId,
-        draft.anchor.id,
-        body,
-        ids,
-        alsoPost
-      );
-      await store.refresh();
-      if (draftThread.value === draft) draftThread.value = null;
-    } else if (open) await sendMessage(open.channelId, body, ids, alsoPost);
+      await startThread(draft.parentChannelId, draft.anchor.id, body, ids, alsoPost)
+      await store.refresh()
+      if (draftThread.value === draft) draftThread.value = null
+    } else if (open) await sendMessage(open.channelId, body, ids, alsoPost)
     // `text` is the typed text. The draft never holds the reply prefix.
-    if (drafts[key]?.trim() === text) drafts[key] = '';
-    if (replies[key] === pending) delete replies[key];
-    const sentIds = new Set(attachments.map((file) => file.id));
-    attachmentDrafts[key] = (attachmentDrafts[key] ?? []).filter(
-      (file) => !sentIds.has(file.id)
-    );
+    if (drafts[key]?.trim() === text) drafts[key] = ''
+    if (replies[key] === pending) delete replies[key]
+    const sentIds = new Set(attachments.map((file) => file.id))
+    attachmentDrafts[key] = (attachmentDrafts[key] ?? []).filter((file) => !sentIds.has(file.id))
   } catch (error) {
-    toast.error('Message was not sent', { description: String(error) });
+    toast.error('Message was not sent', { description: String(error) })
   } finally {
-    sending.value = false;
+    sending.value = false
   }
 }
 async function stopThread() {
-  const open = store.snapshot?.openThread;
-  if (!open) return;
+  const open = store.snapshot?.openThread
+  if (!open) return
   try {
-    await cancelTurn(open.channelId);
+    await cancelTurn(open.channelId)
   } catch {
-    toast.error('Could not stop the agent');
+    toast.error('Could not stop the agent')
   }
 }
 function replyInThread(message: MessageDto) {
-  const snapshot = store.snapshot;
-  if (!snapshot || threadReplyDisabled.value) return;
-  const open = openThreadView.value;
-  const history = store.threadHistory;
-  const anchor = draftThread.value?.anchor ?? history?.anchor;
+  const snapshot = store.snapshot
+  if (!snapshot || threadReplyDisabled.value) return
+  const open = openThreadView.value
+  const history = store.threadHistory
+  const anchor = draftThread.value?.anchor ?? history?.anchor
   // The anchor lives in the parent channel; every other thread message lives in the thread.
   const [source, channelId] =
     anchor?.id === message.id
       ? [anchor, draftThread.value?.parentChannelId ?? history?.parentChannelId]
-      : [
-          history?.messages.find((item) => item.id === message.id),
-          open?.channelId,
-        ];
-  if (!source || !channelId) return;
-  const pending = createReply(source, channelId, open?.agent ?? snapshot.agent);
-  if (!pending) return;
+      : [history?.messages.find((item) => item.id === message.id), open?.channelId]
+  if (!source || !channelId) return
+  const pending = createReply(source, channelId, open?.agent ?? snapshot.agent)
+  if (!pending) return
   if (open?.kind === 'sub_agent') {
-    replies[snapshot.channelId] = pending;
-    void composer.value?.focusEnd?.();
-    return;
+    replies[snapshot.channelId] = pending
+    void composer.value?.focusEnd?.()
+    return
   }
-  replies[threadKey.value] = pending;
-  void threadPanel.value?.focusComposer?.();
+  replies[threadKey.value] = pending
+  void threadPanel.value?.focusComposer?.()
 }
 async function copyUnsavedReply() {
   const text =
     store.snapshot?.liveBlocks
       .map((block) => ('text' in block ? block.text : ''))
       .filter(Boolean)
-      .join('\n\n') ?? '';
+      .join('\n\n') ?? ''
   try {
-    await navigator.clipboard.writeText(text);
-    toast.success('Reply copied');
+    await navigator.clipboard.writeText(text)
+    toast.success('Reply copied')
   } catch (cause) {
-    toast.error(String(cause));
+    toast.error(String(cause))
   }
 }
 async function restoreCurrentConversation() {
-  const id = store.snapshot?.channelId;
-  if (!id) return;
+  const id = store.snapshot?.channelId
+  if (!id) return
   try {
-    await restoreConversation(id);
-    await store.refresh();
+    await restoreConversation(id)
+    await store.refresh()
   } catch (cause) {
-    toast.error(String(cause));
+    toast.error(String(cause))
   }
 }
 async function retry() {
-  const last = [...store.history]
-    .reverse()
-    .find((message) => message.role === 'user');
+  const last = [...store.history].reverse().find((message) => message.role === 'user')
   const text = last?.blocks
     .map((block) => ('text' in block ? block.text : ''))
     .filter(Boolean)
-    .join('\n\n');
-  if (text) await send(text);
+    .join('\n\n')
+  if (text) await send(text)
 }
 /** The agent request that a decision is working on. The card disables its buttons meanwhile. */
-const decidingRequest = ref<string | null>(null);
+const decidingRequest = ref<string | null>(null)
 async function decideAgentRequest(requestId: string, decision: 'add' | 'deny') {
-  if (decidingRequest.value || switching.value) return;
-  decidingRequest.value = requestId;
+  if (decidingRequest.value || switching.value) return
+  decidingRequest.value = requestId
   try {
-    await store.decideAgentRequest(requestId, decision);
+    await store.decideAgentRequest(requestId, decision)
     // A decision can continue the requesting agent. Load the snapshot again.
-    await store.refresh();
+    await store.refresh()
   } catch (error) {
-    toast.error('Could not decide request', { description: String(error) });
+    toast.error('Could not decide request', { description: String(error) })
   } finally {
-    decidingRequest.value = null;
+    decidingRequest.value = null
   }
 }
 async function stop() {
   if (store.snapshot)
     try {
-      await cancelTurn(store.snapshot.channelId);
+      await cancelTurn(store.snapshot.channelId)
     } catch {
-      toast.error('Could not stop the agent');
+      toast.error('Could not stop the agent')
     }
 }
 async function selectChannel(id: string) {
-  if (switching.value) return;
-  switching.value = true;
+  if (switching.value) return
+  switching.value = true
   try {
-    await switchChannel(id);
-    await store.refresh();
-    navigate('conversation');
+    await switchChannel(id)
+    await store.refresh()
+    navigate('conversation')
   } catch (error) {
-    toast.error('Could not open channel', { description: String(error) });
+    toast.error('Could not open channel', { description: String(error) })
   } finally {
-    switching.value = false;
+    switching.value = false
   }
 }
 async function inspectChannel(id: string) {
-  if (switching.value) return;
-  switching.value = true;
+  if (switching.value) return
+  switching.value = true
   try {
-    await switchChannel(id);
-    await store.refresh();
-    if (disposed) return;
-    sidebarMode.value = 'profile';
-    navigate('conversation');
+    await switchChannel(id)
+    await store.refresh()
+    if (disposed) return
+    sidebarMode.value = 'profile'
+    navigate('conversation')
     if (isWide.value) {
-      if (!store.snapshot?.memberListVisible) await setMemberListVisible(true);
+      if (!store.snapshot?.memberListVisible) await setMemberListVisible(true)
     } else {
-      contextOpen.value = true;
+      contextOpen.value = true
     }
   } catch (error) {
     toast.error('Could not open archived channel', {
       description: String(error),
-    });
+    })
   } finally {
-    switching.value = false;
+    switching.value = false
   }
 }
 async function openBranch(key: string) {
-  if (switching.value) return;
-  switching.value = true;
+  if (switching.value) return
+  switching.value = true
   try {
-    const projectId = store.snapshot?.projectId;
+    const projectId = store.snapshot?.projectId
     if (
       projectId &&
-      !projectChannels.value.some(
-        (channel) => channel.kind === 'general' && !channel.archived
-      )
+      !projectChannels.value.some((channel) => channel.kind === 'general' && !channel.archived)
     ) {
-      await selectProject(projectId);
+      await selectProject(projectId)
     }
-    await openBranchChannel(key);
-    await store.refresh();
-    await refreshProjectChannels(store.snapshot?.projectId || null);
-    navigate('conversation');
+    await openBranchChannel(key)
+    await store.refresh()
+    await refreshProjectChannels(store.snapshot?.projectId || null)
+    navigate('conversation')
   } catch (error) {
-    toast.error('Could not open branch', { description: String(error) });
+    toast.error('Could not open branch', { description: String(error) })
   } finally {
-    switching.value = false;
+    switching.value = false
   }
 }
 async function showApprovals() {
-  const snapshot = store.snapshot;
-  const channels = snapshot?.channels ?? [];
-  const threads = snapshot?.threadApprovals ?? [];
+  const snapshot = store.snapshot
+  const channels = snapshot?.channels ?? []
+  const threads = snapshot?.threadApprovals ?? []
   // The selected channel and its threads come first. Then the other channels, then the other threads.
   const channel =
-    channels.find(
-      (entry) => entry.id === snapshot?.channelId && entry.pendingApprovals
-    ) ?? undefined;
-  const ownThread = threads.find(
-    (entry) => entry.parentChannelId === snapshot?.channelId
-  );
-  const otherChannel = channels.find((entry) => entry.pendingApprovals);
-  const anyThread = threads[0];
+    channels.find((entry) => entry.id === snapshot?.channelId && entry.pendingApprovals) ??
+    undefined
+  const ownThread = threads.find((entry) => entry.parentChannelId === snapshot?.channelId)
+  const otherChannel = channels.find((entry) => entry.pendingApprovals)
+  const anyThread = threads[0]
   const target: { channelId: string } | { threadId: string } | null = channel
     ? { channelId: channel.id }
     : ownThread
@@ -1256,44 +1105,41 @@ async function showApprovals() {
         ? { channelId: otherChannel.id }
         : anyThread
           ? { threadId: anyThread.threadId }
-          : null;
+          : null
   if (!target) {
-    toast.info('No pending approvals');
-    return;
+    toast.info('No pending approvals')
+    return
   }
-  if ('threadId' in target) await openThreadFromBar(target.threadId);
-  else await selectChannel(target.channelId);
-  await nextTick();
+  if ('threadId' in target) await openThreadFromBar(target.threadId)
+  else await selectChannel(target.channelId)
+  await nextTick()
   document
     .querySelector<HTMLElement>('[data-ui-id="approval-card"]')
-    ?.scrollIntoView({ block: 'nearest' });
+    ?.scrollIntoView({ block: 'nearest' })
 }
 watch([isWide, isCompact], () => {
-  navigationOpen.value = false;
-  contextOpen.value = false;
-  currentLayout.value = [];
-});
+  navigationOpen.value = false
+  contextOpen.value = false
+  currentLayout.value = []
+})
 watch(
   () => store.snapshot?.openThread?.channelId,
   (id) => {
-    threadJump.value = null;
+    threadJump.value = null
     // An opened thread replaces the draft.
-    if (id) draftThread.value = null;
-  }
-);
+    if (id) draftThread.value = null
+  },
+)
 watch(
   () => store.snapshot?.channelId,
   () => {
-    draftThread.value = null;
-    conversationTab.value = 'conversation';
-    messageJump.value = null;
-    if (
-      searchAgent.value?.id !== store.snapshot?.agentId ||
-      store.snapshot?.activeProjectId
-    )
-      sidebarMode.value = 'profile';
-  }
-);
+    draftThread.value = null
+    conversationTab.value = 'conversation'
+    messageJump.value = null
+    if (searchAgent.value?.id !== store.snapshot?.agentId || store.snapshot?.activeProjectId)
+      sidebarMode.value = 'profile'
+  },
+)
 </script>
 <template>
   <main
@@ -1334,10 +1180,7 @@ watch(
         <ScanEye />
       </Button>
     </header>
-    <div
-      v-if="store.snapshot"
-      class="flex min-h-0 flex-1 gap-1.5 px-1.5 pb-1.5"
-    >
+    <div v-if="store.snapshot" class="flex min-h-0 flex-1 gap-1.5 px-1.5 pb-1.5">
       <NavigationPanel
         @project-action="projectAction"
         @rail-change="railChange"
@@ -1369,9 +1212,7 @@ watch(
         <template v-if="!isCompact">
           <ResizablePanel
             :order="1"
-            :default-size="
-              navigationWidth(store.snapshot.panels.channelList, railWidth)
-            "
+            :default-size="navigationWidth(store.snapshot.panels.channelList, railWidth)"
             size-unit="px"
             :min-size="180 + railWidth"
             :max-size="400 + railWidth"
@@ -1414,15 +1255,11 @@ watch(
             class="relative flex h-full min-w-0 flex-col overflow-hidden rounded-xl border border-border/60 bg-workspace"
           >
             <ChannelHeader
-              :conversation="
-                page === 'conversation' && !!store.snapshot.channelId
-              "
+              :conversation="page === 'conversation' && !!store.snapshot.channelId"
               :channel="heading || ''"
               :subtitle="
                 store.snapshot.activeProjectId && page !== 'direct-messages'
-                  ? projects.find(
-                      (p) => p.id === store.snapshot?.activeProjectId
-                    )?.name
+                  ? projects.find((p) => p.id === store.snapshot?.activeProjectId)?.name
                   : undefined
               "
               :direct-message="
@@ -1431,27 +1268,19 @@ watch(
               "
               :compact="isCompact"
               :agent-id="store.snapshot.agentId"
-              :sidebar-available="
-                page === 'conversation' && !!store.snapshot.channelId
-              "
+              :sidebar-available="page === 'conversation' && !!store.snapshot.channelId"
               :agent-name="
-                page === 'conversation' && store.snapshot.agentId
-                  ? store.snapshot.agent
-                  : undefined
+                page === 'conversation' && store.snapshot.agentId ? store.snapshot.agent : undefined
               "
               @search="searchHistory"
               :threads="store.snapshot.channelThreads ?? []"
               @open-thread="openThreadById"
               :member-list-visible="
-                (showContextPanel || contextOpen) &&
-                sidebarMode === 'profile' &&
-                !threadActive
+                (showContextPanel || contextOpen) && sidebarMode === 'profile' && !threadActive
               "
               @toggle-members="toggleMembers"
               :terminal-visible="terminalShown"
-              :terminal-disabled-reason="
-                terminalAccess.available ? '' : terminalAccess.reason
-              "
+              :terminal-disabled-reason="terminalAccess.available ? '' : terminalAccess.reason"
               :terminal-shortcut="terminalShortcut"
               @toggle-terminal="toggleTerminal"
               @toggle-navigation="navigationOpen = true"
@@ -1466,9 +1295,7 @@ watch(
                 :plugin="store.snapshot.slots.channel_header.plugin"
               />
             </ChannelHeader>
-            <template
-              v-if="page === 'conversation' && store.snapshot.channelId"
-            >
+            <template v-if="page === 'conversation' && store.snapshot.channelId">
               <Tabs
                 v-if="store.snapshot.activeProjectId"
                 v-model="conversationTab"
@@ -1479,19 +1306,13 @@ watch(
                   <TabsTrigger value="conversation">Conversation</TabsTrigger>
                   <TabsTrigger v-if="showChangesTab" value="changes">
                     Changes
-                    <Badge
-                      v-if="changes.length"
-                      variant="secondary"
-                      class="font-mono"
-                    >
+                    <Badge v-if="changes.length" variant="secondary" class="font-mono">
                       {{ changes.length }}
                     </Badge>
                   </TabsTrigger>
                   <TabsTrigger value="run">Run</TabsTrigger>
                   <!-- TODO: Implement merge review. -->
-                  <TabsTrigger value="review" disabled
-                    >Merge review · Soon</TabsTrigger
-                  >
+                  <TabsTrigger value="review" disabled>Merge review · Soon</TabsTrigger>
                 </TabsList>
                 <span
                   v-if="store.snapshot.turnRunning"
@@ -1508,19 +1329,12 @@ watch(
                 :conversation-id="store.snapshot.channelId"
                 :project-id="store.snapshot.activeProjectId"
                 :jump-to="
-                  messageJump?.channelId === store.snapshot.channelId
-                    ? messageJump
-                    : undefined
+                  messageJump?.channelId === store.snapshot.channelId ? messageJump : undefined
                 "
                 :memory-revision="store.snapshot.memoryRev"
                 :position="transcriptPositions[store.snapshot.channelId]"
-                @save-position="
-                  (id, position) => (transcriptPositions[id] = position)
-                "
-                v-if="
-                  !store.snapshot.activeProjectId ||
-                  conversationTab === 'conversation'
-                "
+                @save-position="(id, position) => (transcriptPositions[id] = position)"
+                v-if="!store.snapshot.activeProjectId || conversationTab === 'conversation'"
                 :key="store.snapshot.channelId"
                 :messages="store.history"
                 :reply-disabled="replyDisabled"
@@ -1529,9 +1343,7 @@ watch(
                 @start-thread="startThreadDraft"
                 @open-thread="openThreadById"
                 @decide-agent-request="decideAgentRequest"
-                :live-sub-agent-threads="
-                  store.snapshot.liveSubAgentThreads ?? []
-                "
+                :live-sub-agent-threads="store.snapshot.liveSubAgentThreads ?? []"
                 :agent-requests="store.agentRequests"
                 :agent-request-busy="decidingRequest"
                 :live="store.snapshot.liveBlocks"
@@ -1597,8 +1409,7 @@ watch(
             </template>
             <FriendsList
               v-else-if="
-                page === 'direct-messages' ||
-                (page === 'conversation' && !store.snapshot.channelId)
+                page === 'direct-messages' || (page === 'conversation' && !store.snapshot.channelId)
               "
               @action="action"
             />
@@ -1607,9 +1418,7 @@ watch(
               :page="page"
               :snapshot="store.snapshot"
               :messages="store.history"
-              :project="
-                projects.find((entry) => entry.id === store.snapshot?.projectId)
-              "
+              :project="projects.find((entry) => entry.id === store.snapshot?.projectId)"
               :project-channels="projectChannels"
               @project-changed="refreshProjectContext"
               @action="action"
@@ -1625,9 +1434,7 @@ watch(
               />
               <div
                 v-if="
-                  store.snapshot.notice &&
-                  !store.snapshot.turnRunning &&
-                  store.snapshot.channelId
+                  store.snapshot.notice && !store.snapshot.turnRunning && store.snapshot.channelId
                 "
                 class="flex flex-wrap gap-2 px-5 py-2"
               >
@@ -1638,17 +1445,10 @@ watch(
                 >
                   Copy reply before sending again
                 </Button>
-                <Button
-                  v-if="!store.snapshot.composerDisabled"
-                  variant="outline"
-                  @click="retry"
-                >
+                <Button v-if="!store.snapshot.composerDisabled" variant="outline" @click="retry">
                   Retry last message
                 </Button>
-                <Button
-                  variant="outline"
-                  @click="action('open_agent_settings')"
-                >
+                <Button variant="outline" @click="action('open_agent_settings')">
                   Choose model
                 </Button>
               </div>
@@ -1669,18 +1469,16 @@ watch(
                 View channel details
               </Button>
               <p
-                v-if="
-                  store.snapshot.composerDisabled && store.snapshot.channelId
-                "
+                v-if="store.snapshot.composerDisabled && store.snapshot.channelId"
                 class="px-5 py-2 text-xs text-muted-foreground"
               >
                 <template v-if="archivedLegacy">
-                  Archived project history. Choose its details to select it as
-                  the canonical channel.
+                  Archived project history. Choose its details to select it as the canonical
+                  channel.
                 </template>
                 <template v-else>
-                  Read only. You can restore archived agents from their profile.
-                  Deleted agents cannot send messages.
+                  Read only. You can restore archived agents from their profile. Deleted agents
+                  cannot send messages.
                 </template>
               </p>
               <Notices
@@ -1689,9 +1487,7 @@ watch(
                 :archived="store.snapshot.archived"
               />
             </div>
-            <template
-              v-if="page === 'conversation' && store.snapshot.channelId"
-            >
+            <template v-if="page === 'conversation' && store.snapshot.channelId">
               <p
                 v-if="thinkingAgents.length"
                 data-ui-id="thinking-line"
@@ -1701,7 +1497,7 @@ watch(
                 {{
                   thinkingLine(
                     true,
-                    thinkingAgents.map((agent) => agent.name)
+                    thinkingAgents.map((agent) => agent.name),
                   )
                 }}
               </p>
@@ -1712,16 +1508,12 @@ watch(
                 :drop-target="mainPanel"
                 v-model:draft="drafts[store.snapshot.channelId]"
                 :attachments="attachmentDrafts[store.snapshot.channelId] ?? []"
-                @update:attachments="
-                  attachmentDrafts[store.snapshot.channelId] = $event
-                "
+                @update:attachments="attachmentDrafts[store.snapshot.channelId] = $event"
                 :channel="store.snapshot.channel"
                 :direct-message="!store.snapshot.activeProjectId"
                 :project-id="store.snapshot.activeProjectId"
                 :agent="store.snapshot.agent"
-                :archived="
-                  store.snapshot.composerDisabled || store.snapshot.archived
-                "
+                :archived="store.snapshot.composerDisabled || store.snapshot.archived"
                 :busy="
                   switching ||
                   sending ||
@@ -1755,23 +1547,13 @@ watch(
           <ResizablePanel
             :key="showThreadPanel ? 'thread' : 'context'"
             :order="3"
-            :default-size="
-              showThreadPanel
-                ? 420
-                : Math.max(240, store.snapshot.panels.memberList)
-            "
+            :default-size="showThreadPanel ? 420 : Math.max(240, store.snapshot.panels.memberList)"
             size-unit="px"
             :min-size="showThreadPanel ? 360 : 240"
             :max-size="showThreadPanel ? 640 : 400"
           >
-            <div
-              class="h-full overflow-hidden rounded-xl border border-border/60"
-            >
-              <div
-                v-if="showThreadPanel"
-                class="h-full"
-                @click="openMessageSource"
-              >
+            <div class="h-full overflow-hidden rounded-xl border border-border/60">
+              <div v-if="showThreadPanel" class="h-full" @click="openMessageSource">
                 <ThreadPanel
                   :parent-agent-id="store.snapshot?.agentId"
                   :parent-agent="store.snapshot?.agent"
@@ -1817,14 +1599,8 @@ watch(
       <Sheet v-model:open="navigationOpen">
         <SheetContent side="left" class="gap-0" :show-close-button="false">
           <SheetTitle class="sr-only">Workspace navigation</SheetTitle>
-          <SheetDescription class="sr-only"
-            >Projects, channels, and agents</SheetDescription
-          >
-          <Button
-            variant="ghost"
-            class="shrink-0"
-            @click="navigationOpen = false"
-          >
+          <SheetDescription class="sr-only">Projects, channels, and agents</SheetDescription>
+          <Button variant="ghost" class="shrink-0" @click="navigationOpen = false">
             Close navigation
           </Button>
           <DirectMessageSidebar
@@ -1852,8 +1628,7 @@ watch(
             :project-path="store.snapshot.projectPath"
             :project-display-path="store.snapshot.projectDisplayPath"
             :project-avatar="
-              projects.find((entry) => entry.id === store.snapshot?.projectId)
-                ?.avatar
+              projects.find((entry) => entry.id === store.snapshot?.projectId)?.avatar
             "
             :agent="store.snapshot.agent"
             :channel="store.snapshot.channel"
@@ -1877,19 +1652,14 @@ watch(
           />
         </SheetContent>
       </Sheet>
-      <Sheet
-        :open="threadSheetOpen"
-        @update:open="(open) => !open && closeThreadPanel()"
-      >
+      <Sheet :open="threadSheetOpen" @update:open="(open) => !open && closeThreadPanel()">
         <SheetContent
           side="right"
           class="gap-0 data-[side=right]:sm:max-w-md"
           :show-close-button="false"
         >
           <SheetTitle class="sr-only">Thread</SheetTitle>
-          <SheetDescription class="sr-only"
-            >A side conversation about one message</SheetDescription
-          >
+          <SheetDescription class="sr-only">A side conversation about one message</SheetDescription>
           <div class="min-h-0 flex-1" @click="openMessageSource">
             <ThreadPanel
               :parent-agent-id="store.snapshot?.agentId"
@@ -1908,15 +1678,10 @@ watch(
           </div>
         </SheetContent>
       </Sheet>
-      <Sheet
-        :open="contextOpen && !threadActive"
-        @update:open="contextOpen = $event"
-      >
+      <Sheet :open="contextOpen && !threadActive" @update:open="contextOpen = $event">
         <SheetContent side="right" class="gap-0" :show-close-button="false">
           <SheetTitle class="sr-only">Workspace context</SheetTitle>
-          <SheetDescription class="sr-only"
-            >Channel context, members, and reviews</SheetDescription
-          >
+          <SheetDescription class="sr-only">Channel context, members, and reviews</SheetDescription>
           <Button variant="ghost" class="shrink-0" @click="contextOpen = false">
             Close context
           </Button>
@@ -1945,18 +1710,15 @@ watch(
             @canonical-changed="refreshProjectContext"
             @approvals="
               () => {
-                navigate('conversation');
-                contextOpen = false;
+                navigate('conversation')
+                contextOpen = false
               }
             "
           />
         </SheetContent>
       </Sheet>
     </div>
-    <div
-      v-else
-      class="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"
-    >
+    <div v-else class="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
       <BrailleSpinner label="Opening workspace" />
       Opening workspace…
     </div>
@@ -1971,8 +1733,8 @@ watch(
       v-model:open="addAgentOpen"
       @created="
         (id) => {
-          profileId = id;
-          navigate('direct-messages');
+          profileId = id
+          navigate('direct-messages')
         }
       "
       @connections="openProviderConnections"
