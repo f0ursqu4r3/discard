@@ -341,6 +341,7 @@ onUnmounted(() => {
               v-if="surface !== 'thread'"
               :records="memory.data.value.responses.filter((r) => r.responseId === message.id)"
               :proposals="memory.data.value.proposals"
+              :scopes="memory.data.value.scopes"
               :channel-id="conversationId"
               @changed="memory.reload"
             />

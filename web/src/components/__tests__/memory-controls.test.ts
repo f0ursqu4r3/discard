@@ -314,3 +314,53 @@ test('pending notice warnings provide a working reload and rejection settles its
   expect(view.emitted('changed')).toHaveLength(1)
   expect(view.findAll('button').every((b) => b.attributes('disabled') !== undefined)).toBe(true)
 })
+
+function savedCard(
+  content: string,
+  scope = 'agent:a',
+  scopes?: { scope: string; title: string }[],
+) {
+  return mount(MemoryResponse, {
+    props: {
+      channelId: 'current',
+      proposals: [],
+      scopes,
+      records: [
+        {
+          key: 'item:card',
+          responseId: 'persisted',
+          type: 'automatic' as const,
+          item: { ...item, scope, content },
+        },
+      ],
+    },
+  })
+}
+
+test('saved card is collapsed by default and Show reveals the full text', async () => {
+  const view = savedCard('first line\nsecond line')
+  expect(view.text()).toContain('first line')
+  expect(view.text()).not.toContain('second line')
+  await button(view, 'Show')
+  expect(view.text()).toContain('second line')
+  const toggle = view.findAll('button').find((b) => b.text() === 'Hide')
+  expect(toggle).toBeDefined()
+  expect(toggle!.attributes('aria-expanded')).toBe('true')
+})
+
+test('saved card labels its scope with the matching title or the raw scope', () => {
+  const titled = savedCard('text', 'agent:a', data.scopes)
+  expect(titled.text()).toContain('Agent A')
+  expect(titled.text()).not.toContain('agent:a')
+  const raw = savedCard('text', 'agent:zzz', data.scopes)
+  expect(raw.text()).toContain('agent:zzz')
+})
+
+test('Undo still calls memory_mutate while the saved card is collapsed', async () => {
+  const view = savedCard('first line\nsecond line')
+  await button(view, 'Undo')
+  expect(invoke).toHaveBeenCalledWith(
+    'memory_mutate',
+    expect.objectContaining({ id: 'item', action: 'undo', channelId: 'current' }),
+  )
+})
