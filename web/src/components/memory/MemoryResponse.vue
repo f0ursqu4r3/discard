@@ -41,6 +41,10 @@ function toggle(key: string) {
 function scopeLabel(scope: string) {
   return props.scopes.find((entry) => entry.scope === scope)?.title ?? scope
 }
+function label(record: MemoryRecord) {
+  const kind = record.type === 'automatic' ? 'Automatic save' : 'Approved update'
+  return `${kind} · ${scopeLabel(record.item!.scope)} · v${record.item!.version}`
+}
 function preview(item: NonNullable<MemoryRecord['item']>) {
   const line = item.content.split('\n').find((text) => text.trim()) ?? ''
   return item.deleted ? `Forgotten: ${line}` : line
@@ -50,13 +54,16 @@ function proposal(record: MemoryRecord) {
 }
 </script>
 <template>
-  <div v-if="records.length" class="mx-6 my-2 space-y-2 text-xs" data-ui-id="response-memory">
+  <div
+    v-if="records.length"
+    class="mx-6 my-2 min-w-0 space-y-2 text-xs"
+    data-ui-id="response-memory"
+  >
     <template v-for="record in records" :key="record.key">
-      <section v-if="record.item" class="rounded border border-border px-3 py-1.5">
+      <section v-if="record.item" class="min-w-0 rounded border border-border px-3 py-1.5">
         <div class="flex items-center gap-2">
-          <span class="shrink-0 font-medium">
-            {{ record.type === 'automatic' ? 'Automatic save' : 'Approved update' }}
-            · {{ scopeLabel(record.item.scope) }} · v{{ record.item.version }}
+          <span class="min-w-0 truncate font-medium" :title="label(record)">
+            {{ label(record) }}
           </span>
           <span v-if="!expanded[record.key]" class="min-w-0 flex-1 truncate text-muted-foreground">
             {{ preview(record.item) }}
@@ -65,12 +72,21 @@ function proposal(record: MemoryRecord) {
           <Button
             size="sm"
             variant="ghost"
+            class="shrink-0"
             :aria-expanded="!!expanded[record.key]"
             @click="toggle(record.key)"
           >
             {{ expanded[record.key] ? 'Hide' : 'Show' }}
           </Button>
-          <Button size="sm" variant="outline" :disabled="busy" @click="undo(record)">Undo</Button>
+          <Button
+            size="sm"
+            variant="outline"
+            class="shrink-0"
+            :disabled="busy"
+            @click="undo(record)"
+          >
+            Undo
+          </Button>
         </div>
         <div v-if="expanded[record.key]" class="mt-2 max-h-64 overflow-y-auto">
           <p class="whitespace-pre-wrap wrap-break-word">

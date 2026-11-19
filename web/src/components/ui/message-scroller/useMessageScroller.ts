@@ -374,6 +374,9 @@ function createEngine(props: MessageScrollerProviderProps) {
   let itemCount = 0
   let lastScrollTop = 0
   let defaultScrollPositionApplied = false
+  // Whether the reader sat at the true bottom the last time they scrolled or we scrolled for them. Growth
+  // alone never changes it, so it tells a resize whether the reader was at the bottom before the growth.
+  let pinnedToBottom = false
   let preserveScrollOnPrepend = true
   let prependRestore: PrependRestore | null = null
   let pendingScrollToMessage: PendingScrollToMessage | null = null
@@ -708,6 +711,26 @@ function createEngine(props: MessageScrollerProviderProps) {
     }
   }
 
+  /** Whether the viewport shows the very end of its scrollable content, spacer included. */
+  function measurePinned(): boolean {
+    if (!viewport) return false
+    return (
+      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= scrollEdgeThreshold()
+    )
+  }
+
+  /**
+   * A reader at the bottom stays at the bottom when the conversation grows, whatever mode the scroller is
+   * in. A wheel or key press at the bottom leaves free-scrolling mode with no scroll event to leave it, and
+   * an anchored turn with no spacer left holds its anchor. Neither may leave new content below the fold.
+   */
+  function followGrowthIfPinned(wasPinned: boolean): boolean {
+    if (!wasPinned || !autoScroll() || measurePinned()) return false
+    scrollToEnd({ behavior: 'auto' })
+    pinnedToBottom = true
+    return true
+  }
+
   function handleContentChange() {
     if (!content) return
     const children = getMessageChildren(content, spacer)
@@ -716,7 +739,10 @@ function createEngine(props: MessageScrollerProviderProps) {
     itemCount = children.length
     firstItem = children[0] ?? null
 
+    const wasPinned = pinnedToBottom
     applyContentChange(children, previousCount, previousFirst)
+    // A new turn that the scroller anchored or jumped to is placed on purpose.
+    if (mode !== 'anchored-to-message' && mode !== 'settling-jump') followGrowthIfPinned(wasPinned)
     capturePrependAnchor()
   }
 
@@ -725,6 +751,7 @@ function createEngine(props: MessageScrollerProviderProps) {
       scrollToEnd({ behavior: 'auto' })
       return
     }
+    const wasPinned = pinnedToBottom
     const previousSpacerHeight = spacerHeight
     if (reanchorToAnchoredMessage()) {
       // The reply streaming below the anchor consumes the tail spacer as it
@@ -735,8 +762,10 @@ function createEngine(props: MessageScrollerProviderProps) {
       // spacer) held instead of yanked to the end.
       if (autoScroll() && previousSpacerHeight > 0 && spacerHeight === 0)
         scrollToEnd({ behavior: 'auto' })
+      else if (mode !== 'settling-jump') followGrowthIfPinned(wasPinned)
       return
     }
+    if (mode !== 'settling-jump' && followGrowthIfPinned(wasPinned)) return
     scheduleStateCommit()
     scheduleVisibilitySync()
   }
@@ -840,6 +869,7 @@ function createEngine(props: MessageScrollerProviderProps) {
   }
 
   function syncAfterScroll() {
+    pinnedToBottom = measurePinned()
     commitScrollState()
     scheduleVisibilitySync()
     capturePrependAnchor()
