@@ -862,7 +862,8 @@ impl Channels {
             // The card says that the latest message moves. A newer user message makes the request stale.
             if store.last_user_message_id(source).map_err(|e| e.to_string())?.is_some_and(|latest| latest != message.id) { return Err("You sent another message after this request. Ask for the move again.".into()); }
             let text = message.blocks.iter().filter_map(|block| match block { Block::Markdown { text } => Some(text.as_str()), _ => None }).collect::<Vec<_>>().join("\n\n");
-            let attachments: Vec<_> = message.blocks.iter().filter_map(|block| match block { Block::Attachment { attachment } => Some(attachment.clone()), _ => None }).collect();
+            // The handoff carries the files that the agent named. The user's own message does not move.
+            let attachments = discard_core::write_requests::load_source_attachments(&store, source, &details.attachments)?;
             (text, attachments)
         };
         let project = source_channel.project_id.clone().ok_or("Conversation moves require this conversation's project.")?;
@@ -879,7 +880,7 @@ impl Channels {
         // The send runs after the inserts. Check it first, so a refused send leaves nothing in the target.
         self.core.can_send_in_background(&target.id.0, Some(&recipient))?;
         let link = Message { id: MessageId::new(), channel_id: target.id.clone(), role: Role::System, blocks: vec![Block::ChannelLink { direction: LinkDirection::MovedFrom, channel_id: source.0.clone(), channel_name: source_channel.name.clone() }] };
-        let handoff = Message { id: MessageId::new(), channel_id: target.id.clone(), role: Role::Agent, blocks: vec![Block::Markdown { text: format!("Handoff from #{}\n\n{}", source_channel.name, details.handoff.markdown()) }] };
+        let handoff = Message { id: MessageId::new(), channel_id: target.id.clone(), role: Role::Agent, blocks: std::iter::once(Block::Markdown { text: format!("Handoff from #{}\n\n{}", source_channel.name, details.handoff.markdown()) }).chain(attachments.into_iter().map(|attachment| Block::Attachment { attachment })).collect() };
         {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
             store.insert_message(&link).map_err(|e| e.to_string())?;
@@ -890,13 +891,9 @@ impl Channels {
         self.core.apply_channel(&target.id.0, discard_core::ui_state::Update::ConversationMarker(handoff));
         self.core.set_message_author(&target.id.0, handoff_id, moderator);
         // The user's message asked for the move. Do not copy it: the target agent would read it as a new request to
-        // move. Attachments exist only in the source, so a message with attachments still goes across.
-        if attachments.is_empty() {
-            let note = format!("the conversation moved here from #{}. This channel is the new place for the work, so do not move again. The handoff above holds the latest request.", source_channel.name);
-            self.core.continue_in_background(&target.id.0, recipient, note)?;
-        } else {
-            self.core.send_in_background(&target.id.0, text, Some(recipient), attachments)?;
-        }
+        // move. The handoff and its attachments carry the task.
+        let note = format!("the conversation moved here from #{}. This channel is the new place for the work, so do not move again. The handoff above holds the latest request.", source_channel.name);
+        self.core.continue_in_background(&target.id.0, recipient, note)?;
         let moved = Message { id: MessageId::new(), channel_id: source.clone(), role: Role::System, blocks: vec![Block::ChannelLink { direction: LinkDirection::MovedTo, channel_id: target.id.0.clone(), channel_name: target.name.clone() }] };
         // The target has the conversation now. A storage error on the link must not fail the move.
         match self.store.lock().unwrap_or_else(|e| e.into_inner()).insert_message(&moved) {
@@ -2436,7 +2433,7 @@ mod navigation_action_tests {
         }
         /// A pending move request of the project main agent in #general.
         fn move_request(&self, target: discard_core::write_requests::MoveTarget, source_message_id: &MessageId) -> discard_core::write_requests::WriteRequest {
-            let details = discard_core::write_requests::MoveDetails { target, handoff: Self::handoff(), source_message_id: source_message_id.0.clone() };
+            let details = discard_core::write_requests::MoveDetails { target, handoff: Self::handoff(), source_message_id: source_message_id.0.clone(), attachments: vec![] };
             self.requests.request_move(&self.general.id, &self.agent, details).unwrap()
         }
         fn to_channel(&self, id: &ChannelId, name: &str) -> discard_core::write_requests::MoveTarget { discard_core::write_requests::MoveTarget::Channel { channel_id: id.0.clone(), name: name.into() } }
@@ -3199,16 +3196,81 @@ mod navigation_action_tests {
     }
 
     #[tokio::test]
-    async fn move_with_attachments_sends_them_to_the_target() {
+    async fn move_carries_the_named_attachments_in_the_handoff_and_nothing_else() {
         let r = rig().await;
         let feature = r.text_channel("feature");
-        let attachment = discard_core::attachments::Attachment { id: "att-1".into(), name: "notes.txt".into(), media_type: "text/plain".into(), size: 3, path: r.dir.path().join("notes.txt"), text: Some("abc".into()) };
-        let message = r.say(vec![Block::Attachment { attachment: attachment.clone() }]);
-        let request = r.move_request(r.to_channel(&feature, "feature"), &message);
+        let file = |id: &str, name: &str| discard_core::attachments::Attachment {
+            id: id.into(),
+            name: name.into(),
+            media_type: "text/plain".into(),
+            size: 3,
+            path: r.dir.path().join(name),
+            text: Some("abc".into()),
+        };
+        let (kept, left) = (file("att-1", "notes.txt"), file("att-2", "other.txt"));
+        r.say(vec![
+            Block::Attachment {
+                attachment: kept.clone(),
+            },
+            Block::Attachment { attachment: left },
+        ]);
+        let message = r.say(vec![Block::Markdown {
+            text: "lets move this and make the changes".into(),
+        }]);
+        let details = discard_core::write_requests::MoveDetails {
+            target: r.to_channel(&feature, "feature"),
+            handoff: Rig::handoff(),
+            source_message_id: message.0.clone(),
+            attachments: vec![discard_core::write_requests::MoveAttachment {
+                id: "att-1".into(),
+                name: "notes.txt".into(),
+            }],
+        };
+        let request = r
+            .requests
+            .request_move(&r.general.id, &r.agent, details)
+            .unwrap();
         r.received(&feature);
         assert_eq!(r.decide(&request.id, true).unwrap().state, "completed");
-        let commands = r.received(&feature);
-        assert!(matches!(commands.as_slice(), [Command::SendAttachments { text, attachments }] if text.is_empty() && attachments.len() == 1 && attachments[0].id == "att-1"), "{commands:?}");
+        let handoff = &r.messages(&feature)[1];
+        assert_eq!(handoff.role, Role::Agent);
+        assert_eq!(
+            handoff.blocks[1..],
+            [Block::Attachment { attachment: kept }]
+        );
+        assert_eq!(handoff.blocks.len(), 2, "only the named file moves");
+        r.assert_continued(&feature);
+        assert!(
+            r.messages(&feature).iter().all(|m| m.role != Role::User),
+            "the user's message is not copied"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_move_fails_before_posting_when_a_named_attachment_is_gone() {
+        let r = rig().await;
+        let feature = r.text_channel("feature");
+        let message = r.say(vec![Block::Markdown {
+            text: "move it".into(),
+        }]);
+        let details = discard_core::write_requests::MoveDetails {
+            target: r.to_channel(&feature, "feature"),
+            handoff: Rig::handoff(),
+            source_message_id: message.0.clone(),
+            attachments: vec![discard_core::write_requests::MoveAttachment {
+                id: "gone".into(),
+                name: "gone.txt".into(),
+            }],
+        };
+        let request = r
+            .requests
+            .request_move(&r.general.id, &r.agent, details)
+            .unwrap();
+        assert_eq!(r.decide(&request.id, true).unwrap().state, "failed");
+        assert!(
+            r.messages(&feature).is_empty(),
+            "a failed move posts nothing"
+        );
     }
 
     #[tokio::test]

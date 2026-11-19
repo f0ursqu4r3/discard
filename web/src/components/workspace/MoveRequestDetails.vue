@@ -37,6 +37,14 @@ const sections = computed(() => {
       <dt class="mt-2 font-medium">Goal</dt>
       <dd class="break-words whitespace-pre-wrap">{{ details.handoff.goal }}</dd>
     </template>
+    <template v-if="details.attachments?.length">
+      <dt class="mt-2 font-medium">Attachments</dt>
+      <dd>
+        <ul class="list-disc space-y-1 pl-5">
+          <li v-for="file in details.attachments" :key="file.id" class="break-all">{{ file.name }}</li>
+        </ul>
+      </dd>
+    </template>
     <template v-for="section in sections" :key="section.label">
       <dt class="mt-2 font-medium">{{ section.label }}</dt>
       <dd>

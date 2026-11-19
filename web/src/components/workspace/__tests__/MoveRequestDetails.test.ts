@@ -80,3 +80,11 @@ test('handoff text renders as plain text', () => {
   expect(view.find('img').exists()).toBe(false)
   expect(view.find('strong').exists()).toBe(false)
 })
+test('lists the attachments that the handoff carries', () => {
+  const view = mount(MoveRequestDetails, {
+    props: { details: { ...details, attachments: [{ id: 'a1', name: 'spec.pdf' }] } },
+  })
+  expect(view.text()).toContain('Attachments')
+  expect(view.text()).toContain('spec.pdf')
+  expect(mount(MoveRequestDetails, { props: { details } }).text()).not.toContain('Attachments')
+})

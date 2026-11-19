@@ -82,6 +82,67 @@ pub struct MoveDetails {
     pub target: MoveTarget,
     pub handoff: Handoff,
     pub source_message_id: String,
+    /// Attachments of the source that the handoff carries to the target. Approval loads each one again by ID.
+    #[serde(default)]
+    pub attachments: Vec<MoveAttachment>,
+}
+/// An attachment that a move carries. The card shows the name. The ID finds the file at approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveAttachment {
+    pub id: String,
+    pub name: String,
+}
+/// The attachments in the messages of a channel, each file once, oldest first.
+pub fn source_attachments(
+    store: &crate::store::Store,
+    channel: &ChannelId,
+) -> Result<Vec<MoveAttachment>, String> {
+    Ok(attachments_of(store, channel)?
+        .into_iter()
+        .map(|a| MoveAttachment {
+            id: a.id,
+            name: a.name,
+        })
+        .collect())
+}
+/// The saved attachments of a channel with these IDs, in the order of `ids`. A missing ID is an error.
+pub fn load_source_attachments(
+    store: &crate::store::Store,
+    channel: &ChannelId,
+    ids: &[MoveAttachment],
+) -> Result<Vec<crate::attachments::Attachment>, String> {
+    let held = attachments_of(store, channel)?;
+    ids.iter()
+        .map(|wanted| {
+            held.iter()
+                .find(|a| a.id == wanted.id)
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "The attachment {} is no longer in the channel. Ask again.",
+                        wanted.name
+                    )
+                })
+        })
+        .collect()
+}
+fn attachments_of(
+    store: &crate::store::Store,
+    channel: &ChannelId,
+) -> Result<Vec<crate::attachments::Attachment>, String> {
+    let mut seen = std::collections::HashSet::new();
+    Ok(store
+        .messages_for_channel(channel)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .flat_map(|m| m.blocks)
+        .filter_map(|b| match b {
+            crate::model::Block::Attachment { attachment } => Some(attachment),
+            _ => None,
+        })
+        .filter(|a| seen.insert(a.id.clone()))
+        .collect())
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -317,6 +378,7 @@ mod tests {
             target: MoveTarget::Channel { channel_id: "c".into(), name: "feature".into() },
             handoff: Handoff { goal: "Ship it".into(), constraints: vec![], decisions: vec![], open_questions: vec!["Which?".into()] },
             source_message_id: "m1".into(),
+            attachments: vec![],
         }
     }
     fn args(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {

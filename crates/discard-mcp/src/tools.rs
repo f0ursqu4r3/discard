@@ -125,14 +125,20 @@ impl McpHandler {
         if !identity.can_write { return Err("Conversation moves are unavailable during summarization.".into()); }
         let channel = identity.source_conversation.as_ref().ok_or("A project channel is required.")?;
         let args = args.as_object().ok_or("Arguments must be an object.")?;
-        if args.keys().any(|k| !matches!(k.as_str(), "target" | "goal" | "constraints" | "decisions" | "open_questions")) { return Err("Only `target`, `goal`, `constraints`, `decisions`, and `open_questions` are accepted.".into()); }
+        if args.keys().any(|k| !matches!(k.as_str(), "target" | "goal" | "constraints" | "decisions" | "open_questions" | "attachments")) { return Err("Only `target`, `goal`, `constraints`, `decisions`, `open_questions`, and `attachments` are accepted.".into()); }
         let target = args.get("target").and_then(Value::as_object).filter(|t| t.keys().all(|k| matches!(k.as_str(), "channel" | "new_branch" | "base"))).ok_or(TARGET_SHAPE)?;
         let text = |key: &str| -> Result<Option<&str>, String> { match target.get(key) { None => Ok(None), Some(Value::String(s)) => Ok(Some(s.as_str())), Some(_) => Err(TARGET_SHAPE.into()) } };
         let target_args = MoveTargetArgs { channel: text("channel")?, new_branch: text("new_branch")?, base: text("base")? };
         workspace.move_source(channel, &identity.agent, identity.project.as_ref())?;
         let handoff = Handoff::from_args(args)?;
+        let references: Vec<&str> = match args.get("attachments") {
+            None | Some(Value::Null) => vec![],
+            Some(Value::Array(items)) => items.iter().map(Value::as_str).collect::<Option<_>>().ok_or("`attachments` must be a list of attachment names or IDs.")?,
+            Some(_) => return Err("`attachments` must be a list of attachment names or IDs.".into()),
+        };
+        let attachments = workspace.move_attachments(channel, &references)?;
         let (target, message) = workspace.move_request_target(channel, &identity.agent, identity.project.as_ref(), &target_args)?;
-        let request = requests.request_move(channel, &identity.agent, MoveDetails { target, handoff, source_message_id: message.0 })?;
+        let request = requests.request_move(channel, &identity.agent, MoveDetails { target, handoff, source_message_id: message.0, attachments })?;
         Ok(json!({"approvalRequired":true,"request":request,"message":"The move is pending in the app. Nothing has moved. You cannot approve this request. After approval, the conversation continues in the target channel. End your reply here."}).to_string())
     }
 
@@ -661,7 +667,7 @@ fn main_checkout_tool() -> Value {
 }
 
 fn move_tool() -> Value {
-    json!({"name":"conversation_request_move","description":"Ask the user to move this conversation to another channel or to a new branch. Only this project's Primary / Moderator agent has this tool. Give the target and a handoff: the goal, and any constraints, decisions, and open questions. Does nothing until the user approves in the app. After approval, the app posts the handoff and the user's latest message in the target and starts a response there. This channel's transcript is not copied, so the handoff must stand alone.","inputSchema":{"type":"object","properties":{
+    json!({"name":"conversation_request_move","description":"Ask the user to move this conversation to another channel or to a new branch. Only this project's Primary / Moderator agent has this tool. Give the target and a handoff: the goal, and any constraints, decisions, and open questions. Does nothing until the user approves in the app. After approval, the app posts the handoff, with the attachments you name, in the target and starts a response there. The user's message is not copied, and neither is this channel's transcript, so the handoff and its attachments must stand alone.","inputSchema":{"type":"object","properties":{
         "target":{"type":"object","description":"Give exactly one of channel or new_branch.","properties":{
             "channel":{"type":"string","description":"The name of an existing channel in this project, with or without #."},
             "new_branch":{"type":"string","description":"The name of a branch to create. The app also creates its worktree and channel."},
@@ -670,7 +676,8 @@ fn move_tool() -> Value {
         "goal":{"type":"string","description":"What the work in the target must achieve. At most 600 characters."},
         "constraints":{"type":"array","items":{"type":"string"},"maxItems":12},
         "decisions":{"type":"array","items":{"type":"string"},"maxItems":12},
-        "open_questions":{"type":"array","items":{"type":"string"},"maxItems":12}},
+        "open_questions":{"type":"array","items":{"type":"string"},"maxItems":12},
+        "attachments":{"type":"array","items":{"type":"string"},"maxItems":8,"description":"Names or IDs of files attached in this channel that the work in the target needs. Name every one that matters. Leave out the rest."}},
         "required":["target","goal"],"additionalProperties":false}})
 }
 
@@ -885,6 +892,64 @@ mod tests {
     fn pending(r: &Rig, who: &Identity) -> usize { r.handler.writes.as_ref().unwrap().0.list(who.source_conversation.as_ref().unwrap()).len() }
 
     #[test]
+    fn move_tool_records_the_attachments_that_it_names_and_refuses_unknown_ones() {
+        use discard_core::model::{Block, Message, MessageId, Role};
+        let (r, who, _second, store, _dir) = move_rig();
+        let attachment = discard_core::attachments::Attachment {
+            id: "a1".into(),
+            name: "spec.txt".into(),
+            media_type: "text/plain".into(),
+            size: 1,
+            path: "/none".into(),
+            text: Some("x".into()),
+        };
+        store
+            .lock()
+            .unwrap()
+            .insert_message(&Message {
+                id: MessageId::new(),
+                channel_id: who.source_conversation.clone().unwrap(),
+                role: Role::User,
+                blocks: vec![Block::Attachment { attachment }],
+            })
+            .unwrap();
+        let mut bad = move_args();
+        bad["attachments"] = json!(["other.txt"]);
+        let reply = call(&r, &who, "conversation_request_move", bad);
+        assert!(
+            is_error(&reply)
+                && text(&reply).contains("no attachment `other.txt`")
+                && text(&reply).contains("spec.txt (a1)"),
+            "{reply}"
+        );
+        assert_eq!(pending(&r, &who), 0);
+        let mut args = move_args();
+        args["attachments"] = json!(["spec.txt"]);
+        let reply = call(&r, &who, "conversation_request_move", args);
+        assert!(!is_error(&reply), "{reply}");
+        let requests = r
+            .handler
+            .writes
+            .as_ref()
+            .unwrap()
+            .0
+            .list(who.source_conversation.as_ref().unwrap());
+        let attachments = &requests[0].details.as_ref().unwrap().attachments;
+        assert_eq!(
+            (attachments[0].id.as_str(), attachments[0].name.as_str()),
+            ("a1", "spec.txt")
+        );
+        let mut wrong = move_args();
+        wrong["attachments"] = json!("spec.txt");
+        assert!(is_error(&call(
+            &r,
+            &who,
+            "conversation_request_move",
+            wrong
+        )));
+    }
+
+    #[test]
     fn move_tool_is_listed_only_for_the_project_main_agent() {
         let (r, mut who, second, store, _dir) = move_rig();
         assert!(tool_listed(&r, &who, "conversation_request_move"));
@@ -925,7 +990,7 @@ mod tests {
     #[test]
     fn move_tool_refuses_bad_arguments() {
         let (r, who, _second, _store, _dir) = move_rig();
-        let keys = "Only `target`, `goal`, `constraints`, `decisions`, and `open_questions` are accepted.";
+        let keys = "Only `target`, `goal`, `constraints`, `decisions`, `open_questions`, and `attachments` are accepted.";
         let target = "`target` must be an object with `channel`, or `new_branch` and an optional `base`.";
         for (args, expected) in [
             (json!({"target": {"new_branch": "feat/x"}, "goal": "g", "approve": true}), keys),

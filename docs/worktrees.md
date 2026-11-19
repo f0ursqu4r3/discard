@@ -182,12 +182,15 @@ Approval runs these steps in order:
    topic of the channel. The worktree record keeps the branch name and the base
    commit.
 3. In the target, Discard posts a "Moved from" link. It then posts the handoff as a
-   message authored by the moderator.
+   message authored by the moderator. The message also holds the attachments that
+   the agent named in the `attachments` argument of the tool (file names or IDs from
+   this channel, at most 8). The card lists them. The files are app-owned, so the
+   target uses the same files. An unknown or ambiguous name fails the tool call and
+   lists what the channel holds.
 4. Discard starts a response in the target with a short continue note. It does not
    copy the user's message, because the target agent would read "move this" as a new
-   request to move. The handoff carries the task. If the user's message has
-   attachments, Discard sends that message to the target as a normal user message
-   instead, so the attachments arrive.
+   request to move. The handoff and its attachments carry the task. The agent must
+   name every file that the work needs.
 5. In the source, Discard posts a "Moved to" link.
 
 Discard does not copy the source transcript. The user's view stays in the source

@@ -407,6 +407,8 @@ export interface MoveDetails {
   target: MoveTarget
   handoff: MoveHandoff
   sourceMessageId: string
+  /** Files of the source channel that the handoff carries to the target. */
+  attachments?: { id: string; name: string }[]
 }
 export interface WriteRequest {
   id: string

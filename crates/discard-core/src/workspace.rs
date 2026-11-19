@@ -177,6 +177,57 @@ impl GitWorkspace {
         move_gate(&self.store(), channel, agent, project).map(|_| ())
     }
 
+    /// The attachments of the source channel that a move names. Each reference is an attachment ID or a file name. A
+    /// name that matches two different files is refused. An unknown reference gets the list of what the channel holds.
+    pub fn move_attachments(
+        &self,
+        channel: &ChannelId,
+        references: &[&str],
+    ) -> Result<Vec<crate::write_requests::MoveAttachment>, String> {
+        use crate::write_requests::MoveAttachment;
+        if references.len() > crate::attachments::MAX_FILES {
+            return Err(format!(
+                "Name at most {} attachments.",
+                crate::attachments::MAX_FILES
+            ));
+        }
+        let held = crate::write_requests::source_attachments(&self.store(), channel)?;
+        let mut chosen: Vec<MoveAttachment> = Vec::new();
+        for reference in references {
+            let reference = reference.trim();
+            let mut matches: Vec<&MoveAttachment> =
+                held.iter().filter(|a| a.id == reference).collect();
+            if matches.is_empty() {
+                matches = held.iter().filter(|a| a.name == reference).collect();
+            }
+            let found = match matches.as_slice() {
+                [one] => (*one).clone(),
+                [] => {
+                    return Err(format!(
+                        "This channel has no attachment `{reference}`. It holds: {}.",
+                        if held.is_empty() {
+                            "none".to_string()
+                        } else {
+                            held.iter()
+                                .map(|a| format!("{} ({})", a.name, a.id))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        }
+                    ));
+                }
+                _ => {
+                    return Err(format!(
+                        "More than one attachment is named `{reference}`. Use its ID."
+                    ));
+                }
+            };
+            if !chosen.iter().any(|a| a.id == found.id) {
+                chosen.push(found);
+            }
+        }
+        Ok(chosen)
+    }
+
     /// Resolve where a conversation moves. Saved facts resolve under the store lock. Git runs outside it. A new branch
     /// is only checked here. Nothing is created until the user approves.
     pub fn move_request_target(&self, channel: &ChannelId, agent: &crate::model::AgentId, project: Option<&crate::model::ProjectId>, args: &MoveTargetArgs) -> Result<(crate::write_requests::MoveTarget, crate::model::MessageId), String> {
@@ -571,6 +622,64 @@ mod tests {
         let other = r.store.lock().unwrap().create_agent(&AgentConfig { workspace_write: true, sandbox_autorun: false, native_resume: false, delegation: false, reasoning_effort: None, name: "Other".into(), avatar: None, provider: "claude".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         assert_eq!(r.ws.move_source(&r.general.id, &other, Some(&r.project.id)).unwrap_err(), "Only this project's Primary / Moderator agent can move a conversation. Suggest the move in your reply.");
     }
+    fn file(id: &str, name: &str) -> crate::attachments::Attachment {
+        crate::attachments::Attachment {
+            id: id.into(),
+            name: name.into(),
+            media_type: "text/plain".into(),
+            size: 1,
+            path: std::path::PathBuf::from("/none"),
+            text: Some("x".into()),
+        }
+    }
+    fn say_with(r: &MoveRig, files: Vec<crate::attachments::Attachment>) {
+        use crate::model::{Block, Message, MessageId, Role};
+        let message = Message {
+            id: MessageId::new(),
+            channel_id: r.general.id.clone(),
+            role: Role::User,
+            blocks: files
+                .into_iter()
+                .map(|attachment| Block::Attachment { attachment })
+                .collect(),
+        };
+        r.store.lock().unwrap().insert_message(&message).unwrap();
+    }
+    #[test]
+    fn move_attachments_resolve_by_id_or_name_once_each() {
+        let r = move_rig();
+        say_with(&r, vec![file("a1", "spec.txt"), file("a2", "notes.txt")]);
+        let ids = |refs: &[&str]| {
+            r.ws.move_attachments(&r.general.id, refs)
+                .map(|v| v.into_iter().map(|a| a.id).collect::<Vec<_>>())
+        };
+        assert_eq!(ids(&["spec.txt", "a2", "a1"]).unwrap(), vec!["a1", "a2"]);
+        assert!(ids(&[]).unwrap().is_empty());
+        let error = ids(&["missing.txt"]).unwrap_err();
+        assert!(
+            error.contains("no attachment `missing.txt`")
+                && error.contains("spec.txt (a1)")
+                && error.contains("notes.txt (a2)"),
+            "{error}"
+        );
+    }
+    #[test]
+    fn move_attachments_refuse_an_ambiguous_name_and_too_many() {
+        let r = move_rig();
+        say_with(&r, vec![file("a1", "same.txt"), file("a2", "same.txt")]);
+        assert_eq!(
+            r.ws.move_attachments(&r.general.id, &["same.txt"])
+                .unwrap_err(),
+            "More than one attachment is named `same.txt`. Use its ID."
+        );
+        assert_eq!(
+            r.ws.move_attachments(&r.general.id, &["a1"]).unwrap().len(),
+            1
+        );
+        let many = vec!["a1"; crate::attachments::MAX_FILES + 1];
+        assert!(r.ws.move_attachments(&r.general.id, &many).is_err());
+    }
+
     #[test]
     fn move_gate_refuses_threads_archived_channels_and_other_projects() {
         let r = move_rig();
