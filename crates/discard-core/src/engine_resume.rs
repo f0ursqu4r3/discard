@@ -60,6 +60,9 @@ pub(super) enum TurnFailure { Cancelled, Failed, NotSaved }
 const UNSAFE_CANCELLED: &str = "the previous response was cancelled";
 const UNSAFE_FAILED: &str = "the previous response failed";
 const UNSAFE_NOT_SAVED: &str = "the previous response was not saved";
+const UNSAFE_UNFINISHED: &str = "the previous response did not finish";
+/// The resume state of a turn that falls back to a read-only Conversation session.
+const READ_ONLY_FALLBACK: &str = "the workspace sandbox is unavailable, so this response is read-only";
 
 /// True when a provider error says the input passed the model's context limit. A heuristic on the error text: the
 /// adapters do not classify this error.
@@ -194,16 +197,18 @@ impl Engine {
         };
         let messages = context::replay_with_posted(&history.messages, &history.authors, &history.posted);
         fingerprint.history_digest = resume::history_digest(&messages, saved.as_ref().and_then(|row| row.delivered_through.as_ref()));
-        let snapshots = self.turn_snapshots().await?;
+        // The snapshots and the session state go in every turn, labelled so that they replace earlier ones.
+        let snapshots = resume::snapshots_block(&self.turn_snapshots().await?);
         let parts = &setup.parts;
+        let session_state = resume::session_state_block(&parts.session_state);
         // The delta of a resume. Topic and capture state go in only when they changed. A cleared topic is sent as
         // an empty topic element.
         let delta = saved.as_ref().map(|row| {
             let undelivered = resume::undelivered(&messages, row.delivered_through.as_ref());
             let topic_text = (row.delivered_topic_version != Some(topic.version)).then_some(topic.text.as_str());
             let capture = (row.delivered_capture_paused != parts.capture_paused).then_some(parts.capture_paused);
-            let update = resume::context_update(&row.delivered_memory, &parts.selected, &parts.live_ids, topic_text, capture);
-            (resume::compose_resume(update.as_deref(), &parts.session_state, undelivered, &format!("{snapshots}{request}")), undelivered)
+            let update = resume::context_update(&row.delivered_memory, &parts.selected, &parts.live_versions, topic_text, capture);
+            (resume::compose_resume(update.as_deref(), &session_state, undelivered, &format!("{snapshots}{request}")), undelivered)
         });
         let budget = context::input_budget(self.provider.model_context_window(self.model.as_deref().unwrap_or("")));
         let decision = resume::decide(saved.as_ref(), &fingerprint, delta.as_ref().map_or(0, |(input, _)| input.len()), budget);
@@ -216,15 +221,13 @@ impl Engine {
             _ => {
                 if let ResumeDecision::Replay(reason) = &decision { self.announce_replay(reason, updates)?; }
                 // A fresh session gets every selected item, and the capture state only when capture is paused.
-                let update = resume::context_update(&BTreeMap::new(), &parts.selected, &parts.live_ids, None, parts.capture_paused.then_some(true));
-                let current = with_context(update.as_deref(), &parts.session_state, &format!("{snapshots}{}", super::topic_request(&topic.text, request)));
+                let update = resume::context_update(&BTreeMap::new(), &parts.selected, &parts.live_versions, None, parts.capture_paused.then_some(true));
+                let current = with_context(update.as_deref(), &session_state, &format!("{snapshots}{}", super::topic_request(&topic.text, request)));
                 let (input, images) = self.conversation_input(&current, history, system, true, commands, updates).await?;
                 (BTreeMap::new(), system.len() as u64, input, images)
             }
         };
-        let mut delivered_memory = base_memory;
-        delivered_memory.extend(parts.selected.iter().map(|item| (item.id.clone(), item.version)));
-        delivered_memory.retain(|id, _| parts.live_ids.contains(id));
+        let delivered_memory = resume::delivered_after_turn(base_memory, &parts.selected, &parts.live_versions);
         let turn = ResumeTurn { decision, fingerprint, session_dir: setup.session_dir, delivered_ids, delivered_memory, topic_version: topic.version, capture_paused: parts.capture_paused, prev_bytes };
         Ok((input, images, turn))
     }
@@ -233,6 +236,34 @@ impl Engine {
         send(updates, Update::Notice(reason.notice()));
         send(updates, Update::ResumeState(crate::ui_state::ResumeState::Replay { reason: reason.notice().trim_start_matches("Fresh replay: ").into() }));
         self.marker(reason.notice(), updates)
+    }
+
+    /// A resumed turn is about to continue its provider session. Mark the record as unsafe first: if the app exits,
+    /// crashes, or stops the engine during the turn, the provider session holds a partial reply that the transcript
+    /// lacks, and the next response replays. The record of a completed turn clears the mark.
+    pub(super) fn mark_turn_started(&self, turn: &ResumeTurn) {
+        if turn.handle().is_none() { return; }
+        let reason = DropReason::PreviousTurnUnsafe(UNSAFE_UNFINISHED.into()).marker();
+        if let Err(error) = crate::driver::lock(&self.store).drop_agent_session(&self.channel_id, &self.agent_id, &reason) {
+            warn!(%error, "could not mark the native session record");
+        }
+    }
+
+    /// A steer stopped this turn, and the steer turn continues the same provider session. Put the record back as it
+    /// was before `mark_turn_started`.
+    pub(super) fn restore_session(&self, turn: &ResumeTurn) {
+        if let ResumeDecision::Resume(row) = &turn.decision && let Err(error) = crate::driver::lock(&self.store).put_agent_session(row) {
+            warn!(%error, "could not restore the native session record");
+        }
+    }
+
+    /// The sandbox is unavailable, so this eligible turn runs as a read-only replay that saves no session. Delete
+    /// the record, so later responses do not repeat an old drop notice, and correct the resume state.
+    pub(super) fn forget_session_for_read_only(&self, updates: &mpsc::UnboundedSender<Update>) {
+        if let Err(error) = crate::driver::lock(&self.store).delete_agent_session(&self.channel_id, &self.agent_id) {
+            warn!(%error, "could not delete the native session record");
+        }
+        send(updates, Update::ResumeState(crate::ui_state::ResumeState::Replay { reason: READ_ONLY_FALLBACK.into() }));
     }
 
     /// Mark the saved session of a failed eligible turn as dropped, so the next response replays with a notice.
@@ -319,7 +350,8 @@ impl Engine {
             let mut fingerprint = turn.fingerprint;
             fingerprint.summary_through = store.conversation_context(&self.channel_id)?.through.map(|id| id.0);
             fingerprint.history_digest = resume::history_digest(&messages, through.as_ref());
-            let reply_len = serde_json::to_string(&context::compact_blocks(&response.blocks)).map_or(0, |text| text.len());
+            // The provider session holds the full reply, tool outputs included, not the compacted replay form.
+            let reply_len = serde_json::to_string(&response.blocks).map_or(0, |text| text.len());
             store.put_agent_session(&AgentSession {
                 channel_id: self.channel_id.clone(),
                 agent_id: self.agent_id.clone(),

@@ -110,7 +110,7 @@ async fn system_prompt_is_unchanged_by_the_split() {
     golden("unbound.txt", &f.turn(&f.unbound, "bananas", false, false).system_prompt);
 }
 
-fn ids(parts: &discard_core::engine::ResumableParts) -> Vec<&str> { parts.live_ids.iter().map(String::as_str).collect() }
+fn ids(parts: &discard_core::engine::ResumableParts) -> Vec<&str> { parts.live_versions.keys().map(String::as_str).collect() }
 
 #[tokio::test]
 async fn parts_separate_fixed_and_volatile_lines() {
@@ -173,22 +173,22 @@ async fn selected_excludes_instruction_and_preference_items() {
     assert_eq!((item.text.as_str(), item.kind.as_str(), item.scope.as_str(), item.version), ("Cargo builds the workspace.", "fact", &*format!("project:{}", f.project.0), 1));
     assert!(!item.id.is_empty());
     // Every live item, mandatory ones included.
-    assert_eq!(parts.live_ids.len(), 4, "{:?}", ids(&parts));
-    assert!(parts.live_ids.contains(&item.id));
+    assert_eq!(parts.live_versions.len(), 4, "{:?}", ids(&parts));
+    assert_eq!(parts.live_versions.get(&item.id), Some(&item.version));
     // With no query match, nothing is selected, but live ids stay.
     let none = f.turn(&f.general, "zzzz", false, false).parts.unwrap();
-    assert!(none.selected.is_empty() && none.live_ids.len() == 4);
+    assert!(none.selected.is_empty() && none.live_versions.len() == 4);
 }
 
 #[tokio::test]
-async fn live_ids_omit_deleted_items() {
+async fn live_versions_omit_deleted_items() {
     let f = fx().await;
     let bananas = f.memory.list_items(&[Scope::Global]).unwrap().into_iter().find(|i| i.content.contains("Bananas")).unwrap();
     f.memory.forget_item(&bananas.id, bananas.version).unwrap();
     let parts = f.turn(&f.general, "bananas", false, false).parts.unwrap();
-    assert!(!parts.live_ids.contains(&bananas.id));
+    assert!(!parts.live_versions.contains_key(&bananas.id));
     assert!(parts.selected.is_empty());
-    assert_eq!(parts.live_ids.len(), 3);
+    assert_eq!(parts.live_versions.len(), 3);
 }
 
 #[tokio::test]

@@ -1603,7 +1603,7 @@ async fn topic_and_capture_pause_changes_are_delivered_as_updates() {
     rig.memory.forget_item_in(&fact.id, fact.version, Some(&rig.channel)).unwrap();
     rig.say("third request").await;
     let third = rig.sent(2);
-    assert!(third.contains("Fresh topic") && third.contains("<memory-capture>paused</memory-capture>"), "{third}");
+    assert!(third.contains("Fresh topic") && third.contains("<memory-capture>Automatic capture is paused for this conversation. Do not save or propose memory. Only the user can resume capture in the app.</memory-capture>"), "{third}");
     rig.say("fourth request").await;
     let fourth = rig.sent(3);
     assert!(!fourth.contains("Fresh topic") && !fourth.contains("<memory-capture>"), "{fourth}");
@@ -1630,7 +1630,8 @@ async fn two_agent_rig(texts: &[&str]) -> (Rig, AgentId) {
         let bee = store.create_agent(&config).unwrap();
         (channel, bee)
     };
-    let provider = Arc::new(replies(texts));
+    // Each fresh session gets its own handle; a resumed session keeps the handle it was started with.
+    let provider = Arc::new(replies(texts).with_fresh_handles(&["h1", "h2"]));
     let probe = provider.probe.clone();
     rig.respawn(vec![provider], probe, channel.id).await;
     (rig, bee)
@@ -1643,9 +1644,11 @@ async fn two_agents_in_one_channel_keep_separate_rows() {
     rig.say("@Bee what do you think").await;
     rig.say("and again").await;
     rig.say("@Bee last word").await;
-    assert_eq!(rig.started_with(), vec![None, None, Some("h1".into()), Some("h1".into())]);
+    // Each agent resumes only its own session: the first agent got h1, Bee got h2.
+    assert_eq!(rig.started_with(), vec![None, None, Some("h1".into()), Some("h2".into())]);
     let a = rig.row(&rig.agent.clone()).expect("a row for the first agent");
     let b = rig.row(&bee).expect("a row for Bee");
+    assert_eq!((a.handle.as_str(), b.handle.as_str()), ("h1", "h2"));
     assert_ne!(a.delivered_through, b.delivered_through);
     rig.close().await;
 }
@@ -2032,5 +2035,152 @@ async fn a_cancel_during_a_rejected_first_send_ends_the_turn_without_a_replay() 
     assert_eq!(rig.probe.sent.lock().unwrap().len(), 2, "no second input");
     assert!(!notices(&updates).iter().any(|n| n == REJECTED_NOTICE), "{updates:?}");
     assert_eq!(rig.row(&rig.agent.clone()).unwrap().dropped_reason.as_deref(), Some("handle_rejected"));
+    rig.close().await;
+}
+
+// Native provider resume: final review fixes.
+
+const UNSAFE_UNFINISHED: &str = "the previous response did not finish";
+
+#[tokio::test]
+async fn an_interrupted_resumed_turn_replays_with_a_notice_after_a_restart() {
+    let provider = FakeProvider::new(vec![Step::text("one"), Step::idle()])
+        .then_session(vec![Step::text("partial"), Step::Hang])
+        .with_resume_handle("h1");
+    let mut rig = native_rig(provider).await;
+    rig.say("first request").await;
+    rig.commands.send(Command::Send("second request".into())).unwrap();
+    loop {
+        if let Some(Update::Event(event)) = rig.updates.recv().await
+            && matches!(&event.kind, discard_core::event::EventKind::TextDelta { .. }) { break; }
+    }
+    assert_eq!(rig.started_with(), vec![None, Some("h1".into())]);
+    // The provider session now holds a partial reply. The row says so before the turn ends.
+    let row = rig.row(&rig.agent.clone()).unwrap();
+    assert_eq!((row.handle.as_str(), row.dropped_reason.as_deref()), ("h1", Some(UNSAFE_UNFINISHED)));
+    // The app exits mid-turn: a new engine runs on the same store.
+    let provider = Arc::new(replies(&["three"]));
+    let probe = provider.probe.clone();
+    let channel = rig.channel.clone();
+    rig.respawn(vec![provider], probe, channel).await;
+    assert_next_response_replays(&mut rig, &unsafe_notice(UNSAFE_UNFINISHED)).await;
+    assert_eq!(rig.started_with(), vec![None]);
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_changed_item_that_is_not_selected_is_retracted_then_sent_fresh() {
+    let mut rig = native_rig(replies(&["one", "two", "three", "four"])).await;
+    let fact = rig.memory.create_item(&Scope::Agent(rig.agent.clone()), ItemKind::Fact, "Deploys go to staging-A", None, MutationOrigin::User).unwrap();
+    rig.say("Where do deploys go?").await;
+    assert!(rig.sent(0).contains("staging-A"), "{}", rig.sent(0));
+    rig.say("hello there").await;
+    rig.memory.update_item(&fact.id, fact.version, "Deploys go to staging-B", MutationOrigin::User).unwrap();
+    // No word of this turn or the two latest messages matches the item.
+    rig.say("and more").await;
+    let third = rig.sent(2);
+    assert!(third.contains(&format!("<changed-memory id=\"{}\">", fact.id)), "{third}");
+    assert!(!third.contains("staging-A") && !third.contains("staging-B"), "{third}");
+    assert!(!rig.row(&rig.agent.clone()).unwrap().delivered_memory.contains_key(&fact.id));
+    rig.say("deploys now?").await;
+    let fourth = rig.sent(3);
+    assert!(fourth.contains("staging-B") && !fourth.contains("changed-memory"), "{fourth}");
+    assert_eq!(rig.started_with(), vec![None, Some("h1".into()), Some("h1".into()), Some("h1".into())]);
+    assert_eq!(rig.row(&rig.agent.clone()).unwrap().delivered_memory.get(&fact.id), Some(&(fact.version + 1)));
+    rig.close().await;
+}
+
+/// The memory runtime, with the session-state lines of every turn replaced by `state`.
+struct StateOverride {
+    inner: Arc<MemoryRuntime>,
+    state: Arc<Mutex<String>>,
+}
+
+impl discard_core::engine::MemoryService for StateOverride {
+    fn prepare_response(&self, agent: &AgentId, project: Option<&discard_core::model::ProjectId>, source: &ChannelId, base_prompt: Option<&str>, plugin_write: bool, options: discard_core::engine::MemoryOptions<'_>) -> Result<discard_core::engine::PreparedMemory, String> {
+        let mut prepared = self.inner.prepare_response(agent, project, source, base_prompt, plugin_write, options)?;
+        if let Some(parts) = &mut prepared.parts { parts.session_state = self.state.lock().unwrap().clone(); }
+        Ok(prepared)
+    }
+    fn prepare(&self, agent: &AgentId, project: Option<&discard_core::model::ProjectId>, source: &ChannelId, base_prompt: Option<&str>, plugin_write: bool) -> Result<discard_core::engine::PreparedMemory, String> {
+        self.inner.prepare(agent, project, source, base_prompt, plugin_write)
+    }
+    fn prepare_summary(&self, agent: &AgentId, project: Option<&discard_core::model::ProjectId>, source: &ChannelId) -> Result<discard_core::engine::PreparedMemory, String> {
+        self.inner.prepare_summary(agent, project, source)
+    }
+    fn resume_dir(&self, channel: &ChannelId, agent: &AgentId) -> Option<std::path::PathBuf> { self.inner.resume_dir(channel, agent) }
+    fn finish(&self, token: &str) { self.inner.finish(token) }
+}
+
+const MODERATOR: &str = "You are this project's Primary / Moderator agent.";
+
+async fn state_rig(native: bool, state: Arc<Mutex<String>>) -> Rig {
+    let provider = Arc::new(replies(&["one", "two", "three"]));
+    let probe = provider.probe.clone();
+    let rig = Rig::with_memory_service(provider, probe, move |runtime, _| Arc::new(StateOverride { inner: runtime, state })).await;
+    rig.edit(|c| c.native_resume = native);
+    rig
+}
+
+#[tokio::test]
+async fn a_session_state_line_that_disappears_is_replaced_by_none() {
+    let state = Arc::new(Mutex::new(MODERATOR.to_string()));
+    let mut rig = state_rig(true, state.clone()).await;
+    let block = |body: &str| format!("This block replaces every earlier session-state block in this conversation.\n<session-state>\n{body}\n</session-state>");
+    rig.say("first request").await;
+    assert!(rig.sent(0).contains(&block(MODERATOR)), "{}", rig.sent(0));
+    assert!(rig.sent(0).contains("Current snapshot: none. It replaces earlier snapshots."), "{}", rig.sent(0));
+    rig.say("second request").await;
+    assert!(rig.sent(1).contains(&block(MODERATOR)), "{}", rig.sent(1));
+    // The user makes another agent the moderator.
+    *state.lock().unwrap() = String::new();
+    rig.say("third request").await;
+    let third = rig.sent(2);
+    assert!(third.contains(&block("none")) && !third.contains(MODERATOR), "{third}");
+    assert!(third.contains("Current snapshot: none. It replaces earlier snapshots."), "{third}");
+    assert_eq!(rig.started_with(), vec![None, Some("h1".into()), Some("h1".into())]);
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_non_native_agent_gets_no_session_state_or_snapshot_labels() {
+    let mut rig = state_rig(false, Arc::new(Mutex::new(MODERATOR.to_string()))).await;
+    rig.say("first request").await;
+    rig.say("second request").await;
+    for turn in 0..2 {
+        let sent = rig.sent(turn);
+        assert!(!sent.contains("<session-state>") && !sent.contains("replaces earlier snapshots") && !sent.contains(MODERATOR), "{sent}");
+    }
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn the_byte_estimate_counts_full_tool_outputs() {
+    // The fake has no context window, so the budget is the default 48 KB. A 30 KB output is far past the 1 KB that
+    // replay keeps of a tool output.
+    let big = "x".repeat(30_000);
+    let provider = FakeProvider::new(vec![Step::text("one"), Step::idle()])
+        .then_session(vec![
+            Step::Emit(discard_core::event::EventKind::ToolCallStart { call_id: "c1".into(), name: "Bash".into(), input: serde_json::json!({"command": "cat big"}) }),
+            Step::Emit(discard_core::event::EventKind::ToolCallResult { call_id: "c1".into(), output: big, is_error: false }),
+            Step::text("two"),
+            Step::idle(),
+        ])
+        .then_session(vec![Step::text("three"), Step::idle()])
+        .with_resume_handle("h1");
+    let mut rig = native_rig(provider).await;
+    rig.say("first request").await;
+    // The session is near the budget, with room for one small turn but not for 30 KB more.
+    let budget = discard_core::conversation_context::input_budget(None) as u64;
+    let mut row = rig.row(&rig.agent.clone()).unwrap();
+    row.bytes_in_session = budget - 20_000;
+    rig.store.lock().unwrap().put_agent_session(&row).unwrap();
+    rig.say("second request").await;
+    assert_eq!(rig.started_with()[1].as_deref(), Some("h1"));
+    let after = rig.row(&rig.agent.clone()).unwrap().bytes_in_session;
+    assert!(after >= row.bytes_in_session + 30_000, "{after} < {} + 30000", row.bytes_in_session);
+    let updates = rig.say("third request").await;
+    assert_eq!(rig.started_with()[2], None);
+    assert!(notices(&updates).iter().any(|n| n == "Fresh replay: the session grew past its size limit. Discard sends the history again."), "{updates:?}");
     rig.close().await;
 }

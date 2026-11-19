@@ -891,6 +891,63 @@ async fn sandbox_fallback_records_no_autorun_audit() {
     rig.task.abort();
 }
 
+/// A memory service with the prompt split that native resume needs, and a readable MCP config.
+struct ResumableMemory { config: PathBuf }
+
+impl MemoryService for ResumableMemory {
+    fn prepare_workspace_turn(&self, agent: &AgentId, project: Option<&ProjectId>, source: &ChannelId, base: Option<&str>, _grant: &discard_core::workspace_session::WorkspaceGrant, _query: &str) -> Result<PreparedMemory, String> {
+        self.prepare(agent, project, source, base, false)
+    }
+    fn prepare(&self, _: &AgentId, _: Option<&ProjectId>, _: &ChannelId, _: Option<&str>, _: bool) -> Result<PreparedMemory, String> {
+        let parts = discard_core::engine::ResumableParts { fixed_prompt: "P".into(), session_state: String::new(), core_hash: String::new(), selected: vec![], live_versions: Default::default(), capture_paused: false };
+        Ok(PreparedMemory { system_prompt: "P".into(), mcp_config: self.config.clone(), token: "t".into(), parts: Some(parts) })
+    }
+    fn finish(&self, _: &str) {}
+}
+
+#[tokio::test]
+async fn a_sandbox_fallback_forgets_the_saved_session_and_reports_a_replay() {
+    use discard_core::ui_state::ResumeState;
+    let (dir, mut engine, probe) = workspace_engine(FakeProvider::new(vec![Step::working(), Step::text("one"), Step::idle()]).with_resume_handle("h1"), true);
+    let config = dir.path().join("mcp.json");
+    std::fs::write(&config, r#"{"mcpServers":{"discard-memory":{}}}"#).unwrap();
+    engine.memory = Some(Arc::new(ResumableMemory { config }));
+    {
+        let store = engine.store.lock().unwrap();
+        let mut agent = store.load_agent(&engine.agent_id).unwrap(); agent.native_resume = true;
+        store.update_agent(&engine.agent_id, &agent).unwrap();
+    }
+    let (channel, agent) = (engine.channel_id.clone(), engine.agent_id.clone());
+    let fallback = FakeProvider::new(vec![Step::working(), Step::text("two"), Step::idle()])
+        .then_session(vec![Step::working(), Step::text("three"), Step::idle()])
+        .with_resume_handle("h1").with_workspace_error("test unavailable");
+    let fallback_probe = fallback.probe.clone();
+    let mut broken = engine.clone();
+    broken.provider = Arc::new(fallback);
+    // A Workspace response saves a session.
+    let mut rig = launch_workspace(engine, probe);
+    rig.commands.send(Command::Send("Edit".into())).unwrap(); rig.until_finished().await;
+    assert_eq!(rig.probe.started_resumable.lock().unwrap().as_slice(), [true]);
+    let row = rig.store.lock().unwrap().agent_session(&channel, &agent).unwrap().expect("a saved session");
+    assert_eq!((row.handle.as_str(), row.dropped_reason.as_deref()), ("h1", None));
+    rig.task.abort();
+    // The sandbox is gone. The resumed Workspace start fails, and the read-only fallback replays.
+    let mut rig = launch_workspace(broken, fallback_probe);
+    rig.commands.send(Command::Send("Edit again".into())).unwrap();
+    let updates = rig.until_finished().await;
+    assert_eq!(rig.probe.started_with.lock().unwrap().as_slice(), [Some("h1".to_string()), None]);
+    let read_only = ResumeState::Replay { reason: "the workspace sandbox is unavailable, so this response is read-only".into() };
+    let states = |updates: &[Update]| updates.iter().filter_map(|u| match u { Update::ResumeState(state) => Some(state.clone()), _ => None }).collect::<Vec<_>>();
+    assert_eq!(states(&updates).last(), Some(&read_only), "{updates:?}");
+    assert_eq!(rig.store.lock().unwrap().agent_session(&channel, &agent).unwrap(), None);
+    // The next fallback response shows the same state, and no "Fresh replay" marker.
+    rig.commands.send(Command::Send("Edit once more".into())).unwrap();
+    let updates = rig.until_finished().await;
+    assert_eq!(states(&updates), vec![read_only]);
+    assert!(!rig.messages().iter().any(|m| m.role == Role::System && matches!(&m.blocks[0], Block::Markdown { text } if text.starts_with("Fresh replay"))));
+    rig.task.abort();
+}
+
 #[tokio::test]
 async fn autorun_marks_shell_calls_in_the_saved_response() {
     let provider = FakeProvider::new(vec![

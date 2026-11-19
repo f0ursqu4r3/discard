@@ -349,7 +349,7 @@ Missing capabilities show as "No". **Re-check** runs the setup check again. Disc
 
 ### Agent profiles (main window)
 
-The profile editor has a **Keep provider session** switch (off by default). It keeps this agent's provider session between responses. The provider stores the conversation on disk. The setting grants no new tool access. When it is on, a response sends only new messages, and the context panel shows "Resumed session" or "Fresh replay: <reason>". Discard cannot delete the provider's saved conversation. See [native provider resume](runtime/conversation-context.md#native-provider-resume).
+The profile editor has a **Keep provider session** switch (off by default). It keeps this agent's provider session between responses. The provider stores the conversation on disk. The setting grants no new tool access. When it is on, a response sends only new messages, and the context panel shows "Resumed session" or "Fresh replay: <reason>". Discard never deletes the provider's saved conversation, also when the setting is turned off. See [native provider resume](runtime/conversation-context.md#native-provider-resume).
 
 In the profile editor, **Generate** turns a short description into Personality text using the provider, model, and reasoning level currently selected in the form. **Undo** restores the previous text; nothing is saved until you choose **Save profile**.
 

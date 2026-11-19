@@ -106,7 +106,7 @@ Tested Codex 0.166.0 against a live `codex app-server`, model `gpt-5.6-luna` (an
 | --- | --- |
 | Per-session MCP config on `thread/resume` | Re-applies. `config.mcp_servers.tok` with `TOKB` replaced `TOKA`. The config is not stored in the thread: a resume without it had no `tok` tool. Pass it on every resume. |
 | `model` on `thread/resume` | Re-applies. The resume response and the model's own answer showed the new model. A resume without `model` kept the last model. |
-| `developerInstructions` on `thread/resume` | Does not re-apply. A resume with `BRAVO` kept `ALPHA` from the thread start. The thread keeps the instructions it started with. **Adapter refuses resume** when the current system prompt differs from the one at thread start. The engine fingerprint already holds the fixed prompt, so it drops the handle first. |
+| `developerInstructions` on `thread/resume` | Does not re-apply. A resume with `BRAVO` kept `ALPHA` from the thread start. The thread keeps the instructions it started with. The adapter has no check for this. The engine's fingerprint holds the hash of the fixed system prompt, so a changed prompt drops the handle and the response replays in a new thread. |
 | `approvalPolicy` and `sandbox` on `thread/resume` | Re-apply. The response showed `untrusted` and `workspaceWrite` after a resume that asked for them. |
 | Conversation controls (`codex_controls`, tools off) | Process-level `-c` arguments, not thread state. A resume in a process without them could run `echo hi`. A resume in a process with them answered `NO SHELL`. Discard must pass the same `-c` arguments on each spawn, as it does for a fresh start. |
 | Global `~/.codex/AGENTS.md` | Still listed in `instructionSources` on resume, as on a fresh start. |
@@ -136,6 +136,8 @@ Marker for the engine: any JSON-RPC error answer to `thread/resume`. The adapter
 | `HOME` changed | `<HOME>/.codex/sessions/...`. The login is lost. |
 
 `thread/start` returns the rollout path in `thread.path`. A resume in a process with a different `CODEX_HOME` or `HOME` cannot find the thread. Discard must keep both unchanged between turns of one session.
+
+A resumable thread starts with `ephemeral: false`, so Codex keeps its rollout. The rollout may store the per-thread MCP `http_headers`, which hold the Discard MCP bearer token, under `~/.codex/sessions`. Discard revokes that token at the end of each response, so a stored token no longer works. Discard never deletes the stored rollouts.
 
 ### Compaction
 

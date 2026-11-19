@@ -10,23 +10,23 @@ Memory instructions and preferences always enter the prompt in domain precedence
 
 ## Native provider resume
 
-An agent with **Keep provider session** on (`AgentConfig.native_resume`, off by default) keeps one provider session for each channel and agent. The next response continues that session and sends only what is new. The provider stores the conversation on disk, outside Discard's control. The feature is for Conversation and Workspace responses in a channel. Thread turns, summary sessions, and the `--builder` Coding path never resume. If the engine cannot find a stable session directory or a readable MCP config, the response replays as usual.
+An agent with **Keep provider session** on (`AgentConfig.native_resume`, off by default) keeps one provider session for each channel and agent. The next response continues that session and sends only what is new. The provider stores the conversation on disk, outside Discard's control. Discard never deletes the provider's stored sessions, also when it drops a handle, turns the setting off, or deletes a channel or agent. The feature is for Conversation and Workspace responses in a channel. Thread turns, summary sessions, and the `--builder` Coding path never resume. If the engine cannot find a stable session directory or a readable MCP config, the response replays as usual.
 
 ### Session record
 
-The table `agent_sessions` has one row for each (channel, agent). It holds the provider handle, the session fingerprint (as JSON), `delivered_through` (the last saved message the session has seen), the memory items given so far (item ID to version), the topic version, the capture-pause flag, `bytes_in_session`, the session directory, and `dropped_reason`. Deleting or archiving a channel, or deleting the agent, deletes its rows. Turning the setting off, or changing the agent's provider or model, leaves no row.
+The table `agent_sessions` has one row for each (channel, agent). It holds the provider handle, the session fingerprint (as JSON), `delivered_through` (the last saved message the session has seen), the memory items given so far (item ID to version), the topic version, the capture-pause flag, `bytes_in_session`, the session directory, and `dropped_reason`. Deleting or archiving a channel, or deleting the agent, deletes its rows. Turning the setting off deletes the row at that agent's next response in that channel. A change of provider or model replaces the row: the next response replays and saves a row for the new session. A Workspace response that falls back to a read-only session because the sandbox is unavailable deletes the row, and the context panel shows "Fresh replay: the workspace sandbox is unavailable, so this response is read-only".
 
 ### Fixed prompt and per-turn context
 
-The system prompt has a fixed part and a volatile part. The fixed part holds the personality, fixed instructions, repository instructions, the tool-naming lines, the delegation line, and the core memory blocks. Its hash is in the fingerprint. The volatile part holds the worktree approval outcomes, the "no worktree" line, main-checkout availability, and the Primary / Moderator move line. Discard sends it every turn, with the worktree snapshot and the project context.
+The system prompt has a fixed part and a volatile part. The fixed part holds the personality, fixed instructions, repository instructions, the tool-naming lines, the delegation line, and the core memory blocks. Its hash is in the fingerprint. The volatile part holds the worktree approval outcomes, the "no worktree" line, main-checkout availability, and the Primary / Moderator move line. Discard sends it every turn, with the worktree snapshot and the project context. For an agent with the setting on, the volatile lines go in a labelled `<session-state>` block that replaces every earlier one. The block says `none` when there are no lines, so a line that disappears (for example, after another agent becomes the moderator) is withdrawn from the session. The snapshots have a label that says they replace earlier snapshots, or that there is none. Agents with the setting off get the same input as before.
 
 Discard sends the fixed system prompt on every resume. Claude does not store it. Codex freezes developer instructions at thread start, and the fixed-prompt hash guarantees that they equal the current ones.
 
 ### What a resumed response sends
 
-1. Every saved non-system message after `delivered_through`, in order, framed and compacted as replay frames it. Replies that this session produced are skipped.
-2. A `<context-update>` block, only when something changed: memory items that are new or have a new version, items that were forgotten, a new topic, and a changed capture-pause flag. Memory selection is the same as for replay. A selected item is sent when the session has not seen its current version. Text in the block is escaped.
-3. The volatile session state, the worktree snapshot, and the project context.
+1. Every saved non-system message after `delivered_through`, in order, framed and compacted as replay frames it. The session's own replies up to `delivered_through` are not sent again. A reply after a message posted during its turn is sent once more (see below).
+2. A `<context-update>` block, only when something changed: memory items that are new or have a new version, items that were forgotten, a new topic, and a changed capture-pause flag. Memory selection is the same as for replay. A selected item is sent when the session has not seen its current version. A delivered item that changed and is not selected now is withdrawn with a `<changed-memory>` element; its new text goes in when it is next selected. Text in the block is escaped.
+3. The labelled session state, the worktree snapshot, and the project context.
 4. The current user message.
 
 After a completed response, Discard saves `delivered_through` as the end of the contiguous run of replay chunks that the session has seen: messages that existed at the start of the turn, the user message, and the saved reply. A message that another author posts during the turn stops the run, so the agent's own reply is sent once again in the next delta. This is a known limit. It never loses a message.
@@ -40,15 +40,17 @@ A new, changed, or forgotten `instruction` or `preference` memory item changes t
 ### When Discard drops the handle
 
 - The fingerprint differs.
-- The previous response was cancelled, failed, or did not save its reply. A steer does not count.
+- The previous response was cancelled, failed, or did not save its reply. A steer does not count. Before a resumed response starts its provider run, Discard marks the row "the previous response did not finish". A completed response clears the mark. So an app exit, a crash, or a stopped engine during the response also drops the handle.
 - The provider rejects the handle. Claude reports this on the first send. Codex reports it at start. Discard replays once in the same response and never loops.
-- The saved bytes plus the new input exceed the input budget for the model, or the response failed with an error that reads like a context limit. The check is a text heuristic on the provider error.
+- The saved bytes plus the new input exceed the input budget for the model (the saved bytes count each reply with its full tool outputs, as the provider session holds them), or the response failed with an error that reads like a context limit. The check is a text heuristic on the provider error.
 - The provider compacted the session. Discard turns provider compaction off where it can (`DISABLE_AUTO_COMPACT=1` for Claude, a very high `model_auto_compact_token_limit` for Codex). The adapters still detect a compaction event. The session stays saved, and the next response replays.
 - A Codex thread resumes on a model other than the selected one.
 
 A drop shows a notice that names the reason, for example "Fresh replay: the model changed." The replay saves its new handle.
 
 ### Summary headroom
+
+The rolling summary is stored per channel, not per agent. When a native agent's replay summarizes down to about 50% of the budget, the shorter history also applies to agents in the same channel that replay.
 
 A replay that summarizes history normally fills the budget. A resumed turn would then exceed the budget and replay again. For an agent with the setting on, a summarizing replay shrinks the input to half of the budget (`conversation_context::summary_target`). Other agents keep the full budget. A new summary changes the fingerprint, so each summary costs one replay.
 

@@ -75,6 +75,9 @@ pub struct FakeProvider {
     /// Start calls, counted from 0 over every call, that fail with this protocol error.
     failed_starts: Vec<(usize, String)>,
     compaction: bool,
+    /// Handles for fresh sessions, in start order. A session started with a handle reports that handle.
+    fresh_handles: Vec<String>,
+    fresh_started: std::sync::atomic::AtomicUsize,
     pub probe: Probe,
 }
 
@@ -113,6 +116,8 @@ impl FakeProvider {
             first_send_delay: std::time::Duration::ZERO,
             failed_starts: Vec::new(),
             compaction: false,
+            fresh_handles: Vec::new(),
+            fresh_started: std::sync::atomic::AtomicUsize::new(0),
             probe: Probe::default(),
         }
     }
@@ -171,6 +176,20 @@ impl FakeProvider {
         self.resume_handle = Some(handle.to_string());
         self
     }
+
+    /// Each fresh session reports the next of these handles, in start order. A session started with a handle reports
+    /// that handle, as a resumed provider session keeps its ID. When the list runs out, `with_resume_handle` applies.
+    pub fn with_fresh_handles(mut self, handles: &[&str]) -> Self {
+        self.fresh_handles = handles.iter().map(|handle| handle.to_string()).collect();
+        self
+    }
+
+    fn reported_handle(&self, started_with: Option<&String>) -> Option<String> {
+        if self.fresh_handles.is_empty() { return self.resume_handle.clone(); }
+        if let Some(handle) = started_with { return Some(handle.clone()); }
+        let index = self.fresh_started.fetch_add(1, Ordering::SeqCst);
+        self.fresh_handles.get(index).cloned().or_else(|| self.resume_handle.clone())
+    }
 }
 
 #[async_trait]
@@ -217,7 +236,7 @@ impl Provider for FakeProvider {
             decisions_tx,
             decisions_rx,
             waiting_for: None,
-            resume_handle: self.resume_handle.clone(),
+            resume_handle: self.reported_handle(spec.resume_handle.as_ref()),
             notice: self.notice.clone(),
             compacted: self.compaction,
             reject_first_send: self.rejects_resume_on_first_send && spec.resume_handle.is_some(),
@@ -402,6 +421,17 @@ mod tests {
         let s = p.start_session(sp).await.unwrap();
         assert_eq!(s.resume_handle().as_deref(), Some("sess-9"));
         assert_eq!(p.probe.started_with.lock().unwrap().as_slice(), [Some("old".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn fresh_sessions_take_the_next_handle_and_resumed_ones_keep_theirs() {
+        let p = FakeProvider::new(vec![]).with_resume_handle("fallback").with_fresh_handles(&["h1", "h2"]);
+        assert_eq!(p.start_session(spec(EnforcementMode::HostPrompts)).await.unwrap().resume_handle().as_deref(), Some("h1"));
+        assert_eq!(p.start_session(spec(EnforcementMode::HostPrompts)).await.unwrap().resume_handle().as_deref(), Some("h2"));
+        let mut resumed = spec(EnforcementMode::HostPrompts);
+        resumed.resume_handle = Some("h1".into());
+        assert_eq!(p.start_session(resumed).await.unwrap().resume_handle().as_deref(), Some("h1"));
+        assert_eq!(p.start_session(spec(EnforcementMode::HostPrompts)).await.unwrap().resume_handle().as_deref(), Some("fallback"));
     }
 
     #[tokio::test]

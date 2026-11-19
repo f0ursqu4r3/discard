@@ -109,7 +109,7 @@ No control failed. Claude does not need "adapter refuses resume". The adapter mu
 | Unknown or expired ID (a deleted session file gives the same result) | Exit code 1. No `system/init` event. stderr holds `No conversation found with session ID: <id>`. stdout holds one `result` event: `subtype: "error_during_execution"`, `is_error: true`, `num_turns: 0`, `errors: ["No conversation found with session ID: <id>"]`. |
 | Value that is not a UUID | Exit code 1. `errors: ["Error: --resume requires a valid session ID or session title when used with --print. ..."]`. |
 
-Marker for the engine: a `result` event with `subtype: "error_during_execution"` and an `errors[]` entry that starts with `No conversation found with session ID`, with no `init` event before it and exit code 1. Treat a non-UUID error the same way, because Discard stores only IDs that Claude gave it.
+Marker for the engine: a `result` event with `subtype: "error_during_execution"` and an `errors[]` entry that starts with `No conversation found with session ID`, with no `init` event before it and exit code 1. The adapter matches only `No conversation found with session ID`. A non-UUID handle is not mapped: that response fails, its row is dropped, and the next response replays. Discard stores only IDs that Claude gave it, so this case is not expected.
 
 ### Session store
 

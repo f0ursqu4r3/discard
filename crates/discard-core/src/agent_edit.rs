@@ -53,7 +53,7 @@ pub fn review(current: &AgentConfig, draft: &AgentDraft, matrix: &CapabilityMatr
     add("Workspace writes", flag(current.workspace_write), flag(draft.workspace_write));
     add("Sandbox autorun", flag(current.sandbox_autorun), flag(draft.sandbox_autorun));
     add("Delegation", flag(current.delegation), flag(draft.delegation));
-    add("Native resume", flag(current.native_resume), flag(draft.native_resume));
+    add("Keep provider session", flag(current.native_resume), flag(draft.native_resume));
     let id = AgentId(String::new());
     let needs_confirm = (current.policy != draft.policy && AgentChange::SetPolicy { agent: id.clone(), from: current.policy, to: draft.policy }.needs_user_approval(&Initiator::User)) || (current.plugin_write != draft.plugin_write && AgentChange::SetPluginWrite { agent: id.clone(), enabled: draft.plugin_write }.needs_user_approval(&Initiator::User)) || (current.workspace_write != draft.workspace_write && AgentChange::SetWorkspaceWrite { agent: id.clone(), enabled: draft.workspace_write }.needs_user_approval(&Initiator::User)) || (current.sandbox_autorun != draft.sandbox_autorun && AgentChange::SetSandboxAutorun { agent: id.clone(), enabled: draft.sandbox_autorun }.needs_user_approval(&Initiator::User)) || (current.delegation != draft.delegation && AgentChange::SetDelegation { agent: id, enabled: draft.delegation }.needs_user_approval(&Initiator::User));
     let blocked = if draft.provider != matrix.provider {
@@ -148,7 +148,7 @@ mod tests {
         let mut draft = AgentDraft::from(&cfg);
         draft.native_resume = true;
         let result = review(&cfg, &draft, &matrix);
-        assert_eq!(result.changes, vec![FieldChange { field: "Native resume", before: "off".into(), after: "on".into() }]);
+        assert_eq!(result.changes, vec![FieldChange { field: "Keep provider session", before: "off".into(), after: "on".into() }]);
         assert!(!result.needs_confirm, "native resume grants no tool access");
         let saved = save(&store, &id, &draft, &matrix, false).unwrap();
         assert!(saved.native_resume && store.load_agent(&id).unwrap().native_resume);

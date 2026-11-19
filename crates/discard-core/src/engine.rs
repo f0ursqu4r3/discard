@@ -80,8 +80,8 @@ pub struct ResumableParts {
     pub core_hash: String,
     /// The non-mandatory items selected for this turn.
     pub selected: Vec<crate::native_resume::SelectedMemory>,
-    /// IDs of every live applicable item, mandatory ones included.
-    pub live_ids: Vec<String>,
+    /// Every live applicable item, mandatory ones included: its ID and its current version.
+    pub live_versions: std::collections::BTreeMap<String, u64>,
     /// Automatic capture is paused. Not part of `fixed_prompt` or `session_state` text.
     pub capture_paused: bool,
 }
@@ -907,6 +907,7 @@ impl Engine {
         let mut retry = retry.filter(|_| resume_turn.as_ref().is_some_and(|turn| turn.handle().is_some()));
         // Provider error text of the turn, to tell a context-limit failure.
         let mut provider_errors = String::new();
+        if let Some(turn) = &resume_turn { self.mark_turn_started(turn); }
         let (session, result, mut timeline, nested_root, nested_before) = loop {
         let mut started = self.provider.start_session(spec.clone()).await;
         if let Err(ProviderError::SandboxUnavailable(detail)) = &started && session_mode == SessionMode::Workspace {
@@ -934,7 +935,9 @@ impl Engine {
             spec.mode = session_mode; spec.cwd = self.cwd.clone(); spec.system_prompt = Some(format!("{base_system}\n\n{}", reason.note()));
             // The read-only fallback never resumes. Its input is today's full replay with the full system prompt.
             retry = None;
-            if resume_turn.take().is_some() && let (Ok(history), Some(system)) = (&history, &spec.system_prompt) {
+            let eligible = resume_turn.take().is_some();
+            if eligible { self.forget_session_for_read_only(updates); }
+            if eligible && let (Ok(history), Some(system)) = (&history, &spec.system_prompt) {
                 spec.resume_handle = None; spec.resumable = false;
                 let rebuilt = match self.replay_input(&request_text, history, system, commands, updates).await {
                     Ok((rebuilt, previous)) => turn_images(previous, &attachments).map(|images| (rebuilt, images)).ok_or_else(|| IMAGES_TOO_LARGE.to_string()),
@@ -1241,6 +1244,7 @@ impl Engine {
                         self.save_agent_session(turn, session.resume_handle(), session.compacted(), input.len(), response, user_message.as_ref());
                     },
                     (crate::driver::TurnOutcome::Cancelled, Some(turn)) if !steered => self.drop_failed_session(&turn, resume::TurnFailure::Cancelled, ""),
+                    (crate::driver::TurnOutcome::Cancelled, Some(turn)) => self.restore_session(&turn),
                     (crate::driver::TurnOutcome::Failed, Some(turn)) => self.drop_failed_session(&turn, resume::TurnFailure::Failed, &provider_errors),
                     _ => {}
                 }
