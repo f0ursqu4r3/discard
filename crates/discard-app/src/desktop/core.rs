@@ -1481,6 +1481,22 @@ impl AppCore {
         } else { return Err("The agent session is unavailable.".into()); }
         Ok(())
     }
+    /// Start a response of `author` in a loaded channel that no view needs to show, with no user message. The move of a
+    /// conversation uses it, so the target does not receive a copy of the instruction to move. It has the checks of
+    /// `send_in_background`.
+    pub fn continue_in_background(&self, channel: &str, author: discard_core::model::MessageAuthor, note: String) -> Result<(), String> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        Self::send_blocked(&s, channel, Some(&author), true)?;
+        let active = s.channels.get_mut(channel).expect("checked under lock");
+        active.commands.send(Command::Continue { agent: author.agent_id.clone(), note }).map_err(|_| "The agent session is unavailable.")?;
+        active.new_anchor = None;
+        active.ui.response_started();
+        active.ui.apply(Update::Responding(author));
+        s.rev += 1;
+        if is_shown(&s, channel) { s.history_rev += 1; }
+        self.changed.notify_one();
+        Ok(())
+    }
     /// Record the author of a message of a loaded channel, such as a handoff that an agent posted.
     pub fn set_message_author(&self, channel: &str, message: discard_core::model::MessageId, author: discard_core::model::MessageAuthor) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());

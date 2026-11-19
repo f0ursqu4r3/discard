@@ -259,10 +259,11 @@ not approve sandbox escapes or app-owned write requests.
 
 ## Conversation moves
 
-An approved move gives the target two replayed messages. The handoff is an agent message
-authored by the project main agent. The user's latest message, with its attachments,
-is a normal user message. Both are saved in the target and enter its replay. The
-source transcript is not copied.
+An approved move saves the handoff in the target. The handoff is an agent message
+authored by the project main agent, and it enters the target's replay. The user's
+message is not copied, because it holds the instruction to move. A `Command::Continue`
+note starts the response. If the user's message has attachments, Discard sends it as a
+normal user message instead. The source transcript is not copied.
 
 A new channel also gets the handoff as its topic. An existing target channel keeps
 its topic.

@@ -183,8 +183,11 @@ Approval runs these steps in order:
    commit.
 3. In the target, Discard posts a "Moved from" link. It then posts the handoff as a
    message authored by the moderator.
-4. Discard sends the user's latest message, with its attachments, to the target as a
-   normal user message. This starts a response in the target.
+4. Discard starts a response in the target with a short continue note. It does not
+   copy the user's message, because the target agent would read "move this" as a new
+   request to move. The handoff carries the task. If the user's message has
+   attachments, Discard sends that message to the target as a normal user message
+   instead, so the attachments arrive.
 5. In the source, Discard posts a "Moved to" link.
 
 Discard does not copy the source transcript. The user's view stays in the source

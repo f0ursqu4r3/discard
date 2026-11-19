@@ -889,7 +889,14 @@ impl Channels {
         self.core.apply_channel(&target.id.0, discard_core::ui_state::Update::ConversationMarker(link));
         self.core.apply_channel(&target.id.0, discard_core::ui_state::Update::ConversationMarker(handoff));
         self.core.set_message_author(&target.id.0, handoff_id, moderator);
-        self.core.send_in_background(&target.id.0, text, Some(recipient), attachments)?;
+        // The user's message asked for the move. Do not copy it: the target agent would read it as a new request to
+        // move. Attachments exist only in the source, so a message with attachments still goes across.
+        if attachments.is_empty() {
+            let note = format!("the conversation moved here from #{}. This channel is the new place for the work, so do not move again. The handoff above holds the latest request.", source_channel.name);
+            self.core.continue_in_background(&target.id.0, recipient, note)?;
+        } else {
+            self.core.send_in_background(&target.id.0, text, Some(recipient), attachments)?;
+        }
         let moved = Message { id: MessageId::new(), channel_id: source.clone(), role: Role::System, blocks: vec![Block::ChannelLink { direction: LinkDirection::MovedTo, channel_id: target.id.0.clone(), channel_name: target.name.clone() }] };
         // The target has the conversation now. A storage error on the link must not fail the move.
         match self.store.lock().unwrap_or_else(|e| e.into_inner()).insert_message(&moved) {
@@ -2440,6 +2447,11 @@ mod navigation_action_tests {
             self.service.decide_write_request(&ViewId::main(), &self.requests, &self.workspace, &self.grants, &self.general.id.0, id, approve)
         }
         fn channel_count(&self) -> usize { self.store.lock().unwrap().channels_for_project(&self.project.id).unwrap().len() }
+        /// A move starts the target with a continue note. It does not copy the user's message.
+        fn assert_continued(&self, target: &ChannelId) {
+            let received = self.received(target);
+            assert!(matches!(&received[..], [Command::Continue { note, .. }] if note.contains("moved here from #general")), "{received:?}");
+        }
         /// The two messages that a move posts in the target, before the user message.
         fn assert_handoff_posted(&self, target: &ChannelId) {
             let messages = self.messages(target);
@@ -3177,7 +3189,7 @@ mod navigation_action_tests {
         let done = r.decide(&request.id, true).unwrap();
         assert_eq!((done.state.as_str(), done.result.as_deref()), ("completed", Some("Moved to #feature.")));
         r.assert_handoff_posted(&feature);
-        assert_eq!(r.received(&feature), vec![Command::Send("Please ship the importer".into())]);
+        r.assert_continued(&feature);
         r.assert_moved_to(&feature, "feature");
         assert_eq!(r.messages(&r.general.id).len(), 2, "the source holds its user message and the link only");
         assert!(r.received(&r.general.id).is_empty(), "no response starts in the source");
@@ -3218,7 +3230,7 @@ mod navigation_action_tests {
         let topic = r.store.lock().unwrap().channel_topic_history(&channel.id).unwrap();
         assert_eq!((topic.len(), topic[0].version, &topic[0].text, topic[0].author_kind, topic[0].author_id.as_ref()), (1, 1, &Rig::handoff().markdown(), discard_core::model::TopicAuthorKind::Agent, Some(&r.agent)));
         r.assert_handoff_posted(&channel.id);
-        assert_eq!(r.received(&channel.id), vec![Command::Send("Start the importer".into())]);
+        r.assert_continued(&channel.id);
         r.assert_moved_to(&channel.id, "importer");
         assert!(r.core.has_channel(&channel.id.0));
         assert_eq!(r.core.active_channel_id(&ViewId::main()), r.general.id.0);
@@ -3277,7 +3289,7 @@ mod navigation_action_tests {
         r.received(&feature);
         assert_eq!(r.decide(&request.id, true).unwrap().state, "completed");
         r.assert_handoff_posted(&feature);
-        assert_eq!(r.received(&feature), vec![Command::Send("Please ship the importer".into())]);
+        r.assert_continued(&feature);
     }
 
     #[tokio::test]
@@ -3363,7 +3375,7 @@ mod navigation_action_tests {
         assert!(r.launched.lock().unwrap().contains(&feature.0), "the approval launched the channel");
         assert!(r.core.has_channel(&feature.0));
         r.assert_handoff_posted(&feature);
-        assert_eq!(r.received(&feature), vec![Command::Send("Please ship the importer".into())]);
+        r.assert_continued(&feature);
         r.assert_moved_to(&feature, "feature");
     }
 
