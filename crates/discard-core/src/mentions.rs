@@ -127,7 +127,7 @@ mod tests {
     fn agent(store: &Store, name: &str) -> AgentId {
         let id = AgentId::new();
         store.insert_agent(&id, &crate::agent::AgentConfig {
-            workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: name.into(), avatar: None, provider: "fake".into(),
+            workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false, reasoning_effort: None, name: name.into(), avatar: None, provider: "fake".into(),
             model: Some("m".into()), system_prompt: String::new(), policy: crate::capability::ApprovalPolicy::Ask, plugin_write: false,
         }).unwrap();
         id

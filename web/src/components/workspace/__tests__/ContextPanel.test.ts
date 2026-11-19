@@ -80,6 +80,36 @@ test('shows no autorun text when autorun is not configured', () => {
   view.unmount()
 })
 
+test('shows when the response resumed the provider session', () => {
+  const snapshot: SnapshotDto = {
+    ...(fixture as SnapshotDto),
+    activeProjectId: null,
+    resumeState: { kind: 'resumed', agent: 'Reviewer' },
+  }
+  const view = mount(ContextPanel, { props: { snapshot } })
+  expect(view.text()).toContain('Resumed session')
+  expect(view.text()).not.toContain('Fresh replay')
+  view.unmount()
+})
+test('shows why the response replayed the history', () => {
+  const snapshot: SnapshotDto = {
+    ...(fixture as SnapshotDto),
+    activeProjectId: null,
+    resumeState: { kind: 'replay', reason: 'the model changed.', agent: 'Reviewer' },
+  }
+  const view = mount(ContextPanel, { props: { snapshot } })
+  expect(view.text()).toContain('Fresh replay: the model changed.')
+  expect(view.text()).not.toContain('Resumed session')
+  view.unmount()
+})
+test('shows no resume text when the response has no resume state', () => {
+  const snapshot: SnapshotDto = { ...(fixture as SnapshotDto), activeProjectId: null }
+  const view = mount(ContextPanel, { props: { snapshot } })
+  expect(view.text()).not.toContain('Resumed session')
+  expect(view.text()).not.toContain('Fresh replay')
+  view.unmount()
+})
+
 test('a running text channel blocks a main agent change like a running general channel', () => {
   const channel = (id: string, kind: 'general' | 'text' | 'branch', archived = false) =>
     ({

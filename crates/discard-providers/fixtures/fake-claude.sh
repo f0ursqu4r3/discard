@@ -19,11 +19,18 @@ log "ARGS $*"
 log "CWD $PWD"
 log "GIT_LOCKS ${GIT_OPTIONAL_LOCKS:-}"
 log "MEMORY_ENV ${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-} ${CLAUDE_CODE_DISABLE_CLAUDE_MDS:-} ${CLAUDE_CODE_PLUGIN_DIRS:-}"
+log "AUTO_COMPACT ${DISABLE_AUTO_COMPACT:-}"
 mode="${FAKE_CLAUDE_MODE:-approval}"
 fixture="${FAKE_CLAUDE_FIXTURE:?}"
 
 if [ "$mode" = exit_early ]; then
   echo "No conversation found with session ID: nope" >&2
+  exit 1
+fi
+
+if [ "$mode" = resume_rejected ]; then
+  echo "No conversation found with session ID: gone-1" >&2
+  echo '{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["No conversation found with session ID: gone-1"],"usage":{"input_tokens":0,"output_tokens":0}}'
   exit 1
 fi
 

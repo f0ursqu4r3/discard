@@ -1,6 +1,6 @@
 # Project channel foundation status
 
-Updated: 2026-11-17
+Updated: 2026-11-18
 
 The project-channel foundation is implemented. It adds durable project channel identities, saved project navigation, a project main-agent setting, channel memberships, versioned topics, project navigation and details, and topic context in Conversation-mode prompts. The approved design in `docs/superpowers/specs/2026-11-05-project-channel-orchestration-design.md` describes a larger orchestration system. This status page describes the implemented foundation only.
 
@@ -62,8 +62,12 @@ Slice C is implemented: conversation moves and new-branch targets. The project's
 Primary / Moderator agent can ask to move a conversation to an existing channel or
 to a new branch. The user approves on a card. See
 [conversation moves](worktrees.md#conversation-moves-slice-c). "Create a branch
-here" for detached worktrees (decision 17) and native provider resume per agent
-remain planned. This does not implement multi-agent task orchestration.
+here" for detached worktrees (decision 17) remains planned. This does not implement
+multi-agent task orchestration.
+
+Native provider resume per agent is implemented. An agent with **Keep provider session** on
+continues its provider session in each channel and sends only new messages. See
+[native provider resume](runtime/conversation-context.md#native-provider-resume).
 
 ## Terminal
 

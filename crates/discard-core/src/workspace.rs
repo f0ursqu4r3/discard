@@ -327,7 +327,7 @@ mod tests {
         let project = Project { id: ProjectId::new(), name: "p".into(), path: repo.to_string_lossy().into() };
         store.insert_project(&project).unwrap();
         let agent = AgentId::new();
-        store.insert_agent(&agent, &AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "claude".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        store.insert_agent(&agent, &AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "claude".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         let channel = Channel { id: ChannelId::new(), project_id: Some(project.id), name: "general".into(), agent_id: agent, workspace_mode: WorkspaceMode::Worktree };
         store.insert_channel(&channel).unwrap();
         store.create_session(&SessionId::new(), &channel.id).unwrap();
@@ -542,7 +542,7 @@ mod tests {
         git(&repo, &["add", "-A"]);
         git(&repo, &["commit", "-q", "-m", "init"]);
         let store = Store::open_in_memory().unwrap();
-        let config = AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Main".into(), avatar: None, provider: "claude".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false };
+        let config = AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation: false, reasoning_effort: None, name: "Main".into(), avatar: None, provider: "claude".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false };
         let main = store.create_agent(&config).unwrap();
         let project = store.import_project_folder(&repo).unwrap();
         let general = store.ensure_project_general_channel(&project.id, &main).unwrap();
@@ -568,7 +568,7 @@ mod tests {
     fn only_the_project_main_agent_passes_the_move_gate() {
         let r = move_rig();
         assert_eq!(r.ws.move_source(&r.general.id, &r.main, Some(&r.project.id)), Ok(()));
-        let other = r.store.lock().unwrap().create_agent(&AgentConfig { workspace_write: true, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Other".into(), avatar: None, provider: "claude".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        let other = r.store.lock().unwrap().create_agent(&AgentConfig { workspace_write: true, sandbox_autorun: false, native_resume: false, delegation: false, reasoning_effort: None, name: "Other".into(), avatar: None, provider: "claude".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         assert_eq!(r.ws.move_source(&r.general.id, &other, Some(&r.project.id)).unwrap_err(), "Only this project's Primary / Moderator agent can move a conversation. Suggest the move in your reply.");
     }
     #[test]

@@ -175,6 +175,7 @@
     "repositories": [],
     "repositoriesLoading": false,
     "responder": null,
+    "resumeState": null,
     "rev": 1,
     "slots": {},
     "theme": {

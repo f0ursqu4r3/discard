@@ -64,7 +64,7 @@ struct World {
 }
 
 fn config(name: &str, delegation: bool, prompt: &str) -> AgentConfig {
-    AgentConfig { workspace_write: false, sandbox_autorun: false, delegation, reasoning_effort: None, name: name.into(), avatar: None, provider: "fake".into(), model: Some("test".into()), system_prompt: prompt.into(), policy: ApprovalPolicy::Ask, plugin_write: false }
+    AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation, reasoning_effort: None, name: name.into(), avatar: None, provider: "fake".into(), model: Some("test".into()), system_prompt: prompt.into(), policy: ApprovalPolicy::Ask, plugin_write: false }
 }
 
 fn services(core: &Arc<Mutex<Store>>) -> DelegationServices {

@@ -87,10 +87,14 @@ while thread["method"] == "config/read":
     send({"id":thread["id"], "result":{"config":effective,"origins":{},"layers":[{"config":effective}]}})
     thread = read()
 if thread["method"] == "thread/resume" and mode == "resume_reject":
-    send({"id": thread["id"], "error": {"code": -32600, "message": "no rollout found for thread id " + thread["params"]["threadId"]}})
+    send({"id": thread["id"], "error": {"code": -32600, "message": "no rollout found for thread id " + thread["params"]["threadId"] + " (Authorization: Bearer abcdef123456)"}})
     sys.exit(0)
 thread_id = thread["params"].get("threadId", "thread-fake-1")
-send({"id": thread["id"], "result": {"thread": {"id": thread_id}}})
+result = {"thread": {"id": thread_id}}
+resume_model = os.environ.get("FAKE_CODEX_RESUME_MODEL")  # the model a resume response reports; unset reports none
+if thread["method"] == "thread/resume" and resume_model:
+    result["model"] = resume_model
+send({"id": thread["id"], "result": result})
 turn = read()
 send({"id": turn["id"], "result": {"turn": {"id": "turn-1"}}})
 

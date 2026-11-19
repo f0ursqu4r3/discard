@@ -128,7 +128,7 @@ async fn send_streams_then_finishes() {
         .insert_agent(
             &agent_id,
             &AgentConfig {
-                workspace_write: false, sandbox_autorun: false, delegation: false,
+                workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false,
                 reasoning_effort: None,
                 name: "A".into(),
                 avatar: None,

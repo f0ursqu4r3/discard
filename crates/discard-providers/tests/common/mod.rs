@@ -1,6 +1,8 @@
 //! Shared headless test harness: a store, a sequencer, and a UI stand-in.
 #![allow(dead_code)]
 
+pub mod native_probe;
+
 use discard_core::agent::AgentConfig;
 use discard_core::approval::{ApprovalState, Decider, Decision};
 use discard_core::capability::{ApprovalPolicy, EnforcementMode};
@@ -37,7 +39,7 @@ impl Harness {
             .insert_agent(
                 &agent,
                 &AgentConfig {
-                    workspace_write: false, sandbox_autorun: false, delegation: false,
+                    workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false,
                     reasoning_effort: None,
                     name: "A".into(),
                     avatar: None,
@@ -80,6 +82,7 @@ where
     Fut: Future<Output = ()>,
 {
     let spec = SessionSpec {
+        resumable: false,
         reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding,
         cwd: PathBuf::from("."),

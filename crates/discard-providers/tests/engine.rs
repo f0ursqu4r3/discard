@@ -51,7 +51,7 @@ fn start_full(
         .insert_agent(
             &agent,
             &AgentConfig {
-        workspace_write: false, sandbox_autorun: false, delegation: false,
+        workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false,
         reasoning_effort: None, name: "A".into(), avatar: None, provider: "fake".into(), model: None, system_prompt: String::new(), policy, plugin_write: false },
         )
         .unwrap();
@@ -379,6 +379,7 @@ impl MemoryService for FakeMemory {
             system_prompt: "PROMPT WITH CORE BLOCKS".into(),
             mcp_config: PathBuf::from("/run/discard/session.json"),
             token: "tok-1".into(),
+            parts: None,
         })
     }
     fn finish(&self, token: &str) {
@@ -557,7 +558,7 @@ fn start_workspace(
     let project = Project { id: ProjectId::new(), name: "p".into(), path: "/p".into() };
     store.insert_project(&project).unwrap();
     let agent_id = AgentId::new();
-    store.insert_agent(&agent_id, &AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "fake".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+    store.insert_agent(&agent_id, &AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "fake".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
     let channel = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "general".into(), agent_id: agent_id.clone(), workspace_mode: mode };
     store.insert_channel(&channel).unwrap();
     let session = SessionId::new();
@@ -1628,7 +1629,7 @@ async fn a_thread_never_asks_for_main_checkout_writes() {
     impl MemoryService for Spy {
         fn prepare_response(&self, _agent: &AgentId, _project: Option<&ProjectId>, _source: &ChannelId, _base: Option<&str>, _plugin_write: bool, options: discard_core::engine::MemoryOptions<'_>) -> Result<PreparedMemory, String> {
             self.0.lock().unwrap().push(options.main_checkout_requests);
-            Ok(PreparedMemory { system_prompt: "P".into(), mcp_config: PathBuf::from("/run/c.json"), token: "t".into() })
+            Ok(PreparedMemory { system_prompt: "P".into(), mcp_config: PathBuf::from("/run/c.json"), token: "t".into(), parts: None })
         }
         fn prepare(&self, _: &AgentId, _: Option<&ProjectId>, _: &ChannelId, _: Option<&str>, _: bool) -> Result<PreparedMemory, String> { unreachable!() }
         fn finish(&self, _: &str) {}
@@ -1773,7 +1774,7 @@ struct DelegationSpy(Mutex<Vec<bool>>);
 impl MemoryService for DelegationSpy {
     fn prepare_response(&self, _agent: &AgentId, _project: Option<&ProjectId>, _source: &ChannelId, base: Option<&str>, _plugin_write: bool, options: discard_core::engine::MemoryOptions<'_>) -> Result<PreparedMemory, String> {
         self.0.lock().unwrap().push(options.delegation);
-        Ok(PreparedMemory { system_prompt: base.unwrap_or_default().into(), mcp_config: PathBuf::from("/run/c.json"), token: "t".into() })
+        Ok(PreparedMemory { system_prompt: base.unwrap_or_default().into(), mcp_config: PathBuf::from("/run/c.json"), token: "t".into(), parts: None })
     }
     fn prepare(&self, _: &AgentId, _: Option<&ProjectId>, _: &ChannelId, _: Option<&str>, _: bool) -> Result<PreparedMemory, String> { unreachable!() }
     fn finish(&self, _: &str) {}

@@ -60,6 +60,8 @@ pub struct SessionSpec {
     pub mcp_config: Option<PathBuf>,
     /// Run sandboxed shell commands without approval. Only a Workspace session reads this.
     pub sandbox_autorun: bool,
+    /// The session must persist so it can be resumed later. `spec.cwd` is the stable directory the engine chose.
+    pub resumable: bool,
 }
 
 /// Whether a provider adapter can run sandboxed commands without approval.
@@ -108,6 +110,8 @@ pub trait Provider: Send + Sync {
     fn model_context_window(&self, _model: &str) -> Option<u64> {
         None
     }
+    /// The CLI version as `check_setup` last read it. Used in the session fingerprint.
+    fn resume_epoch(&self) -> Option<String> { None }
     /// Start a provider session. Fails closed if the provider cannot enforce `spec.enforcement`.
     async fn start_session(&self, spec: SessionSpec) -> Result<Box<dyn ProviderSession>, ProviderError>;
 }
@@ -127,6 +131,8 @@ pub trait ProviderSession: Send {
     fn notice(&self) -> Option<String> { None }
     /// The provider-native session ID, once known. Stored as a resume handle only.
     fn resume_handle(&self) -> Option<String>;
+    /// True when the CLI compacted the session during the turn. The engine then drops the handle.
+    fn compacted(&self) -> bool { false }
     /// Send one user message and begin a turn.
     async fn send_user_message(&mut self, text: &str) -> Result<(), ProviderError>;
     /// Supply image content without enabling file-reading tools in conversation mode.

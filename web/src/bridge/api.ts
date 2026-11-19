@@ -314,6 +314,8 @@ export interface AgentEntry {
    * lists it as "Delegation"). A new agent cannot start with it on.
    */
   delegation?: boolean
+  /** Keeps the provider's own session between responses. The provider stores it on disk. Needs no confirmation. */
+  nativeResume?: boolean
   /** Why autorun cannot run for this provider. A state block, not planned work. `null` when it can. */
   sandboxAutorunUnavailable: string | null
   archived: boolean

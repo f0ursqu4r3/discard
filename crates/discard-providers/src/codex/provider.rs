@@ -16,6 +16,7 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -163,8 +164,9 @@ pub fn thread_params(spec: &SessionSpec) -> (&'static str, Value) {
             ("thread/resume", params)
         }
         None => {
-            // Saved threads can be resumed in a later process.
-            params["ephemeral"] = json!(spec.mode.replays_transcript());
+            // Saved threads can be resumed in a later process. Only a Conversation or Workspace session that
+            // Discard will not resume stays ephemeral.
+            params["ephemeral"] = json!(spec.mode.replays_transcript() && !spec.resumable);
             if spec.mode.replays_transcript() {
                 params["allowProviderModelFallback"] = json!(false);
             }
@@ -253,6 +255,11 @@ impl Provider for CodexProvider {
         }
     }
 
+    /// The CLI version `check_setup` or the last start read. A new version can change how a saved thread replays.
+    fn resume_epoch(&self) -> Option<String> {
+        self.running_version.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
     fn model_context_window(&self, model: &str) -> Option<u64> {
         let running = self.running_version.lock().unwrap_or_else(|p| p.into_inner()).clone()?;
         crate::conversation::load_catalog(&self.codex_home().ok()?, model, crate::conversation::CatalogTools::None, &running).ok()?.1
@@ -299,14 +306,18 @@ impl Provider for CodexProvider {
         if spec.mode.replays_transcript() {
             use crate::conversation::*;
             read_memory_config(&spec)?;
-            if spec.resume_handle.is_some() {
+            if spec.resume_handle.is_some() && !spec.resumable {
                 return Err(setup("Codex conversation sessions require a fresh replay, not a native resume"));
+            }
+            if spec.resumable && (!spec.cwd.is_absolute() || !spec.cwd.is_dir()) {
+                return Err(setup("a resumable session needs an existing absolute working directory"));
             }
             let model = spec.model.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| setup("select an exact Codex model"))?;
             let running = self.read_version().await?;
             let verification_error = |e| version::verification_error(e, "Codex", &running, CODEX_TESTED);
             let owned = ConversationFiles::new()?;
-            if !workspace { spec.cwd = owned.cwd.clone(); }
+            // A resumable session keeps the stable directory the engine chose, so the thread sees one cwd on every turn.
+            if !workspace && !spec.resumable { spec.cwd = owned.cwd.clone(); }
             let tools = if workspace { CatalogTools::Workspace } else { CatalogTools::None };
             let (catalog, _) = self.conversation_catalog(&self.codex_home()?, model, tools, &running).await?;
             let catalog_path = owned.root.path().join("models.json");
@@ -329,6 +340,8 @@ impl Provider for CodexProvider {
             }
             startup_args.extend(config_args(&controls));
             expected_controls = Some(controls);
+            // Discard owns the size of a resumable thread. Codex cannot be told never to compact, so push its trigger far out.
+            if spec.resumable { startup_args.extend(["-c".into(), "model_auto_compact_token_limit=1000000000".into()]); }
             files = Some(owned);
             running_version = Some(running);
         }
@@ -352,6 +365,8 @@ impl Provider for CodexProvider {
             }
         }
 
+        // `thread/resume` has no `allowProviderModelFallback`, so a resumable replay session checks the model the response reports.
+        let resume_model = (spec.resumable && spec.mode.replays_transcript() && method == "thread/resume").then(|| spec.model.clone()).flatten();
         let mut command = self.command();
         if workspace { command.env("GIT_OPTIONAL_LOCKS", "0"); }
         if let Some(tmp) = &session_tmp { command.env("TMPDIR", tmp); }
@@ -390,7 +405,7 @@ impl Provider for CodexProvider {
         };
 
         let mut lines = BufReader::new(stdout).lines();
-        let handshake = handshake(&mut stdin, &mut lines, method, params, expected_controls.as_ref()).await;
+        let handshake = handshake(&mut stdin, &mut lines, method, params, expected_controls.as_ref(), resume_model.as_deref()).await;
         let thread_id = match handshake {
             Ok(id) => id,
             Err(failure) => {
@@ -404,6 +419,7 @@ impl Provider for CodexProvider {
                     Failure::Controls(message) => ProviderError::Protocol(redact(&message)),
                     Failure::Rejected(message) if method == "thread/resume" => ProviderError::ResumeRejected(redact(&message)),
                     Failure::Rejected(message) => ProviderError::Protocol(redact(&message)),
+                    Failure::ModelMismatch(message) => ProviderError::ResumeRejected(redact(&message)),
                     Failure::Closed => ProviderError::Protocol(format!("codex exited before the handshake finished: {detail}")),
                     Failure::Timeout => ProviderError::Protocol("codex did not answer the handshake in time".into()),
                 };
@@ -417,8 +433,9 @@ impl Provider for CodexProvider {
         let stdin = Arc::new(tokio::sync::Mutex::new(Some(stdin)));
         let shared = Arc::new(Shared::default());
         let (tx, events) = mpsc::unbounded_channel();
+        let compacted = Arc::new(AtomicBool::new(false));
         {
-            let (stdin, shared) = (Arc::clone(&stdin), Arc::clone(&shared));
+            let (stdin, shared, compacted) = (Arc::clone(&stdin), Arc::clone(&shared), Arc::clone(&compacted));
             tokio::spawn(async move {
                 let mut mapper = Mapper::with_mode(spec.mode).with_autorun(spec.mode == SessionMode::Workspace && spec.sandbox_autorun);
                 while let Ok(Some(line)) = lines.next_line().await {
@@ -434,6 +451,11 @@ impl Provider for CodexProvider {
                             }
                         }
                         continue;
+                    }
+                    if msg.get("method").and_then(Value::as_str) == Some("item/completed")
+                        && msg.pointer("/params/item/type").and_then(Value::as_str) == Some("contextCompaction")
+                    {
+                        compacted.store(true, Ordering::SeqCst);
                     }
                     for item in mapper.on_message(&msg) {
                         match item {
@@ -459,7 +481,7 @@ impl Provider for CodexProvider {
         }
 
         let notice = running_version.as_deref().and_then(|running| version::notice("Codex", running, CODEX_TESTED));
-        Ok(Box::new(CodexSession { notice, child, pgid, stdin, events, shared, thread_id, reasoning_effort: spec.reasoning_effort, next_id: 10, _conversation_files: files }) as Box<dyn ProviderSession>)
+        Ok(Box::new(CodexSession { notice, child, pgid, stdin, events, shared, compacted, thread_id, reasoning_effort: spec.reasoning_effort, next_id: 10, _conversation_files: files }) as Box<dyn ProviderSession>)
     }
 }
 
@@ -467,6 +489,8 @@ pub(super) enum Failure {
     Controls(String),
     /// The server answered with a JSON-RPC error.
     Rejected(String),
+    /// A resumed thread runs another model than the selected one.
+    ModelMismatch(String),
     Closed,
     Timeout,
 }
@@ -531,6 +555,7 @@ async fn handshake(
     method: &str,
     params: Value,
     expected_controls: Option<&Value>,
+    expected_model: Option<&str>,
 ) -> Result<String, Failure> {
     let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {"clientInfo": {"name": "discard", "title": "Discard", "version": env!("CARGO_PKG_VERSION")}}});
@@ -559,6 +584,12 @@ async fn handshake(
     if let Some(reviewer) = result.get("approvalsReviewer").filter(|r| !r.is_null() && *r != &json!("user")) {
         return Err(Failure::Controls(format!("Codex sends approvals to {reviewer}, not to the user")));
     }
+    // A response with no model cannot be checked. The sanitized startup catalog is then the only model source.
+    if let (Some(expected), Some(actual)) = (expected_model, result.get("model").and_then(Value::as_str))
+        && actual != expected
+    {
+        return Err(Failure::ModelMismatch(format!("the resumed thread uses model {actual}, not {expected}")));
+    }
     result
         .pointer("/thread/id")
         .and_then(Value::as_str)
@@ -578,6 +609,8 @@ struct CodexSession {
     stdin: Arc<tokio::sync::Mutex<Option<ChildStdin>>>,
     events: mpsc::UnboundedReceiver<RawEvent>,
     shared: Arc<Shared>,
+    /// Set once Codex compacts the thread. It never clears.
+    compacted: Arc<AtomicBool>,
     thread_id: String,
     reasoning_effort: Option<String>,
     next_id: i64,
@@ -605,6 +638,7 @@ impl ProviderSession for CodexSession {
     fn resume_handle(&self) -> Option<String> {
         Some(self.thread_id.clone())
     }
+    fn compacted(&self) -> bool { self.compacted.load(Ordering::SeqCst) }
 
     async fn send_user_message(&mut self, text: &str) -> Result<(), ProviderError> {
         self.send_user_message_with_images(text, &[]).await
@@ -656,6 +690,7 @@ mod tests {
 
     fn spec(enforcement: EnforcementMode) -> SessionSpec {
         SessionSpec {
+            resumable: false,
             reasoning_effort: None,
             mode: discard_core::provider::SessionMode::Coding,
             cwd: PathBuf::from("/work/proj"),
@@ -772,6 +807,25 @@ mod tests {
         let (method, p) = thread_params(&s);
         assert_eq!((method, p["threadId"].clone()), ("thread/resume", json!("th-1")));
         assert!(p.get("ephemeral").is_none(), "resume params have no ephemeral flag");
+    }
+
+    #[test]
+    fn resumable_replay_threads_are_saved_and_resume_params_match_the_start_controls() {
+        for mode in [SessionMode::Conversation, SessionMode::Workspace] {
+            let mut s = spec(EnforcementMode::HostPrompts);
+            s.mode = mode;
+            let (_, fresh) = thread_params(&s);
+            assert_eq!(fresh["ephemeral"], true, "{mode:?} stays ephemeral without resume");
+            s.resumable = true;
+            let (_, saved) = thread_params(&s);
+            assert_eq!(saved["ephemeral"], false, "{mode:?}");
+            s.resume_handle = Some("th-1".into());
+            let (method, resumed) = thread_params(&s);
+            assert_eq!(method, "thread/resume");
+            for key in ["cwd", "approvalPolicy", "sandbox", "approvalsReviewer"] {
+                assert_eq!(resumed[key], saved[key], "{mode:?} {key}");
+            }
+        }
     }
 
     #[test]

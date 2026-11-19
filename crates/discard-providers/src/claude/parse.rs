@@ -20,6 +20,8 @@ pub enum Item {
     /// Claude's own session ID. Stored as a resume handle.
     SessionId(String),
     Event(RawEvent),
+    /// The CLI compacted the conversation (`compact_boundary`).
+    Compacted,
     /// Always followed by the matching `ApprovalRequest` event.
     Request(PendingRequest),
 }
@@ -55,8 +57,10 @@ impl StreamParser {
     }
 
     fn system(&mut self, v: &Value) -> Vec<Item> {
-        if v.get("subtype").and_then(Value::as_str) != Some("init") {
-            return Vec::new();
+        match v.get("subtype").and_then(Value::as_str) {
+            Some("init") => {}
+            Some("compact_boundary") => return vec![Item::Compacted],
+            _ => return Vec::new(),
         }
         let mut out = Vec::new();
         if let Some(id) = v.get("session_id").and_then(Value::as_str) {
@@ -371,7 +375,7 @@ mod tests {
                             names.push(n);
                         }
                     }
-                    Item::Request(_) => {}
+                    Item::Request(_) | Item::Compacted => {}
                 }
             }
         }

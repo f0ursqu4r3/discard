@@ -73,6 +73,7 @@ async fn wait_for_file(path: &Path) {
 
 fn spec() -> SessionSpec {
     SessionSpec {
+        resumable: false,
         reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding,
         cwd: PathBuf::from("."),
@@ -619,4 +620,184 @@ async fn tested_codex_version_has_no_notice() {
     let rig = Rig::new();
     let session = rig.provider("approval").with_env("CODEX_HOME", rig.dir.path()).start_session(conversation_spec(&rig)).await.unwrap();
     assert_eq!(session.notice(), None);
+}
+
+fn resumable_spec(rig: &Rig) -> SessionSpec {
+    let mut s = conversation_spec(rig);
+    s.resumable = true;
+    s.cwd = rig.dir.path().join("stable-cwd");
+    std::fs::create_dir_all(&s.cwd).unwrap();
+    s.cwd = s.cwd.canonicalize().unwrap();
+    s
+}
+
+fn codex_provider(rig: &Rig, mode: &str) -> CodexProvider {
+    rig.provider(mode).with_env("CODEX_HOME", rig.dir.path())
+}
+
+/// The arguments of the last spawn, which is the app-server that holds the thread.
+fn args_line(rig: &Rig) -> String {
+    rig.log_text().lines().filter_map(|l| l.strip_prefix("ARGS ")).next_back().unwrap_or_else(|| panic!("no ARGS in {}", rig.log_text())).to_string()
+}
+
+const COMPACT_LIMIT: &str = "model_auto_compact_token_limit=1000000000";
+
+#[tokio::test]
+async fn resumable_thread_passes_a_high_auto_compact_limit() {
+    for handle in [None, Some("thread-old".to_string())] {
+        let rig = Rig::new();
+        let mut s = resumable_spec(&rig);
+        s.resume_handle = handle.clone();
+        let session = codex_provider(&rig, "approval").start_session(s).await.unwrap();
+        assert!(args_line(&rig).contains(COMPACT_LIMIT), "{handle:?}: {}", args_line(&rig));
+        drop(session);
+    }
+}
+
+#[tokio::test]
+async fn non_resumable_sessions_do_not_get_the_auto_compact_flag() {
+    let rig = Rig::new();
+    let session = codex_provider(&rig, "approval").start_session(conversation_spec(&rig)).await.unwrap();
+    assert!(!args_line(&rig).contains("auto_compact"), "{}", args_line(&rig));
+    drop(session);
+    let rig = Rig::new();
+    let session = rig.provider("approval").start_session(spec()).await.unwrap();
+    assert!(!args_line(&rig).contains("auto_compact"), "{}", args_line(&rig));
+    drop(session);
+}
+
+#[tokio::test]
+async fn a_context_compaction_item_sets_compacted() {
+    let rig = Rig::new();
+    let mut lines: Vec<String> = std::fs::read_to_string(FIXTURE).unwrap().lines().map(String::from).collect();
+    lines.insert(1, r#"{"method":"item/started","params":{"item":{"type":"contextCompaction","id":"c1"}}}"#.into());
+    lines.insert(2, r#"{"method":"item/completed","params":{"item":{"type":"contextCompaction","id":"c1"}}}"#.into());
+    let fixture = rig.dir.path().join("compact.jsonl");
+    std::fs::write(&fixture, lines.join("\n")).unwrap();
+    let mut session = codex_provider(&rig, "approval").with_env("FAKE_CODEX_FIXTURE", fixture).start_session(resumable_spec(&rig)).await.unwrap();
+    assert!(!session.compacted());
+    session.send_user_message("hello").await.unwrap();
+    while let Some(event) = session.next_event().await {
+        if matches!(event.kind, EventKind::ApprovalRequest { .. }) { break; }
+    }
+    assert!(session.compacted());
+}
+
+#[tokio::test]
+async fn a_turn_without_compaction_leaves_compacted_false() {
+    let rig = Rig::new();
+    let mut session = codex_provider(&rig, "approval").start_session(resumable_spec(&rig)).await.unwrap();
+    session.send_user_message("hello").await.unwrap();
+    while let Some(event) = session.next_event().await {
+        if matches!(event.kind, EventKind::ApprovalRequest { .. }) { break; }
+    }
+    assert!(!session.compacted());
+}
+
+#[tokio::test]
+async fn resumable_conversation_thread_is_not_ephemeral() {
+    let rig = Rig::new();
+    let s = resumable_spec(&rig);
+    let session = codex_provider(&rig, "approval").start_session(s.clone()).await.unwrap();
+    let p = rig.request("thread/start")["params"].clone();
+    assert_eq!(p["ephemeral"], false);
+    assert_eq!(p["cwd"], s.cwd.to_string_lossy().as_ref(), "the stable directory is used, not a temp one");
+    drop(session);
+    assert!(s.cwd.is_dir(), "the stable directory must survive the session");
+}
+
+#[tokio::test]
+async fn non_resumable_conversation_thread_stays_ephemeral() {
+    let rig = Rig::new();
+    let session = codex_provider(&rig, "approval").start_session(conversation_spec(&rig)).await.unwrap();
+    assert_eq!(rig.request("thread/start")["params"]["ephemeral"], true);
+    drop(session);
+}
+
+#[tokio::test]
+async fn resumable_handle_selects_thread_resume_with_conversation_controls() {
+    let rig = Rig::new();
+    let mut s = resumable_spec(&rig);
+    s.resume_handle = Some("thread-old".into());
+    let provider = codex_provider(&rig, "approval")
+        .with_env("FAKE_CODEX_CONFIG", json!({"mcp_servers":{"inherited":{"command":"must-not-start"}}}).to_string());
+    let session = provider.start_session(s.clone()).await.unwrap();
+    assert_eq!(session.resume_handle().as_deref(), Some("thread-old"));
+    assert!(!rig.received().iter().any(|v| v["method"] == "thread/start"));
+    let p = rig.request("thread/resume")["params"].clone();
+    assert_eq!(p["threadId"], "thread-old");
+    assert_eq!(p["cwd"], s.cwd.to_string_lossy().as_ref());
+    assert_eq!((p["approvalPolicy"].clone(), p["sandbox"].clone(), p["approvalsReviewer"].clone()), (json!("never"), json!("read-only"), json!("user")));
+    assert_eq!(p["model"], "exact-model");
+    assert_eq!(p["developerInstructions"], "Synthetic scoped memory.");
+    assert!(p.get("ephemeral").is_none() && p.get("allowProviderModelFallback").is_none(), "thread/resume does not take these: {p}");
+    assert_eq!(p["config"]["mcp_servers"]["discard-memory"]["url"], "http://127.0.0.1:1/mcp");
+    assert_eq!(p["config"]["mcp_servers"]["discard-memory"]["default_tools_approval_mode"], "approve");
+    assert_eq!(p["config"]["mcp_servers"]["inherited"]["enabled"], false);
+    // The process-level controls go on the resume spawn too.
+    let args = args_line(&rig);
+    assert!(args.contains("model_catalog_json=") && args.contains("shell_tool"), "{args}");
+    drop(session);
+    assert!(s.cwd.is_dir());
+}
+
+#[tokio::test]
+async fn a_handle_without_resumable_is_still_refused_in_conversation() {
+    let rig = Rig::new();
+    let mut s = conversation_spec(&rig);
+    s.resume_handle = Some("thread-old".into());
+    let error = codex_provider(&rig, "approval").start_session(s).await.err().unwrap();
+    assert!(matches!(&error, ProviderError::Setup(m) if m.contains("not a native resume")), "{error:?}");
+    assert!(rig.log_text().is_empty(), "no process may start");
+}
+
+#[tokio::test]
+async fn a_rejected_resume_maps_to_resume_rejected() {
+    let rig = Rig::new();
+    let mut s = resumable_spec(&rig);
+    s.resume_handle = Some("gone".into());
+    let error = codex_provider(&rig, "resume_reject").start_session(s.clone()).await.err().unwrap();
+    assert!(matches!(&error, ProviderError::ResumeRejected(m) if m == "no rollout found for thread id gone (Authorization: [REDACTED] [REDACTED])"), "{error:?}");
+    assert!(s.cwd.is_dir());
+}
+
+#[tokio::test]
+async fn resume_epoch_returns_the_cli_version() {
+    let rig = Rig::new();
+    let p = rig.provider("approval");
+    assert_eq!(p.resume_epoch(), None);
+    assert_eq!(p.check_setup().await, SetupStatus::Ready);
+    assert_eq!(p.resume_epoch().as_deref(), Some("0.166.0"));
+    let rig = Rig::new();
+    let p = codex_provider(&rig, "approval").with_env("FAKE_CODEX_VERSION", "codex-cli 0.170.2");
+    let s = resumable_spec(&rig);
+    let cache = json!({"client_version":"0.170.2","models":[{"slug":"exact-model","context_window":200000}]});
+    std::fs::write(rig.dir.path().join("models_cache.json"), cache.to_string()).unwrap();
+    let _ = p.start_session(s).await.unwrap();
+    assert_eq!(p.resume_epoch().as_deref(), Some("0.170.2"));
+}
+
+#[tokio::test]
+async fn a_resumed_thread_on_another_model_is_rejected_and_keeps_the_stable_dir() {
+    let rig = Rig::new();
+    let mut s = resumable_spec(&rig);
+    s.resume_handle = Some("thread-old".into());
+    let provider = codex_provider(&rig, "approval").with_env("FAKE_CODEX_RESUME_MODEL", "other-model");
+    let error = provider.start_session(s.clone()).await.err().unwrap();
+    assert!(matches!(&error, ProviderError::ResumeRejected(m) if m == "the resumed thread uses model other-model, not exact-model"), "{error:?}");
+    assert!(s.cwd.is_dir());
+    assert!(!rig.received().iter().any(|v| v["method"] == "turn/start"));
+}
+
+#[tokio::test]
+async fn a_resumed_thread_on_the_selected_model_or_with_no_reported_model_resumes() {
+    for reported in [Some("exact-model"), None] {
+        let rig = Rig::new();
+        let mut s = resumable_spec(&rig);
+        s.resume_handle = Some("thread-old".into());
+        let mut provider = codex_provider(&rig, "approval");
+        if let Some(model) = reported { provider = provider.with_env("FAKE_CODEX_RESUME_MODEL", model); }
+        let session = provider.start_session(s).await.unwrap_or_else(|e| panic!("{reported:?}: {e:?}"));
+        assert_eq!(session.resume_handle().as_deref(), Some("thread-old"));
+    }
 }

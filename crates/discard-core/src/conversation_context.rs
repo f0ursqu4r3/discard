@@ -31,6 +31,12 @@ pub fn summary_limit(budget: usize) -> usize {
     (budget / 20).clamp(MIN_SUMMARY_LIMIT, MAX_SUMMARY_LIMIT)
 }
 
+/// Bytes that a summarizing replay shrinks the input to once it starts. A resumable agent leaves half of the budget
+/// free, so its next resumed turn does not exceed the budget and replay again.
+pub fn summary_target(budget: usize, resumable: bool) -> usize {
+    if resumable { budget / 2 } else { budget }
+}
+
 /// Bytes of a tool output that replay keeps.
 pub const TOOL_OUTPUT_REPLAY_BYTES: usize = 1024;
 /// Bytes of a `delegate` result that replay keeps: the results of sub-agents are the point of the call.
@@ -251,6 +257,12 @@ mod tests {
         assert_eq!(compact_blocks(&blocks), serde_json::to_value(&blocks).unwrap());
     }
     #[test]
+    fn summary_target_halves_only_for_resumable_agents() {
+        assert_eq!(summary_target(49_152, false), 49_152);
+        assert_eq!(summary_target(49_152, true), 24_576);
+        assert_eq!(summary_target(7, true), 3);
+    }
+    #[test]
     fn saved_boundary_survives_fewer_fragments() {
         let messages = vec![(MessageId("old:part:0".into()), "a".into()), (MessageId("old:part:1".into()), "b".into()), (MessageId("new:part:0".into()), "c".into())];
         assert_eq!(after_boundary(&messages, Some(&MessageId("old:part:5".into()))), &messages[2..]);
@@ -316,7 +328,7 @@ mod tests {
     fn a_summary_boundary_in_a_threads_parent_prefix_stays_valid_as_the_conversation_grows() {
         use crate::{agent::AgentConfig, capability::ApprovalPolicy, store::Store};
         let store = Store::open_in_memory().unwrap();
-        let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "fake".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "fake".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         let parent = store.create_conversation(&agent, None, "chat").unwrap();
         let add = |channel: &crate::model::ChannelId, role: Role, text: &str| {
             let message = Message { id: MessageId::new(), channel_id: channel.clone(), role, blocks: vec![Block::Markdown { text: text.into() }] };

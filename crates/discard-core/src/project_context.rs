@@ -387,7 +387,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let agent = store
             .create_agent(&AgentConfig {
-                workspace_write: false, sandbox_autorun: false, delegation: false,
+                workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false,
                 name: "Agent".into(),
                 provider: "fake".into(),
                 model: Some("test".into()),

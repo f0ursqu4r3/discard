@@ -57,6 +57,15 @@ pub enum Command {
 }
 
 /// From the engine to the UI.
+/// How the response of an agent with native resume on started: in its saved provider session, or with a fresh replay.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResumeState {
+    Resumed,
+    /// `reason` is the drop reason without the "Fresh replay: " prefix.
+    Replay { reason: String },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Update {
     Event(Box<Event>),
@@ -71,6 +80,8 @@ pub enum Update {
     ResponseCompleted(Message),
     Responding(crate::model::MessageAuthor),
     SessionProfile(SessionProfile),
+    /// Sent for a response of an agent with native resume on, when the turn is eligible. Not sent for a first session. The last one in a response is the state that applies.
+    ResumeState(ResumeState),
     /// The live reply remains available for copying; no saved response ID exists.
     ResponseSaveFailed(String),
     MemoryChanges { response: MessageId, changes: Vec<crate::memory_items::MemoryChange> },
@@ -99,6 +110,7 @@ pub enum Update {
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiState {
     pub session_profile: SessionProfile,
+    resume_state: Option<ResumeState>,
     channel_id: ChannelId,
     history: Vec<Message>,
     authors: std::collections::HashMap<MessageId, crate::model::MessageAuthor>,
@@ -113,13 +125,15 @@ pub struct UiState {
 
 impl UiState {
     pub fn new(channel_id: ChannelId, history: Vec<Message>) -> Self {
-        Self { session_profile: SessionProfile::default(), channel_id, history, authors: Default::default(), responder: None, live: Timeline::new(), turn_running: false, response_save_failed: false, notice: None, unsaved_user: None }
+        Self { session_profile: SessionProfile::default(), resume_state: None, channel_id, history, authors: Default::default(), responder: None, live: Timeline::new(), turn_running: false, response_save_failed: false, notice: None, unsaved_user: None }
     }
 
     pub fn with_authors(mut self, authors: std::collections::HashMap<MessageId, crate::model::MessageAuthor>) -> Self { self.authors = authors; self }
     pub fn authors(&self) -> &std::collections::HashMap<MessageId, crate::model::MessageAuthor> { &self.authors }
     /// Record the author of a message that was added through `Update::ConversationMarker`.
     pub fn set_author(&mut self, message: MessageId, author: crate::model::MessageAuthor) { self.authors.insert(message, author); }
+    /// How the latest response started. Kept after the turn ends. The next turn clears it.
+    pub fn resume_state(&self) -> Option<&ResumeState> { self.resume_state.as_ref() }
     pub fn responder(&self) -> Option<&crate::model::MessageAuthor> { self.responder.as_ref() }
     /// Drop a saved message from the transcript, with its author. Returns whether it was there.
     pub fn remove_message(&mut self, message: &MessageId) -> bool {
@@ -136,6 +150,7 @@ impl UiState {
 
     pub fn response_started(&mut self) {
         self.turn_running = true;
+        self.resume_state = None;
         self.notice = None;
         self.response_save_failed = false;
     }
@@ -155,6 +170,7 @@ impl UiState {
         self.live = Timeline::new();
         self.turn_running = true;
         self.responder = None;
+        self.resume_state = None;
         self.response_save_failed = false;
         self.notice = None;
     }
@@ -162,8 +178,9 @@ impl UiState {
     pub fn apply(&mut self, update: Update) {
         match update {
             Update::SessionProfile(profile) => self.session_profile = profile,
+            Update::ResumeState(state) => self.resume_state = Some(state),
             Update::ResponseSaveFailed(message) => { self.response_save_failed = true; self.notice = Some(message); },
-            Update::Responding(author) => self.responder = Some(author),
+            Update::Responding(author) => { self.responder = Some(author); self.resume_state = None; },
             Update::ResponseCompleted(message) => {
                 if let Some(author) = &self.responder { self.authors.insert(message.id.clone(), author.clone()); }
                 self.live = Timeline::new(); self.history.push(message);
@@ -570,6 +587,38 @@ mod tests {
         assert_eq!(v["pending_approvals"], 1);
         assert_eq!(v["agent"]["status"], "awaiting_approval");
         assert_eq!(v["turn_running"], true);
+    }
+
+    #[test]
+    fn resume_state_is_kept_until_the_next_turn_starts() {
+        let mut s = state();
+        assert_eq!(s.resume_state(), None);
+        s.apply(Update::ResumeState(ResumeState::Replay { reason: "the model changed.".into() }));
+        assert_eq!(s.resume_state(), Some(&ResumeState::Replay { reason: "the model changed.".into() }));
+        s.apply(Update::TurnFinished(TurnOutcome::Completed));
+        assert!(s.resume_state().is_some());
+        s.user_sent("again");
+        assert_eq!(s.resume_state(), None);
+        s.apply(Update::ResumeState(ResumeState::Resumed));
+        s.response_started();
+        assert_eq!(s.resume_state(), None);
+    }
+
+    #[test]
+    fn a_new_responder_clears_the_previous_resume_state() {
+        let other = crate::model::MessageAuthor { agent_id: crate::model::AgentId("b".into()), name: "Other".into(), provider: "fake".into(), avatar: None };
+        let mut s = state();
+        s.apply(Update::ResumeState(ResumeState::Resumed));
+        s.apply(Update::Responding(other.clone()));
+        assert_eq!(s.resume_state(), None);
+        s.apply(Update::ResumeState(ResumeState::Replay { reason: "r".into() }));
+        assert_eq!(s.resume_state(), Some(&ResumeState::Replay { reason: "r".into() }));
+    }
+
+    #[test]
+    fn resume_state_serializes_with_a_kind() {
+        assert_eq!(serde_json::to_value(ResumeState::Resumed).unwrap(), serde_json::json!({"kind": "resumed"}));
+        assert_eq!(serde_json::to_value(ResumeState::Replay { reason: "r".into() }).unwrap(), serde_json::json!({"kind": "replay", "reason": "r"}));
     }
 
     #[test]

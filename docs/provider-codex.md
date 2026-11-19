@@ -78,7 +78,7 @@ its own agent and session.
 
 ## Conversation sessions
 
-`SessionMode::Conversation` uses a fresh, empty Discard-owned working directory. It starts a new ephemeral thread for each replay. It rejects native resume handles. The selected model must have an exact slug in a model cache whose `client_version` equals the running CLI version. Discard resolves that cache from the provider's `CODEX_HOME`, or `HOME/.codex`. If the cache is missing, incompatible, or written by another CLI version, Discard asks Codex to refresh its model list once, then validates the cache again. This bounded recovery starts no thread and sends no user prompt. Discard does not edit configuration or authentication; Codex may refresh its own cache.
+`SessionMode::Conversation` uses a fresh, empty Discard-owned working directory. A session that Discard does not resume starts a new ephemeral thread for each replay and rejects native resume handles. When Discard passes `resumable`, the thread is persistent (`ephemeral: false`), the working directory is the stable directory Discard chose, and a later start may pass the handle to `thread/resume` with the same controls. The process still gets the same `-c` controls and `model_auto_compact_token_limit=1000000000`. A handle Codex rejects, or a resumed thread whose response reports a model other than the selected one, gives `ResumeRejected` so Discard replays instead. The selected model must have an exact slug in a model cache whose `client_version` equals the running CLI version. Discard resolves that cache from the provider's `CODEX_HOME`, or `HOME/.codex`. If the cache is missing, incompatible, or written by another CLI version, Discard asks Codex to refresh its model list once, then validates the cache again. This bounded recovery starts no thread and sends no user prompt. Discard does not edit configuration or authentication; Codex may refresh its own cache.
 
 Discard copies complete model records into a temporary startup catalog. It changes only tool capability fields: patch, shell, experimental tools, delegation, node REPL and tool mode. The model slug and context-window metadata stay intact. `allowProviderModelFallback` is false. `Provider::model_context_window` returns the exact model's published limit when available.
 
@@ -96,7 +96,57 @@ The supported version is pinned because tool registration and catalog fields can
 
 Run the local probe with `python3 crates/discard-providers/tests/probes/codex_conversation.py`. The script works from any working directory when you give its full path. Use `--codex /path/to/codex` or `DISCARD_CODEX_BIN` to select the CLI executable. Use `--codex-home /path/to/provider-home` to select the source model cache; the default uses `CODEX_HOME` or `~/.codex`. The probe fails before thread creation if a required effective control differs.
 
-Normal app conversations replay the current conversation transcript with refreshed personality and applicable saved memory before every response. Memory edits apply to existing conversations without restarting. Native resume behavior described above applies to Coding sessions. See [Saved memory](memory.md) for the four domains, shared-write approval, Forget, and capture controls.
+Normal app conversations replay the current conversation transcript with refreshed personality and applicable saved memory before every response. Memory edits apply to existing conversations without restarting. Agents with **Keep provider session** on resume their Codex thread between responses (see [Conversation runtime](runtime/conversation-context.md#native-provider-resume)); other agents replay. See [Saved memory](memory.md) for the four domains, shared-write approval, Forget, and capture controls.
+
+## Native resume spike results
+
+Tested Codex 0.166.0 against a live `codex app-server`, model `gpt-5.6-luna` (and `gpt-5.6-terra` for the model change), with the Conversation controls from `codex_controls` (tools off, every inherited MCP server disabled) passed as `-c` arguments, `ephemeral: false` on `thread/start`, and a stdio MCP server that returned `TOKA` or `TOKB`.
+
+| Question | Result |
+| --- | --- |
+| Per-session MCP config on `thread/resume` | Re-applies. `config.mcp_servers.tok` with `TOKB` replaced `TOKA`. The config is not stored in the thread: a resume without it had no `tok` tool. Pass it on every resume. |
+| `model` on `thread/resume` | Re-applies. The resume response and the model's own answer showed the new model. A resume without `model` kept the last model. |
+| `developerInstructions` on `thread/resume` | Does not re-apply. A resume with `BRAVO` kept `ALPHA` from the thread start. The thread keeps the instructions it started with. **Adapter refuses resume** when the current system prompt differs from the one at thread start. The engine fingerprint already holds the fixed prompt, so it drops the handle first. |
+| `approvalPolicy` and `sandbox` on `thread/resume` | Re-apply. The response showed `untrusted` and `workspaceWrite` after a resume that asked for them. |
+| Conversation controls (`codex_controls`, tools off) | Process-level `-c` arguments, not thread state. A resume in a process without them could run `echo hi`. A resume in a process with them answered `NO SHELL`. Discard must pass the same `-c` arguments on each spawn, as it does for a fresh start. |
+| Global `~/.codex/AGENTS.md` | Still listed in `instructionSources` on resume, as on a fresh start. |
+
+### Model on resume
+
+`thread/resume` params have no `allowProviderModelFallback`. The `ThreadResumeResponse` has a top-level `model`. For a resumable Conversation or Workspace session, the adapter compares it with the selected model and returns `ResumeRejected` on a difference. If the response has no `model`, the adapter cannot check it and resumes. This is deliberate: the startup catalog holds only the selected model's record, and the spike showed the resume `model` param re-applies. Whether Codex can fall back on resume was not probed.
+
+### Handle rejected
+
+`thread/resume` answers with a JSON-RPC error. The process stays alive.
+
+| Case | Error |
+| --- | --- |
+| Unknown ID (valid UUID) | code `-32600`, message `no rollout found for thread id <id>` |
+| Expired ID (rollout file removed) | code `-32600`, message `no rollout found for thread id <id>` |
+| Malformed ID | code `-32600`, message `invalid session id: ...` |
+
+Marker for the engine: any JSON-RPC error answer to `thread/resume`. The adapter already maps this case to `ProviderError::ResumeRejected`. The stable text is `no rollout found for thread id`.
+
+### Session store
+
+| Setting | Rollout file |
+| --- | --- |
+| Default | `~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<thread id>.jsonl`, with metadata in `~/.codex/state_5.sqlite` |
+| `CODEX_HOME` changed | `<CODEX_HOME>/sessions/...`. The login is lost (`401 Unauthorized`). |
+| `HOME` changed | `<HOME>/.codex/sessions/...`. The login is lost. |
+
+`thread/start` returns the rollout path in `thread.path`. A resume in a process with a different `CODEX_HOME` or `HOME` cannot find the thread. Discard must keep both unchanged between turns of one session.
+
+### Compaction
+
+Codex compacts a long thread on its own, also on a resumed thread. It has no off switch.
+
+- Flag: `-c model_auto_compact_token_limit=<tokens>` sets the trigger. A limit of 12000 compacted a resumed thread on turn 2 (about 18k tokens). A limit of `1000000000` did not compact over four resumed turns (about 30k tokens). Raise the limit to delay compaction. The behavior near the full model window with a high limit was not probed.
+- Stream signal: an `item/started` and an `item/completed` notification with `item.type: "contextCompaction"` inside the turn. No `thread/compacted` notification appeared.
+
+### Live probe result
+
+`cargo test -p discard-providers --test codex_live real_codex_resumes -- --ignored --nocapture` passed on codex-cli 0.166.0 with model `gpt-5.6-luna` (2026-11-18). It ran three Conversation turns for one agent with **Keep provider session** on. A new fact, not an instruction or preference, was saved between turns 2 and 3. Turn 1 started a thread. Turn 2 and turn 3 resumed it with `thread/resume`. The answer in turn 3 used the new fact. The saved `agent_sessions` row kept the same handle after all three turns. No "Fresh replay" notice appeared, so the model check on resume did not reject the thread. A separate raw `thread/resume` call showed that the real 0.166.0 response includes a top-level `model` (`gpt-5.6-luna`). The adapter's model check therefore runs on this CLI version.
 
 ## Workspace sessions (spike results)
 

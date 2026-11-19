@@ -428,7 +428,7 @@ mod tests {
     fn session_with_config(mode: discard_core::provider::SessionMode, doc: Option<Value>) -> (SessionSpec, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let path = doc.map(|doc| { let path = dir.path().join("session.json"); std::fs::write(&path, doc.to_string()).unwrap(); path });
-        let spec = SessionSpec { reasoning_effort: None, mode, cwd: dir.path().to_path_buf(), model: None, system_prompt: None, enforcement: discard_core::capability::EnforcementMode::HostPrompts, resume_handle: None, mcp_config: path, sandbox_autorun: false };
+        let spec = SessionSpec { resumable: false, reasoning_effort: None, mode, cwd: dir.path().to_path_buf(), model: None, system_prompt: None, enforcement: discard_core::capability::EnforcementMode::HostPrompts, resume_handle: None, mcp_config: path, sandbox_autorun: false };
         (spec, dir)
     }
 

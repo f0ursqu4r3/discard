@@ -10,6 +10,7 @@ import { Button } from '../ui/button'
 import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from '../ui/empty'
 import AgentSummary from '../agents/AgentSummary.vue'
 import AutorunIndicator from './AutorunIndicator.vue'
+import ResumeIndicator from './ResumeIndicator.vue'
 import MemberList from '../MemberList.vue'
 import MemoryBrowser from '../memory/MemoryBrowser.vue'
 import PluginElement from '@/plugin/PluginElement.vue'
@@ -126,6 +127,7 @@ const generalRunning = computed(() =>
                 <dd class="flex flex-wrap items-center justify-end gap-x-2 gap-y-1 text-right">
                   <span>{{ snapshot.turnRunning ? 'Running' : 'Idle' }}</span>
                   <AutorunIndicator :autorun="snapshot.autorun" />
+                  <ResumeIndicator :resume-state="snapshot.resumeState" />
                 </dd>
               </div>
             </dl>

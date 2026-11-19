@@ -317,6 +317,9 @@ export interface BannersDto {
   archive: { message: string } | null
   safeMode: boolean
 }
+/** How the latest response started: in the saved provider session, or with a fresh replay. */
+export type ResumeState = { kind: 'resumed' } | { kind: 'replay'; reason: string }
+
 export interface SnapshotDto {
   activeProjectId: string | null
   composerDisabled: boolean
@@ -335,6 +338,7 @@ export interface SnapshotDto {
   responder?: MessageAuthorDto | null
   agentStatus: string
   autorun: { state: 'on' | 'unavailable'; reason: string | null } | null
+  resumeState: (ResumeState & { agent: string }) | null
   turnRunning: boolean
   notice: string | null
   liveBlocks: BlockDto[]

@@ -251,7 +251,7 @@ mod tests {
     struct World { store: Store, project: ProjectId, channel: Channel, caller: AgentId }
 
     fn config(name: &str, delegation: bool, model: Option<&str>) -> AgentConfig {
-        AgentConfig { workspace_write: false, sandbox_autorun: false, delegation, reasoning_effort: None, name: name.into(), avatar: None, provider: "fake".into(), model: model.map(Into::into), system_prompt: format!("{name} personality"), policy: ApprovalPolicy::Ask, plugin_write: false }
+        AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation, reasoning_effort: None, name: name.into(), avatar: None, provider: "fake".into(), model: model.map(Into::into), system_prompt: format!("{name} personality"), policy: ApprovalPolicy::Ask, plugin_write: false }
     }
 
     fn world() -> World {

@@ -6,7 +6,7 @@ mod tests {
     fn loosening_policy_requires_confirmation() {
         let store = Store::open_in_memory().unwrap();
         let id = AgentId::new();
-        let cfg = AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "p".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::DenyAll, plugin_write: false };
+        let cfg = AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "p".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::DenyAll, plugin_write: false };
         store.insert_agent(&id, &cfg).unwrap();
         let matrix = CapabilityMatrix { provider: "p".into(), matrix_version: 1, cli_version: "1".into(), capabilities: Capabilities { interactive_approvals: true, tool_call_visibility: true, per_session_mcp: true, session_resume: true, cancellation: true, pre_execution_blocking: true } };
         let mut draft = AgentDraft::from(&cfg); draft.policy = ApprovalPolicy::Ask;
@@ -15,7 +15,7 @@ mod tests {
     }
     #[test]
     fn omitted_avatar_is_preserved_and_explicit_null_clears_it() {
-        let current=AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name:"A".into(),avatar:Some("avatar.png".into()),provider:"p".into(),model:Some("m".into()),system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false };
+        let current=AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation: false, reasoning_effort: None, name:"A".into(),avatar:Some("avatar.png".into()),provider:"p".into(),model:Some("m".into()),system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false };
         let mut value=serde_json::json!({"model":"m","systemPrompt":"","policy":"ask","workspaceWrite":false,"pluginWrite":false});
         let draft:Draft=serde_json::from_value(value.clone()).unwrap();
         assert_eq!(draft.into_core(&current).unwrap().avatar,current.avatar);
@@ -43,7 +43,7 @@ mod tests {
         assert!(!defaults["name"].as_str().unwrap().trim().is_empty());
         assert_eq!(defaults["model"], "");
         assert_eq!(defaults["systemPrompt"], "");
-        let cfg = AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "A".into(), avatar: Some("keep.png".into()), provider: "old".into(), model: Some("old-model".into()), system_prompt: String::new(), policy: ApprovalPolicy::DenyAll, plugin_write: false };
+        let cfg = AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation: false, reasoning_effort: None, name: "A".into(), avatar: Some("keep.png".into()), provider: "old".into(), model: Some("old-model".into()), system_prompt: String::new(), policy: ApprovalPolicy::DenyAll, plugin_write: false };
         let value = serde_json::json!({"name":"Human name", "provider":"new", "model":"provider/exact-ID:1", "systemPrompt":"", "policy":"deny", "workspaceWrite":false,"pluginWrite":false});
         let draft = serde_json::from_value::<Draft>(value).unwrap().into_core(&cfg).unwrap();
         let matrix = CapabilityMatrix { provider: "new".into(), matrix_version: 1, cli_version: "1".into(), capabilities: Capabilities { interactive_approvals: true, tool_call_visibility: true, per_session_mcp: true, session_resume: true, cancellation: true, pre_execution_blocking: true } };
@@ -68,7 +68,7 @@ mod tests {
     fn agent_rows_report_autorun_support() {
         use discard_core::provider::SandboxAutorun;
         use discard_providers::fake::FakeProvider;
-        let cfg = |provider: &str, autorun: bool| AgentConfig { workspace_write: true, sandbox_autorun: autorun, delegation: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: provider.into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false };
+        let cfg = |provider: &str, autorun: bool| AgentConfig { workspace_write: true, sandbox_autorun: autorun, native_resume: false, delegation: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: provider.into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false };
         let providers = [
             provider_info("blocked", FakeProvider::new(vec![]).with_sandbox_autorun(SandboxAutorun::Unsupported("x".into()))),
             provider_info("ready", FakeProvider::new(vec![]).with_sandbox_autorun(SandboxAutorun::Supported)),
@@ -86,7 +86,7 @@ mod tests {
         let draft = |extra: serde_json::Value| {
             let mut value = serde_json::json!({"model":"m","systemPrompt":"","policy":"ask","workspaceWrite":false,"pluginWrite":false});
             value.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-            let blank = AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "p".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::DenyAll, plugin_write: false };
+            let blank = AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "p".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::DenyAll, plugin_write: false };
             serde_json::from_value::<Draft>(value).unwrap().into_core(&blank).unwrap()
         };
         assert_eq!(check_create_draft(&draft(serde_json::json!({"sandboxAutorun": true}))).unwrap_err(), "Create the agent first. Then review Sandbox autorun permission.");
@@ -94,10 +94,21 @@ mod tests {
     }
 
     #[test]
+    fn the_native_resume_setting_reads_and_drafts_without_confirmation() {
+        let cfg = AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "p".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false };
+        assert_eq!(agent_rows(vec![(AgentId::new(), cfg.clone(), false)], &[])[0]["nativeResume"], false);
+        let mut value = serde_json::json!({"model":"m","systemPrompt":"","policy":"ask","workspaceWrite":false,"pluginWrite":false});
+        assert!(!serde_json::from_value::<Draft>(value.clone()).unwrap().into_core(&cfg).unwrap().native_resume);
+        value["nativeResume"] = serde_json::json!(true);
+        let draft = serde_json::from_value::<Draft>(value).unwrap().into_core(&cfg).unwrap();
+        assert!(draft.native_resume && check_create_draft(&draft).is_ok());
+    }
+
+    #[test]
     fn the_delegation_setting_reads_drafts_saves_and_asks_for_confirmation_like_other_permissions() {
         let store = Store::open_in_memory().unwrap();
         let id = AgentId::new();
-        let cfg = AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "p".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false };
+        let cfg = AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "p".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false };
         store.insert_agent(&id, &cfg).unwrap();
         let matrix = CapabilityMatrix { provider: "p".into(), matrix_version: 1, cli_version: "1".into(), capabilities: Capabilities { interactive_approvals: true, tool_call_visibility: true, per_session_mcp: true, session_resume: true, cancellation: true, pre_execution_blocking: true } };
         // Read: the settings row carries the value.
@@ -131,7 +142,7 @@ mod tests {
 
     #[test]
     fn omitted_autorun_keeps_the_saved_value_and_explicit_values_replace_it() {
-        let current = AgentConfig { workspace_write: true, sandbox_autorun: true, delegation: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "p".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false };
+        let current = AgentConfig { workspace_write: true, sandbox_autorun: true, native_resume: false, delegation: false, reasoning_effort: None, name: "A".into(), avatar: None, provider: "p".into(), model: Some("m".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false };
         let mut value = serde_json::json!({"model":"m","systemPrompt":"","policy":"ask","workspaceWrite":true,"pluginWrite":false});
         assert!(serde_json::from_value::<Draft>(value.clone()).unwrap().into_core(&current).unwrap().sandbox_autorun);
         value["sandboxAutorun"] = serde_json::json!(false);
@@ -148,7 +159,7 @@ pub fn save_agent(store: &Store, id: &AgentId, draft: &AgentDraft, matrix: &Capa
 }
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Draft { name: Option<String>, #[serde(default, deserialize_with = "deserialize_avatar")] avatar: Option<Option<String>>, provider: Option<String>, model: String, #[serde(default, deserialize_with = "deserialize_avatar")] reasoning_effort: Option<Option<String>>, system_prompt: String, policy: String, plugin_write: bool, workspace_write: Option<bool>, #[serde(default)] sandbox_autorun: Option<bool>, #[serde(default)] delegation: Option<bool> }
+pub struct Draft { name: Option<String>, #[serde(default, deserialize_with = "deserialize_avatar")] avatar: Option<Option<String>>, provider: Option<String>, model: String, #[serde(default, deserialize_with = "deserialize_avatar")] reasoning_effort: Option<Option<String>>, system_prompt: String, policy: String, plugin_write: bool, workspace_write: Option<bool>, #[serde(default)] sandbox_autorun: Option<bool>, #[serde(default)] delegation: Option<bool>, #[serde(default)] native_resume: Option<bool> }
 // Preserve an omitted avatar in existing forms. Explicit null clears it.
 fn deserialize_avatar<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Option<String>>, D::Error> {
     <Option<String> as serde::Deserialize>::deserialize(deserializer).map(Some)
@@ -156,7 +167,7 @@ fn deserialize_avatar<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Resu
 impl Draft {
     pub(crate) fn into_core(self, current: &discard_core::agent::AgentConfig) -> Result<AgentDraft, String> {
         let policy = match self.policy.as_str() { "ask" => ApprovalPolicy::Ask, "deny" => ApprovalPolicy::DenyAll, _ => return Err("Unknown policy".into()) };
-        Ok(AgentDraft { reasoning_effort: self.reasoning_effort.unwrap_or_else(|| current.reasoning_effort.clone()), name:self.name.unwrap_or_else(||current.name.clone()), avatar:self.avatar.unwrap_or_else(||current.avatar.clone()), provider:self.provider.unwrap_or_else(||current.provider.clone()), model: if self.model.is_empty() { None } else { Some(self.model) }, system_prompt: self.system_prompt, policy, plugin_write: self.plugin_write, workspace_write: self.workspace_write.unwrap_or(current.workspace_write), sandbox_autorun: self.sandbox_autorun.unwrap_or(current.sandbox_autorun), delegation: self.delegation.unwrap_or(current.delegation) })
+        Ok(AgentDraft { reasoning_effort: self.reasoning_effort.unwrap_or_else(|| current.reasoning_effort.clone()), name:self.name.unwrap_or_else(||current.name.clone()), avatar:self.avatar.unwrap_or_else(||current.avatar.clone()), provider:self.provider.unwrap_or_else(||current.provider.clone()), model: if self.model.is_empty() { None } else { Some(self.model) }, system_prompt: self.system_prompt, policy, plugin_write: self.plugin_write, workspace_write: self.workspace_write.unwrap_or(current.workspace_write), sandbox_autorun: self.sandbox_autorun.unwrap_or(current.sandbox_autorun), delegation: self.delegation.unwrap_or(current.delegation), native_resume: self.native_resume.unwrap_or(current.native_resume) })
     }
 }
 fn selected_provider<'a>(providers: &'a [crate::desktop::actions::ProviderInfo], draft: &AgentDraft) -> Result<&'a crate::desktop::actions::ProviderInfo, String> {
@@ -177,7 +188,7 @@ fn agent_rows(rows: Vec<(AgentId, discard_core::agent::AgentConfig, bool)>, prov
             Some(info) => match info.provider.sandbox_autorun() { discard_core::provider::SandboxAutorun::Supported => None, discard_core::provider::SandboxAutorun::Unsupported(reason) => Some(reason) },
             None => Some("This provider is not available.".to_string()),
         };
-        serde_json::json!({"id": id.0, "name": cfg.name, "avatar": cfg.avatar, "archived": archived, "provider": cfg.provider, "model": cfg.model.unwrap_or_default(), "reasoningEffort": cfg.reasoning_effort, "systemPrompt": cfg.system_prompt, "policy": policy_name(cfg.policy), "workspaceWrite": cfg.workspace_write, "sandboxAutorun": cfg.sandbox_autorun, "delegation": cfg.delegation, "sandboxAutorunUnavailable": unavailable, "pluginWrite": cfg.plugin_write})
+        serde_json::json!({"id": id.0, "name": cfg.name, "avatar": cfg.avatar, "archived": archived, "provider": cfg.provider, "model": cfg.model.unwrap_or_default(), "reasoningEffort": cfg.reasoning_effort, "systemPrompt": cfg.system_prompt, "policy": policy_name(cfg.policy), "workspaceWrite": cfg.workspace_write, "sandboxAutorun": cfg.sandbox_autorun, "delegation": cfg.delegation, "nativeResume": cfg.native_resume, "sandboxAutorunUnavailable": unavailable, "pluginWrite": cfg.plugin_write})
     }).collect()
 }
 #[tauri::command]
@@ -253,13 +264,13 @@ fn check_create_draft(draft: &AgentDraft) -> Result<(), String> {
 }
 #[tauri::command]
 pub fn settings_agent_create(app: tauri::AppHandle, context: tauri::State<'_, super::SettingsContext>, draft: Draft) -> Result<String, String> {
-    let blank = discard_core::agent::AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: discard_core::agent::generated_name(), avatar: None, provider: String::new(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::DenyAll, plugin_write: false };
+    let blank = discard_core::agent::AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation: false, reasoning_effort: None, name: discard_core::agent::generated_name(), avatar: None, provider: String::new(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::DenyAll, plugin_write: false };
     let draft = draft.into_core(&blank)?;
     check_create_draft(&draft)?;
     let provider = selected_provider(&context.providers, &draft)?;
     require_connected(provider)?;
     provider.matrix.enforcement_for(draft.policy).map_err(|e| e.to_string())?;
-    let cfg = discard_core::agent::AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: draft.reasoning_effort, name: draft.name, avatar: draft.avatar, provider: draft.provider, model: draft.model, system_prompt: draft.system_prompt, policy: draft.policy, plugin_write: false };
+    let cfg = discard_core::agent::AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: draft.native_resume, delegation: false, reasoning_effort: draft.reasoning_effort, name: draft.name, avatar: draft.avatar, provider: draft.provider, model: draft.model, system_prompt: draft.system_prompt, policy: draft.policy, plugin_write: false };
     let id = context.store.lock().unwrap_or_else(|e| e.into_inner()).create_agent(&cfg).map_err(|e| e.to_string())?;
     agents_changed(&app); context.core.changed.notify_one(); Ok(id.0)
 }

@@ -18,16 +18,22 @@ use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
 const STDERR_TAIL_LINES: usize = 20;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 const TERM_GRACE: Duration = Duration::from_secs(2);
+
+/// How long the first message of a resumed session waits for the CLI to start or reject the session.
+const RESUME_START_TIMEOUT: Duration = Duration::from_secs(60);
+/// The CLI's message for a session ID it cannot find.
+const UNKNOWN_SESSION: &str = "No conversation found with session ID";
 
 const MATRIX_JSON: &str = include_str!("../../fixtures/claude.capabilities.json");
 
@@ -51,6 +57,8 @@ pub struct ClaudeProvider {
     env: Vec<(OsString, OsString)>,
     /// `DISCARD_HOME`. Autorun sessions deny reads of its files except the session's own.
     discard_home: Option<PathBuf>,
+    /// The CLI version last read. Part of the session fingerprint.
+    epoch: Mutex<Option<String>>,
 }
 
 impl ClaudeProvider {
@@ -60,7 +68,7 @@ impl ClaudeProvider {
     }
 
     pub fn with_matrix(executable: impl Into<PathBuf>, matrix: CapabilityMatrix) -> Self {
-        Self { executable: executable.into(), matrix, env: Vec::new(), discard_home: None }
+        Self { executable: executable.into(), matrix, env: Vec::new(), discard_home: None, epoch: Mutex::new(None) }
     }
 
     /// Extra environment for the child process (used by tests).
@@ -172,6 +180,12 @@ fn absolute_dir(value: Option<OsString>) -> Option<PathBuf> {
 }
 
 impl ClaudeProvider {
+    fn record_epoch(&self, version_output: &str) {
+        if let Some(version) = version::number(version_output) {
+            *self.epoch.lock().unwrap_or_else(|p| p.into_inner()) = Some(version);
+        }
+    }
+
     fn command(&self) -> Command {
         let mut cmd = Command::new(&self.executable);
         cmd.envs(self.env.iter().cloned());
@@ -191,6 +205,10 @@ impl Provider for ClaudeProvider {
         &self.matrix
     }
 
+    fn resume_epoch(&self) -> Option<String> {
+        self.epoch.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
     /// Every model Claude Code offers has a window of at least 200,000 tokens.
     fn model_context_window(&self, _model: &str) -> Option<u64> { Some(200_000) }
 
@@ -205,9 +223,11 @@ impl Provider for ClaudeProvider {
     }
 
     async fn check_setup(&self) -> SetupStatus {
-        let version = spawn_tokio(self.command().arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true));
-        match tokio::time::timeout(SETUP_TIMEOUT, async { version?.wait().await }).await {
-            Ok(Ok(_)) => {}
+        let version = spawn_tokio(self.command().arg("--version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true));
+        match tokio::time::timeout(SETUP_TIMEOUT, async { version?.wait_with_output().await }).await {
+            Ok(Ok(out)) => {
+                if out.status.success() { self.record_epoch(&String::from_utf8_lossy(&out.stdout)); }
+            }
             _ => {
                 return SetupStatus::NotInstalled {
                     install_hint: "Install the Claude Code CLI and make sure `claude` is on your PATH.".into(),
@@ -254,8 +274,11 @@ impl Provider for ClaudeProvider {
             if spec.model.as_deref().filter(|s| !s.is_empty()).is_none() {
                 return Err(setup("select an exact Claude model".into()));
             }
-            if spec.resume_handle.is_some() {
+            if spec.resume_handle.is_some() && !spec.resumable {
                 return Err(setup("Claude conversation sessions require a fresh transcript replay".into()));
+            }
+            if spec.resumable && (!spec.cwd.is_absolute() || !spec.cwd.is_dir()) {
+                return Err(setup("a resumable session needs an existing absolute working directory".into()));
             }
             let version = spawn_tokio(self.command().arg("--version").kill_on_drop(true).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()));
             let version = tokio::time::timeout(SETUP_TIMEOUT, async { version?.wait_with_output().await })
@@ -263,6 +286,7 @@ impl Provider for ClaudeProvider {
                 .map_err(|_| setup("Claude Code version could not be read: version check timed out".into()))?
                 .map_err(|_| setup("Claude Code version could not be read".into()))?;
             let output = String::from_utf8_lossy(&version.stdout);
+            if version.status.success() { self.record_epoch(&output); }
             let running = version::require(if version.status.success() { &output } else { "" }, "Claude Code", CLAUDE_TESTED)?;
             let help = spawn_tokio(self.command().arg("--help").kill_on_drop(true).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()));
             let help = tokio::time::timeout(SETUP_TIMEOUT, async { help?.wait_with_output().await })
@@ -283,7 +307,7 @@ impl Provider for ClaudeProvider {
             // Managed policy remains authoritative. Reject known local conflicts; never change policy.
             crate::conversation::check_claude_managed_files(workspace).map_err(|e| version::verification_error(e, "Claude Code", &running, CLAUDE_TESTED))?;
             notice = version::notice("Claude Code", &running, CLAUDE_TESTED);
-            if workspace { None } else {
+            if workspace || spec.resumable { None } else {
                 let owned = crate::conversation::ConversationFiles::new()?;
                 spec.cwd = owned.cwd.clone(); Some(owned)
             }
@@ -297,6 +321,8 @@ impl Provider for ClaudeProvider {
                 .env("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1")
                 .env_remove("CLAUDE_CODE_PLUGIN_DIRS");
         }
+        // Discard owns the size guard of a resumable session, so the CLI must not compact it alone.
+        if spec.resumable && spec.mode.replays_transcript() { command.env("DISABLE_AUTO_COMPACT", "1"); }
         if workspace { command.env("GIT_OPTIONAL_LOCKS", "0"); }
         if autorun { command.envs(AUTORUN_GIT_ENV.iter().copied()); }
         for key in env_removals(autorun) { command.env_remove(key); }
@@ -336,17 +362,31 @@ impl Provider for ClaudeProvider {
         };
 
         let (tx, events) = mpsc::unbounded_channel();
+        // A resumed session learns from its first reply whether the CLI accepted the handle.
+        let resuming = spec.resumable && spec.resume_handle.is_some();
+        let (start_tx, start_rx) = if resuming {
+            let (t, r) = oneshot::channel();
+            (Some(t), Some(r))
+        } else { (None, None) };
         {
             let shared = Arc::clone(&shared);
+            let mut start_tx = start_tx;
             tokio::spawn(async move {
+                let mut rejection: Option<String> = None;
                 let mut parser = StreamParser::new();
                 let mut lines = BufReader::new(stdout).lines();
                 let mut saw_init = false;
                 while let Ok(Some(line)) = lines.next_line().await {
+                    if resuming && !saw_init && let Some(message) = unknown_session_result(&line) {
+                        rejection = Some(message);
+                        continue;
+                    }
                     for item in parser.parse_line(&line) {
                         match item {
+                            Item::Compacted => shared.compacted.store(true, Ordering::SeqCst),
                             Item::SessionId(id) => {
                                 saw_init = true;
+                                if let Some(t) = start_tx.take() { let _ = t.send(Start::Ready); }
                                 *shared.session_id.lock().unwrap_or_else(|p| p.into_inner()) = Some(id);
                             }
                             Item::Request(req) => {
@@ -365,13 +405,19 @@ impl Provider for ClaudeProvider {
                     let _ = tokio::time::timeout(Duration::from_millis(500), stderr_task).await;
                     let tail = tail.lock().unwrap_or_else(|p| p.into_inner());
                     let detail = tail.iter().cloned().collect::<Vec<_>>().join("\n");
+                    if resuming && rejection.is_none() && detail.contains(UNKNOWN_SESSION) { rejection = Some(redact(&detail)); }
+                    if let Some(message) = rejection {
+                        if let Some(t) = start_tx.take() { let _ = t.send(Start::Rejected(message)); }
+                        return;
+                    }
+                    if let Some(t) = start_tx.take() { let _ = t.send(Start::Exited); }
                     let message = format!("claude exited before starting a session: {detail}");
                     let _ = tx.send(RawEvent { kind: EventKind::Error { message }, raw: None });
                 }
             });
         }
 
-        Ok(Box::new(ClaudeSession { notice, child, pgid, stdin, events, shared, _conversation_files: files }))
+        Ok(Box::new(ClaudeSession { notice, child, pgid, stdin, events, shared, started: start_rx, _conversation_files: files }))
     }
 }
 
@@ -379,6 +425,23 @@ impl Provider for ClaudeProvider {
 struct Shared {
     session_id: Mutex<Option<String>>,
     requests: Mutex<HashMap<ApprovalId, PendingRequest>>,
+    compacted: AtomicBool,
+}
+
+/// What the first reply of a resumed session shows.
+enum Start {
+    Ready,
+    Rejected(String),
+    Exited,
+}
+
+/// The redacted message of a `result` event that reports an unknown session ID.
+fn unknown_session_result(line: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(line.trim()).ok()?;
+    if v.get("type").and_then(Value::as_str) != Some("result") || v.get("subtype").and_then(Value::as_str) != Some("error_during_execution") {
+        return None;
+    }
+    v.get("errors")?.as_array()?.iter().filter_map(Value::as_str).find(|e| e.starts_with(UNKNOWN_SESSION)).map(redact)
 }
 
 struct ClaudeSession {
@@ -389,6 +452,8 @@ struct ClaudeSession {
     stdin: Option<ChildStdin>,
     events: mpsc::UnboundedReceiver<RawEvent>,
     shared: Arc<Shared>,
+    /// Set for a resumed session until its first message shows whether the CLI accepted the handle.
+    started: Option<oneshot::Receiver<Start>>,
 }
 
 impl ClaudeSession {
@@ -396,6 +461,15 @@ impl ClaudeSession {
         if let Some(pgid) = self.pgid {
             // ESRCH just means the group is already gone.
             let _ = killpg(Pid::from_raw(pgid), signal);
+        }
+    }
+
+    /// After the first message of a resumed session, wait for the CLI to start or reject it.
+    async fn await_start(&mut self) -> Result<(), ProviderError> {
+        let Some(rx) = self.started.take() else { return Ok(()) };
+        match tokio::time::timeout(RESUME_START_TIMEOUT, rx).await {
+            Ok(Ok(Start::Rejected(message))) => Err(ProviderError::ResumeRejected(message)),
+            Ok(Ok(Start::Ready | Start::Exited)) | Ok(Err(_)) | Err(_) => Ok(()),
         }
     }
 
@@ -436,13 +510,17 @@ impl ProviderSession for ClaudeSession {
         self.shared.session_id.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
+    fn compacted(&self) -> bool { self.shared.compacted.load(Ordering::SeqCst) }
+
     async fn send_user_message(&mut self, text: &str) -> Result<(), ProviderError> {
-        self.write_line(&json!({"type": "user", "message": {"role": "user", "content": text}})).await
+        self.write_line(&json!({"type": "user", "message": {"role": "user", "content": text}})).await?;
+        self.await_start().await
     }
     async fn send_user_message_with_images(&mut self, text: &str, images: &[discard_core::attachments::Attachment]) -> Result<(), ProviderError> {
         if images.is_empty() { return self.send_user_message(text).await; }
         let content = crate::attachments::claude_content(text, images)?;
-        self.write_line(&json!({"type": "user", "message": {"role": "user", "content": content}})).await
+        self.write_line(&json!({"type": "user", "message": {"role": "user", "content": content}})).await?;
+        self.await_start().await
     }
 
     /// Cancel-safe: this only awaits a channel receive.
@@ -508,6 +586,7 @@ mod tests {
 
     fn spec(enforcement: EnforcementMode) -> SessionSpec {
         SessionSpec {
+            resumable: false,
             reasoning_effort: None,
             mode: discard_core::provider::SessionMode::Coding,
             cwd: PathBuf::from("."),

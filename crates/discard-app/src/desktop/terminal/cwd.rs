@@ -115,7 +115,7 @@ mod tests {
             .create_agent(&AgentConfig {
                 workspace_write: false,
                 sandbox_autorun: false,
-                delegation: false,
+                delegation: false, native_resume: false,
                 reasoning_effort: None,
                 name: "Agent".into(),
                 provider: "codex".into(),

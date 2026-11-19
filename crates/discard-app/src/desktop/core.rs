@@ -145,7 +145,7 @@ fn closed_snapshot(s: &State) -> SnapshotDto {
         active_project_id: None, composer_disabled: true, rev: s.rev, history_rev: s.history_rev, memory_rev: s.memory_rev,
         project: String::new(), project_id: String::new(), project_path: String::new(), project_display_path: String::new(),
         channel_id: String::new(), agent_id: String::new(), channel: String::new(), agent: String::new(), provider: String::new(),
-        responder: None, agent_status: agent_status_name(AgentStatus::Idle).into(), turn_running: false, autorun: None, notice: None,
+        responder: None, agent_status: agent_status_name(AgentStatus::Idle).into(), turn_running: false, autorun: None, resume_state: None, notice: None,
         live_blocks: vec![], prompts: vec![], pending_approvals: 0, unread: false, new_anchor_id: None, archived: false, archive_busy: false,
         member_list_visible: true, panels: PanelsDto { channel_list: panels.channel_list, member_list: panels.member_list },
         branches: vec![], repositories: vec![], repositories_loading: false, channels: vec![], live_sub_agent_threads: vec![],
@@ -942,6 +942,7 @@ impl AppCore {
                 turn_running: ui.turn_running(),
                 // The indicator describes a running response only, like the plugin slot state.
                 autorun: if ui.turn_running() { AutorunDto::from_profile(&ui.session_profile) } else { None },
+                resume_state: ui.resume_state().map(|state| ResumeStateDto { state: state.clone(), agent: ui.responder().map_or_else(|| active.agent.clone(), |author| author.name.clone()) }),
                 notice: ui.notice().map(str::to_owned),
                 live_blocks: ui.live_blocks().to_vec(),
                 prompts: prompt_dtos(ui),
@@ -2723,6 +2724,25 @@ mod read_tests {
         ui.response_started();
         let core = AppCore::new(CoreInit { state: ui, commands, project: "P".into(), channel: "C".into(), agent: "A".into(), provider: "fake".into() });
         assert_eq!(serde_json::to_value(core.snapshot(&ViewId::main())).unwrap()["autorun"], serde_json::json!({"state": "unavailable", "reason": "r"}));
+    }
+
+    #[test]
+    fn snapshot_reports_how_the_response_started() {
+        use discard_core::ui_state::ResumeState;
+        let snapshot = |ui: UiState| {
+            let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+            let core = AppCore::new(CoreInit { state: ui, commands, project: "P".into(), channel: "C".into(), agent: "A".into(), provider: "fake".into() });
+            serde_json::to_value(core.snapshot(&ViewId::main())).unwrap()["resumeState"].clone()
+        };
+        let mut ui = UiState::new(ChannelId::new(), vec![]);
+        assert_eq!(snapshot(ui.clone()), serde_json::Value::Null);
+        ui.apply(Update::ResumeState(ResumeState::Resumed));
+        assert_eq!(snapshot(ui.clone()), serde_json::json!({"kind": "resumed", "agent": "A"}));
+        ui.apply(Update::Responding(discard_core::model::MessageAuthor { agent_id: discard_core::model::AgentId::new(), name: "Reviewer".into(), provider: "fake".into(), avatar: None }));
+        ui.apply(Update::ResumeState(ResumeState::Replay { reason: "the model changed.".into() }));
+        assert_eq!(snapshot(ui.clone()), serde_json::json!({"kind": "replay", "reason": "the model changed.", "agent": "Reviewer"}));
+        ui.user_sent("next");
+        assert_eq!(snapshot(ui), serde_json::Value::Null);
     }
 
     #[test]

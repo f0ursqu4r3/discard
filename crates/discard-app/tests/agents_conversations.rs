@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 
 fn config() -> AgentConfig {
     AgentConfig {
-        workspace_write: false, sandbox_autorun: false, delegation: false,
+        workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false,
         reasoning_effort: None,
         name: generated_name(),
         avatar: Some("avatar.png".into()),

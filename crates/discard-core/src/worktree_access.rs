@@ -239,7 +239,7 @@ mod tests {
         git(&repo, &["worktree", "add", "--detach", path.to_str().unwrap()]).unwrap();
         git(&path, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "unique commit"]).unwrap();
         let store = Store::open_in_memory().unwrap();
-        let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, name: "Agent".into(), provider: "fake".into(), model: Some("test".into()), avatar: None, reasoning_effort: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+        let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation: false, name: "Agent".into(), provider: "fake".into(), model: Some("test".into()), avatar: None, reasoning_effort: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
         let project = store.import_project_folder(&repo).unwrap();
         let channel = Channel { id: ChannelId::new(), project_id: Some(project.id), name: "detached".into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::Worktree };
         store.create_named_repository_channel(&channel, "", None, Some(&WorktreeRecord { channel_id: channel.id.clone(), path: path.to_string_lossy().into(), branch: "detached".into(), base_commit: String::new(), repo: repo.to_string_lossy().into(), owned: false })).unwrap();

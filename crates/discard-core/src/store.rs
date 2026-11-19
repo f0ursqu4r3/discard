@@ -15,7 +15,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+mod agent_sessions;
 mod rail;
+pub use agent_sessions::AgentSession;
 pub use rail::{RailGroup, RailItem, RailLayout, RailTarget};
 
 #[derive(Debug, thiserror::Error)]
@@ -263,7 +265,7 @@ pub struct ThreadDeletion {
 
 /// Rows that hang off one channel, in an order that leaves no dangling reference. Posted references in other
 /// channels go with their source message, so a caller that keeps them must turn them into messages first.
-const CHANNEL_PURGE_SQL: [&str; 19] = [
+const CHANNEL_PURGE_SQL: [&str; 20] = [
     "DELETE FROM project_last_channels WHERE channel_id=?1",
     "DELETE FROM project_channel_views WHERE channel_id=?1",
     "DELETE FROM project_channels WHERE channel_id=?1",
@@ -277,6 +279,7 @@ const CHANNEL_PURGE_SQL: [&str; 19] = [
     "DELETE FROM events WHERE session_id IN (SELECT id FROM sessions WHERE channel_id=?1)",
     "DELETE FROM conversation_context WHERE channel_id=?1",
     "DELETE FROM response_memory WHERE channel_id=?1",
+    "DELETE FROM agent_sessions WHERE channel_id=?1",
     "DELETE FROM sessions WHERE channel_id=?1",
     "DELETE FROM messages WHERE source_message_id IN (SELECT id FROM messages WHERE channel_id=?1)",
     "DELETE FROM messages WHERE channel_id=?1",
@@ -611,6 +614,13 @@ impl Store {
             // Saved rail order and groups. Projects without a saved row keep their `visible_projects` order.
             tx.execute_batch(rail::RAIL_SCHEMA)?;
             tx.pragma_update(None, "user_version", 15)?;
+            tx.commit()?;
+        }
+        if self.schema_version()? < 16 {
+            let tx = self.conn.unchecked_transaction()?;
+            // Native provider sessions, one per channel and agent.
+            tx.execute_batch(agent_sessions::AGENT_SESSIONS_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 16)?;
             tx.commit()?;
         }
         self.conn.execute_batch("CREATE TABLE IF NOT EXISTS direct_message_list (agent_id TEXT PRIMARY KEY REFERENCES agents(id));")?;
@@ -1676,9 +1686,11 @@ impl Store {
             params![id.0],
         )?;
         tx.execute("DELETE FROM always_allow_rules WHERE agent_id=?1", params![id.0])?;
+        // The tombstone has no provider, so its native sessions can never resume.
+        tx.execute("DELETE FROM agent_sessions WHERE agent_id=?1", params![id.0])?;
         // Keep a minimal tombstone so retained history still has a readable author.
         let tombstone = AgentConfig {
-            workspace_write: false, sandbox_autorun: false, delegation: false,
+            workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false,
             reasoning_effort: None,
             name: "Deleted agent".into(),
             avatar: None,
@@ -2086,13 +2098,16 @@ impl Store {
     }
 
     pub fn archive_channel(&self, channel: &ChannelId) -> Result<()> {
-        let n = self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
             "UPDATE channels SET archived = 1 WHERE id = ?1",
             params![channel.0],
         )?;
         if n == 0 {
             return Err(StoreError::NotFound(format!("channel {}", channel.0)));
         }
+        tx.execute("DELETE FROM agent_sessions WHERE channel_id=?1", params![channel.0])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -2681,6 +2696,7 @@ impl Store {
         for sql in [
             "DELETE FROM events WHERE session_id IN (SELECT id FROM sessions WHERE channel_id=?1)",
             "DELETE FROM conversation_context WHERE channel_id=?1",
+            "DELETE FROM agent_sessions WHERE channel_id=?1",
             "DELETE FROM channel_agents WHERE channel_id=?1",
             "DELETE FROM sessions WHERE channel_id=?1",
             "DELETE FROM channels WHERE id=?1",
@@ -3057,7 +3073,7 @@ mod tests {
         let f = fixture();
         f.store.conn.execute_batch("DROP TABLE always_allow_rules; PRAGMA user_version=8;").unwrap();
         f.store.migrate().unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 15);
+        assert_eq!(f.store.schema_version().unwrap(), 16);
         assert!(f.store.always_allow_rules(&f.project.id).unwrap().is_empty());
     }
 
@@ -3070,7 +3086,7 @@ mod tests {
             store.conn.execute_batch("DROP TABLE autorun_responses; PRAGMA user_version=9;").unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 15);
+        assert_eq!(store.schema_version().unwrap(), 16);
         let columns: Vec<String> = store.conn.prepare("PRAGMA table_info(autorun_responses)").unwrap()
             .query_map([], |r| r.get::<_, String>(1)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
         assert_eq!(columns, ["response_id", "channel_id", "agent_id", "provider", "root", "created_at"]);
@@ -3122,7 +3138,7 @@ mod tests {
             .insert_agent(
                 &agent,
                 &AgentConfig {
-                    workspace_write: false, sandbox_autorun: false, delegation: false,
+                    workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false,
                     reasoning_effort: None,
                     name: "Scout".into(),
                     avatar: None,
@@ -3252,7 +3268,7 @@ mod tests {
         let v1 = Store::open(&path).unwrap().schema_version().unwrap();
         let v2 = Store::open(&path).unwrap().schema_version().unwrap();
         assert!(v1 >= 2);
-        assert_eq!(v1, 15);
+        assert_eq!(v1, 16);
         assert_eq!(v1, v2);
     }
 
@@ -3296,7 +3312,7 @@ mod tests {
             conn.execute("INSERT INTO channels (id, project_id, name, agent_id, workspace_mode) VALUES ('c', 'p', 'general', 'a', 'main_checkout')", []).unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 15);
+        assert_eq!(store.schema_version().unwrap(), 16);
         let channels = store.channels_for_project(&ProjectId("p".into())).unwrap();
         assert_eq!(channels.len(), 1);
         assert_eq!(
@@ -3462,11 +3478,11 @@ mod tests {
         let f = fixture(); let turn = Turn::new(f.session.clone()); f.store.insert_turn(&turn).unwrap();
         let a = Approval::new(turn.id, "Bash", json!({})); f.store.save_approval(&a).unwrap();
         f.store.conn.execute_batch("ALTER TABLE approvals DROP COLUMN kind; DROP TABLE agent_commits; DROP TABLE always_allow_rules;").unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 15);
+        assert_eq!(f.store.schema_version().unwrap(), 16);
         f.store.migrate().unwrap();
         assert_eq!(f.store.load_approval(&a.id).unwrap().kind, crate::approval::ApprovalKind::ProviderTool);
         f.store.migrate().unwrap();
-        assert_eq!(f.store.schema_version().unwrap(), 15);
+        assert_eq!(f.store.schema_version().unwrap(), 16);
     }
 
     #[test]
@@ -3641,7 +3657,7 @@ mod tests {
                 .insert_agent(
                     &agent,
                     &AgentConfig {
-                        workspace_write: false, sandbox_autorun: false, delegation: false,
+                        workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false,
                         reasoning_effort: None,
                         name: "Friend".into(),
                         avatar: None,
@@ -3744,7 +3760,7 @@ mod tests {
                 .insert_agent(
                     &agent,
                     &AgentConfig {
-                        workspace_write: false, sandbox_autorun: false, delegation: false,
+                        workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false,
                         reasoning_effort: None,
                         name: "A".into(),
                         avatar: None,
@@ -3817,7 +3833,7 @@ mod tests {
             (f.channel, message)
         };
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 15);
+        assert_eq!(store.schema_version().unwrap(), 16);
         assert_eq!(columns(&store, "channels"), fresh_channels, "an upgraded database matches a fresh one");
         assert_eq!(columns(&store, "messages"), fresh_messages);
         assert_eq!(texts(&store.messages_for_channel(&channel.id).unwrap()), ["old"]);
@@ -3825,7 +3841,7 @@ mod tests {
         let thread = store.create_thread(&channel.id, &message, "old", &channel.agent_id).unwrap();
         assert!(store.thread_info(&thread.id).unwrap().unwrap().followed);
         store.migrate().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 15);
+        assert_eq!(store.schema_version().unwrap(), 16);
     }
 
     #[test]
@@ -3846,7 +3862,7 @@ mod tests {
             (f.channel, answer)
         };
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 15);
+        assert_eq!(store.schema_version().unwrap(), 16);
         assert_eq!(columns(&store, "channels"), fresh, "an upgraded database matches a fresh one");
         let question = store.thread_for_anchor(&answer).unwrap().unwrap();
         assert_eq!((question.kind, question.state, question.followed), (ThreadKind::Question, None, true), "old threads are question threads");
@@ -3857,7 +3873,7 @@ mod tests {
     }
 
     fn store_agent_config() -> AgentConfig {
-        AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None, name: "Scout".into(), avatar: None, provider: "claude".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }
+        AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation: false, reasoning_effort: None, name: "Scout".into(), avatar: None, provider: "claude".into(), model: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }
     }
 
     #[test]
@@ -4498,7 +4514,7 @@ mod agent_lifecycle_tests {
     }
     fn config() -> AgentConfig {
         AgentConfig {
-            workspace_write: false, sandbox_autorun: false, delegation: false,
+            workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false,
             reasoning_effort: None,
             name: crate::agent::generated_name(),
             avatar: None,
@@ -5195,7 +5211,7 @@ mod text_channel_tests {
 
     fn config(name: &str) -> AgentConfig {
         AgentConfig {
-            workspace_write: false, sandbox_autorun: false, delegation: false,
+            workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false,
             reasoning_effort: None,
             name: name.into(),
             avatar: None,
@@ -5382,7 +5398,7 @@ mod text_channel_tests {
             (project, general, branch)
         };
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 15);
+        assert_eq!(store.schema_version().unwrap(), 16);
         assert!(!store.project_show_archived(&project.id).unwrap(), "the new column defaults to off");
         let general_metadata = store.project_channel_metadata(&general.id).unwrap().unwrap();
         assert_eq!((general_metadata.kind, general_metadata.project_id.clone()), (ProjectChannelKind::General, project.id.clone()));
@@ -5398,7 +5414,7 @@ mod text_channel_tests {
         assert!(store.conn.execute("INSERT INTO project_channels(channel_id,project_id,kind,branch_name,repository) VALUES(?1,?2,'branch','feature','/p/sub')", params![other.id.0, project.id.0]).is_err(), "the branch index still holds");
         assert!(store.conn.execute("INSERT INTO project_channels(channel_id,project_id,kind) VALUES(?1,?2,'general')", params![other.id.0, project.id.0]).is_err(), "the general index still holds");
         store.migrate().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 15);
+        assert_eq!(store.schema_version().unwrap(), 16);
     }
 
     #[test]
@@ -5454,7 +5470,7 @@ mod navigation_action_tests {
     fn fixture() -> Fixture {
         let store = Store::open_in_memory().unwrap();
         let config = AgentConfig {
-            workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None,
+            workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false, reasoning_effort: None,
             name: "Main".into(), avatar: None, provider: "claude".into(), model: Some("model".into()),
             system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false,
         };
@@ -5507,7 +5523,7 @@ mod navigation_action_tests {
             store.conn.execute_batch("DROP TABLE rail_projects; DROP TABLE rail_groups; PRAGMA user_version=14;").unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 15);
+        assert_eq!(store.schema_version().unwrap(), 16);
         let layout = store.rail_layout().unwrap();
         assert_eq!(layout.items, ids.iter().cloned().map(RailItem::Project).collect::<Vec<_>>(), "no saved order keeps the visible_projects order");
         let group = store.rail_group_projects(&ids[1], &ids[0]).unwrap();
@@ -5535,7 +5551,7 @@ mod navigation_action_tests {
             drop(f);
             let store = Store::open(&path).unwrap();
             let config = AgentConfig {
-                workspace_write: false, sandbox_autorun: false, delegation: false, reasoning_effort: None,
+                workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false, reasoning_effort: None,
                 name: "Main".into(), avatar: None, provider: "claude".into(), model: Some("model".into()),
                 system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false,
             };
@@ -5548,7 +5564,7 @@ mod navigation_action_tests {
             (project, general)
         };
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 15);
+        assert_eq!(store.schema_version().unwrap(), 16);
         assert!(!store.channel_muted(&general.id).unwrap(), "the new column defaults to off");
         assert_eq!(store.load_channel(&general.id).unwrap().project_id, Some(project.id));
         store.set_channel_muted(&general.id, true).unwrap();
@@ -5605,5 +5621,115 @@ mod navigation_action_tests {
         assert!(f.store.worktree_for(&two.id).unwrap().is_none());
         assert!(f.store.worktree_for(&other.id).unwrap().is_some());
         assert_eq!(f.store.load_channel(&one.id).unwrap(), one, "the channel stays");
+    }
+}
+
+#[cfg(test)]
+mod agent_session_tests {
+    use super::*;
+    use crate::capability::ApprovalPolicy;
+    use crate::model::{Block, Message, Role};
+    use std::collections::BTreeMap;
+
+    struct Fixture {
+        store: Store,
+        agent: AgentId,
+        channel: Channel,
+    }
+
+    fn fixture() -> Fixture {
+        let store = Store::open_in_memory().unwrap();
+        let config = AgentConfig {
+            workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false, reasoning_effort: None,
+            name: "Main".into(), avatar: None, provider: "claude".into(), model: Some("model".into()),
+            system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false,
+        };
+        let agent = store.create_agent(&config).unwrap();
+        let project = Project { id: ProjectId::new(), name: "P".into(), path: "/p".into() };
+        store.insert_project(&project).unwrap();
+        let channel = store.ensure_project_general_channel(&project.id, &agent).unwrap();
+        Fixture { store, agent, channel }
+    }
+
+    fn row(channel: &ChannelId, agent: &AgentId) -> AgentSession {
+        AgentSession {
+            channel_id: channel.clone(), agent_id: agent.clone(), handle: "handle-1".into(),
+            fingerprint: r#"{"model":"m"}"#.into(), delivered_through: Some(MessageId::new()),
+            delivered_memory: BTreeMap::from([("a".to_string(), 3), ("b".to_string(), 7)]),
+            delivered_topic_version: Some(4), delivered_capture_paused: true, bytes_in_session: 1234,
+            cwd: "/p".into(), dropped_reason: None,
+        }
+    }
+
+    #[test]
+    fn migration_16_adds_agent_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v15.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store.conn.execute_batch("DROP TABLE agent_sessions; PRAGMA user_version=15;").unwrap();
+        }
+        let f = Store::open(&path).unwrap();
+        assert_eq!(f.schema_version().unwrap(), 16);
+        let count: i64 = f.conn.query_row("SELECT COUNT(*) FROM agent_sessions", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn agent_session_round_trips_with_memory_map() {
+        let f = fixture();
+        assert!(f.store.agent_session(&f.channel.id, &f.agent).unwrap().is_none());
+        let saved = row(&f.channel.id, &f.agent);
+        f.store.put_agent_session(&saved).unwrap();
+        assert_eq!(f.store.agent_session(&f.channel.id, &f.agent).unwrap(), Some(saved.clone()));
+        let changed = AgentSession { handle: "handle-2".into(), delivered_through: None, delivered_topic_version: None, delivered_capture_paused: false, ..saved };
+        f.store.put_agent_session(&changed).unwrap();
+        assert_eq!(f.store.agent_session(&f.channel.id, &f.agent).unwrap(), Some(changed), "put upserts");
+        f.store.delete_agent_session(&f.channel.id, &f.agent).unwrap();
+        assert!(f.store.agent_session(&f.channel.id, &f.agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn drop_then_put_clears_the_reason() {
+        let f = fixture();
+        let saved = row(&f.channel.id, &f.agent);
+        f.store.put_agent_session(&saved).unwrap();
+        f.store.drop_agent_session(&f.channel.id, &f.agent, "model changed").unwrap();
+        let dropped = f.store.agent_session(&f.channel.id, &f.agent).unwrap().unwrap();
+        assert_eq!(dropped.dropped_reason.as_deref(), Some("model changed"));
+        assert_eq!(dropped.handle, saved.handle, "the row keeps its handle");
+        f.store.put_agent_session(&saved).unwrap();
+        assert_eq!(f.store.agent_session(&f.channel.id, &f.agent).unwrap().unwrap().dropped_reason, None);
+    }
+
+    #[test]
+    fn deleting_a_channel_removes_its_rows() {
+        let f = fixture();
+        let anchor = Message { id: MessageId::new(), channel_id: f.channel.id.clone(), role: Role::User, blocks: vec![Block::Markdown { text: "why?".into() }] };
+        f.store.insert_message(&anchor).unwrap();
+        let thread = f.store.create_thread(&f.channel.id, &anchor.id, "Why", &f.agent).unwrap();
+        f.store.put_agent_session(&row(&thread.id, &f.agent)).unwrap();
+        f.store.put_agent_session(&row(&f.channel.id, &f.agent)).unwrap();
+        f.store.delete_thread(&thread.id).unwrap();
+        assert!(f.store.agent_session(&thread.id, &f.agent).unwrap().is_none());
+        assert!(f.store.agent_session(&f.channel.id, &f.agent).unwrap().is_some(), "other channels keep theirs");
+    }
+
+    #[test]
+    fn archiving_a_channel_removes_its_rows() {
+        let f = fixture();
+        f.store.put_agent_session(&row(&f.channel.id, &f.agent)).unwrap();
+        f.store.archive_channel(&f.channel.id).unwrap();
+        assert!(f.store.agent_session(&f.channel.id, &f.agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn deleting_an_agent_removes_its_rows() {
+        for delete_conversations in [true, false] {
+            let f = fixture();
+            f.store.put_agent_session(&row(&f.channel.id, &f.agent)).unwrap();
+            f.store.delete_agent(&f.agent, DeleteAgentOptions { delete_conversations, delete_private_memory: false }).unwrap();
+            assert!(f.store.agent_session(&f.channel.id, &f.agent).unwrap().is_none(), "delete_conversations={delete_conversations}");
+        }
     }
 }

@@ -399,6 +399,13 @@ impl AutorunDto {
         }
     }
 }
+/// How the latest response started, with the name of the agent that answered.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+pub struct ResumeStateDto {
+    #[serde(flatten)]
+    pub state: discard_core::ui_state::ResumeState,
+    pub agent: String,
+}
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotDto {
@@ -420,6 +427,7 @@ pub struct SnapshotDto {
     pub agent_status: String,
     pub turn_running: bool,
     pub autorun: Option<AutorunDto>,
+    pub resume_state: Option<ResumeStateDto>,
     pub notice: Option<String>,
     pub live_blocks: Vec<BlockDto>,
     pub prompts: Vec<PromptDto>,
@@ -506,6 +514,7 @@ fn sample_snapshot() -> SnapshotDto {
         agent_status: "working".into(),
         turn_running: true,
         autorun: None,
+        resume_state: None,
         notice: None,
         live_blocks: vec![Block::Markdown {
             text: "Hello".into(),

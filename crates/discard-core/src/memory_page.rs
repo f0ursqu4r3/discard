@@ -80,7 +80,7 @@ mod tests {
         };
         let id = AgentId::new();
         let cfg = AgentConfig {
-            workspace_write: false, sandbox_autorun: false, delegation: false,
+            workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false,
             reasoning_effort: None,
             name: "Agent".into(),
             avatar: None,

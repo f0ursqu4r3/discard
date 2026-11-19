@@ -181,7 +181,7 @@ mod tests {
     struct World { store: Store, project: ProjectId, channel: Channel, caller: AgentId, outsider: AgentId, requests: AgentRequests }
 
     fn config(name: &str, delegation: bool) -> AgentConfig {
-        AgentConfig { workspace_write: false, sandbox_autorun: false, delegation, reasoning_effort: None, name: name.into(), avatar: None, provider: "codex".into(), model: Some("gpt".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }
+        AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation, reasoning_effort: None, name: name.into(), avatar: None, provider: "codex".into(), model: Some("gpt".into()), system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }
     }
 
     fn world() -> World {

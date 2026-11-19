@@ -498,6 +498,22 @@ async function remove() {
         </Field>
         <Field orientation="horizontal">
           <FieldContent>
+            <FieldLabel for="agent-native-resume">Keep provider session</FieldLabel>
+            <FieldDescription id="agent-native-resume-description">
+              Keeps this agent's provider session between responses. The provider stores the
+              conversation on disk.
+            </FieldDescription>
+          </FieldContent>
+          <Switch
+            id="agent-native-resume"
+            :model-value="!!draft.nativeResume"
+            :disabled="busy"
+            aria-describedby="agent-native-resume-description"
+            @update:model-value="draft.nativeResume = $event === true"
+          />
+        </Field>
+        <Field orientation="horizontal">
+          <FieldContent>
             <FieldLabel for="agent-plugin-write">Allow plugin writes</FieldLabel>
             <FieldDescription id="agent-plugin-write-description">
               Works only in a builder session. Start Discard with

@@ -58,6 +58,7 @@ async fn wait_for_file(path: &Path) {
 
 fn spec() -> SessionSpec {
     SessionSpec {
+        resumable: false,
         reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding,
         cwd: PathBuf::from("."),
@@ -461,4 +462,195 @@ async fn tested_claude_version_has_no_notice() {
     let rig = Rig::new();
     let session = rig.provider("approval").start_session(conversation_spec(&rig)).await.unwrap();
     assert_eq!(session.notice(), None);
+}
+
+fn resumable_spec(rig: &Rig) -> SessionSpec {
+    let mut s = conversation_spec(rig);
+    s.resumable = true;
+    s.cwd = rig.dir.path().join("stable-cwd");
+    std::fs::create_dir_all(&s.cwd).unwrap();
+    s.cwd = s.cwd.canonicalize().unwrap();
+    s
+}
+
+fn log_line(log: &str, prefix: &str) -> String {
+    log.lines().find_map(|l| l.strip_prefix(prefix)).unwrap_or_else(|| panic!("no {prefix} line in {log}")).to_string()
+}
+
+#[tokio::test]
+async fn resumable_session_passes_resume_and_the_same_isolation_flags_as_a_fresh_one() {
+    let mut lists = Vec::new();
+    let rig = Rig::new();
+    for handle in [None, Some("sess-9".to_string())] {
+        let mut s = resumable_spec(&rig);
+        s.resume_handle = handle;
+        let mut session = rig.provider("approval").start_session(s).await.unwrap();
+        let _ = session.next_event().await;
+        lists.push(rig.log_text().lines().filter_map(|l| l.strip_prefix("ARGS ")).next_back().unwrap().to_string());
+    }
+    assert!(!lists[0].contains("--resume"), "{}", lists[0]);
+    assert_eq!(lists[1].replace(" --resume sess-9", ""), lists[0]);
+    assert!(lists[1].contains("--resume sess-9"));
+    for flag in ["--tools", "--strict-mcp-config", "--restricted", "--disable-slash-commands", "--system-prompt-snapshot off", "--append-system-prompt Fresh synthetic memory", "--mcp-config"] {
+        assert!(lists[1].contains(flag), "{flag}: {}", lists[1]);
+    }
+    assert!(!lists[1].contains("no-session-persistence"));
+}
+
+#[tokio::test]
+async fn resumable_session_runs_in_the_given_directory() {
+    let rig = Rig::new();
+    let mut s = resumable_spec(&rig);
+    s.resume_handle = Some("sess-9".into());
+    let cwd = s.cwd.clone();
+    let mut session = rig.provider("approval").start_session(s).await.unwrap();
+    let _ = session.next_event().await;
+    assert_eq!(log_line(&rig.log_text(), "CWD "), cwd.display().to_string());
+    drop(session);
+    assert!(cwd.exists(), "the directory belongs to the caller");
+    // A relative or missing directory is refused.
+    for bad in [PathBuf::from("relative"), rig.dir.path().join("missing")] {
+        let mut s = resumable_spec(&rig);
+        s.cwd = bad;
+        let error = rig.provider("approval").start_session(s).await.err().unwrap();
+        assert!(matches!(error, ProviderError::Setup(_)), "{error:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_handle_without_resumable_is_still_refused_in_conversation() {
+    let rig = Rig::new();
+    let mut s = conversation_spec(&rig);
+    s.resume_handle = Some("sess-9".into());
+    let error = rig.provider("approval").start_session(s).await.err().unwrap();
+    assert!(matches!(error, ProviderError::Setup(_)), "{error:?}");
+    assert!(error.to_string().contains("fresh transcript replay"), "{error}");
+    assert!(!rig.log_text().contains("ARGS"));
+}
+
+#[tokio::test]
+async fn the_unknown_session_error_maps_to_resume_rejected() {
+    let rig = Rig::new();
+    let mut s = resumable_spec(&rig);
+    s.resume_handle = Some("gone-1".into());
+    let mut session = rig.provider("resume_rejected").start_session(s).await.unwrap();
+    let error = session.send_user_message("hello").await.expect_err("the rejection");
+    assert!(matches!(&error, ProviderError::ResumeRejected(m) if m.contains("No conversation found")), "{error:?}");
+    // No generic turn failure follows.
+    assert!(session.next_event().await.is_none());
+}
+
+#[tokio::test]
+async fn resumable_sessions_set_disable_auto_compact() {
+    let rig = Rig::new();
+    let mut session = rig.provider("approval").start_session(resumable_spec(&rig)).await.unwrap();
+    let _ = session.next_event().await;
+    assert_eq!(log_line(&rig.log_text(), "AUTO_COMPACT "), "1");
+    let rig = Rig::new();
+    let mut session = rig.provider("approval").start_session(conversation_spec(&rig)).await.unwrap();
+    let _ = session.next_event().await;
+    assert_eq!(log_line(&rig.log_text(), "AUTO_COMPACT ").trim(), "");
+}
+
+#[tokio::test]
+async fn a_compact_boundary_event_sets_compacted() {
+    let rig = Rig::new();
+    let mut lines: Vec<String> = std::fs::read_to_string(FIXTURE).unwrap().lines().map(String::from).collect();
+    lines.insert(1, r#"{"type":"system","subtype":"compact_boundary","session_id":"s","compact_metadata":{"trigger":"auto","pre_tokens":1}}"#.into());
+    let fixture = rig.dir.path().join("compact.jsonl");
+    std::fs::write(&fixture, lines.join("\n")).unwrap();
+    let mut session = rig.provider("approval").with_env("FAKE_CLAUDE_FIXTURE", fixture).start_session(resumable_spec(&rig)).await.unwrap();
+    assert!(!session.compacted());
+    session.send_user_message("hello").await.unwrap();
+    let mut seen = 0;
+    while let Some(event) = session.next_event().await {
+        seen += 1;
+        if matches!(event.kind, EventKind::ApprovalRequest { .. }) { break; }
+    }
+    assert!(seen > 0 && session.compacted());
+}
+
+#[tokio::test]
+async fn resume_epoch_returns_the_cli_version() {
+    let rig = Rig::new();
+    let p = rig.provider("approval");
+    assert_eq!(p.resume_epoch(), None);
+    assert_eq!(p.check_setup().await, SetupStatus::Ready);
+    assert_eq!(p.resume_epoch().as_deref(), Some("2.1.318"));
+    let p = rig.provider("approval").with_env("FAKE_CLAUDE_VERSION", "2.1.325 (Claude Code)");
+    let _ = p.start_session(conversation_spec(&rig)).await.unwrap();
+    assert_eq!(p.resume_epoch().as_deref(), Some("2.1.325"));
+}
+
+fn error_message(event: &discard_core::event::RawEvent) -> Option<&str> {
+    match &event.kind { EventKind::Error { message } => Some(message), _ => None }
+}
+
+#[tokio::test]
+async fn a_non_resumable_resume_with_an_unknown_session_keeps_the_generic_error() {
+    for mode in ["exit_early", "resume_rejected"] {
+        let rig = Rig::new();
+        let mut sp = spec();
+        sp.resume_handle = Some("gone-1".into());
+        let mut s = rig.provider(mode).start_session(sp).await.unwrap();
+        s.send_user_message("hello").await.expect("no ResumeRejected without resumable");
+        let mut errors = Vec::new();
+        while let Some(e) = s.next_event().await { if let Some(m) = error_message(&e) { errors.push(m.to_string()); } }
+        assert!(errors.iter().any(|m| m.contains("No conversation found")), "{mode}: {errors:?}");
+    }
+}
+
+#[tokio::test]
+async fn disable_auto_compact_is_limited_to_resumable_conversation_and_workspace_sessions() {
+    let rig = Rig::new();
+    let mut sp = spec();
+    sp.resumable = true;
+    let mut s = rig.provider("approval").start_session(sp).await.unwrap();
+    let _ = s.next_event().await;
+    assert_eq!(log_line(&rig.log_text(), "AUTO_COMPACT ").trim(), "", "Coding must not get the variable");
+}
+
+#[tokio::test]
+async fn an_accepted_resume_works_normally() {
+    let rig = Rig::new();
+    let mut sp = resumable_spec(&rig);
+    sp.resume_handle = Some("sess-9".into());
+    let mut s = rig.provider("approval").start_session(sp).await.unwrap();
+    s.send_user_message("hello").await.unwrap();
+    let mut kinds = 0;
+    while let Some(e) = s.next_event().await {
+        assert!(error_message(&e).is_none());
+        kinds += 1;
+        if matches!(e.kind, EventKind::ApprovalRequest { .. }) { break; }
+    }
+    assert!(kinds > 1);
+    assert_eq!(s.resume_handle().as_deref(), Some("00000000-0000-4000-8000-000000000001"));
+}
+
+#[tokio::test]
+async fn the_stderr_only_unknown_session_exit_maps_to_resume_rejected() {
+    let rig = Rig::new();
+    let mut sp = resumable_spec(&rig);
+    sp.resume_handle = Some("nope".into());
+    let mut s = rig.provider("exit_early").start_session(sp).await.unwrap();
+    let error = s.send_user_message("hello").await.expect_err("the rejection");
+    assert!(matches!(&error, ProviderError::ResumeRejected(m) if m.contains("No conversation found")), "{error:?}");
+}
+
+#[tokio::test]
+async fn a_mid_turn_error_result_after_init_is_not_a_resume_rejection() {
+    let rig = Rig::new();
+    let mut lines: Vec<String> = std::fs::read_to_string(FIXTURE).unwrap().lines().map(String::from).collect();
+    lines.insert(1, r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom","errors":["No conversation found with session ID: x"],"usage":{"input_tokens":0,"output_tokens":0}}"#.into());
+    let fixture = rig.dir.path().join("mid-turn-error.jsonl");
+    std::fs::write(&fixture, lines.join("\n")).unwrap();
+    let mut sp = resumable_spec(&rig);
+    sp.resume_handle = Some("sess-9".into());
+    let mut s = rig.provider("approval").with_env("FAKE_CLAUDE_FIXTURE", fixture).start_session(sp).await.unwrap();
+    s.send_user_message("hello").await.expect("not ResumeRejected");
+    let mut saw_error = false;
+    while let Some(e) = s.next_event().await {
+        if error_message(&e) == Some("boom") { saw_error = true; break; }
+    }
+    assert!(saw_error);
 }

@@ -17,6 +17,7 @@ const original = {
   pluginWrite: false,
   workspaceWrite: false,
   sandboxAutorun: false,
+  nativeResume: false,
   sandboxAutorunUnavailable: null as string | null,
   archived: false,
 }
@@ -305,6 +306,23 @@ test('disables autorun with the provider reason and no Soon label', async () => 
   expect(view.get('#agent-sandbox-autorun').attributes('disabled')).toBeDefined()
   expect(view.text()).toContain('Codex autorun was checked on macOS only.')
   expect(view.text()).not.toContain('Soon')
+  view.unmount()
+})
+
+test('the Keep provider session control is off by default, explains itself, and saves without confirmation', async () => {
+  const view = await editor()
+  const toggle = view.get('#agent-native-resume')
+  expect(toggle.attributes('aria-checked')).toBe('false')
+  expect(view.get('label[for="agent-native-resume"]').text()).toBe('Keep provider session')
+  expect(view.get(`#${toggle.attributes('aria-describedby')}`).text()).toBe(
+    "Keeps this agent's provider session between responses. The provider stores the conversation on disk.",
+  )
+  await toggle.trigger('click')
+  await flushPromises()
+  expect(invoke).toHaveBeenLastCalledWith(
+    'settings_agent_review',
+    expect.objectContaining({ id: 'a', draft: expect.objectContaining({ nativeResume: true }) }),
+  )
   view.unmount()
 })
 

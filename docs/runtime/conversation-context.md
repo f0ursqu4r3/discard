@@ -4,9 +4,57 @@ Regular agent chats use `SessionMode::Conversation`. The deliberate `--builder` 
 
 Before each conversation response, Engine loads the saved agent and conversation. An archived or deleted agent cannot start a response. The configured provider must be available and the model must be explicit. Engine holds that snapshot until the response ends. Provider/model changes keep the transcript and add a saved system message.
 
-Conversation mode builds fresh provider input from this conversation's messages, the saved personality, and current applicable memory. It never supplies a native resume handle. Memory receives the actual optional project and source conversation ID. Conversation mode disables plugin-authoring tools and skips git worktree preparation. Provider adapters create their own empty working directory.
+Conversation mode builds fresh provider input from this conversation's messages, the saved personality, and current applicable memory. It supplies a native resume handle only for an agent with **Keep provider session** on (see [Native provider resume](#native-provider-resume)). Memory receives the actual optional project and source conversation ID. Conversation mode disables plugin-authoring tools and skips git worktree preparation. Provider adapters create their own empty working directory, except for a resumable session, which uses a stable Discard-owned directory.
 
 Memory instructions and preferences always enter the prompt in domain precedence order. Other live items use word overlap with the current request and the two latest messages in this conversation. Matching uses Unicode alphanumeric words of at least three bytes, normalized to lowercase. This is a simple lexical retrieval policy. The scoped memory search/read tools remain available for further retrieval. Current user instructions take precedence over memory. Capture guidance and the current capture-pause state enter each response prompt.
+
+## Native provider resume
+
+An agent with **Keep provider session** on (`AgentConfig.native_resume`, off by default) keeps one provider session for each channel and agent. The next response continues that session and sends only what is new. The provider stores the conversation on disk, outside Discard's control. The feature is for Conversation and Workspace responses in a channel. Thread turns, summary sessions, and the `--builder` Coding path never resume. If the engine cannot find a stable session directory or a readable MCP config, the response replays as usual.
+
+### Session record
+
+The table `agent_sessions` has one row for each (channel, agent). It holds the provider handle, the session fingerprint (as JSON), `delivered_through` (the last saved message the session has seen), the memory items given so far (item ID to version), the topic version, the capture-pause flag, `bytes_in_session`, the session directory, and `dropped_reason`. Deleting or archiving a channel, or deleting the agent, deletes its rows. Turning the setting off, or changing the agent's provider or model, leaves no row.
+
+### Fixed prompt and per-turn context
+
+The system prompt has a fixed part and a volatile part. The fixed part holds the personality, fixed instructions, repository instructions, the tool-naming lines, the delegation line, and the core memory blocks. Its hash is in the fingerprint. The volatile part holds the worktree approval outcomes, the "no worktree" line, main-checkout availability, and the Primary / Moderator move line. Discard sends it every turn, with the worktree snapshot and the project context.
+
+Discard sends the fixed system prompt on every resume. Claude does not store it. Codex freezes developer instructions at thread start, and the fixed-prompt hash guarantees that they equal the current ones.
+
+### What a resumed response sends
+
+1. Every saved non-system message after `delivered_through`, in order, framed and compacted as replay frames it. Replies that this session produced are skipped.
+2. A `<context-update>` block, only when something changed: memory items that are new or have a new version, items that were forgotten, a new topic, and a changed capture-pause flag. Memory selection is the same as for replay. A selected item is sent when the session has not seen its current version. Text in the block is escaped.
+3. The volatile session state, the worktree snapshot, and the project context.
+4. The current user message.
+
+After a completed response, Discard saves `delivered_through` as the end of the contiguous run of replay chunks that the session has seen: messages that existed at the start of the turn, the user message, and the saved reply. A message that another author posts during the turn stops the run, so the agent's own reply is sent once again in the next delta. This is a known limit. It never loses a message.
+
+### Fingerprint
+
+A handle is usable only when the saved fingerprint equals the current one. The fields are: provider, model, reasoning effort, session mode, session directory, the hash of the fixed prompt, the list of Discard MCP tools, the delegation flag, the sandbox flag, the autorun flag, the provider CLI version, the summary boundary, and a digest of the replayed history through `delivered_through`. The digest changes when a message at or before that point is edited, deleted, or removed. The first differing field names the reason in the notice.
+
+A new, changed, or forgotten `instruction` or `preference` memory item changes the fixed prompt, so it drops the handle. Other items go in the context update.
+
+### When Discard drops the handle
+
+- The fingerprint differs.
+- The previous response was cancelled, failed, or did not save its reply. A steer does not count.
+- The provider rejects the handle. Claude reports this on the first send. Codex reports it at start. Discard replays once in the same response and never loops.
+- The saved bytes plus the new input exceed the input budget for the model, or the response failed with an error that reads like a context limit. The check is a text heuristic on the provider error.
+- The provider compacted the session. Discard turns provider compaction off where it can (`DISABLE_AUTO_COMPACT=1` for Claude, a very high `model_auto_compact_token_limit` for Codex). The adapters still detect a compaction event. The session stays saved, and the next response replays.
+- A Codex thread resumes on a model other than the selected one.
+
+A drop shows a notice that names the reason, for example "Fresh replay: the model changed." The replay saves its new handle.
+
+### Summary headroom
+
+A replay that summarizes history normally fills the budget. A resumed turn would then exceed the budget and replay again. For an agent with the setting on, a summarizing replay shrinks the input to half of the budget (`conversation_context::summary_target`). Other agents keep the full budget. A new summary changes the fingerprint, so each summary costs one replay.
+
+### Indicator
+
+The context panel shows "Resumed session" when the response continued a saved session. It shows "Fresh replay: <reason>" when the response replayed after a drop. A first session and an agent with the setting off show nothing. The state stays until the next response starts.
 
 ## Codex model-cache recovery
 

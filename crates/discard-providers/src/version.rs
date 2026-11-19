@@ -20,6 +20,9 @@ fn parse(output: &str) -> Option<([u64; 3], String)> {
     })
 }
 
+/// The first `x.y.z` token of CLI version output.
+pub(crate) fn number(output: &str) -> Option<String> { parse(output).map(|(_, text)| text) }
+
 pub(crate) fn check(output: &str, tested: &str) -> VersionCheck {
     let Some((running, text)) = parse(output) else { return VersionCheck::Unknown; };
     let Some((tested, _)) = parse(tested) else { return VersionCheck::Unknown; };

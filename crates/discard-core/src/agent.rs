@@ -29,6 +29,9 @@ pub struct AgentConfig {
     /// May start read-only sub-agents in threads through the `delegate` tool. Off by default.
     #[serde(default)]
     pub delegation: bool,
+    /// Keeps the provider's own session between responses (the provider stores it on disk). Off by default.
+    #[serde(default)]
+    pub native_resume: bool,
 }
 
 /// Generate an editable human name without using a model as identity.
@@ -166,13 +169,18 @@ mod tests {
     }
 
     #[test]
+    fn old_agent_toml_reads_native_resume_as_false() {
+        assert!(!AgentConfig::from_toml("name = 'A'\nprovider = 'claude'\npolicy = 'ask'\n").unwrap().native_resume);
+    }
+
+    #[test]
     fn old_agent_toml_reads_workspace_write_as_false() {
         assert!(!AgentConfig::from_toml("name = 'A'\nprovider = 'claude'\npolicy = 'ask'\n").unwrap().workspace_write);
     }
 
     fn cfg(policy: ApprovalPolicy) -> AgentConfig {
         AgentConfig {
-            workspace_write: false, sandbox_autorun: false, delegation: false,
+            workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false,
             reasoning_effort: None,
             name: "Scout".into(),
             avatar: None,

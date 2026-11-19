@@ -47,6 +47,8 @@ pub struct Probe {
     pub specs: Arc<Mutex<Vec<SessionSpec>>>,
     /// The resume handle each started session was given.
     pub started_with: Arc<Mutex<Vec<Option<String>>>>,
+    /// The `resumable` flag each started session was given.
+    pub started_resumable: Arc<Mutex<Vec<bool>>>,
     pub responses: Arc<Mutex<Vec<(ApprovalId, Decision)>>>,
     pub cancelled: Arc<AtomicBool>,
     pub sent: Arc<Mutex<Vec<String>>>,
@@ -66,6 +68,13 @@ pub struct FakeProvider {
     setup: SetupStatus,
     resume_handle: Option<String>,
     notice: Option<String>,
+    rejects_resume: bool,
+    rejects_resume_on_first_send: bool,
+    /// How long the rejected first message takes, as the Claude CLI's start wait does.
+    first_send_delay: std::time::Duration,
+    /// Start calls, counted from 0 over every call, that fail with this protocol error.
+    failed_starts: Vec<(usize, String)>,
+    compaction: bool,
     pub probe: Probe,
 }
 
@@ -99,6 +108,11 @@ impl FakeProvider {
             setup: SetupStatus::Ready,
             resume_handle: None,
             notice: None,
+            rejects_resume: false,
+            rejects_resume_on_first_send: false,
+            first_send_delay: std::time::Duration::ZERO,
+            failed_starts: Vec::new(),
+            compaction: false,
             probe: Probe::default(),
         }
     }
@@ -133,6 +147,25 @@ impl FakeProvider {
         self
     }
 
+    /// Starting a session with a resume handle fails with `ResumeRejected`. Starting without one works.
+    pub fn with_rejecting_resume(mut self) -> Self { self.rejects_resume = true; self }
+
+    /// A session started with a resume handle starts, then its first message fails with `ResumeRejected`, as the
+    /// Claude CLI does. A session started without one works.
+    pub fn with_rejecting_resume_on_first_send(mut self) -> Self { self.rejects_resume_on_first_send = true; self }
+
+    /// As `with_rejecting_resume_on_first_send`, but the rejected message takes `delay` to fail.
+    pub fn with_slow_rejecting_resume_on_first_send(mut self, delay: std::time::Duration) -> Self {
+        self.first_send_delay = delay;
+        self.with_rejecting_resume_on_first_send()
+    }
+
+    /// Start call `index` (from 0, counting every call) fails with a protocol error that holds `message`.
+    pub fn with_failed_start(mut self, index: usize, message: &str) -> Self { self.failed_starts.push((index, message.into())); self }
+
+    /// Every started session reports that the CLI compacted it.
+    pub fn with_compaction(mut self) -> Self { self.compaction = true; self }
+
     /// The resume handle every session reports once started.
     pub fn with_resume_handle(mut self, handle: &str) -> Self {
         self.resume_handle = Some(handle.to_string());
@@ -164,8 +197,15 @@ impl Provider for FakeProvider {
     }
     async fn start_session(&self, spec: SessionSpec) -> Result<Box<dyn ProviderSession>, ProviderError> {
         self.matrix.supports(spec.enforcement)?;
-        self.probe.started_with.lock().expect("probe lock").push(spec.resume_handle.clone());
+        let call = {
+            let mut started_with = self.probe.started_with.lock().expect("probe lock");
+            started_with.push(spec.resume_handle.clone());
+            started_with.len() - 1
+        };
+        self.probe.started_resumable.lock().expect("probe lock").push(spec.resumable);
         self.probe.specs.lock().expect("probe lock").push(spec.clone());
+        if self.rejects_resume && spec.resume_handle.is_some() { return Err(ProviderError::ResumeRejected("the fake rejects every resume handle".into())); }
+        if let Some((_, message)) = self.failed_starts.iter().find(|(index, _)| *index == call) { return Err(ProviderError::Protocol(message.clone())); }
         if spec.mode == discard_core::provider::SessionMode::Workspace && let Some(error) = &self.workspace_error { return Err(ProviderError::SandboxUnavailable(error.clone())); }
         let (decisions_tx, decisions_rx) = mpsc::unbounded_channel();
         let number = self.sessions_started.fetch_add(1, Ordering::SeqCst);
@@ -179,6 +219,9 @@ impl Provider for FakeProvider {
             waiting_for: None,
             resume_handle: self.resume_handle.clone(),
             notice: self.notice.clone(),
+            compacted: self.compaction,
+            reject_first_send: self.rejects_resume_on_first_send && spec.resume_handle.is_some(),
+            first_send_delay: self.first_send_delay,
         }))
     }
 }
@@ -192,16 +235,25 @@ pub struct FakeSession {
     waiting_for: Option<ApprovalId>,
     resume_handle: Option<String>,
     notice: Option<String>,
+    compacted: bool,
+    /// The first message fails with `ResumeRejected`.
+    reject_first_send: bool,
+    first_send_delay: std::time::Duration,
 }
 
 #[async_trait]
 impl ProviderSession for FakeSession {
+    fn compacted(&self) -> bool { self.compacted }
     fn notice(&self) -> Option<String> { self.notice.clone() }
     fn resume_handle(&self) -> Option<String> {
         self.resume_handle.clone()
     }
     async fn send_user_message(&mut self, text: &str) -> Result<(), ProviderError> {
         self.probe.sent.lock().expect("probe lock").push(text.to_string());
+        if std::mem::take(&mut self.reject_first_send) {
+            tokio::time::sleep(self.first_send_delay).await;
+            return Err(ProviderError::ResumeRejected("the fake rejects the resumed session".into()));
+        }
         self.started = true;
         Ok(())
     }
@@ -281,6 +333,7 @@ mod tests {
             resume_handle: None,
             mcp_config: None,
             sandbox_autorun: false,
+            resumable: false,
         }
     }
 
@@ -349,6 +402,46 @@ mod tests {
         let s = p.start_session(sp).await.unwrap();
         assert_eq!(s.resume_handle().as_deref(), Some("sess-9"));
         assert_eq!(p.probe.started_with.lock().unwrap().as_slice(), [Some("old".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn records_resumable_flag() {
+        let p = FakeProvider::new(vec![]);
+        let mut sp = spec(EnforcementMode::HostPrompts);
+        sp.resumable = true;
+        p.start_session(sp).await.unwrap();
+        p.start_session(spec(EnforcementMode::HostPrompts)).await.unwrap();
+        assert_eq!(p.probe.started_resumable.lock().unwrap().as_slice(), [true, false]);
+    }
+
+    #[tokio::test]
+    async fn a_rejecting_fake_refuses_a_handle_and_accepts_none() {
+        let p = FakeProvider::new(vec![]).with_rejecting_resume();
+        let mut sp = spec(EnforcementMode::HostPrompts);
+        sp.resume_handle = Some("old".into());
+        assert!(matches!(p.start_session(sp).await, Err(ProviderError::ResumeRejected(_))));
+        assert!(p.start_session(spec(EnforcementMode::HostPrompts)).await.is_ok());
+        assert_eq!(p.probe.started_with.lock().unwrap().as_slice(), [Some("old".to_string()), None]);
+    }
+
+    #[tokio::test]
+    async fn a_first_send_rejecting_fake_starts_then_rejects_the_first_message() {
+        let p = FakeProvider::new(vec![]).with_rejecting_resume_on_first_send().with_failed_start(2, "broke");
+        let mut sp = spec(EnforcementMode::HostPrompts);
+        sp.resume_handle = Some("old".into());
+        let mut s = p.start_session(sp).await.unwrap();
+        assert!(matches!(s.send_user_message("go").await, Err(ProviderError::ResumeRejected(_))));
+        let mut fresh = p.start_session(spec(EnforcementMode::HostPrompts)).await.unwrap();
+        assert!(fresh.send_user_message("go").await.is_ok());
+        assert!(matches!(p.start_session(spec(EnforcementMode::HostPrompts)).await, Err(ProviderError::Protocol(m)) if m == "broke"));
+    }
+
+    #[tokio::test]
+    async fn the_fake_can_report_a_compaction() {
+        let plain = FakeProvider::new(vec![]).start_session(spec(EnforcementMode::HostPrompts)).await.unwrap();
+        assert!(!plain.compacted());
+        let p = FakeProvider::new(vec![]).with_compaction();
+        assert!(p.start_session(spec(EnforcementMode::HostPrompts)).await.unwrap().compacted());
     }
 
     #[tokio::test]

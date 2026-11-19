@@ -30,7 +30,7 @@ async fn scoped_http_tool_requests_removal_but_only_app_approval_executes_it() {
     git(&repo,&["init","-q","-b","main"]); git(&repo,&["commit","--allow-empty","-m","initial"]);
     let path = dir.path().join("linked"); git(&repo,&["worktree","add","--detach",path.to_str().unwrap()]);
     let store = Store::open_in_memory().unwrap();
-    let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, name:"Agent".into(),provider:"fake".into(),model:Some("test".into()),avatar:None,reasoning_effort:None,system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false }).unwrap();
+    let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation: false, name:"Agent".into(),provider:"fake".into(),model:Some("test".into()),avatar:None,reasoning_effort:None,system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false }).unwrap();
     let project = store.import_project_folder(&repo).unwrap();
     let channel = Channel {id:ChannelId::new(),project_id:Some(project.id.clone()),name:"linked".into(),agent_id:agent.clone(),workspace_mode:WorkspaceMode::Worktree};
     store.create_named_repository_channel(&channel,"",None,Some(&WorktreeRecord {channel_id:channel.id.clone(),path:path.to_string_lossy().into(),repo:repo.to_string_lossy().into(),branch:"detached".into(),base_commit:String::new(),owned:false})).unwrap();
@@ -67,7 +67,7 @@ async fn general_channel_runtime_exposes_project_files_without_worktree_tools() 
     let repo = dir.path().join("project"); std::fs::create_dir(&repo).unwrap();
     std::fs::write(repo.join("README.md"), "Project overview").unwrap();
     let store = Store::open_in_memory().unwrap();
-    let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, name:"Agent".into(),provider:"fake".into(),model:Some("test".into()),avatar:None,reasoning_effort:None,system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false }).unwrap();
+    let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation: false, name:"Agent".into(),provider:"fake".into(),model:Some("test".into()),avatar:None,reasoning_effort:None,system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false }).unwrap();
     let project = store.import_project_folder(&repo).unwrap();
     let channel = store.ensure_project_general_channel(&project.id, &agent).unwrap();
     let access = Arc::new(WorktreeAccess::new(Arc::new(Mutex::new(store))));
@@ -103,7 +103,7 @@ async fn project_git_and_search_options_use_scoped_http_tools() {
     std::fs::write(repo.join("other.txt"), "new\n").unwrap();
     git(&repo, &["add", "."]); git(&repo, &["commit", "-qm", "second"]);
     let store = Store::open_in_memory().unwrap();
-    let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, delegation: false, name:"Agent".into(),provider:"fake".into(),model:Some("test".into()),avatar:None,reasoning_effort:None,system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false }).unwrap();
+    let agent = store.create_agent(&AgentConfig { workspace_write: false, sandbox_autorun: false, native_resume: false, delegation: false, name:"Agent".into(),provider:"fake".into(),model:Some("test".into()),avatar:None,reasoning_effort:None,system_prompt:String::new(),policy:ApprovalPolicy::Ask,plugin_write:false }).unwrap();
     let project = store.import_project_folder(&repo).unwrap();
     let channel = store.ensure_project_general_channel(&project.id, &agent).unwrap();
     let access = Arc::new(WorktreeAccess::new(Arc::new(Mutex::new(store))));
@@ -186,7 +186,7 @@ async fn a_thread_of_a_worktree_channel_reads_the_parents_worktree_and_gets_no_w
     git(&repo, &["worktree", "add", "-q", "-b", "feature", linked.to_str().unwrap()]);
     std::fs::write(linked.join("NOTE.md"), "uncommitted in the worktree\n").unwrap();
     let store = Store::open_in_memory().unwrap();
-    let agent = store.create_agent(&AgentConfig { workspace_write: true, sandbox_autorun: false, delegation: false, name: "Agent".into(), provider: "fake".into(), model: Some("test".into()), avatar: None, reasoning_effort: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
+    let agent = store.create_agent(&AgentConfig { workspace_write: true, sandbox_autorun: false, native_resume: false, delegation: false, name: "Agent".into(), provider: "fake".into(), model: Some("test".into()), avatar: None, reasoning_effort: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false }).unwrap();
     let project = store.import_project_folder(&repo).unwrap();
     let bound = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "feature".into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::Worktree };
     store.create_named_repository_channel(&bound, "", Some("feature"), Some(&WorktreeRecord { channel_id: bound.id.clone(), path: linked.to_string_lossy().into(), repo: repo.to_string_lossy().into(), branch: "feature".into(), base_commit: String::new(), owned: false })).unwrap();
@@ -254,7 +254,7 @@ async fn moderator_prompt_names_the_move_tool() {
     let repo = dir.path().join("repo"); std::fs::create_dir(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]); git(&repo, &["commit", "--allow-empty", "-m", "initial"]);
     let store = Store::open_in_memory().unwrap();
-    let config = |name: &str| AgentConfig { workspace_write: true, sandbox_autorun: false, delegation: false, name: name.into(), provider: "fake".into(), model: Some("test".into()), avatar: None, reasoning_effort: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false };
+    let config = |name: &str| AgentConfig { workspace_write: true, sandbox_autorun: false, native_resume: false, delegation: false, name: name.into(), provider: "fake".into(), model: Some("test".into()), avatar: None, reasoning_effort: None, system_prompt: String::new(), policy: ApprovalPolicy::Ask, plugin_write: false };
     let main = store.create_agent(&config("Main")).unwrap();
     let other = store.create_agent(&config("Other")).unwrap();
     let project = store.import_project_folder(&repo).unwrap();

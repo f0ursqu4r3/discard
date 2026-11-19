@@ -21,7 +21,7 @@ fn setup() -> (
     let store = Store::open_in_memory().unwrap();
     let agent = store
         .create_agent(&AgentConfig {
-            workspace_write: false, sandbox_autorun: false, delegation: false,
+            workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false,
             reasoning_effort: None,
             name: "Ada".into(),
             avatar: None,
@@ -504,7 +504,7 @@ fn committed_approval_survives_sql_notice_failure_reopen_and_later_edit() {
     let store = Store::open(&dir.path().join("approval.db")).unwrap();
     let agent = store
         .create_agent(&AgentConfig {
-            workspace_write: false, sandbox_autorun: false, delegation: false,
+            workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false,
             reasoning_effort: None,
             name: "Ada".into(),
             avatar: None,

@@ -69,7 +69,7 @@ See `docs/provider-codex.md`. The Codex matrix was verified against a live `code
 
 ## Conversation sessions
 
-`SessionMode::Conversation` and Workspace use Claude Code 2.1.318 as the tested version. A newer CLI may run only after all required isolation controls pass verification. Older versions stay blocked with an update message. An unreadable version also stays blocked. It uses a fresh, empty Discard-owned working directory and rejects native resume handles. Discard supplies the selected model and refreshed system instructions for a new transcript replay.
+`SessionMode::Conversation` and Workspace use Claude Code 2.1.318 as the tested version. A newer CLI may run only after all required isolation controls pass verification. Older versions stay blocked with an update message. An unreadable version also stays blocked. It uses a fresh, empty Discard-owned working directory and rejects native resume handles, unless Discard passes `resumable`. A resumable session uses a stable Discard-owned directory and persists its transcript. It sets `DISABLE_AUTO_COMPACT=1`. Discard supplies the selected model and refreshed system instructions for a new transcript replay.
 
 The adapter passes `--tools ""`, `--strict-mcp-config`, `--disable-slash-commands`, `--restricted` and `--system-prompt-snapshot off`. It accepts only the scoped Discard memory MCP configuration. It forces `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` in both process environment and explicit session settings. It disables hooks and removes inherited explicit plugin directories. Authentication uses the existing CLI login; Discard does not use `--bare`, copy credentials or change user settings.
 
@@ -83,7 +83,56 @@ The opt-in synthetic probe at `crates/discard-providers/tests/probes/claude_conv
 
 Run the local probe with `python3 crates/discard-providers/tests/probes/claude_conversation.py`. The script works from any working directory when you give its full path. Use `--claude /path/to/claude` or `DISCARD_CLAUDE_BIN` to select the CLI executable.
 
-Normal app conversations replay the current conversation transcript with refreshed personality and applicable saved memory before every response. Memory edits apply to existing conversations without restarting. Native resume behavior described above applies to Coding sessions. See [Saved memory](memory.md) for the four domains, shared-write approval, Forget, and capture controls.
+Normal app conversations replay the current conversation transcript with refreshed personality and applicable saved memory before every response. Memory edits apply to existing conversations without restarting. Agents with **Keep provider session** on resume their Claude session between responses (see [Conversation runtime](runtime/conversation-context.md#native-provider-resume)); other agents replay. See [Saved memory](memory.md) for the four domains, shared-write approval, Forget, and capture controls.
+
+## Native resume spike results
+
+Tested Claude Code 2.1.325 (the installed version; the pinned tested version stays 2.1.318). The probes used the real CLI, the Haiku model, a stable empty working directory, and the Conversation isolation flags (`--tools`, `--strict-mcp-config`, `--disable-slash-commands`, `--restricted`, `--system-prompt-snapshot off`, `--settings`). A stdio MCP server returned a fixed token, `TOKA` or `TOKB`. Resume used `--resume <id>`.
+
+| Question | Result |
+| --- | --- |
+| Resume from a stable empty directory | Yes. `--resume` found the session and the `system/init` event kept the same `session_id`. A resume from a different directory also worked; `init.cwd` showed the new directory. Use the same directory anyway. |
+| `--tools` on resume | Re-applies. A session started with `--tools ""` showed `Bash` in `init.tools` after a resume with `--tools Bash`. A resume with `--tools ""` removed it again. |
+| `--permission-mode` on resume | Re-applies. `init.permissionMode` was `plan` after a resume with `--permission-mode plan`. |
+| `--mcp-config` on resume | Re-applies. A session started with the `TOKA` server returned `TOKB` after a resume with the `TOKB` config. |
+| `--allowedTools` on resume | Re-applies. The scoped tool ran with no permission prompt. |
+| `--append-system-prompt` on resume | Not stored in the session. A resume without the flag lost the earlier prompt (the model could not find the codeword). A resume with a new prompt used the new one. Pass the prompt on every resume. |
+| Sandbox settings in `--settings` on resume | Re-applies. A resume with `sandbox.filesystem.denyWrite=[<dir>]` blocked `touch <dir>/m1` (`Operation not permitted`) and allowed a write in the working directory. |
+| `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` on resume | Still applies. A `CLAUDE.md` sentinel in the working directory was invisible in the first turn and in the resumed turn. A control run without the variable saw it. |
+
+No control failed. Claude does not need "adapter refuses resume". The adapter must pass every isolation flag, the MCP config, `--allowedTools`, `--settings` and the system prompt again on each resume. This is the same argument list as a fresh start plus `--resume`.
+
+### Handle rejected
+
+| Case | Behavior |
+| --- | --- |
+| Unknown or expired ID (a deleted session file gives the same result) | Exit code 1. No `system/init` event. stderr holds `No conversation found with session ID: <id>`. stdout holds one `result` event: `subtype: "error_during_execution"`, `is_error: true`, `num_turns: 0`, `errors: ["No conversation found with session ID: <id>"]`. |
+| Value that is not a UUID | Exit code 1. `errors: ["Error: --resume requires a valid session ID or session title when used with --print. ..."]`. |
+
+Marker for the engine: a `result` event with `subtype: "error_during_execution"` and an `errors[]` entry that starts with `No conversation found with session ID`, with no `init` event before it and exit code 1. Treat a non-UUID error the same way, because Discard stores only IDs that Claude gave it.
+
+### Session store
+
+| Setting | Session file |
+| --- | --- |
+| Default | `~/.claude/projects/<working directory with / and . replaced by ->/<session_id>.jsonl` |
+| `HOME` changed | `<HOME>/.claude/projects/...`. The login is lost (`Not logged in`). |
+| `CLAUDE_CONFIG_DIR` changed | `<CLAUDE_CONFIG_DIR>/projects/...`. The login is lost in the test. |
+
+Resume reads the store of the current `HOME` and `CLAUDE_CONFIG_DIR`. Discard must keep both unchanged between turns of one session. Claude removes old sessions by its own cleanup; a removed file is an expired handle.
+
+### Compaction
+
+Claude compacts a long session on its own, and the compaction also runs on a resumed session.
+
+- Flags: `--autocompact <auto|tokens>` sets the window (100k to 1M tokens). The environment variable `DISABLE_AUTO_COMPACT=1` turns it off. The settings key `autoCompactEnabled` and `DISABLE_COMPACT` exist in the binary and were not probed.
+- Test: a Haiku session with `--autocompact 100000` grew past 160k tokens over three resumed turns with `DISABLE_AUTO_COMPACT=1` and showed no compaction. The next resumed turn without the variable compacted: `pre_tokens` 198262, `post_tokens` 37519.
+- Stream signal: `system` event with `subtype: "status"` and `status: "compacting"`, then `system` with `subtype: "compact_boundary"` and `compact_metadata` (`trigger: "auto"`, `pre_tokens`, `post_tokens`). A compaction that cannot run shows `status: null`, `compact_result: "failed"`, `compact_error`.
+- With `DISABLE_AUTO_COMPACT=1` Discard owns the size guard. The behavior near the full window with the variable set was not probed.
+
+### Live probe result
+
+`cargo test -p discard-providers --test claude_live real_claude_resumes -- --ignored --nocapture` passed on Claude Code 2.1.325 with model `haiku` (2026-11-18). It ran three Conversation turns for one agent with **Keep provider session** on. A new fact, not an instruction or preference, was saved between turns 2 and 3. Turn 1 started a session. Turn 2 and turn 3 resumed it with `--resume`. The answer in turn 3 used the new fact, which reached the model only through the context update. The saved `agent_sessions` row kept the same handle after all three turns. No "Fresh replay" notice appeared.
 
 ## Workspace sessions (spike results)
 
@@ -109,7 +158,7 @@ The probe adds a three-second curl limit and a third Git-protection run.
 
 Workspace uses the Conversation isolation controls and a fresh replay, with the bound directory
 as cwd. It enables only Read, Glob, Grep, Edit, Write and Bash, plus the scoped Discard tools
-and worktree_commit. Native resume is refused. Hooks, plugin directories, automatic memory,
+and worktree_commit. Native resume is available for agents that keep their provider session. Hooks, plugin directories, automatic memory,
 and instruction discovery remain off. `GIT_OPTIONAL_LOCKS=0` allows read-only Git commands.
 Every Workspace session passes `--setting-sources ""`. The agent can write
 `<root>/.claude/settings.json` and `settings.local.json`, so Claude must not load them. Only the

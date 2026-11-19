@@ -19,6 +19,7 @@ async fn real_claude_asks_for_approval_and_runs_the_approved_command() {
 
     let dir = tempfile::tempdir().unwrap();
     let spec = SessionSpec {
+        resumable: false,
         reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding,
         cwd: dir.path().to_path_buf(),
@@ -55,6 +56,7 @@ async fn real_claude_does_not_run_a_denied_command() {
     let p = ClaudeProvider::new("claude");
     let dir = tempfile::tempdir().unwrap();
     let spec = SessionSpec {
+        resumable: false,
         reasoning_effort: None,
         mode: discard_core::provider::SessionMode::Coding,
         cwd: dir.path().to_path_buf(),
@@ -156,6 +158,7 @@ async fn real_claude_autorun_runs_sandboxed_commands_and_denies_credential_reads
 
     let provider = provider.with_discard_home(&discard_home).with_env("HOME", &real_home);
     let spec = SessionSpec {
+        resumable: false,
         reasoning_effort: None,
         mode: SessionMode::Workspace,
         cwd: root.clone(),
@@ -290,4 +293,15 @@ impl Drop for HomeGuard {
             }
         }
     }
+}
+
+/// Native resume over three turns. A new memory item arrives before turn 3. Turn 2 and turn 3 must
+/// resume the saved Claude session, and the answer in turn 3 must use the new item.
+#[tokio::test]
+#[ignore = "uses the real claude CLI and the logged-in subscription"]
+async fn real_claude_resumes_its_session_and_sees_a_memory_change() {
+    let provider = std::sync::Arc::new(ClaudeProvider::new("claude"));
+    assert_eq!(provider.check_setup().await, SetupStatus::Ready, "run `claude auth login` first");
+    let result = native_probe::run(provider, "claude", "haiku").await;
+    native_probe::assert_resumed(&result);
 }

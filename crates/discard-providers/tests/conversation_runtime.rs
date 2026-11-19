@@ -55,7 +55,7 @@ impl Rig {
         let store = Store::open(&dir.path().join("store.db")).unwrap();
         let agent = store
             .create_agent(&AgentConfig {
-                workspace_write: false, sandbox_autorun: false, delegation: false,
+                workspace_write: false, sandbox_autorun: false, delegation: false, native_resume: false,
                 reasoning_effort: None,
                 name: "A".into(),
                 avatar: None,
@@ -1403,5 +1403,634 @@ async fn provider_notice_is_saved_once_across_two_turns() {
     assert_eq!(markers[0].blocks, vec![Block::Markdown { text: notice.into() }]);
     let messages = rig.store.lock().unwrap().messages_for_channel(&rig.channel).unwrap();
     assert_eq!(messages.iter().filter(|m| m.role == Role::System && m.blocks == markers[0].blocks).count(), 1);
+    rig.close().await;
+}
+
+// Native provider resume (engine side).
+
+/// A fake that answers each session with the next text, and reports the handle `h1`.
+fn replies(texts: &[&str]) -> FakeProvider {
+    let mut texts = texts.iter();
+    let mut provider = FakeProvider::new(vec![Step::text(texts.next().unwrap()), Step::idle()]);
+    for text in texts { provider = provider.then_session(vec![Step::text(text), Step::idle()]); }
+    provider.with_resume_handle("h1")
+}
+
+/// A rig whose agent has `native_resume` on.
+async fn native_rig(provider: FakeProvider) -> Rig {
+    let provider = Arc::new(provider);
+    let probe = provider.probe.clone();
+    let rig = Rig::with_provider(provider, probe).await;
+    rig.edit(|c| c.native_resume = true);
+    rig
+}
+
+impl Rig {
+    async fn say(&mut self, text: &str) -> Vec<Update> {
+        self.commands.send(Command::Send(text.into())).unwrap();
+        let updates = self.done().await;
+        assert!(updates.iter().any(|u| matches!(u, Update::TurnFinished(discard_core::driver::TurnOutcome::Completed))), "{updates:?}");
+        updates
+    }
+    fn row(&self, agent: &AgentId) -> Option<discard_core::store::AgentSession> {
+        self.store.lock().unwrap().agent_session(&self.channel, agent).unwrap()
+    }
+    fn sent(&self, turn: usize) -> String {
+        self.probe.sent.lock().unwrap()[turn].clone()
+    }
+    fn started_with(&self) -> Vec<Option<String>> {
+        self.probe.started_with.lock().unwrap().clone()
+    }
+    fn started_resumable(&self) -> Vec<bool> {
+        self.probe.started_resumable.lock().unwrap().clone()
+    }
+    /// Run a new engine on `channel` with these providers, keeping the store and the memory runtime.
+    async fn respawn(&mut self, providers: Vec<Arc<dyn discard_core::provider::Provider>>, probe: Probe, channel: ChannelId) {
+        self.task.abort();
+        let _ = (&mut self.task).await;
+        let (project, session) = {
+            let store = self.store.lock().unwrap();
+            (store.load_channel(&channel).unwrap().project_id, store.latest_session(&channel).unwrap().unwrap())
+        };
+        let engine = Engine {
+            main_checkout_grants: Arc::default(), workspace_locks: Arc::default(),
+            write_access: Err(discard_core::workspace_session::ReadOnlyReason::NotProjectChannel), autorun: discard_core::workspace_session::AutorunState::Off,
+            reasoning_effort: None, mode: SessionMode::Conversation, provider: providers[0].clone(), providers,
+            store: self.store.clone(), agent_id: self.agent.clone(), project_id: project,
+            memory: Some(self.runtime.clone()), plugin_write: false, workspace_mode: WorkspaceMode::MainCheckout,
+            workspace: None, observer: None, channel_name: "talk".into(),
+            channel_id: channel.clone(), session_id: session, cwd: self._dir.path().join("empty"),
+            model: None, system_prompt: None, policy: ApprovalPolicy::Ask,
+        };
+        let (commands, rx) = mpsc::unbounded_channel();
+        let (tx, updates) = mpsc::unbounded_channel();
+        self.commands = commands;
+        self.updates = updates;
+        self.channel = channel;
+        self.probe = probe;
+        self.task = tokio::spawn(engine.run(rx, tx));
+    }
+}
+
+fn notices(updates: &[Update]) -> Vec<String> {
+    updates.iter().filter_map(|u| match u { Update::Notice(text) => Some(text.clone()), _ => None }).collect()
+}
+
+fn resume_states(updates: &[Update]) -> Vec<discard_core::ui_state::ResumeState> {
+    updates.iter().filter_map(|u| match u { Update::ResumeState(state) => Some(state.clone()), _ => None }).collect()
+}
+
+#[tokio::test]
+async fn the_engine_reports_resumed_and_replay_states() {
+    use discard_core::ui_state::ResumeState;
+    let mut rig = native_rig(replies(&["answer one", "answer two", "answer three"])).await;
+    // A first session is fresh: no state.
+    let first = rig.say("first request").await;
+    assert_eq!(resume_states(&first), vec![]);
+    let second = rig.say("second request").await;
+    assert_eq!(resume_states(&second), vec![ResumeState::Resumed]);
+    rig.edit(|c| c.model = Some("other-model".into()));
+    let third = rig.say("third request").await;
+    let reasons = resume_states(&third);
+    assert_eq!(reasons.len(), 1, "{third:?}");
+    let ResumeState::Replay { reason } = &reasons[0] else { panic!("{reasons:?}") };
+    assert!(!reason.starts_with("Fresh replay: ") && reason.contains("changed"), "{reason}");
+    assert!(notices(&third).contains(&format!("Fresh replay: {reason}")), "{third:?}");
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_non_native_agent_reports_no_resume_state() {
+    let mut rig = Rig::with_provider(Arc::new(replies(&["answer one", "answer two"])), Probe::default()).await;
+    rig.say("first request").await;
+    let second = rig.say("second request").await;
+    assert_eq!(resume_states(&second), vec![]);
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_non_native_agent_still_replays_every_turn() {
+    let mut rig = Rig::with_provider(Arc::new(replies(&["answer one", "answer two"])), Probe::default()).await;
+    let provider = Arc::new(replies(&["answer one", "answer two"]));
+    let probe = provider.probe.clone();
+    let channel = rig.channel.clone();
+    rig.respawn(vec![provider], probe, channel).await;
+    rig.say("first request").await;
+    rig.say("second request").await;
+    assert_eq!(rig.started_with(), vec![None, None]);
+    assert_eq!(rig.started_resumable(), vec![false, false]);
+    assert!(rig.sent(1).contains("first request") && rig.sent(1).contains("answer one"));
+    assert!(rig.row(&rig.agent.clone()).is_none());
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn second_response_resumes_and_sends_only_new_messages() {
+    let mut rig = native_rig(replies(&["answer one", "answer two", "answer three"])).await;
+    rig.say("first request").await;
+    rig.say("second request").await;
+    rig.say("third request").await;
+    assert_eq!(rig.started_with(), vec![None, Some("h1".into()), Some("h1".into())]);
+    assert_eq!(rig.started_resumable(), vec![true, true, true]);
+    assert!(rig.sent(0).contains("first request"));
+    let second = rig.sent(1);
+    assert!(second.contains("second request"), "{second}");
+    assert!(!second.contains("first request") && !second.contains("answer one"), "{second}");
+    let third = rig.sent(2);
+    assert!(third.contains("third request") && !third.contains("second request") && !third.contains("answer two"), "{third}");
+    let specs = rig.probe.specs.lock().unwrap().clone();
+    let sessions = rig._dir.path().join("sessions");
+    assert!(specs.iter().all(|s| s.cwd.starts_with(&sessions) && s.cwd == specs[0].cwd), "{:?}", specs[0].cwd);
+    assert!(specs.iter().all(|s| s.system_prompt == specs[0].system_prompt));
+    let row = rig.row(&rig.agent.clone()).expect("a saved session");
+    assert_eq!(row.handle, "h1");
+    let messages = rig.store.lock().unwrap().messages_for_channel(&rig.channel).unwrap();
+    let last = messages.iter().rfind(|m| m.role == Role::Agent).unwrap();
+    assert_eq!(row.delivered_through.as_ref().map(|id| id.0.split(":part:").next().unwrap().to_owned()), Some(last.id.0.clone()));
+    assert!(row.bytes_in_session > 0 && row.dropped_reason.is_none());
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_changed_non_mandatory_memory_item_goes_in_the_context_update_and_keeps_the_handle() {
+    let mut rig = native_rig(replies(&["one", "two", "three"])).await;
+    let fact = rig.memory.create_item(&Scope::Agent(rig.agent.clone()), ItemKind::Fact, "The Rust compiler is rustc 1.90", None, MutationOrigin::User).unwrap();
+    rig.say("Which Rust compiler?").await;
+    let system = rig.probe.specs.lock().unwrap()[0].system_prompt.clone().unwrap();
+    assert!(!system.contains("rustc 1.90"), "selected facts stay out of the fixed system prompt");
+    assert!(rig.sent(0).contains("<context-update>") && rig.sent(0).contains("rustc 1.90"));
+    rig.memory.update_item(&fact.id, fact.version, "The Rust compiler is rustc 1.91", MutationOrigin::User).unwrap();
+    rig.say("And the Rust version now?").await;
+    assert_eq!(rig.started_with()[1].as_deref(), Some("h1"));
+    assert!(rig.sent(1).contains("<context-update>") && rig.sent(1).contains("rustc 1.91"), "{}", rig.sent(1));
+    rig.say("Rust once more").await;
+    assert_eq!(rig.started_with()[2].as_deref(), Some("h1"));
+    assert!(!rig.sent(2).contains("<context-update>"), "{}", rig.sent(2));
+    let row = rig.row(&rig.agent.clone()).unwrap();
+    assert_eq!(row.delivered_memory.get(&fact.id), Some(&(fact.version + 1)));
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_changed_instruction_item_replays_with_a_notice() {
+    let mut rig = native_rig(replies(&["one", "two", "three", "four"])).await;
+    let rule = rig.memory.create_item(&Scope::Agent(rig.agent.clone()), ItemKind::Instruction, "Keep decisions explicit", None, MutationOrigin::User).unwrap();
+    rig.say("first request").await;
+    rig.say("second request").await;
+    rig.memory.update_item(&rule.id, rule.version, "Keep every decision explicit", MutationOrigin::User).unwrap();
+    let updates = rig.say("third request").await;
+    assert_eq!(rig.started_with(), vec![None, Some("h1".into()), None]);
+    assert!(notices(&updates).iter().any(|n| n == "Fresh replay: the instructions changed. Discard sends the history again."), "{updates:?}");
+    assert!(updates.iter().any(|u| matches!(u, Update::ConversationMarker(m) if matches!(&m.blocks[0], Block::Markdown { text } if text.starts_with("Fresh replay:")))));
+    let third = rig.sent(2);
+    assert!(third.contains("first request") && third.contains("two"), "a replay sends the whole history");
+    assert!(rig.probe.specs.lock().unwrap()[2].system_prompt.as_deref().unwrap().contains("Keep every decision explicit"));
+    rig.say("fourth request").await;
+    assert_eq!(rig.started_with()[3].as_deref(), Some("h1"));
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn topic_and_capture_pause_changes_are_delivered_as_updates() {
+    let mut rig = native_rig(replies(&["one", "two", "three", "four"])).await;
+    rig.store.lock().unwrap().save_channel_topic(&rig.channel, 0, "Old topic", discard_core::model::TopicAuthorKind::User, None).unwrap();
+    rig.say("first request").await;
+    assert!(rig.sent(0).contains("Old topic"));
+    rig.say("second request").await;
+    assert!(!rig.sent(1).contains("Old topic") && !rig.sent(1).contains("<channel-topic>"), "{}", rig.sent(1));
+    rig.store.lock().unwrap().save_channel_topic(&rig.channel, 1, "Fresh topic", discard_core::model::TopicAuthorKind::User, None).unwrap();
+    let fact = rig.memory.create_item(&Scope::Agent(rig.agent.clone()), ItemKind::Fact, "unrelated", None, MutationOrigin::User).unwrap();
+    rig.memory.forget_item_in(&fact.id, fact.version, Some(&rig.channel)).unwrap();
+    rig.say("third request").await;
+    let third = rig.sent(2);
+    assert!(third.contains("Fresh topic") && third.contains("<memory-capture>paused</memory-capture>"), "{third}");
+    rig.say("fourth request").await;
+    let fourth = rig.sent(3);
+    assert!(!fourth.contains("Fresh topic") && !fourth.contains("<memory-capture>"), "{fourth}");
+    assert_eq!(rig.started_with(), vec![None, Some("h1".into()), Some("h1".into()), Some("h1".into())]);
+    let row = rig.row(&rig.agent.clone()).unwrap();
+    assert!(row.delivered_capture_paused);
+    assert_eq!(row.delivered_topic_version, Some(2));
+    rig.close().await;
+}
+
+/// A project channel with a second native agent named Bee. Returns Bee's id.
+async fn two_agent_rig(texts: &[&str]) -> (Rig, AgentId) {
+    let mut rig = native_rig(replies(&["unused"])).await;
+    let project_dir = rig._dir.path().join("project");
+    std::fs::create_dir(&project_dir).unwrap();
+    std::fs::write(project_dir.join("README.md"), "A small project.").unwrap();
+    let (channel, bee) = {
+        let store = rig.store.lock().unwrap();
+        let project = store.import_project_folder(&project_dir).unwrap();
+        store.ensure_project_general_channel(&project.id, &rig.agent).unwrap();
+        let channel = store.create_conversation(&rig.agent, Some(&project.id), "talk").unwrap();
+        let mut config = store.load_agent(&rig.agent).unwrap();
+        config.name = "Bee".into();
+        let bee = store.create_agent(&config).unwrap();
+        (channel, bee)
+    };
+    let provider = Arc::new(replies(texts));
+    let probe = provider.probe.clone();
+    rig.respawn(vec![provider], probe, channel.id).await;
+    (rig, bee)
+}
+
+#[tokio::test]
+async fn two_agents_in_one_channel_keep_separate_rows() {
+    let (mut rig, bee) = two_agent_rig(&["reply a1", "reply b1", "reply a2", "reply b2"]).await;
+    rig.say("hello there").await;
+    rig.say("@Bee what do you think").await;
+    rig.say("and again").await;
+    rig.say("@Bee last word").await;
+    assert_eq!(rig.started_with(), vec![None, None, Some("h1".into()), Some("h1".into())]);
+    let a = rig.row(&rig.agent.clone()).expect("a row for the first agent");
+    let b = rig.row(&bee).expect("a row for Bee");
+    assert_ne!(a.delivered_through, b.delivered_through);
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn agent_a_delta_includes_agent_b_reply_but_not_its_own() {
+    let (mut rig, _bee) = two_agent_rig(&["reply a1", "reply b1", "reply a2", "reply b2"]).await;
+    rig.say("hello there").await;
+    rig.say("@Bee what do you think").await;
+    rig.say("and again").await;
+    let a2 = rig.sent(2);
+    assert!(a2.contains("what do you think") && a2.contains("reply b1"), "{a2}");
+    assert!(!a2.contains("reply a1") && !a2.contains("hello there"), "{a2}");
+    rig.say("@Bee last word").await;
+    let b2 = rig.sent(3);
+    assert!(b2.contains("and again") && b2.contains("reply a2"), "{b2}");
+    assert!(!b2.contains("reply b1") && !b2.contains("what do you think"), "{b2}");
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_message_posted_during_the_turn_is_delivered_next_turn() {
+    let provider = FakeProvider::new(vec![Step::Approval { tool: "Bash".into(), input: serde_json::json!({"command": "ls"}) }, Step::text("answer one"), Step::idle()])
+        .then_session(vec![Step::text("answer two"), Step::idle()])
+        .with_resume_handle("h1");
+    let mut rig = native_rig(provider).await;
+    rig.commands.send(Command::Send("first request".into())).unwrap();
+    let approval = loop {
+        if let Some(Update::Event(event)) = rig.updates.recv().await
+            && let discard_core::event::EventKind::ApprovalRequest { approval_id, .. } = &event.kind { break approval_id.clone(); }
+    };
+    rig.store.lock().unwrap().insert_message(&Message { id: MessageId::new(), channel_id: rig.channel.clone(), role: Role::User, blocks: vec![Block::Markdown { text: "posted mid-turn".into() }] }).unwrap();
+    rig.commands.send(Command::Decide { approval_id: approval, decision: discard_core::approval::Decision::Approve, rule_cut: None }).unwrap();
+    let updates = rig.done().await;
+    assert!(updates.iter().any(|u| matches!(u, Update::TurnFinished(discard_core::driver::TurnOutcome::Completed))), "{updates:?}");
+    rig.say("second request").await;
+    assert_eq!(rig.started_with(), vec![None, Some("h1".into())]);
+    let second = rig.sent(1);
+    assert!(second.contains("posted mid-turn") && second.contains("second request"), "{second}");
+    assert!(!second.contains("first request"), "{second}");
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn deleting_an_earlier_message_forces_a_replay() {
+    let mut rig = native_rig(replies(&["one", "two", "three"])).await;
+    rig.say("first request").await;
+    rig.say("second request").await;
+    let first = rig.store.lock().unwrap().messages_for_channel(&rig.channel).unwrap()[0].id.clone();
+    let connection = rusqlite::Connection::open(rig._dir.path().join("store.db")).unwrap();
+    connection.execute("DELETE FROM messages WHERE id=?1", [&first.0]).unwrap();
+    let updates = rig.say("third request").await;
+    assert_eq!(rig.started_with(), vec![None, Some("h1".into()), None]);
+    assert!(notices(&updates).iter().any(|n| n.contains("earlier messages changed")), "{updates:?}");
+    let third = rig.sent(2);
+    assert!(third.contains("second request") && !third.contains("first request"), "{third}");
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn changing_model_provider_or_turning_the_setting_off_leaves_no_row() {
+    let mut rig = native_rig(replies(&["one", "two", "three", "four", "five", "six"])).await;
+    let agent = rig.agent.clone();
+    rig.say("first request").await;
+    assert!(rig.row(&agent).is_some());
+    rig.edit(|c| c.model = Some("two".into()));
+    let updates = rig.say("second request").await;
+    assert!(notices(&updates).iter().any(|n| n == "Fresh replay: the model changed. Discard sends the history again."), "{updates:?}");
+    assert!(rig.row(&agent).unwrap().fingerprint.contains("\"model\":\"two\""));
+    rig.say("third request").await;
+    assert_eq!(rig.started_with(), vec![None, None, Some("h1".into())]);
+    // The provider changes: the old handle is never offered to the new provider.
+    let fake = Arc::new(replies(&["unused"]));
+    let other = Arc::new(NamedProvider { name: "other", inner: replies(&["four", "five"]) });
+    let probe = other.inner.probe.clone();
+    let channel = rig.channel.clone();
+    rig.respawn(vec![fake, other], probe, channel).await;
+    rig.edit(|c| c.provider = "other".into());
+    let updates = rig.say("fourth request").await;
+    assert_eq!(rig.started_with(), vec![None]);
+    assert!(notices(&updates).iter().any(|n| n == "Fresh replay: the provider changed. Discard sends the history again."), "{updates:?}");
+    assert!(rig.row(&agent).unwrap().fingerprint.contains("\"provider\":\"other\""));
+    rig.edit(|c| c.native_resume = false);
+    rig.say("fifth request").await;
+    assert_eq!(rig.started_with(), vec![None, None]);
+    assert_eq!(rig.started_resumable(), vec![true, false]);
+    assert!(rig.row(&agent).is_none());
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_thread_turn_and_a_summary_never_resume() {
+    // Summary: the summary session never resumes. The response session starts fresh and resumable.
+    let mut rig = native_rig(replies(&["A semantic summary.", "answer"])).await;
+    for i in 0..messages_over_budget(1) {
+        rig.store.lock().unwrap().insert_message(&Message { id: MessageId::new(), channel_id: rig.channel.clone(), role: Role::User, blocks: vec![Block::Markdown { text: format!("older {i} {}", "x".repeat(4000)) }] }).unwrap();
+    }
+    rig.say("current request").await;
+    assert_eq!(rig.started_with(), vec![None, None]);
+    assert_eq!(rig.started_resumable(), vec![false, true]);
+    // Thread: a thread turn never resumes and saves no row.
+    let anchor = rig.store.lock().unwrap().messages_for_channel(&rig.channel).unwrap().last().unwrap().id.clone();
+    let thread = rig.store.lock().unwrap().create_thread(&rig.channel, &anchor, "t", &rig.agent).unwrap();
+    let provider = Arc::new(replies(&["thread one", "thread two"]));
+    let probe = provider.probe.clone();
+    rig.respawn(vec![provider], probe, thread.id.clone()).await;
+    rig.say("side question").await;
+    rig.say("another side question").await;
+    // The thread replays the long parent prefix, so it summarizes too.
+    assert!(rig.started_with().len() >= 2 && rig.started_with().iter().all(Option::is_none));
+    assert!(rig.started_resumable().iter().all(|resumable| !resumable));
+    assert!(rig.row(&rig.agent.clone()).is_none());
+    rig.close().await;
+}
+
+// Native provider resume: summary headroom.
+
+/// 20 messages of 4000 bytes: the first summary batch leaves about 36 KB, which fits the budget but not half of it.
+fn insert_twenty_long_messages(rig: &Rig) {
+    for i in 0..20 {
+        rig.store.lock().unwrap().insert_message(&Message { id: MessageId::new(), channel_id: rig.channel.clone(), role: Role::User, blocks: vec![Block::Markdown { text: format!("older {i} {}", "x".repeat(4000)) }] }).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_channel_that_overflowed_once_resumes_on_the_next_turn() {
+    let mut rig = native_rig(replies(&["summary one", "summary two", "answer one", "answer two"])).await;
+    insert_twenty_long_messages(&rig);
+    rig.say("current request").await;
+    // Two summary sessions, then the response session.
+    assert_eq!(rig.started_with(), vec![None, None, None]);
+    assert_eq!(rig.started_resumable(), vec![false, false, true]);
+    let updates = rig.say("second request").await;
+    assert_eq!(rig.started_with().last().unwrap().as_deref(), Some("h1"));
+    assert_eq!(rig.started_resumable().last(), Some(&true));
+    assert!(!notices(&updates).iter().any(|n| n.starts_with("Fresh replay")), "{updates:?}");
+    assert!(!rig.sent(3).contains("current request"), "{}", rig.sent(3));
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_non_resumable_agent_keeps_todays_summary_target() {
+    let provider = Arc::new(replies(&["summary one", "answer one"]));
+    let probe = provider.probe.clone();
+    let rig = Rig::with_provider(provider, probe).await;
+    insert_twenty_long_messages(&rig);
+    let mut rig = rig;
+    rig.say("current request").await;
+    // One summary session only: the input fits the full budget after the first batch.
+    assert_eq!(rig.started_with().len(), 2);
+    assert_eq!(rig.started_resumable(), vec![false, false]);
+    assert!(rig.sent(1).contains("summary one"));
+    assert!(rig.sent(1).len() > discard_core::conversation_context::input_budget(None) / 2, "{}", rig.sent(1).len());
+    rig.close().await;
+}
+
+// Native provider resume: drop rules.
+
+const UNSAFE_CANCELLED: &str = "the previous response was cancelled";
+const UNSAFE_FAILED: &str = "the previous response failed";
+const UNSAFE_NOT_SAVED: &str = "the previous response was not saved";
+const REJECTED_NOTICE: &str = "Fresh replay: the provider rejected the saved session. Discard sends the history again.";
+
+fn unsafe_notice(why: &str) -> String {
+    format!("Fresh replay: the last turn did not finish cleanly ({why}). Discard sends the history again.")
+}
+
+fn finished(updates: &[Update]) -> Option<discard_core::driver::TurnOutcome> {
+    updates.iter().find_map(|u| match u { Update::TurnFinished(outcome) => Some(*outcome), _ => None })
+}
+
+fn errors(updates: &[Update]) -> Vec<String> {
+    updates.iter().filter_map(|u| match u { Update::Error(text) => Some(text.clone()), _ => None }).collect()
+}
+
+/// After a drop, the next response replays the whole history with the notice, and saves a valid row.
+async fn assert_next_response_replays(rig: &mut Rig, notice: &str) {
+    let updates = rig.say("after the drop").await;
+    let last = rig.started_with().len() - 1;
+    assert_eq!(rig.started_with()[last], None, "a dropped handle is never offered");
+    assert!(notices(&updates).iter().any(|n| n == notice), "{updates:?}");
+    let input = rig.probe.sent.lock().unwrap().last().unwrap().clone();
+    assert!(input.contains("first request") && input.contains("after the drop"), "{input}");
+    let row = rig.row(&rig.agent.clone()).unwrap();
+    assert_eq!(row.dropped_reason, None);
+}
+
+#[tokio::test]
+async fn a_cancelled_turn_drops_the_handle_and_the_next_response_replays_with_a_notice() {
+    let provider = FakeProvider::new(vec![Step::text("one"), Step::idle()])
+        .then_session(vec![Step::text("partial"), Step::Hang])
+        .then_session(vec![Step::text("three"), Step::idle()])
+        .with_resume_handle("h1");
+    let mut rig = native_rig(provider).await;
+    rig.say("first request").await;
+    rig.commands.send(Command::Send("second request".into())).unwrap();
+    loop {
+        if let Some(Update::Event(event)) = rig.updates.recv().await
+            && matches!(&event.kind, discard_core::event::EventKind::TextDelta { .. }) { break; }
+    }
+    rig.commands.send(Command::Cancel).unwrap();
+    let updates = rig.done().await;
+    assert_eq!(finished(&updates), Some(discard_core::driver::TurnOutcome::Cancelled));
+    assert_eq!(rig.started_with(), vec![None, Some("h1".into())]);
+    let row = rig.row(&rig.agent.clone()).unwrap();
+    assert_eq!(row.handle, "h1", "a dropped row keeps its handle");
+    assert_eq!(row.dropped_reason.as_deref(), Some(UNSAFE_CANCELLED));
+    assert_next_response_replays(&mut rig, &unsafe_notice(UNSAFE_CANCELLED)).await;
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_failed_turn_drops_the_handle() {
+    let provider = FakeProvider::new(vec![Step::text("one"), Step::idle()])
+        .then_session(vec![Step::text("partial"), Step::Crash])
+        .then_session(vec![Step::text("three"), Step::idle()])
+        .with_resume_handle("h1");
+    let mut rig = native_rig(provider).await;
+    rig.say("first request").await;
+    rig.commands.send(Command::Send("second request".into())).unwrap();
+    let updates = rig.done().await;
+    assert_eq!(finished(&updates), Some(discard_core::driver::TurnOutcome::Failed));
+    assert_eq!(rig.row(&rig.agent.clone()).unwrap().dropped_reason.as_deref(), Some(UNSAFE_FAILED));
+    assert_next_response_replays(&mut rig, &unsafe_notice(UNSAFE_FAILED)).await;
+    assert_eq!(rig.started_with(), vec![None, Some("h1".into()), None]);
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_response_that_fails_to_save_drops_the_handle() {
+    let mut rig = native_rig(replies(&["one", "two", "three"])).await;
+    rig.say("first request").await;
+    let connection = rusqlite::Connection::open(rig._dir.path().join("store.db")).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_agent_message BEFORE INSERT ON messages WHEN NEW.role='agent' BEGIN SELECT RAISE(ABORT, 'test disk write failed'); END;").unwrap();
+    rig.commands.send(Command::Send("second request".into())).unwrap();
+    let updates = rig.done().await;
+    assert!(updates.iter().any(|u| matches!(u, Update::ResponseSaveFailed(_))), "{updates:?}");
+    assert_eq!(rig.row(&rig.agent.clone()).unwrap().dropped_reason.as_deref(), Some(UNSAFE_NOT_SAVED));
+    connection.execute_batch("DROP TRIGGER reject_agent_message;").unwrap();
+    assert_next_response_replays(&mut rig, &unsafe_notice(UNSAFE_NOT_SAVED)).await;
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_rejected_handle_replays_once_in_the_same_response() {
+    // Codex shape: the start fails. Claude shape: the start works and the first message fails.
+    for first_send in [false, true] {
+        let provider = if first_send {
+            FakeProvider::new(vec![Step::text("one"), Step::idle()])
+                .then_session(vec![Step::text("from the rejected session"), Step::idle()])
+                .then_session(vec![Step::text("two"), Step::idle()])
+                .with_rejecting_resume_on_first_send()
+        } else {
+            FakeProvider::new(vec![Step::text("one"), Step::idle()])
+                .then_session(vec![Step::text("two"), Step::idle()])
+                .with_rejecting_resume()
+        };
+        let mut rig = native_rig(provider.with_resume_handle("h1")).await;
+        rig.say("first request").await;
+        let updates = rig.say("second request").await;
+        assert_eq!(rig.started_with(), vec![None, Some("h1".into()), None], "first_send={first_send}");
+        assert_eq!(rig.started_resumable(), vec![true, true, true]);
+        assert_eq!(notices(&updates).iter().filter(|n| *n == REJECTED_NOTICE).count(), 1, "{updates:?}");
+        assert!(errors(&updates).is_empty(), "{updates:?}");
+        // The last state wins: a rejected handle ends as a replay with its reason, never as a stale `Resumed`.
+        assert_eq!(resume_states(&updates).last(), Some(&discard_core::ui_state::ResumeState::Replay { reason: "the provider rejected the saved session. Discard sends the history again.".into() }), "first_send={first_send} {updates:?}");
+        assert!(updates.iter().any(|u| matches!(u, Update::ConversationMarker(m) if matches!(&m.blocks[0], Block::Markdown { text } if text == REJECTED_NOTICE))));
+        let sent = rig.probe.sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), if first_send { 3 } else { 2 });
+        if first_send { assert!(!sent[1].contains("first request") && sent[1].contains("second request"), "the rejected session got the delta"); }
+        let replay = sent.last().unwrap();
+        assert!(replay.contains("first request") && replay.contains("one") && replay.contains("second request"), "{replay}");
+        assert_eq!(replay.matches("second request").count(), 1, "{replay}");
+        // The rejected session shows nothing.
+        let texts: Vec<String> = updates.iter().filter_map(|u| match u { Update::Event(e) => match &e.kind { discard_core::event::EventKind::TextDelta { text } => Some(text.clone()), _ => None }, _ => None }).collect();
+        assert_eq!(texts, vec!["two".to_string()]);
+        let messages = rig.store.lock().unwrap().messages_for_channel(&rig.channel).unwrap();
+        assert!(!messages.iter().any(|m| m.blocks.iter().any(|b| matches!(b, Block::Markdown { text } if text.contains("rejected session") && !text.starts_with("Fresh replay")))));
+        let row = rig.row(&rig.agent.clone()).unwrap();
+        assert_eq!((row.handle.as_str(), row.dropped_reason.as_deref()), ("h1", None));
+        let last = messages.iter().rfind(|m| m.role == Role::Agent).unwrap();
+        assert_eq!(row.delivered_through.as_ref().map(|id| id.0.split(":part:").next().unwrap().to_owned()), Some(last.id.0.clone()));
+        rig.close().await;
+    }
+}
+
+#[tokio::test]
+async fn a_rejected_handle_whose_replay_also_fails_ends_the_turn() {
+    for first_send in [false, true] {
+        let provider = FakeProvider::new(vec![Step::text("one"), Step::idle()]).with_resume_handle("h1").with_failed_start(2, "the replay broke");
+        let provider = if first_send { provider.with_rejecting_resume_on_first_send() } else { provider.with_rejecting_resume() };
+        let mut rig = native_rig(provider).await;
+        rig.say("first request").await;
+        rig.commands.send(Command::Send("second request".into())).unwrap();
+        let updates = rig.done().await;
+        assert_eq!(finished(&updates), Some(discard_core::driver::TurnOutcome::Failed));
+        assert_eq!(rig.started_with(), vec![None, Some("h1".into()), None], "no third start; first_send={first_send}");
+        assert!(errors(&updates).iter().any(|e| e.contains("the replay broke")), "{updates:?}");
+        assert!(!errors(&updates).iter().any(|e| e.contains("Start a new session")), "{updates:?}");
+        assert_eq!(rig.row(&rig.agent.clone()).unwrap().dropped_reason.as_deref(), Some(UNSAFE_FAILED));
+        rig.close().await;
+    }
+}
+
+#[tokio::test]
+async fn over_budget_bytes_replay_on_the_next_response() {
+    let mut rig = native_rig(replies(&["one", "two"])).await;
+    rig.say("first request").await;
+    let mut row = rig.row(&rig.agent.clone()).unwrap();
+    row.bytes_in_session = discard_core::conversation_context::input_budget(None) as u64;
+    rig.store.lock().unwrap().put_agent_session(&row).unwrap();
+    assert_next_response_replays(&mut rig, "Fresh replay: the session grew past its size limit. Discard sends the history again.").await;
+    assert_eq!(rig.started_with(), vec![None, None]);
+    assert!(rig.row(&rig.agent.clone()).unwrap().bytes_in_session < row.bytes_in_session);
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_compacted_session_replays_on_the_next_response() {
+    let mut rig = native_rig(replies(&["one", "two"]).with_compaction()).await;
+    rig.say("first request").await;
+    let row = rig.row(&rig.agent.clone()).unwrap();
+    assert_eq!((row.handle.as_str(), row.dropped_reason.as_deref()), ("h1", Some("provider_compacted")));
+    let updates = rig.say("after the drop").await;
+    assert_eq!(rig.started_with(), vec![None, None]);
+    assert!(notices(&updates).iter().any(|n| n == "Fresh replay: the provider compacted the session. Discard sends the history again."), "{updates:?}");
+    assert!(rig.sent(1).contains("first request"));
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_context_limit_error_drops_the_handle_with_over_budget() {
+    let provider = FakeProvider::new(vec![Step::text("one"), Step::idle()])
+        .then_session(vec![Step::Emit(discard_core::event::EventKind::Error { message: "Prompt is too long: the context window limit was exceeded".into() }), Step::idle()])
+        .then_session(vec![Step::text("three"), Step::idle()])
+        .with_resume_handle("h1");
+    let mut rig = native_rig(provider).await;
+    rig.say("first request").await;
+    rig.commands.send(Command::Send("second request".into())).unwrap();
+    let updates = rig.done().await;
+    assert_eq!(finished(&updates), Some(discard_core::driver::TurnOutcome::Failed));
+    assert_eq!(rig.row(&rig.agent.clone()).unwrap().dropped_reason.as_deref(), Some("over_budget"));
+    assert_next_response_replays(&mut rig, "Fresh replay: the session grew past its size limit. Discard sends the history again.").await;
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_non_native_agent_is_unaffected_by_failures() {
+    let provider = FakeProvider::new(vec![Step::text("partial"), Step::Crash])
+        .then_session(vec![Step::text("two"), Step::idle()])
+        .with_resume_handle("h1")
+        .with_compaction();
+    let probe = provider.probe.clone();
+    let mut rig = Rig::with_provider(Arc::new(provider), probe).await;
+    rig.commands.send(Command::Send("first request".into())).unwrap();
+    let updates = rig.done().await;
+    assert_eq!(finished(&updates), Some(discard_core::driver::TurnOutcome::Failed));
+    let updates = rig.say("second request").await;
+    assert!(!notices(&updates).iter().any(|n| n.starts_with("Fresh replay")), "{updates:?}");
+    assert_eq!(rig.started_with(), vec![None, None]);
+    assert_eq!(rig.started_resumable(), vec![false, false]);
+    assert!(rig.row(&rig.agent.clone()).is_none());
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_cancel_during_a_rejected_first_send_ends_the_turn_without_a_replay() {
+    let provider = FakeProvider::new(vec![Step::text("one"), Step::idle()])
+        .then_session(vec![Step::text("from the rejected session"), Step::idle()])
+        .then_session(vec![Step::text("must not run"), Step::idle()])
+        .with_resume_handle("h1")
+        .with_slow_rejecting_resume_on_first_send(std::time::Duration::from_millis(300));
+    let mut rig = native_rig(provider).await;
+    rig.say("first request").await;
+    rig.commands.send(Command::Send("second request".into())).unwrap();
+    // The rejected session received its message: the send is now waiting.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while rig.probe.sent.lock().unwrap().len() < 2 { tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+    }).await.unwrap();
+    rig.commands.send(Command::Cancel).unwrap();
+    let updates = rig.done().await;
+    assert_eq!(finished(&updates), Some(discard_core::driver::TurnOutcome::Cancelled), "{updates:?}");
+    assert_eq!(rig.started_with(), vec![None, Some("h1".into())], "no replay starts after a cancel");
+    assert_eq!(rig.probe.sent.lock().unwrap().len(), 2, "no second input");
+    assert!(!notices(&updates).iter().any(|n| n == REJECTED_NOTICE), "{updates:?}");
+    assert_eq!(rig.row(&rig.agent.clone()).unwrap().dropped_reason.as_deref(), Some("handle_rejected"));
     rig.close().await;
 }
