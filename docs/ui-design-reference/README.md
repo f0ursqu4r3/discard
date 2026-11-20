@@ -776,7 +776,7 @@ These images were captured from the final prototype revision listed at the top. 
 
 ### Merge review
 
-Implemented as a Rust-rendered tab. It reviews committed work only, stores approval as a decision, and never runs a Git merge. It shows an honest empty state, not a fake merge request, when a channel has no branch or nothing to review.
+Implemented. It has no plugin surface: Rust computes the review and the web view draws it. It reviews committed work only, stores approval as a decision, and never runs a Git merge. It shows an honest empty state, not a fake merge request, when a channel has no branch or nothing to review.
 
 ![Reference merge-review composition](discard-ui-reference/02-merge-review.png)
 

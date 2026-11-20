@@ -86,11 +86,14 @@ second confirm when the removal would lose files.
 
 ## Merge review
 
-The **Merge review** tab of a branch channel shows the committed work of the branch against the default branch, from the merge base. The tab is read-only. It runs no Git write and does not merge.
+The **Merge review** tab of a branch channel shows the committed work of the branch against the default branch,
+from the merge base. The tab is read-only. It runs no Git write and does not merge.
 
-- **Approve** and **Request changes** store a decision that names the reviewed commit. The newest decision decides the state.
+- **Approve** and **Request changes** store a decision that names the reviewed commit. The newest decision decides
+  the state.
 - A new commit on the branch makes an approval `Approval out of date`.
-- **Request changes** needs a note. Discard posts the note into the channel conversation as `Review of <short commit>: <note>`. If the post fails, the decision stays saved and the tab shows **Retry**.
+- **Request changes** needs a note. Discard posts the note into the channel conversation as
+  `Review of <short commit>: <note>`. If the post fails, the decision stays saved and the tab shows **Retry**.
 - A note has at most 4000 characters.
 - **Ask for a summary** posts a summary request into the conversation.
 - The tab shows `Nothing to review` when the branch has no commits beyond the target.
@@ -101,8 +104,9 @@ The **Merge review** tab of a branch channel shows the committed work of the bra
 
 - Worktrees are a git feature. A project that is not a git repository uses the main checkout.
 - Submodules and sparse checkouts are not handled specially.
-- Discard does not merge the worktree branches. The Merge review tab records a decision and runs no merge. Archiving and **Remove Worktree…** keep the branch. **Delete
-  Branch…** deletes a local branch only after you confirm it.
+- Discard does not merge the worktree branches. The Merge review tab records a decision and runs no merge.
+  Archiving and **Remove Worktree…** keep the branch. **Delete Branch…** deletes a local branch only after you
+  confirm it.
 
 ## Conversation worktree tools
 
