@@ -4,7 +4,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { useAppearanceSettings } from '@/bridge/appearance'
 import { isTauri } from '@tauri-apps/api/core'
 import { useMediaQuery } from '@vueuse/core'
-import { ScanEye, GitPullRequest, ListChecks } from '@lucide/vue'
+import { ScanEye, ListChecks } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 import { useStore } from './bridge/store'
 import { currentWindowLabel } from './bridge/window'
@@ -55,7 +55,7 @@ import {
   type MessageSource,
   type PendingReply,
 } from './components/reply'
-import type { AttachmentDto, MessageDto, ProjectChannelDto } from './bridge/types'
+import type { AttachmentDto, MessageDto, ProjectChannelDto, ReviewStateDto } from './bridge/types'
 import ChannelList from './components/ChannelList.vue'
 import ChannelHeader from './components/ChannelHeader.vue'
 import MessageList from './components/MessageList.vue'
@@ -67,6 +67,8 @@ import { unescapeSlash } from './components/slash'
 import Notices from './components/Notices.vue'
 import ApprovalDock from './components/ApprovalDock.vue'
 import ChangesView from './components/changes/ChangesView.vue'
+import ReviewView from './components/review/ReviewView.vue'
+import { reviewBadge } from './components/review/reviewBadge'
 import ToolCallBlock from './components/ToolCallBlock.vue'
 import BrailleSpinner from './components/BrailleSpinner.vue'
 import StatusLine from './components/StatusLine.vue'
@@ -282,6 +284,8 @@ const addAgentOpen = ref(false),
   profileId = ref<string | null>(null),
   profileBusy = ref(false)
 const conversationTab = ref('conversation')
+const reviewState = ref<ReviewStateDto | null>(null)
+const reviewBadgeLabel = computed(() => reviewBadge(reviewState.value))
 const sidebarMode = ref<'profile' | 'search'>('profile')
 const historyQuery = ref(''),
   historyRevision = ref(0),
@@ -1135,6 +1139,7 @@ watch(
   () => {
     draftThread.value = null
     conversationTab.value = 'conversation'
+    reviewState.value = null
     messageJump.value = null
     if (searchAgent.value?.id !== store.snapshot?.agentId || store.snapshot?.activeProjectId)
       sidebarMode.value = 'profile'
@@ -1311,8 +1316,12 @@ watch(
                     </Badge>
                   </TabsTrigger>
                   <TabsTrigger value="run">Run</TabsTrigger>
-                  <!-- TODO: Implement merge review. -->
-                  <TabsTrigger value="review" disabled>Merge review · Soon</TabsTrigger>
+                  <TabsTrigger value="review">
+                    Merge review
+                    <Badge v-if="reviewBadgeLabel" variant="secondary">
+                      {{ reviewBadgeLabel }}
+                    </Badge>
+                  </TabsTrigger>
                 </TabsList>
                 <span
                   v-if="store.snapshot.turnRunning"
@@ -1391,21 +1400,12 @@ watch(
                   </EmptyHeader>
                 </Empty>
               </div>
-              <div
-                v-else
-                data-ui-id="merge-review-view"
-                class="min-h-0 flex-1 overflow-auto overscroll-contain"
-              >
-                <Empty>
-                  <EmptyHeader>
-                    <EmptyMedia variant="icon"><GitPullRequest /></EmptyMedia>
-                    <EmptyTitle>No merge review</EmptyTitle>
-                    <EmptyDescription>
-                      Merge reviews are not available in this workspace yet.
-                    </EmptyDescription>
-                  </EmptyHeader>
-                </Empty>
-              </div>
+              <ReviewView
+                v-else-if="conversationTab === 'review'"
+                :channel-id="store.snapshot.channelId"
+                :turn-running="!!store.snapshot.turnRunning"
+                @state="(state) => (reviewState = state)"
+              />
             </template>
             <FriendsList
               v-else-if="
