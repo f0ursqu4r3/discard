@@ -867,9 +867,9 @@ async fn a_review_request_posts_into_the_open_channel_and_a_running_turn_refuses
     let channels = service(core.clone(), store.clone());
     let channel = ChannelId(channels.activate_project(&ViewId::main(), &project.id).unwrap().1);
     store.lock().unwrap().bind_branch(&channel, "feature").unwrap();
-    let send = |text: String| core.send_to_agent(Some(&channel.0), text, None);
-    let s = store.lock().unwrap();
-    let outcome = decide(&s, &channel, repo.path(), core.channel_busy_reason(&channel.0), "changes_requested", &head, Some("Rename it."), send).unwrap();
+    let operation = channels.operation_guard();
+    let send = |text: String| channels.send_to_channel(&operation, &channel.0, text);
+    let outcome = decide(&store, &channel, repo.path(), core.channel_busy_reason(&channel.0), "changes_requested", &head, Some("Rename it."), send).unwrap();
     assert_eq!(outcome.post_error, None);
     assert_eq!(outcome.dto.state, ReviewState::ChangesRequested);
     let expected = format!("Review of {}: Rename it.", &head[..7]);
@@ -879,9 +879,9 @@ async fn a_review_request_posts_into_the_open_channel_and_a_running_turn_refuses
     // The posted message starts a turn. The channel is busy until it ends.
     let busy = core.channel_busy_reason(&channel.0);
     assert!(busy.is_some());
-    let refused = request_summary(&s, &channel, busy, |text| core.send_to_agent(Some(&channel.0), text, None));
+    let refused = request_summary(&store, &channel, busy, |text| channels.send_to_channel(&operation, &channel.0, text));
     assert_eq!(refused.err().as_deref(), busy);
     core.apply(&ViewId::main(), discard_core::ui_state::Update::TurnFinished(discard_core::driver::TurnOutcome::Completed));
-    request_summary(&s, &channel, core.channel_busy_reason(&channel.0), |text| core.send_to_agent(Some(&channel.0), text, None)).unwrap();
+    request_summary(&store, &channel, core.channel_busy_reason(&channel.0), |text| channels.send_to_channel(&operation, &channel.0, text)).unwrap();
     assert!(format!("{:?}", core.history_snapshot(&ViewId::main()).messages).contains(SUMMARY_REQUEST));
 }

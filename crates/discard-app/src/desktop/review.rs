@@ -8,10 +8,15 @@ use discard_core::{
     store::Store,
 };
 use serde::Serialize;
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::{Mutex, MutexGuard},
+};
 
 pub const ARCHIVED: &str = "This channel is archived.";
 pub const STALE: &str = "The branch changed. Reload the review.";
+pub const MERGED: &str = "This branch is already merged.";
+pub const POST_FAILED: &str = "Your decision is saved, but the note was not posted: ";
 pub const SUMMARY_REQUEST: &str = "Summarize this branch against its target branch. Use project_git_compare and project_git_log, and read the changed files where you need to. Describe what the branch changes, and note anything that looks risky.";
 
 #[derive(Debug, Serialize)]
@@ -38,43 +43,66 @@ fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
-fn archived(store: &Store, channel: &ChannelId) -> Result<bool, String> {
-    store.channel_archived(channel).map_err(|e| e.to_string())
+/// Git runs outside the store lock. Each store access takes the lock for one short step.
+fn lock(store: &Mutex<Store>) -> MutexGuard<'_, Store> {
+    store.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn short(head: &str) -> String {
     head.chars().take(7).collect()
 }
 
-pub fn review(store: &Store, channel: &ChannelId, folder: &Path, busy: Option<&str>) -> Result<ReviewDto, String> {
-    let rows = store.review_decisions(channel).map_err(|e| e.to_string())?;
+fn post_failed(error: String) -> String {
+    format!("{POST_FAILED}{error}")
+}
+
+/// What the snapshot needs from the store: the branch and the head of the newest decision.
+fn snapshot_inputs(store: &Mutex<Store>, channel: &ChannelId) -> Result<(Option<String>, Option<ReviewDecision>), String> {
+    let store = lock(store);
     let branch = store.channel_branch(channel).map_err(|e| e.to_string())?;
-    let snapshot = snapshot(folder, branch.as_deref(), rows.first().map(|row| row.head.as_str()));
+    let newest = store.review_decisions(channel).map_err(|e| e.to_string())?.into_iter().next();
+    Ok((branch, newest))
+}
+
+/// The DTO of a snapshot read earlier. It reads the rows again, so it shows a row written after the snapshot.
+fn assemble(store: &Mutex<Store>, channel: &ChannelId, snapshot: ReviewSnapshot, busy: Option<&str>) -> Result<ReviewDto, String> {
+    let store = lock(store);
+    let rows = store.review_decisions(channel).map_err(|e| e.to_string())?;
     let state = review_state(&snapshot, rows.first());
-    let blocked = if archived(store, channel)? { Some(ARCHIVED.to_owned()) } else { busy.map(str::to_owned) };
+    let blocked = if store.channel_archived(channel).map_err(|e| e.to_string())? { Some(ARCHIVED.to_owned()) } else { busy.map(str::to_owned) };
     let unposted = rows.iter().find(|row| row.decision == Decision::ChangesRequested && row.posted_at.is_none()).map(|row| row.id.clone());
     Ok(ReviewDto { snapshot, state, decisions: rows, blocked, unposted })
 }
 
-fn refuse_archived(store: &Store, channel: &ChannelId) -> Result<(), String> {
-    if archived(store, channel)? { Err(ARCHIVED.into()) } else { Ok(()) }
+pub fn review(store: &Mutex<Store>, channel: &ChannelId, folder: &Path, busy: Option<&str>) -> Result<ReviewDto, String> {
+    let (branch, newest) = snapshot_inputs(store, channel)?;
+    let snapshot = snapshot(folder, branch.as_deref(), newest.as_ref().map(|row| row.head.as_str()));
+    assemble(store, channel, snapshot, busy)
+}
+
+fn refuse_archived(store: &Mutex<Store>, channel: &ChannelId) -> Result<(), String> {
+    if lock(store).channel_archived(channel).map_err(|e| e.to_string())? { Err(ARCHIVED.into()) } else { Ok(()) }
 }
 
 fn refuse_busy(busy: Option<&str>) -> Result<(), String> {
     busy.map_or(Ok(()), |reason| Err(reason.to_owned()))
 }
 
-/// Posts the note of `row`, then sets `posted_at`. A send error leaves the row unposted.
-fn post(store: &Store, row: &ReviewDecision, send: impl FnOnce(String) -> Result<(), String>) -> Result<(), String> {
+/// Posts the note of `row`, then sets `posted_at`. A send error leaves the row unposted. The store lock is free
+/// while `send` runs.
+fn post(store: &Mutex<Store>, row: &ReviewDecision, send: impl FnOnce(String) -> Result<(), String>) -> Result<(), String> {
     let note = row.note.as_deref().unwrap_or_default();
-    send(format!("Review of {}: {note}", short(&row.head)))?;
-    store.mark_review_posted(&row.id, now()).map_err(|e| e.to_string())
+    send(format!("Review of {}: {note}", short(&row.head))).map_err(post_failed)?;
+    lock(store).mark_review_posted(&row.id, now()).map_err(|e| e.to_string())
 }
 
 /// Records a decision. Request changes also posts the note through `send`.
+///
+/// Git runs before any store step, and `send` runs with the store free. The caller holds the operation lock of the
+/// channels, which makes a double click one row and one post.
 #[expect(clippy::too_many_arguments, reason = "Each argument is one field of the decision.")]
 pub fn decide(
-    store: &Store,
+    store: &Mutex<Store>,
     channel: &ChannelId,
     folder: &Path,
     busy: Option<&str>,
@@ -99,8 +127,7 @@ pub fn decide(
     if decision == Decision::ChangesRequested {
         refuse_busy(busy)?;
     }
-    let newest = store.review_decisions(channel).map_err(|e| e.to_string())?.into_iter().next();
-    let branch = store.channel_branch(channel).map_err(|e| e.to_string())?;
+    let (branch, newest) = snapshot_inputs(store, channel)?;
     let live = snapshot(folder, branch.as_deref(), newest.as_ref().map(|row| row.head.as_str()));
     if let Some(reason) = &live.reason {
         return Err(reason.clone());
@@ -108,8 +135,10 @@ pub fn decide(
     if live.head.as_deref() != Some(head) {
         return Err(STALE.into());
     }
-    if matches!(review_state(&live, newest.as_ref()), ReviewState::Merged | ReviewState::NothingToReview) {
-        return Err("This branch has nothing to review.".into());
+    match review_state(&live, newest.as_ref()) {
+        ReviewState::Merged => return Err(MERGED.into()),
+        ReviewState::NothingToReview => return Err("This branch has nothing to review.".into()),
+        _ => {}
     }
     let (Some(base), Some(target)) = (live.base.clone(), live.target.clone()) else {
         return Err("The review has no target branch.".into());
@@ -126,14 +155,14 @@ pub fn decide(
         posted_at: None,
     };
     // An identical newest row comes back instead of a second row. Its posted note is not posted again.
-    let row = store.add_review_decision(&row).map_err(|e| e.to_string())?;
+    let row = lock(store).add_review_decision(&row).map_err(|e| e.to_string())?;
     let post_error = if decision == Decision::ChangesRequested && row.posted_at.is_none() { post(store, &row, send).err() } else { None };
-    Ok(Outcome { dto: review(store, channel, folder, busy)?, post_error })
+    Ok(Outcome { dto: assemble(store, channel, live, busy)?, post_error })
 }
 
 /// Posts the stored note of an unposted changes-requested row.
 pub fn retry_post(
-    store: &Store,
+    store: &Mutex<Store>,
     channel: &ChannelId,
     folder: &Path,
     busy: Option<&str>,
@@ -142,7 +171,7 @@ pub fn retry_post(
 ) -> Result<Outcome, String> {
     refuse_archived(store, channel)?;
     refuse_busy(busy)?;
-    let rows = store.review_decisions(channel).map_err(|e| e.to_string())?;
+    let rows = lock(store).review_decisions(channel).map_err(|e| e.to_string())?;
     let Some(row) = rows.iter().find(|row| row.id == decision_id) else { return Err("This review decision does not exist.".into()) };
     if row.decision != Decision::ChangesRequested {
         return Err("Only a request for changes has a note to post.".into());
@@ -155,7 +184,7 @@ pub fn retry_post(
 }
 
 /// Posts the fixed summary request.
-pub fn request_summary(store: &Store, channel: &ChannelId, busy: Option<&str>, send: impl FnOnce(String) -> Result<(), String>) -> Result<(), String> {
+pub fn request_summary(store: &Mutex<Store>, channel: &ChannelId, busy: Option<&str>, send: impl FnOnce(String) -> Result<(), String>) -> Result<(), String> {
     refuse_archived(store, channel)?;
     refuse_busy(busy)?;
     send(SUMMARY_REQUEST.to_owned())
@@ -193,7 +222,7 @@ mod tests {
     struct Fixture {
         _dir: tempfile::TempDir,
         root: PathBuf,
-        store: Store,
+        store: Mutex<Store>,
         channel: ChannelId,
     }
 
@@ -217,7 +246,7 @@ mod tests {
         store.insert_project(&project).unwrap();
         let channel = store.ensure_project_general_channel(&project.id, &agent).unwrap();
         store.bind_branch(&channel.id, "feature").unwrap();
-        Fixture { _dir: dir, root, store, channel: channel.id }
+        Fixture { _dir: dir, root, store: Mutex::new(store), channel: channel.id }
     }
 
     fn head(f: &Fixture) -> String {
@@ -242,7 +271,7 @@ mod tests {
     }
 
     fn rows(f: &Fixture) -> Vec<ReviewDecision> {
-        f.store.review_decisions(&f.channel).unwrap()
+        f.store.lock().unwrap().review_decisions(&f.channel).unwrap()
     }
 
     #[test]
@@ -321,7 +350,7 @@ mod tests {
         let f = fixture();
         let h = head(&f);
         let out = decide(&f.store, &f.channel, &f.root, None, "changes_requested", &h, Some("Fix it."), |_| Err("offline".into())).unwrap();
-        assert_eq!(out.post_error.as_deref(), Some("offline"));
+        assert_eq!(out.post_error.as_deref(), Some("Your decision is saved, but the note was not posted: offline"));
         let id = rows(&f)[0].id.clone();
         assert_eq!(out.dto.unposted.as_deref(), Some(id.as_str()));
         assert_eq!(rows(&f)[0].posted_at, None);
@@ -367,8 +396,8 @@ mod tests {
         git(&f.root, &["checkout", "-q", "main"]);
         git(&f.root, &["merge", "-q", "--no-ff", "-m", "merge", "feature"]);
         assert_eq!(review(&f.store, &f.channel, &f.root, None).unwrap().state, ReviewState::Merged);
-        assert!(approve(&f, None, &h, &sent).is_err());
-        assert!(request(&f, None, &h, "note", &sent).is_err());
+        assert_eq!(approve(&f, None, &h, &sent).err().as_deref(), Some("This branch is already merged."));
+        assert_eq!(request(&f, None, &h, "note", &sent).err().as_deref(), Some(MERGED));
         assert_eq!(rows(&f).len(), 1, "only the approval before the merge");
         // Nothing to review.
         let f = fixture();
@@ -396,7 +425,7 @@ mod tests {
         let mut id = None;
         let out = decide(&f.store, &f.channel, &f.root, None, "changes_requested", &h, Some("n"), |_| Err("offline".into())).unwrap();
         id.get_or_insert(out.dto.unposted.unwrap());
-        f.store.archive_channel(&f.channel).unwrap();
+        f.store.lock().unwrap().archive_channel(&f.channel).unwrap();
         let dto = review(&f.store, &f.channel, &f.root, Some("A turn runs.")).unwrap();
         assert_eq!(dto.blocked.as_deref(), Some("This channel is archived."));
         assert_eq!(approve(&f, None, &h, &sent).err().as_deref(), Some(ARCHIVED));
@@ -417,6 +446,28 @@ mod tests {
         assert_eq!(rows(&f).len(), 1);
         assert_eq!(out.dto.unposted, None);
         assert_eq!(sent.borrow().len(), 1, "the repeat posts nothing");
+    }
+
+    #[test]
+    fn the_store_lock_is_free_while_the_note_posts() {
+        let f = fixture();
+        let h = head(&f);
+        let store = &f.store;
+        let out = decide(store, &f.channel, &f.root, None, "changes_requested", &h, Some("n"), |_| {
+            assert!(store.try_lock().is_ok(), "send runs with the store free");
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(out.post_error, None);
+        let id = {
+            let out = decide(store, &f.channel, &f.root, None, "changes_requested", &h, Some("m"), |_| Err("x".into())).unwrap();
+            out.dto.unposted.unwrap()
+        };
+        retry_post(store, &f.channel, &f.root, None, &id, |_| {
+            assert!(store.try_lock().is_ok(), "a retry sends with the store free");
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]

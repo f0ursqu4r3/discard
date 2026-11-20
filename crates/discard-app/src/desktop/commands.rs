@@ -859,15 +859,6 @@ fn review_folder(channels: &super::channels::Channels, channel: &discard_core::m
         .map_err(|error| if error == super::terminal::cwd::NO_PROJECT { "Direct messages have no merge review.".to_owned() } else { error })
 }
 
-/// Post a review message the way the composer does: from the user, answered by the agent of the channel.
-fn review_send(channels: &super::channels::Channels, store: &discard_core::store::Store, channel: &discard_core::model::ChannelId, text: String) -> Result<(), String> {
-    let id = discard_core::mentions::recipient(store, channel, &text)?;
-    if store.agent_archived(&id).map_err(|e| e.to_string())? { return Err("This agent is archived. Restore it before sending a message.".into()); }
-    let config = store.load_agent(&id).map_err(|e| e.to_string())?;
-    let recipient = discard_core::model::MessageAuthor { agent_id: id, name: config.name, provider: config.provider, avatar: config.avatar };
-    channels.core.send_to_agent(Some(&channel.0), text, Some(recipient))
-}
-
 /// The merge review of a channel: the branch snapshot, the stored decisions, and the derived state. It reads Git only.
 #[tauri::command]
 pub async fn channel_review(channels: State<'_, Arc<super::channels::Channels>>, channel_id: String) -> Result<super::review::ReviewDto, String> {
@@ -876,8 +867,7 @@ pub async fn channel_review(channels: State<'_, Arc<super::channels::Channels>>,
         let channel = discard_core::model::ChannelId(channel_id);
         let folder = review_folder(&channels, &channel)?;
         let busy = channels.core.channel_busy_reason(&channel.0);
-        let store = channels.store.lock().unwrap_or_else(|e| e.into_inner());
-        super::review::review(&store, &channel, &folder, busy)
+        super::review::review(&channels.store, &channel, &folder, busy)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -890,11 +880,12 @@ pub async fn review_decide(channels: State<'_, Arc<super::channels::Channels>>, 
     let channels = channels.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let channel = discard_core::model::ChannelId(channel_id);
+        // The operation lock makes a double click one row and one post. Git and the post run with the store free.
+        let operation = channels.operation_guard();
         let folder = review_folder(&channels, &channel)?;
         let busy = channels.core.channel_busy_reason(&channel.0);
-        let store = channels.store.lock().unwrap_or_else(|e| e.into_inner());
-        let send = |text: String| review_send(&channels, &store, &channel, text);
-        let outcome = super::review::decide(&store, &channel, &folder, busy, &decision, &head, note.as_deref(), send)?;
+        let send = |text: String| channels.send_to_channel(&operation, &channel.0, text);
+        let outcome = super::review::decide(&channels.store, &channel, &folder, busy, &decision, &head, note.as_deref(), send)?;
         outcome.post_error.map_or(Ok(outcome.dto), Err)
     })
     .await
@@ -907,11 +898,11 @@ pub async fn review_retry_post(channels: State<'_, Arc<super::channels::Channels
     let channels = channels.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let channel = discard_core::model::ChannelId(channel_id);
+        let operation = channels.operation_guard();
         let folder = review_folder(&channels, &channel)?;
         let busy = channels.core.channel_busy_reason(&channel.0);
-        let store = channels.store.lock().unwrap_or_else(|e| e.into_inner());
-        let send = |text: String| review_send(&channels, &store, &channel, text);
-        let outcome = super::review::retry_post(&store, &channel, &folder, busy, &decision_id, send)?;
+        let send = |text: String| channels.send_to_channel(&operation, &channel.0, text);
+        let outcome = super::review::retry_post(&channels.store, &channel, &folder, busy, &decision_id, send)?;
         outcome.post_error.map_or(Ok(outcome.dto), Err)
     })
     .await
@@ -924,10 +915,10 @@ pub async fn review_request_summary(channels: State<'_, Arc<super::channels::Cha
     let channels = channels.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let channel = discard_core::model::ChannelId(channel_id);
+        let operation = channels.operation_guard();
         let busy = channels.core.channel_busy_reason(&channel.0);
-        let store = channels.store.lock().unwrap_or_else(|e| e.into_inner());
-        let send = |text: String| review_send(&channels, &store, &channel, text);
-        super::review::request_summary(&store, &channel, busy, send)
+        let send = |text: String| channels.send_to_channel(&operation, &channel.0, text);
+        super::review::request_summary(&channels.store, &channel, busy, send)
     })
     .await
     .map_err(|e| e.to_string())?

@@ -1012,19 +1012,32 @@ impl Channels {
     pub fn send_with_attachments(&self, channel: &str, text: String, attachments: Vec<discard_core::attachments::Attachment>) -> Result<(), String> {
         self.send_with_options(channel, text, attachments, false)
     }
+    /// The agent that answers `text` in `channel`: the mentioned agent, or the agent of the channel.
+    fn recipient_of(&self, channel: &str, text: &str) -> Result<discard_core::model::MessageAuthor, String> {
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let id = discard_core::mentions::recipient(&store, &ChannelId(channel.into()), text)?;
+        if store.agent_archived(&id).map_err(|e| e.to_string())? { return Err("This agent is archived. Restore it before sending a message.".into()); }
+        let config = store.load_agent(&id).map_err(|e| e.to_string())?;
+        Ok(discard_core::model::MessageAuthor { agent_id: id, name: config.name, provider: config.provider, avatar: config.avatar })
+    }
+    /// Take the operation lock. A caller that holds it serialises with every channel operation, and posts with
+    /// `send_to_channel`.
+    pub fn operation_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.operation.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// Send a user message to a channel the way the composer does. The guard proves that the caller holds the
+    /// operation lock, as `send_with_options` does. The store lock must be free.
+    pub fn send_to_channel(&self, _operation: &std::sync::MutexGuard<'_, ()>, channel: &str, text: String) -> Result<(), String> {
+        let recipient = self.recipient_of(channel, &text)?;
+        self.core.send_to_agent(Some(channel), text, Some(recipient))
+    }
     /// Send a user message. In a thread, `also_post` also posts it to the parent channel. Anywhere else it is an error.
     pub fn send_with_options(&self, channel: &str, text: String, attachments: Vec<discard_core::attachments::Attachment>, also_post: bool) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let thread_info = self.store.lock().unwrap_or_else(|e| e.into_inner()).thread_info(&ChannelId(channel.into())).map_err(|e| e.to_string())?;
         let thread = thread_info.is_some();
         if also_post && !thread { return Err("Only a message in a thread can be posted to a channel.".into()); }
-        let recipient = {
-            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-            let id = discard_core::mentions::recipient(&store, &ChannelId(channel.into()), &text)?;
-            if store.agent_archived(&id).map_err(|e| e.to_string())? { return Err("This agent is archived. Restore it before sending a message.".into()); }
-            let config = store.load_agent(&id).map_err(|e| e.to_string())?;
-            Some(discard_core::model::MessageAuthor { agent_id: id, name: config.name, provider: config.provider, avatar: config.avatar })
-        };
+        let recipient = Some(self.recipient_of(channel, &text)?);
         if thread {
             self.load_thread(&ChannelId(channel.into()))?;
             return self.core.send_in_thread(channel, text, attachments, also_post, recipient);
