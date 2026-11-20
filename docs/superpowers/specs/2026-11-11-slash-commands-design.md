@@ -82,13 +82,13 @@ The owner approved the feature and left all design decisions to the designer. Ea
 | `/members` | `Action::ToggleMemberList`. | ready |
 | `/plugins` | `Action::ReviewPlugins`. | ready |
 | `/archive` | `Action::ArchiveChannel` with the composer's channel as the target. It starts the existing archive flow. | ready |
-| `/model` | Change the model of the channel's agent. | planned |
-| `/clear` | Start a new agent session in the channel. | planned |
+| `/model` | `/model @agent [model]`. Changes the model of the mentioned agent. The agent is required, so the command knows whose model to change. With no model, it lists the current model and the models of the provider. With a model, it checks the ID against the provider list (when the provider has one), saves it through the agent editor path, and answers `<name> now uses <model>.` The change applies to every channel of the agent. It is refused while a turn of that agent runs. | ready |
+| `/clear` | Starts a new provider session in the channel for every agent that has one. It saves a system marker, makes later replay start after the marker, drops the saved summary and the session records, and replaces the idle provider transport. The transcript keeps all messages. It takes no arguments, and it is refused during a turn (`Stop the turn before clearing the session.`) and in a thread (`/clear does not apply to a thread.`). | ready |
 
 13. A built-in command ignores arguments that it does not use.
 14. A built-in command that the current state blocks returns an error and does nothing. Examples: `/stop` with no running turn returns `No turn is running.`; `/archive` during a turn returns the existing text `Stop the turn before archiving the channel`. A built-in command adds no state check that its `Action` does not have.
 14a. `/archive` returns when the existing archive flow starts. The confirm step and the later notices show as they do today. The result panel shows only a refusal that is known at once.
-15. A planned command has no handler. Its shared definition has a `TODO` comment that states the missing behavior. Running it returns the error `/name is not available yet.`
+15. No command is planned now. A planned command has no handler. Its shared definition has a `TODO` comment that states the missing behavior. Running it returns the error `/name is not available yet.`
 
 ### Plugin API
 

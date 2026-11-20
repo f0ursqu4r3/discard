@@ -1074,6 +1074,7 @@ async fn later_summary_batch_failure_or_cancel_keeps_original_boundary_and_clean
             model: Some("one".into()),
             summary: Some("previous durable summary".into()),
             through: None,
+            ..Default::default()
         };
         rig.store
             .lock()
@@ -1705,6 +1706,41 @@ async fn deleting_an_earlier_message_forces_a_replay() {
     assert!(notices(&updates).iter().any(|n| n.contains("earlier messages changed")), "{updates:?}");
     let third = rig.sent(2);
     assert!(third.contains("second request") && !third.contains("first request"), "{third}");
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn clearing_the_context_starts_a_new_provider_session_with_no_earlier_messages() {
+    let mut rig = native_rig(replies(&["alpha-reply", "beta-reply", "gamma-reply", "delta-reply"])).await;
+    let agent = rig.agent.clone();
+    rig.say("first request").await;
+    rig.say("second request").await;
+    assert!(rig.row(&agent).is_some());
+    rig.store.lock().unwrap().reset_channel_context(&rig.channel).unwrap();
+    assert!(rig.row(&agent).is_none(), "the session record is gone");
+    rig.say("third request").await;
+    assert_eq!(rig.started_with(), vec![None, Some("h1".into()), None], "the third turn starts a new session");
+    let third = rig.sent(2);
+    assert!(third.contains("third request"), "{third}");
+    assert!(!third.contains("first request") && !third.contains("second request") && !third.contains("alpha-reply"), "{third}");
+    assert!(rig.row(&agent).is_some(), "the new session is saved");
+    rig.say("fourth request").await;
+    assert_eq!(rig.started_with().last(), Some(&Some("h1".into())), "the new session resumes");
+    let fourth = rig.sent(3);
+    assert!(fourth.contains("fourth request") && !fourth.contains("first request"), "{fourth}");
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn clearing_the_context_cuts_the_replay_of_an_agent_without_a_saved_session() {
+    let provider = Arc::new(replies(&["alpha-reply", "beta-reply"]));
+    let probe = provider.probe.clone();
+    let mut rig = Rig::with_provider(provider, probe).await;
+    rig.say("first request").await;
+    rig.store.lock().unwrap().reset_channel_context(&rig.channel).unwrap();
+    rig.say("second request").await;
+    let sent = rig.sent(1);
+    assert!(sent.contains("second request") && !sent.contains("first request") && !sent.contains("alpha-reply"), "{sent}");
     rig.close().await;
 }
 

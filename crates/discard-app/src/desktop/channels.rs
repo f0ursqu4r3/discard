@@ -667,6 +667,41 @@ impl Channels {
         })();
         self.core.end_agent_change(&channel.agent_id.0); result
     }
+    /// `/clear`: the next turn of the channel starts a new provider session with no earlier context. The transcript
+    /// keeps its messages and shows a marker. A thread has no session of its own, so it is refused.
+    pub fn clear_context(&self, channel_id: &str) -> Result<(), String> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let id = ChannelId(channel_id.to_owned());
+        let (channel, thread) = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            (store.load_channel(&id).map_err(|e| e.to_string())?, store.thread_info(&id).map_err(|e| e.to_string())?)
+        };
+        if thread.is_some() { return Err("/clear does not apply to a thread.".into()); }
+        if self.core.channel_running(channel_id) { return Err("Stop the turn before clearing the session.".into()); }
+        let marker = self.store.lock().unwrap_or_else(|e| e.into_inner()).reset_channel_context(&id).map_err(|e| e.to_string())?;
+        self.core.apply_channel(channel_id, discard_core::ui_state::Update::ConversationMarker(marker));
+        // Close the idle provider transport of the channel and open a new one.
+        if self.core.invalidate_idle_channel(&channel)? { self.start_mode(&channel, true)?; }
+        Ok(())
+    }
+    /// `/model`: save a new model for the agent through the same checks as the agent editor, then refresh every channel
+    /// of the agent. A turn reads the model of its agent when it starts, so the next turn uses the new one. The change
+    /// is refused while a turn of the agent runs.
+    pub fn change_agent_model(&self, agent: &discard_core::model::AgentId, model: &str, matrix: &discard_core::capability::CapabilityMatrix) -> Result<discard_core::agent::AgentConfig, String> {
+        let name = self.store.lock().unwrap_or_else(|e| e.into_inner()).load_agent(agent).map_err(|e| e.to_string())?.name;
+        if self.core.agent_running(&agent.0) { return Err(format!("Stop the turn of {name} before changing its model.")); }
+        self.core.begin_agent_change(&agent.0)?;
+        let result = (|| {
+            let saved = discard_core::agent_edit::change_model(&self.store.lock().unwrap_or_else(|e| e.into_inner()), agent, model, matrix).map_err(|error| match error {
+                discard_core::agent_edit::SaveError::Unchanged => format!("{name} already uses {model}."),
+                other => other.to_string(),
+            })?;
+            self.reload_agent(&agent.0)?;
+            Ok(saved)
+        })();
+        self.core.end_agent_change(&agent.0);
+        result
+    }
     pub fn reload_agent(&self, id: &str) -> Result<(), String> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let channels = self.core.agent_channel_ids(id);

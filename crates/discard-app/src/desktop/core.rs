@@ -670,6 +670,11 @@ impl AppCore {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.channels.values().any(|c| c.agent_id == id && c.commands.is_closed())
     }
+    /// Whether the agent has a turn that runs in any loaded channel, as the channel agent or as the responder.
+    pub fn agent_running(&self, id: &str) -> bool {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.channels.values().any(|c| (c.agent_id == id || c.ui.responder().is_some_and(|author| author.agent_id.0 == id)) && c.ui.turn_running())
+    }
     pub fn begin_agent_change(&self, id: &str) -> Result<(), String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if s.changing_agents.contains(id) || s.channels.values().any(|c| (c.agent_id == id || c.ui.responder().is_some_and(|author| author.agent_id.0 == id)) && (c.ui.turn_running() || c.archive_busy)) {

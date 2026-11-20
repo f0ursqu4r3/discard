@@ -39,7 +39,10 @@ const command = (name: string, extra: Partial<CommandDto> = {}): CommandDto => (
 const registry = [
   command('help'),
   command('stop'),
-  command('model', { planned: true }),
+  command('model', { args: '@agent [model]' }),
+  command('clear'),
+  // No built-in command is planned now. This entry keeps the planned-row behavior covered.
+  command('later', { planned: true }),
   command('echo', { source: 'tools', args: '<text>', description: 'Repeat' }),
 ]
 const props = { channelId: 'c1', archived: false, busy: false, running: false, channel: 'general' }
@@ -312,11 +315,16 @@ describe('command popup', () => {
       expect.stringContaining('/help'),
       expect.stringContaining('/stop'),
       expect.stringContaining('/model'),
+      expect.stringContaining('/clear'),
+      expect.stringContaining('/later'),
       expect.stringContaining('/echo'),
     ])
-    expect(list[3]!.text()).toContain('<text>')
-    expect(list[3]!.text()).toContain('Repeat')
-    expect(list[3]!.text()).toContain('tools')
+    expect(list[2]!.text()).toContain('@agent [model]')
+    expect(list[2]!.text()).not.toContain('Soon')
+    expect(list[3]!.text()).not.toContain('Soon')
+    expect(list[5]!.text()).toContain('<text>')
+    expect(list[5]!.text()).toContain('Repeat')
+    expect(list[5]!.text()).toContain('tools')
     expect(list[0]!.text()).not.toContain('builtin')
   })
 
@@ -341,12 +349,11 @@ describe('command popup', () => {
   it('marks a planned command as Soon and skips it', async () => {
     await type(w, '/')
     await flushPromises()
-    const model = rows(w)[2]!
-    expect(model.attributes('aria-disabled')).toBe('true')
-    expect(model.text()).toContain('Soon')
-    expect(model.text()).not.toContain('TODO')
-    await key(w, 'ArrowDown')
-    await key(w, 'ArrowDown') // help -> stop -> echo
+    const later = rows(w)[4]!
+    expect(later.attributes('aria-disabled')).toBe('true')
+    expect(later.text()).toContain('Soon')
+    expect(later.text()).not.toContain('TODO')
+    for (let i = 0; i < 4; i++) await key(w, 'ArrowDown') // help -> stop -> model -> clear -> echo
     expect(w.find('[role="option"][aria-selected="true"]').text()).toContain('/echo')
     expect(w.get('textarea').attributes('aria-activedescendant')).toBe(
       w.get('[role="option"][aria-selected="true"]').attributes('id'),
@@ -356,8 +363,19 @@ describe('command popup', () => {
   it('does not complete a planned command on click', async () => {
     await type(w, '/')
     await flushPromises()
-    await rows(w)[2]!.trigger('click')
+    await rows(w)[4]!.trigger('click')
     expect(input(w).value).toBe('/')
+  })
+
+  it('completes /model and /clear from the popup', async () => {
+    await type(w, '/mo')
+    await flushPromises()
+    await key(w, 'Tab')
+    expect(input(w).value).toBe('/model ')
+    await type(w, '/cl')
+    await flushPromises()
+    await rows(w)[0]!.trigger('click')
+    expect(input(w).value).toBe('/clear ')
   })
 
   it('completes with Tab', async () => {
@@ -480,5 +498,69 @@ describe('command popup', () => {
     await type(w, '//')
     await type(w, '/Help')
     expect(popup(w).exists()).toBe(false)
+  })
+})
+
+describe('/model with a mention', () => {
+  const agent = (id: string, name: string) => ({
+    id,
+    name,
+    model: 'm',
+    archived: false,
+    provider: 'p',
+  })
+  const withAgents = async () => {
+    api.getAgents.mockResolvedValue([agent('a', 'Alex'), agent('j', 'Jordan Lee')])
+    api.getProjectMembers.mockResolvedValue([])
+    w = mount(Composer, { props: { ...props, projectId: 'project', alsoPostLabel: undefined } })
+  }
+
+  it('opens the mention list after the command name and completes the mention in the line', async () => {
+    await withAgents()
+    await type(w, '/model @Al')
+    await flushPromises()
+    expect(w.find('[aria-label="Commands"]').exists()).toBe(false)
+    expect(w.findAll('[role="option"]').map((o) => o.text())).toEqual([
+      expect.stringContaining('Alex'),
+    ])
+    await enter(w)
+    expect(input(w).value).toBe('/model @Alex ')
+    expect(api.runCommand).not.toHaveBeenCalled()
+    expect(w.emitted('send')).toBeUndefined()
+  })
+
+  it('quotes a name with a space and runs the whole line as one command', async () => {
+    await withAgents()
+    await type(w, '/model @Jor')
+    await flushPromises()
+    await key(w, 'Tab')
+    expect(input(w).value).toBe('/model @"Jordan Lee" ')
+    await type(w, '/model @"Jordan Lee" gpt-5')
+    api.runCommand.mockResolvedValue('Jordan Lee now uses gpt-5.')
+    await enter(w)
+    await flushPromises()
+    expect(api.runCommand).toHaveBeenCalledWith('c1', 'model', '@"Jordan Lee" gpt-5')
+    expect(w.emitted('send')).toBeUndefined()
+    expect(panel(w).get('[role="status"]').text()).toBe('Jordan Lee now uses gpt-5.')
+    expect(input(w).value).toBe('')
+  })
+
+  it('runs /clear and clears the draft with no output', async () => {
+    api.runCommand.mockResolvedValue(null)
+    await type(w, '/clear')
+    await enter(w)
+    await flushPromises()
+    expect(api.runCommand).toHaveBeenCalledWith('c1', 'clear', '')
+    expect(panel(w).exists()).toBe(false)
+    expect(input(w).value).toBe('')
+  })
+
+  it('shows the error of a refused /clear and keeps the draft', async () => {
+    api.runCommand.mockRejectedValue('Stop the turn before clearing the session.')
+    await type(w, '/clear')
+    await enter(w)
+    await flushPromises()
+    expect(panel(w).get('[role="alert"]').text()).toBe('Stop the turn before clearing the session.')
+    expect(input(w).value).toBe('/clear')
   })
 })

@@ -756,3 +756,85 @@ async fn folder_reload_preserves_unsaved_replies_and_only_restarts_affected_tran
     assert_eq!(core.snapshot(&ViewId::main()).live_blocks, retained.live_blocks);
     assert_eq!(core.snapshot(&ViewId::main()).notice, retained.notice);
 }
+
+fn matrix(provider: &str) -> discard_core::capability::CapabilityMatrix {
+    use discard_core::capability::{Capabilities, CapabilityMatrix};
+    CapabilityMatrix { provider: provider.into(), matrix_version: 1, cli_version: "1".into(), capabilities: Capabilities { interactive_approvals: true, tool_call_visibility: true, per_session_mcp: true, session_resume: true, cancellation: true, pre_execution_blocking: true } }
+}
+fn session_row(channel: &ChannelId, agent: &discard_core::model::AgentId) -> discard_core::store::AgentSession {
+    discard_core::store::AgentSession {
+        channel_id: channel.clone(), agent_id: agent.clone(), handle: "h".into(), fingerprint: "{}".into(), delivered_through: None,
+        delivered_memory: Default::default(), delivered_topic_version: None, delivered_capture_paused: false, bytes_in_session: 1, cwd: "/".into(), dropped_reason: None,
+    }
+}
+
+#[tokio::test]
+async fn clearing_a_channel_marks_the_timeline_drops_sessions_and_replaces_the_idle_transport() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let agent = store.lock().unwrap().create_agent(&config()).unwrap();
+    let chat = store.lock().unwrap().default_conversation(&agent).unwrap();
+    let core = empty_core(dir.path());
+    let channels = service(core.clone(), store.clone());
+    channels.open_agent(&ViewId::main(), &agent).unwrap();
+    store.lock().unwrap().put_agent_session(&session_row(&chat.id, &agent)).unwrap();
+    let before = core.channel_runtime_generation(&chat.id.0).unwrap();
+
+    channels.clear_context(&chat.id.0).unwrap();
+
+    assert!(store.lock().unwrap().agent_session(&chat.id, &agent).unwrap().is_none());
+    let saved = store.lock().unwrap().messages_for_channel(&chat.id).unwrap();
+    let marker = saved.last().unwrap();
+    assert_eq!(marker.role, Role::System);
+    assert_eq!(store.lock().unwrap().conversation_context(&chat.id).unwrap().reset_from.as_ref(), Some(&marker.id));
+    let shown = core.history_snapshot(&ViewId::main()).messages;
+    assert_eq!(shown.last().map(|m| m.id.as_str()), Some(marker.id.0.as_str()), "the timeline shows the marker");
+    assert!(core.channel_runtime_generation(&chat.id.0).unwrap() > before, "the idle transport was replaced");
+    assert!(!core.channel_session_closed(&chat.id.0), "and the new one is open");
+}
+
+#[tokio::test]
+async fn clearing_is_refused_while_a_turn_runs_and_in_a_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let agent = store.lock().unwrap().create_agent(&config()).unwrap();
+    let chat = store.lock().unwrap().default_conversation(&agent).unwrap();
+    let anchor = Message { id: MessageId::new(), channel_id: chat.id.clone(), role: Role::User, blocks: vec![Block::Markdown { text: "q".into() }] };
+    store.lock().unwrap().insert_message(&anchor).unwrap();
+    let thread = store.lock().unwrap().create_thread(&chat.id, &anchor.id, "T", &agent).unwrap();
+    let core = empty_core(dir.path());
+    let channels = service(core.clone(), store.clone());
+    channels.open_agent(&ViewId::main(), &agent).unwrap();
+    store.lock().unwrap().put_agent_session(&session_row(&chat.id, &agent)).unwrap();
+    assert_eq!(channels.clear_context(&thread.id.0).unwrap_err(), "/clear does not apply to a thread.");
+    core.send_to(Some(&chat.id.0), "Hello".into()).unwrap();
+    assert_eq!(channels.clear_context(&chat.id.0).unwrap_err(), "Stop the turn before clearing the session.");
+    assert!(store.lock().unwrap().agent_session(&chat.id, &agent).unwrap().is_some(), "a refused clear changes nothing");
+    assert_eq!(store.lock().unwrap().messages_for_channel(&chat.id).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_model_change_saves_through_the_editor_path_for_every_channel_and_waits_for_idle() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let agent = store.lock().unwrap().create_agent(&config()).unwrap();
+    store.lock().unwrap().default_conversation(&agent).unwrap();
+    let second = store.lock().unwrap().create_conversation(&agent, None, "Second").unwrap();
+    let core = empty_core(dir.path());
+    let channels = service(core.clone(), store.clone());
+    channels.open_agent(&ViewId::main(), &agent).unwrap();
+    channels.select(&ViewId::main(), &second.id.0).unwrap();
+    // A running turn blocks the change, and nothing is saved.
+    core.send_to(Some(&second.id.0), "Hello".into()).unwrap();
+    let blocked = channels.change_agent_model(&agent, "new-model", &matrix("codex")).unwrap_err();
+    assert!(blocked.starts_with("Stop the turn of ") && blocked.ends_with(" before changing its model."), "{blocked}");
+    assert_eq!(store.lock().unwrap().load_agent(&agent).unwrap().model.as_deref(), Some("provider/exact-model:1"));
+    core.apply_channel(&second.id.0, discard_core::ui_state::Update::TurnFinished(discard_core::driver::TurnOutcome::Completed));
+    // Idle: the model changes and only the model.
+    let before = store.lock().unwrap().load_agent(&agent).unwrap();
+    let saved = channels.change_agent_model(&agent, "new-model", &matrix("codex")).unwrap();
+    assert_eq!(saved, discard_core::agent::AgentConfig { model: Some("new-model".into()), ..before });
+    assert_eq!(store.lock().unwrap().load_agent(&agent).unwrap(), saved, "the one saved config serves every channel of the agent");
+    assert!(channels.change_agent_model(&agent, "new-model", &matrix("codex")).unwrap_err().ends_with("already uses new-model."));
+    assert!(channels.change_agent_model(&agent, "x", &matrix("other")).is_err(), "the provider check of the editor applies");
+}

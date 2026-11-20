@@ -82,6 +82,14 @@ pub fn save(store: &Store, id: &AgentId, draft: &AgentDraft, matrix: &Capability
     Ok(cfg)
 }
 
+/// Save a new model for the agent and change nothing else. The save goes through `save`, so its checks apply.
+/// A model change never needs confirmation. Fails with `Unchanged` when the agent already uses the model.
+pub fn change_model(store: &Store, id: &AgentId, model: &str, matrix: &CapabilityMatrix) -> Result<AgentConfig, SaveError> {
+    let mut draft = AgentDraft::from(&store.load_agent(id)?);
+    draft.model = Some(model.to_owned());
+    save(store, id, &draft, matrix, false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,6 +102,18 @@ mod tests {
         store.insert_agent(&id, &cfg).unwrap();
         let matrix = CapabilityMatrix { provider: "p".into(), matrix_version: 1, cli_version: "1".into(), capabilities: Capabilities { interactive_approvals: true, tool_call_visibility: true, per_session_mcp: true, session_resume: true, cancellation: true, pre_execution_blocking: true } };
         (store, id, cfg, matrix)
+    }
+
+    #[test]
+    fn a_model_change_saves_only_the_model_without_confirmation() {
+        let (store, id, cfg, matrix) = setup(ApprovalPolicy::Ask);
+        let saved = change_model(&store, &id, "new-model", &matrix).unwrap();
+        assert_eq!(saved, AgentConfig { model: Some("new-model".into()), ..cfg.clone() });
+        assert_eq!(store.load_agent(&id).unwrap(), saved);
+        assert!(matches!(change_model(&store, &id, "new-model", &matrix), Err(SaveError::Unchanged)));
+        let other = CapabilityMatrix { provider: "other".into(), ..matrix };
+        assert!(matches!(change_model(&store, &id, "third", &other), Err(SaveError::Blocked(_))), "the provider check still applies");
+        assert_eq!(store.load_agent(&id).unwrap().model.as_deref(), Some("new-model"));
     }
 
     #[test]

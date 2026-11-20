@@ -197,6 +197,12 @@ pub struct ChannelHistory {
     pub posted: std::collections::HashMap<MessageId, PostedSource>,
 }
 
+/// The messages after the `/clear` marker. Without a marker, or when the marker is not among them, all of them.
+fn after_reset(mut messages: Vec<Message>, reset: Option<&MessageId>) -> Vec<Message> {
+    if let Some(index) = reset.and_then(|id| messages.iter().position(|m| &m.id == id)) { messages.drain(..=index); }
+    messages
+}
+
 /// Characters kept from the first thread message when it names the thread.
 pub const THREAD_NAME_CHARS: usize = 40;
 
@@ -2885,14 +2891,15 @@ impl Store {
     /// A question thread replays its parent channel up to and including the anchor message, then its own messages.
     /// A sub-agent thread replays only its own messages.
     pub fn channel_history(&self, channel: &ChannelId) -> Result<ChannelHistory> {
-        let mut history = ChannelHistory { messages: self.messages_for_channel(channel)?, authors: self.message_authors(channel)?, posted: self.posted_sources(channel)? };
+        let mut history = ChannelHistory { messages: after_reset(self.messages_for_channel(channel)?, self.conversation_context(channel)?.reset_from.as_ref()), authors: self.message_authors(channel)?, posted: self.posted_sources(channel)? };
         let Some(thread) = self.thread_info(channel)? else { return Ok(history) };
         // A sub-agent sees only its own messages: the brief, its replies, and the project context the engine adds.
         let Some(anchor) = thread.anchor_message_id.filter(|_| thread.kind == ThreadKind::Question) else { return Ok(history) };
         let parent = self.messages_for_channel(&thread.parent_channel_id)?;
         let end = parent.iter().position(|m| m.id == anchor)
             .ok_or_else(|| StoreError::Corrupt(format!("thread anchor {}", anchor.0)))?;
-        let mut messages = parent[..=end].to_vec();
+        // A `/clear` in the parent before the anchor also cuts what the thread sees of the parent.
+        let mut messages = after_reset(parent[..=end].to_vec(), self.conversation_context(&thread.parent_channel_id)?.reset_from.as_ref());
         messages.append(&mut history.messages);
         history.messages = messages;
         history.authors.extend(self.message_authors(&thread.parent_channel_id)?);
@@ -5731,5 +5738,57 @@ mod agent_session_tests {
             f.store.delete_agent(&f.agent, DeleteAgentOptions { delete_conversations, delete_private_memory: false }).unwrap();
             assert!(f.store.agent_session(&f.channel.id, &f.agent).unwrap().is_none(), "delete_conversations={delete_conversations}");
         }
+    }
+
+    fn said(f: &Fixture, role: Role, text: &str) -> Message {
+        let message = Message { id: MessageId::new(), channel_id: f.channel.id.clone(), role, blocks: vec![Block::Markdown { text: text.into() }] };
+        f.store.insert_message(&message).unwrap();
+        message
+    }
+
+    #[test]
+    fn clearing_context_ends_sessions_marks_the_transcript_and_cuts_replay() {
+        let f = fixture();
+        let other_agent = f.store.create_agent(&f.store.load_agent(&f.agent).unwrap()).unwrap();
+        let other_channel = f.store.create_conversation(&f.agent, None, "dm").unwrap();
+        for (channel, agent) in [(&f.channel.id, &f.agent), (&f.channel.id, &other_agent), (&other_channel.id, &f.agent)] {
+            f.store.put_agent_session(&row(channel, agent)).unwrap();
+        }
+        said(&f, Role::User, "old question");
+        let old = said(&f, Role::Agent, "old answer");
+        f.store.set_conversation_context(&f.channel.id, &crate::conversation_context::ConversationContext {
+            provider: Some("claude".into()), model: Some("model".into()), summary: Some("s".into()), through: Some(old.id.clone()), reset_from: None,
+        }).unwrap();
+
+        let marker = f.store.reset_channel_context(&f.channel.id).unwrap();
+        let fresh = said(&f, Role::User, "new question");
+
+        assert_eq!(marker.role, Role::System);
+        assert!(matches!(&marker.blocks[..], [Block::Markdown { text }] if text == crate::conversation_context::CONTEXT_CLEARED));
+        assert!(f.store.agent_session(&f.channel.id, &f.agent).unwrap().is_none());
+        assert!(f.store.agent_session(&f.channel.id, &other_agent).unwrap().is_none(), "every agent loses its session");
+        assert!(f.store.agent_session(&other_channel.id, &f.agent).unwrap().is_some(), "other channels keep theirs");
+        let ids: Vec<_> = f.store.messages_for_channel(&f.channel.id).unwrap().into_iter().map(|m| m.id).collect();
+        assert_eq!(ids.len(), 4, "the transcript keeps every message");
+        assert_eq!(ids[2], marker.id);
+        let history = f.store.channel_history(&f.channel.id).unwrap();
+        assert_eq!(history.messages.iter().map(|m| m.id.clone()).collect::<Vec<_>>(), vec![fresh.id.clone()], "replay starts after the marker");
+        let state = f.store.conversation_context(&f.channel.id).unwrap();
+        assert_eq!((state.summary, state.through, state.reset_from), (None, None, Some(marker.id.clone())));
+        assert_eq!((state.provider.as_deref(), state.model.as_deref()), (Some("claude"), Some("model")));
+        let second = f.store.reset_channel_context(&f.channel.id).unwrap();
+        assert_eq!(f.store.conversation_context(&f.channel.id).unwrap().reset_from, Some(second.id));
+        assert!(f.store.channel_history(&f.channel.id).unwrap().messages.is_empty());
+    }
+
+    #[test]
+    fn a_thread_after_a_cleared_parent_does_not_replay_the_cleared_messages() {
+        let f = fixture();
+        said(&f, Role::User, "before clear");
+        f.store.reset_channel_context(&f.channel.id).unwrap();
+        let anchor = said(&f, Role::Agent, "after clear");
+        let thread = f.store.create_thread(&f.channel.id, &anchor.id, "T", &f.agent).unwrap();
+        let history = f.store.channel_history(&thread.id).unwrap();
+        assert_eq!(history.messages.iter().map(|m| m.id.clone()).collect::<Vec<_>>(), vec![anchor.id]);
     }
 }

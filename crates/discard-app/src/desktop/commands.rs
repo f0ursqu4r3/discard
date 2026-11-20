@@ -380,7 +380,8 @@ pub async fn list_commands(core: State<'_, Arc<AppCore>>) -> Result<Vec<super::d
 
 /// Run a slash command in a channel. Returns the text to show, if any.
 #[tauri::command]
-pub async fn run_command(app: tauri::AppHandle, window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>, actions: State<'_, Arc<super::actions::DesktopActions>>, channel_id: String, name: String, args: String) -> Result<Option<String>, String> {
+#[expect(clippy::too_many_arguments, reason = "A Tauri command takes each managed state as its own argument.")]
+pub async fn run_command(app: tauri::AppHandle, window: tauri::WebviewWindow, core: State<'_, Arc<AppCore>>, actions: State<'_, Arc<super::actions::DesktopActions>>, channels: State<'_, Arc<super::channels::Channels>>, context: State<'_, super::settings::SettingsContext>, channel_id: String, name: String, args: String) -> Result<Option<String>, String> {
     use discard_core::{action::Action, context_menu::ContextTarget, slash::{self, Builtin}};
     use super::slash::{Step, builtin_step};
     if !slash::valid_name(&name) { return Err(format!("Unknown command: /{name}")); }
@@ -390,7 +391,7 @@ pub async fn run_command(app: tauri::AppHandle, window: tauri::WebviewWindow, co
     let (entries, shadowed) = slash::registry(&core.plugin_commands());
     for lost in &shadowed { tracing::warn!(plugin = %lost.plugin, command = %lost.name, by = %lost.by, "plugin command shadowed"); }
     if let Some(builtin) = Builtin::from_name(&name) {
-        return match builtin_step(builtin, &channel, &entries) {
+        return match builtin_step(builtin, &channel, &entries, &args) {
             Step::Output(text) => Ok(Some(slash::truncate_output(text))),
             Step::Error(text) => Err(text),
             Step::Dispatch(action) => {
@@ -399,6 +400,12 @@ pub async fn run_command(app: tauri::AppHandle, window: tauri::WebviewWindow, co
                 super::actions::run(&app, core.inner(), &actions, &view, action, target);
                 Ok(None)
             }
+            Step::Clear => {
+                let channels = channels.inner().clone();
+                tauri::async_runtime::spawn_blocking(move || channels.clear_context(&channel_id)).await.map_err(|e| e.to_string())??;
+                Ok(None)
+            }
+            Step::Model(model) => change_model(&app, channels.inner().clone(), &context, &channel_id, &args, model).await.map(|text| Some(slash::truncate_output(text))),
         };
     }
     let owner = entries.iter().find(|entry| entry.name == name).map(|entry| entry.source.clone());
@@ -413,6 +420,23 @@ pub async fn run_command(app: tauri::AppHandle, window: tauri::WebviewWindow, co
         }
         None => Err(format!("Unknown command: /{name}")),
     }
+}
+
+/// `/model @agent [model]`. With no model, list the current model and the provider's models. With a model, check it
+/// against the provider's list and save it for the agent.
+async fn change_model(app: &tauri::AppHandle, channels: Arc<super::channels::Channels>, context: &super::settings::SettingsContext, channel_id: &str, args: &str, model: Option<String>) -> Result<String, String> {
+    use super::slash::{check_model, model_listing, model_target};
+    let target = { let store = context.store.lock().unwrap_or_else(|e| e.into_inner()); model_target(&store, &discard_core::model::ChannelId(channel_id.to_owned()), args)? };
+    let info = context.providers.iter().find(|info| info.id == target.provider).ok_or_else(|| format!("Provider {} is unavailable. Reconnect it or select another provider in agent settings.", target.provider))?;
+    let models = info.provider.models().await.map_err(|error| error.to_string());
+    let Some(model) = model else { return Ok(model_listing(&target, &models)) };
+    check_model(&target, &model, &models)?;
+    let matrix = info.matrix.clone();
+    let (agent, requested) = (target.id.clone(), model.clone());
+    tauri::async_runtime::spawn_blocking(move || channels.change_agent_model(&agent, &requested, &matrix)).await.map_err(|e| e.to_string())??;
+    use tauri::Emitter;
+    let _ = app.emit("discard://agents", ());
+    Ok(format!("{} now uses {model}.", target.name))
 }
 
 #[tauri::command]

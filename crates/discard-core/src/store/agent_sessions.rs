@@ -2,7 +2,7 @@
 //! what the provider session has already received, so the next turn can send only what changed.
 
 use super::{Result, Store};
-use crate::model::{AgentId, ChannelId, MessageId};
+use crate::model::{AgentId, Block, ChannelId, Message, MessageId, Role};
 use rusqlite::{OptionalExtension, params};
 use std::collections::BTreeMap;
 
@@ -105,5 +105,29 @@ impl Store {
             params![channel.0, agent.0],
         )?;
         Ok(())
+    }
+
+    pub fn delete_agent_sessions_for_channel(&self, channel: &ChannelId) -> Result<()> {
+        self.conn.execute("DELETE FROM agent_sessions WHERE channel_id=?1", params![channel.0])?;
+        Ok(())
+    }
+
+    /// `/clear`: save a system marker as the newest message, make replay start after it, drop the saved summary,
+    /// and delete every provider session of the channel. The transcript keeps all messages.
+    pub fn reset_channel_context(&self, channel: &ChannelId) -> Result<Message> {
+        let tx = self.conn.unchecked_transaction()?;
+        let marker = Message {
+            id: MessageId::new(),
+            channel_id: channel.clone(),
+            role: Role::System,
+            blocks: vec![Block::Markdown { text: crate::conversation_context::CONTEXT_CLEARED.into() }],
+        };
+        self.insert_message(&marker)?;
+        let mut state = self.conversation_context(channel)?;
+        (state.summary, state.through, state.reset_from) = (None, None, Some(marker.id.clone()));
+        self.set_conversation_context(channel, &state)?;
+        self.delete_agent_sessions_for_channel(channel)?;
+        tx.commit()?;
+        Ok(marker)
     }
 }

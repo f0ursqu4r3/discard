@@ -19,7 +19,13 @@ pub struct ConversationContext {
     pub model: Option<String>,
     pub summary: Option<String>,
     pub through: Option<MessageId>,
+    /// The `/clear` marker. Replay starts after this message. Earlier messages stay in the transcript only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_from: Option<MessageId>,
 }
+
+/// The transcript note that `/clear` saves.
+pub const CONTEXT_CLEARED: &str = "Context cleared. Earlier messages stay here, but the agent no longer sees them.";
 
 /// Replay budget in bytes for a context window in tokens.
 pub fn input_budget(window: Option<u64>) -> usize {

@@ -270,3 +270,9 @@ its topic.
 
 The "Moved from" and "Moved to" link blocks are `System` messages. They never enter
 replay. See [conversation moves](../worktrees.md#conversation-moves-slice-c).
+
+## Clearing the context
+
+`/clear` saves a system message in the channel and stores its ID as `reset_from` in the saved conversation context. History assembly (`Store::channel_history`) skips every message up to and including that message, so the next response starts with no earlier messages. The same command clears the saved summary and deletes the `agent_sessions` rows of the channel, so no provider session resumes. The transcript keeps every message. A thread that is anchored after the marker does not replay the cleared messages of its parent. A thread has no session of its own, so `/clear` does not apply to it.
+
+`/model @agent <model>` saves the new model through the agent editor path. A response reads the model of its agent when it starts. A saved native session whose fingerprint holds the old model does not resume. The next response replays with the notice `Fresh replay: the model changed.`

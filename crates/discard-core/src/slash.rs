@@ -43,9 +43,7 @@ impl Builtin {
             Self::Members => "members",
             Self::Plugins => "plugins",
             Self::Archive => "archive",
-            // TODO: Change the model of the channel's agent.
             Self::Model => "model",
-            // TODO: Start a new agent session in the channel.
             Self::Clear => "clear",
         }
     }
@@ -58,12 +56,20 @@ impl Builtin {
             Self::Members => "Show or hide the member list",
             Self::Plugins => "Review plugins",
             Self::Archive => "Archive this channel",
-            Self::Model => "Change the model of the agent",
-            Self::Clear => "Start a new agent session",
+            Self::Model => "Change the model of an agent",
+            Self::Clear => "Start a new agent session with no earlier context",
         }
     }
 
-    /// The menu action the command runs. `Help` shows the registry. The planned commands have none.
+    /// The argument hint of the command, if it takes arguments.
+    pub fn args(self) -> Option<&'static str> {
+        match self {
+            Self::Model => Some("@agent [model]"),
+            _ => None,
+        }
+    }
+
+    /// The menu action the command runs. `Help`, `Model`, and `Clear` have none: the desktop layer runs them.
     pub fn action(self) -> Option<Action> {
         match self {
             Self::Stop => Some(Action::CancelTurn),
@@ -75,9 +81,12 @@ impl Builtin {
         }
     }
 
-    /// A planned command shows greyed, tagged "Soon", and does nothing.
+    /// A planned command shows greyed, tagged "Soon", and does nothing. No command is planned now. Mark a future
+    /// one here and add a `TODO` that states its missing behavior (AGENTS.md).
     pub fn planned(self) -> bool {
-        matches!(self, Self::Model | Self::Clear)
+        match self {
+            Self::Help | Self::Stop | Self::Settings | Self::Members | Self::Plugins | Self::Archive | Self::Model | Self::Clear => false,
+        }
     }
 
     pub fn from_name(name: &str) -> Option<Builtin> {
@@ -100,7 +109,7 @@ pub struct Shadowed { pub plugin: String, pub name: String, pub by: String }
 pub fn registry(plugins: &[PluginCommand]) -> (Vec<Entry>, Vec<Shadowed>) {
     let mut entries: Vec<Entry> = Builtin::ALL
         .iter()
-        .map(|b| Entry { name: b.name().into(), description: b.description().into(), args: None, source: "builtin".into(), planned: b.planned() })
+        .map(|b| Entry { name: b.name().into(), description: b.description().into(), args: b.args().map(Into::into), source: "builtin".into(), planned: b.planned() })
         .collect();
     let mut shadowed = Vec::new();
     let mut commands: Vec<Entry> = Vec::new();
@@ -121,6 +130,24 @@ pub fn registry(plugins: &[PluginCommand]) -> (Vec<Entry>, Vec<Shadowed>) {
     commands.sort_by(|a, b| a.name.cmp(&b.name));
     entries.extend(commands);
     (entries, shadowed)
+}
+
+/// The model ID of `/model @agent [model]`, from the text after the command name. The text holds exactly one
+/// mention, in the form of `mentions::names`, in any position.
+pub fn parse_model_args(args: &str) -> Result<Option<String>, String> {
+    const USAGE: &str = "/model @name <model>";
+    match crate::mentions::names(args).len() {
+        0 => return Err(format!("Mention the agent: {USAGE}")),
+        1 => {}
+        _ => return Err(format!("Mention one agent: {USAGE}")),
+    }
+    let pattern = regex::Regex::new(r#"(?:^|[\s(])(@(?:"[^"]+"|[\p{L}\p{N}_-]+))"#).expect("mention pattern");
+    let Some(mention) = pattern.captures(args).and_then(|c| c.get(1)) else { return Err(format!("Mention the agent: {USAGE}")) };
+    let rest = format!("{} {}", &args[..mention.start()], &args[mention.end()..]);
+    let mut words = rest.split_whitespace();
+    let model = words.next().map(String::from);
+    if words.next().is_some() { return Err(format!("Give one model ID: {USAGE}")); }
+    Ok(model)
 }
 
 /// One line per entry: `/name[ args] — description[ (Soon)][ (plugin)]`.
@@ -179,10 +206,11 @@ mod tests {
         assert!(valid_name("a") && valid_name("git-log_2"));
         for name in ["", "A", "1a", "a b", "a/b", &"a".repeat(33)] { assert!(!valid_name(name), "{name}"); }
     }
-    #[test] fn builtins_are_in_table_order_and_planned_ones_have_no_action() {
+    #[test] fn builtins_are_in_table_order_and_none_is_planned() {
         let names: Vec<_> = Builtin::ALL.iter().map(|b| b.name()).collect();
         assert_eq!(names, ["help", "stop", "settings", "members", "plugins", "archive", "model", "clear"]);
-        for b in Builtin::ALL { if b.planned() { assert_eq!(b.action(), None); } }
+        assert!(Builtin::ALL.iter().all(|b| !b.planned()), "/model and /clear are implemented");
+        assert_eq!((Builtin::Model.action(), Builtin::Clear.action()), (None, None), "they run in the desktop layer, not through the menu");
         assert_eq!(Builtin::Stop.action(), Some(Action::CancelTurn));
         assert_eq!(Builtin::from_name("archive"), Some(Builtin::Archive));
         assert_eq!(Builtin::from_name("nope"), None);
@@ -195,7 +223,8 @@ mod tests {
         assert_eq!(entries.last().unwrap().source, "b");
         assert_eq!(entries.last().unwrap().description, "Plugin command");
         assert_eq!(entries[0].source, "builtin");
-        assert!(entries[6].planned && !entries[0].planned);
+        assert!(entries.iter().all(|e| !e.planned));
+        assert_eq!(entries[6].args.as_deref(), Some("@agent [model]"));
         assert_eq!(shadowed, [
             Shadowed { plugin: "a".into(), name: "help".into(), by: "builtin".into() },
             Shadowed { plugin: "a".into(), name: "zed".into(), by: "b".into() },
@@ -205,9 +234,22 @@ mod tests {
         let (entries, _) = registry(&[PluginCommand { plugin: "p".into(), name: "echo".into(), description: Some("Repeat".into()), args: Some("<text>".into()) }]);
         let text = help_text(&entries);
         assert!(text.contains("/help — Show the available commands"));
-        assert!(text.contains("/model — Change the model of the agent (Soon)"));
+        assert!(text.contains("/model @agent [model] — Change the model of an agent"));
+        assert!(text.contains("/clear — Start a new agent session with no earlier context"));
+        assert!(!text.contains("Soon"));
         assert!(text.contains("/echo <text> — Repeat (p)"));
         assert_eq!(text.lines().count(), 9);
+    }
+    #[test] fn model_args_need_one_mention_and_at_most_one_model() {
+        let usage = "Mention the agent: /model @name <model>";
+        for (args, model) in [("@Alice gpt-5", Some("gpt-5")), ("gpt-5 @Alice", Some("gpt-5")), ("@Alice", None), ("  @Alice\tm-1:x  ", Some("m-1:x")), ("@\"Ann Lee\" m", Some("m")), ("@\"Ann Lee\"", None)] {
+            assert_eq!(parse_model_args(args), Ok(model.map(String::from)), "{args:?}");
+        }
+        assert_eq!(parse_model_args(""), Err(usage.into()));
+        assert_eq!(parse_model_args("gpt-5"), Err(usage.into()));
+        assert_eq!(parse_model_args("mail@Alice.com m"), Err(usage.into()));
+        assert_eq!(parse_model_args("@A @B m"), Err("Mention one agent: /model @name <model>".into()));
+        assert_eq!(parse_model_args("@Alice a b"), Err("Give one model ID: /model @name <model>".into()));
     }
     #[test] fn truncates_output_on_a_character_boundary() {
         assert_eq!(truncate_output("short".into()), "short");
