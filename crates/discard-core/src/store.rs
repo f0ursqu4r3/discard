@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 mod agent_sessions;
 mod rail;
+mod review;
 pub use agent_sessions::AgentSession;
 pub use rail::{RailGroup, RailItem, RailLayout, RailTarget};
 
@@ -630,6 +631,7 @@ impl Store {
             tx.commit()?;
         }
         self.conn.execute_batch("CREATE TABLE IF NOT EXISTS direct_message_list (agent_id TEXT PRIMARY KEY REFERENCES agents(id));")?;
+        self.conn.execute_batch(review::REVIEW_SCHEMA)?;
         Ok(())
     }
 

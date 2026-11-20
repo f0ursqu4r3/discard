@@ -57,6 +57,7 @@ pub mod workspace_lock;
 pub mod workspace_changes;
 pub mod workspace_diff;
 pub mod merge_review;
+pub mod review_state;
 
 pub mod always_allow;
 
