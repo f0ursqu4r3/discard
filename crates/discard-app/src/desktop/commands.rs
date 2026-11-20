@@ -880,13 +880,19 @@ pub async fn review_decide(channels: State<'_, Arc<super::channels::Channels>>, 
     let channels = channels.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let channel = discard_core::model::ChannelId(channel_id);
-        // The operation lock makes a double click one row and one post. Git and the post run with the store free.
-        let operation = channels.operation_guard();
         let folder = review_folder(&channels, &channel)?;
-        let busy = channels.core.channel_busy_reason(&channel.0);
-        let send = |text: String| channels.send_to_channel(&operation, &channel.0, text);
-        let outcome = super::review::decide(&channels.store, &channel, &folder, busy, &decision, &head, note.as_deref(), send)?;
-        outcome.post_error.map_or(Ok(outcome.dto), Err)
+        // The operation lock makes a double click one row and one post. It covers the light Git read and the post,
+        // not the full snapshot.
+        let (busy, outcome) = {
+            let operation = channels.operation_guard();
+            let busy = channels.core.channel_busy_reason(&channel.0);
+            let send = |text: String| channels.send_to_channel(&operation, &channel.0, text);
+            (busy, super::review::decide(&channels.store, &channel, &folder, busy, &decision, &head, note.as_deref(), send)?)
+        };
+        if let Some(error) = outcome.post_error {
+            return Err(error);
+        }
+        super::review::review(&channels.store, &channel, &folder, busy)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -898,12 +904,17 @@ pub async fn review_retry_post(channels: State<'_, Arc<super::channels::Channels
     let channels = channels.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let channel = discard_core::model::ChannelId(channel_id);
-        let operation = channels.operation_guard();
         let folder = review_folder(&channels, &channel)?;
-        let busy = channels.core.channel_busy_reason(&channel.0);
-        let send = |text: String| channels.send_to_channel(&operation, &channel.0, text);
-        let outcome = super::review::retry_post(&channels.store, &channel, &folder, busy, &decision_id, send)?;
-        outcome.post_error.map_or(Ok(outcome.dto), Err)
+        let (busy, outcome) = {
+            let operation = channels.operation_guard();
+            let busy = channels.core.channel_busy_reason(&channel.0);
+            let send = |text: String| channels.send_to_channel(&operation, &channel.0, text);
+            (busy, super::review::retry_post(&channels.store, &channel, &folder, busy, &decision_id, send)?)
+        };
+        if let Some(error) = outcome.post_error {
+            return Err(error);
+        }
+        super::review::review(&channels.store, &channel, &folder, busy)
     })
     .await
     .map_err(|e| e.to_string())?

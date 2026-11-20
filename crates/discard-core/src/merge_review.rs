@@ -115,47 +115,46 @@ fn on_target(top: &Path, id: &str, target: &str) -> bool {
     !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_hexdigit()) && git(top, &["merge-base", "--is-ancestor", id, target]).is_ok()
 }
 
-/// The review of `branch` against the default branch.
-///
-/// `folder` is the channel folder, a worktree or the project path. `last_decided_head` is the `head` of the
-/// newest stored decision. This never fails. Every Git error becomes a `reason`.
-pub fn snapshot(folder: &Path, branch: Option<&str>, last_decided_head: Option<&str>) -> ReviewSnapshot {
-    let Some(source) = branch else { return empty(None, None, "This channel has no branch.") };
-    let top = match toplevel(folder) {
-        Ok(top) => top,
-        Err(reason) => return empty(Some(source), None, reason),
-    };
+/// The light read: a snapshot without `commits` and `files`, and what the heavy read needs next.
+struct Light {
+    snap: ReviewSnapshot,
+    top: std::path::PathBuf,
+    target_id: String,
+}
+
+fn failed(source: &str, target: Option<String>, error: String) -> ReviewSnapshot {
+    empty(Some(source), target, format!("Git could not read the branch: {error}"))
+}
+
+/// Everything except the commit list and the file diffs. `Err` is a snapshot with a `reason`.
+fn light(folder: &Path, branch: Option<&str>, last_decided_head: Option<&str>) -> Result<Light, Box<ReviewSnapshot>> {
+    let Some(source) = branch else { return Err(Box::new(empty(None, None, "This channel has no branch."))) };
+    let top = toplevel(folder).map_err(|reason| Box::new(empty(Some(source), None, reason)))?;
     if git(&top, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_err() {
-        return empty(Some(source), None, "This repository has no commits yet.");
+        return Err(Box::new(empty(Some(source), None, "This repository has no commits yet.")));
     }
     let target = default_branch(&top);
     if target.as_deref() == Some(source) {
-        return empty(Some(source), target, "This channel is on the default branch.");
+        return Err(Box::new(empty(Some(source), target, "This channel is on the default branch.")));
     }
     let source_ref = format!("refs/heads/{source}");
     let Ok(head) = git(&top, &["rev-parse", "--verify", "--quiet", "--end-of-options", &format!("{source_ref}^{{commit}}")]) else {
-        return empty(Some(source), target, "The branch no longer exists.");
+        return Err(Box::new(empty(Some(source), target, "The branch no longer exists.")));
     };
     let Some(target_name) = target.clone() else {
-        return empty(Some(source), None, "The target branch cannot be determined.");
+        return Err(Box::new(empty(Some(source), None, "The target branch cannot be determined.")));
     };
     let target_ref = format!("refs/heads/{target_name}");
     let Ok(target_id) = git(&top, &["rev-parse", "--verify", "--quiet", "--end-of-options", &format!("{target_ref}^{{commit}}")]) else {
-        return empty(Some(source), target, "The target branch cannot be determined.");
+        return Err(Box::new(empty(Some(source), target, "The target branch cannot be determined.")));
     };
     let Ok(base) = git(&top, &["merge-base", &target_id, &head]) else {
-        return empty(Some(source), target, format!("The branch has no commit in common with {target_name}."));
+        return Err(Box::new(empty(Some(source), target, format!("The branch has no commit in common with {target_name}."))));
     };
     let short = |id: &str| git(&top, &["rev-parse", "--short", id]).ok();
     let counted = git(&top, &["rev-list", "--left-right", "--count", &format!("{target_id}...{head}")]).and_then(|text| parse_counts(&text));
-    let (behind, ahead) = match counted {
-        Ok(counts) => counts,
-        Err(error) => return empty(Some(source), target, format!("Git could not read the branch: {error}")),
-    };
-    let dirty = match dirty_count(folder) {
-        Ok(dirty) => dirty,
-        Err(error) => return empty(Some(source), target, format!("Git could not read the branch: {error}")),
-    };
+    let (behind, ahead) = counted.map_err(|error| Box::new(failed(source, target.clone(), error)))?;
+    let dirty = dirty_count(folder).map_err(|error| Box::new(failed(source, target.clone(), error)))?;
     let mut snap = empty(Some(source), target, "");
     snap.reason = None;
     snap.head_short = short(&head);
@@ -165,18 +164,39 @@ pub fn snapshot(folder: &Path, branch: Option<&str>, last_decided_head: Option<&
     snap.nothing_to_review = ahead == 0;
     snap.merged = ahead == 0 && last_decided_head.is_some_and(|id| on_target(&top, id, &target_id));
     snap.dirty = dirty;
-    if ahead > 0 {
+    snap.head = Some(head);
+    snap.base = Some(base);
+    Ok(Light { snap, top, target_id })
+}
+
+/// The review of `branch` without the commit list and the file diffs: refs, counts, `merged`, and `reason`.
+/// It makes a few Git calls and no per-file diff. `commits` and `files` are empty.
+///
+/// `folder` and `last_decided_head` are as in `snapshot`.
+pub fn basics(folder: &Path, branch: Option<&str>, last_decided_head: Option<&str>) -> ReviewSnapshot {
+    light(folder, branch, last_decided_head).map_or_else(|snap| *snap, |light| light.snap)
+}
+
+/// The review of `branch` against the default branch.
+///
+/// `folder` is the channel folder, a worktree or the project path. `last_decided_head` is the `head` of the
+/// newest stored decision. This never fails. Every Git error becomes a `reason`.
+pub fn snapshot(folder: &Path, branch: Option<&str>, last_decided_head: Option<&str>) -> ReviewSnapshot {
+    let Light { mut snap, top, target_id } = match light(folder, branch, last_decided_head) {
+        Ok(light) => light,
+        Err(snap) => return *snap,
+    };
+    if snap.ahead > 0 {
+        let (Some(head), Some(base)) = (snap.head.clone(), snap.base.clone()) else { return snap };
         let read = commits(&top, &target_id, &head).and_then(|(commits, commits_cut)| {
             let (files, files_cut) = committed_files(&top, &base, &head)?;
             Ok((commits, files, commits_cut || files_cut))
         });
         match read {
             Ok((commits, files, truncated)) => (snap.commits, snap.files, snap.truncated) = (commits, files, truncated),
-            Err(error) => return empty(Some(source), snap.target, format!("Git could not read the branch: {error}")),
+            Err(error) => return failed(snap.source.as_deref().unwrap_or_default(), snap.target, error),
         }
     }
-    snap.head = Some(head);
-    snap.base = Some(base);
     snap
 }
 
@@ -389,5 +409,36 @@ mod tests {
         assert_eq!(snap.reason.as_deref(), Some("This folder is not a Git repository."));
         let missing = snapshot(&dir.path().join("nope"), Some("feature"), None);
         assert!(missing.reason.is_some());
+    }
+
+    #[test]
+    fn basics_match_the_snapshot_on_every_shared_field_and_skip_commits_and_files() {
+        let (_dir, root) = repository();
+        feature(&root);
+        let head = run(&root, &["rev-parse", "feature"]);
+        std::fs::write(root.join("new.txt"), "new\n").unwrap();
+        let mut cases = vec![snapshot(&root, Some("feature"), None), snapshot(&root, Some("main"), None), snapshot(&root, None, None), snapshot(&root, Some("gone"), None)];
+        let mut lights = vec![basics(&root, Some("feature"), None), basics(&root, Some("main"), None), basics(&root, None, None), basics(&root, Some("gone"), None)];
+        run(&root, &["checkout", "-q", "main"]);
+        run(&root, &["merge", "-q", "--no-ff", "-m", "merge feature", "feature"]);
+        cases.push(snapshot(&root, Some("feature"), Some(&head)));
+        lights.push(basics(&root, Some("feature"), Some(&head)));
+        assert!(lights[0].ahead > 0 || lights[0].reason.is_some());
+        for (full, light) in cases.into_iter().zip(lights) {
+            assert!(light.commits.is_empty() && light.files.is_empty() && !light.truncated);
+            let stripped = ReviewSnapshot { commits: Vec::new(), files: Vec::new(), truncated: false, ..full };
+            assert_eq!(light, stripped);
+        }
+    }
+
+    #[test]
+    fn basics_of_a_branch_with_commits_leave_commits_and_files_empty() {
+        let (_dir, root) = repository();
+        feature(&root);
+        let full = snapshot(&root, Some("feature"), None);
+        let light = basics(&root, Some("feature"), None);
+        assert_eq!(full.files.len(), 2);
+        assert_eq!(light.ahead, 2);
+        assert!(light.commits.is_empty() && light.files.is_empty());
     }
 }

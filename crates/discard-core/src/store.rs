@@ -272,7 +272,7 @@ pub struct ThreadDeletion {
 
 /// Rows that hang off one channel, in an order that leaves no dangling reference. Posted references in other
 /// channels go with their source message, so a caller that keeps them must turn them into messages first.
-const CHANNEL_PURGE_SQL: [&str; 20] = [
+const CHANNEL_PURGE_SQL: [&str; 21] = [
     "DELETE FROM project_last_channels WHERE channel_id=?1",
     "DELETE FROM project_channel_views WHERE channel_id=?1",
     "DELETE FROM project_channels WHERE channel_id=?1",
@@ -292,6 +292,7 @@ const CHANNEL_PURGE_SQL: [&str; 20] = [
     "DELETE FROM messages WHERE channel_id=?1",
     "DELETE FROM worktrees WHERE channel_id=?1",
     "DELETE FROM channel_branches WHERE channel_id=?1",
+    "DELETE FROM review_decisions WHERE channel_id=?1",
     "DELETE FROM channels WHERE id=?1",
 ];
 

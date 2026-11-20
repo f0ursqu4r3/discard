@@ -183,4 +183,16 @@ mod tests {
         store.add_review_decision(&row(&ch.id, Decision::Approved, "h1", None, 10)).unwrap();
         assert!(store.review_decisions(&other).unwrap().is_empty());
     }
+
+    #[test]
+    fn deleting_the_agent_with_its_conversations_removes_the_review_rows() {
+        let (store, ch, _) = fixture();
+        store.add_review_decision(&row(&ch.id, Decision::Approved, "h1", None, 10)).unwrap();
+        let agent = ch.agent_id.clone();
+        store
+            .delete_agent(&agent, super::super::DeleteAgentOptions { delete_conversations: true, delete_private_memory: false })
+            .unwrap();
+        let count: i64 = store.conn.query_row("SELECT COUNT(*) FROM review_decisions", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0);
+    }
 }

@@ -2,7 +2,7 @@
 //! The Tauri commands in `commands.rs` only resolve the folder and the send path.
 
 use discard_core::{
-    merge_review::{snapshot, ReviewSnapshot},
+    merge_review::{basics, snapshot, ReviewSnapshot},
     model::ChannelId,
     review_state::{review_state, Decision, ReviewDecision, ReviewState, NOTE_LIMIT},
     store::Store,
@@ -28,13 +28,14 @@ pub struct ReviewDto {
     pub decisions: Vec<ReviewDecision>,
     /// The busy reason or the archived text. Actions are disabled when it is set.
     pub blocked: Option<String>,
-    /// The id of a changes-requested row that never reached the conversation.
+    /// The id of the newest row, when it is a changes-requested row that never reached the conversation.
     pub unposted: Option<String>,
 }
 
 #[derive(Debug)]
 /// The result of an action that can post. `post_error` is set when the row exists but the post failed.
 pub struct Outcome {
+    /// Its snapshot has no commits and no files. The caller reads `review` for the full view, with the operation lock free.
     pub dto: ReviewDto,
     pub post_error: Option<String>,
 }
@@ -70,7 +71,7 @@ fn assemble(store: &Mutex<Store>, channel: &ChannelId, snapshot: ReviewSnapshot,
     let rows = store.review_decisions(channel).map_err(|e| e.to_string())?;
     let state = review_state(&snapshot, rows.first());
     let blocked = if store.channel_archived(channel).map_err(|e| e.to_string())? { Some(ARCHIVED.to_owned()) } else { busy.map(str::to_owned) };
-    let unposted = rows.iter().find(|row| row.decision == Decision::ChangesRequested && row.posted_at.is_none()).map(|row| row.id.clone());
+    let unposted = rows.first().filter(|row| row.decision == Decision::ChangesRequested && row.posted_at.is_none()).map(|row| row.id.clone());
     Ok(ReviewDto { snapshot, state, decisions: rows, blocked, unposted })
 }
 
@@ -128,7 +129,7 @@ pub fn decide(
         refuse_busy(busy)?;
     }
     let (branch, newest) = snapshot_inputs(store, channel)?;
-    let live = snapshot(folder, branch.as_deref(), newest.as_ref().map(|row| row.head.as_str()));
+    let live = basics(folder, branch.as_deref(), newest.as_ref().map(|row| row.head.as_str()));
     if let Some(reason) = &live.reason {
         return Err(reason.clone());
     }
@@ -180,7 +181,9 @@ pub fn retry_post(
         return Err("This note is already posted.".into());
     }
     let post_error = post(store, row, send).err();
-    Ok(Outcome { dto: review(store, channel, folder, busy)?, post_error })
+    let (branch, newest) = snapshot_inputs(store, channel)?;
+    let live = basics(folder, branch.as_deref(), newest.as_ref().map(|row| row.head.as_str()));
+    Ok(Outcome { dto: assemble(store, channel, live, busy)?, post_error })
 }
 
 /// Posts the fixed summary request.
@@ -479,5 +482,29 @@ mod tests {
         request_summary(&f.store, &f.channel, None, recorder(&sent)).unwrap();
         assert_eq!(*sent.borrow(), vec![SUMMARY_REQUEST.to_owned()]);
         assert!(rows(&f).is_empty());
+    }
+
+    #[test]
+    fn unposted_is_set_only_when_the_newest_row_is_an_unposted_request() {
+        let f = fixture();
+        let h = head(&f);
+        let out = decide(&f.store, &f.channel, &f.root, None, "changes_requested", &h, Some("Fix it."), |_| Err("offline".into())).unwrap();
+        assert!(out.dto.unposted.is_some());
+        let sent = Sent::default();
+        let out = approve(&f, None, &h, &sent).unwrap();
+        assert_eq!(out.dto.unposted, None);
+        assert_eq!(review(&f.store, &f.channel, &f.root, None).unwrap().unposted, None);
+    }
+
+    #[test]
+    fn decide_reads_the_light_snapshot_and_review_reads_the_full_one() {
+        let f = fixture();
+        let sent = Sent::default();
+        let out = approve(&f, None, &head(&f), &sent).unwrap();
+        assert_eq!(out.dto.state, ReviewState::Approved);
+        assert!(out.dto.snapshot.commits.is_empty() && out.dto.snapshot.files.is_empty());
+        let full = review(&f.store, &f.channel, &f.root, None).unwrap();
+        assert_eq!(full.snapshot.commits.len(), 1);
+        assert_eq!(full.snapshot.files.len(), 1);
     }
 }
