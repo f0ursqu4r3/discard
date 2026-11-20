@@ -286,6 +286,13 @@ const addAgentOpen = ref(false),
 const conversationTab = ref('conversation')
 const reviewState = ref<ReviewStateDto | null>(null)
 const reviewBadgeLabel = computed(() => reviewBadge(reviewState.value))
+// A turn can move the branch. With the tab closed nothing re-reads the review, so the badge goes.
+watch(
+  () => !!store.snapshot?.turnRunning,
+  (running, was) => {
+    if (was && !running && conversationTab.value !== 'review') reviewState.value = null
+  },
+)
 const sidebarMode = ref<'profile' | 'search'>('profile')
 const historyQuery = ref(''),
   historyRevision = ref(0),
