@@ -82,7 +82,7 @@ fn bounded(root: &Path, args: &[&str], limit: usize) -> Result<(String, bool), S
 }
 
 /// The top folder of the repository that holds `folder`.
-fn toplevel(folder: &Path) -> Result<PathBuf, String> {
+pub(crate) fn toplevel(folder: &Path) -> Result<PathBuf, String> {
     if !folder.is_dir() {
         return Err(format!("The folder {} does not exist.", folder.display()));
     }
@@ -150,11 +150,12 @@ fn parse_numstat(text: &str) -> HashMap<String, (u64, u64, bool)> {
     stats
 }
 
-/// The changed tracked files against `base`. The flag is true when a list was cut.
-fn tracked(top: &Path, base: &str) -> Result<(Vec<Entry>, bool), String> {
+/// The changed tracked files for `range`: `[base]` compares the working tree, `[base, head]` compares two commits.
+/// The flag is true when a list was cut.
+fn tracked(top: &Path, range: &[&str]) -> Result<(Vec<Entry>, bool), String> {
     let common = ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "-M", "-z"];
-    let (names, names_cut) = bounded(top, &[&common[..], &["--name-status", base, "--"]].concat(), LIST_BYTES)?;
-    let (numbers, numbers_cut) = bounded(top, &[&common[..], &["--numstat", base, "--"]].concat(), LIST_BYTES)?;
+    let (names, names_cut) = bounded(top, &[&common[..], &["--name-status"], range, &["--"]].concat(), LIST_BYTES)?;
+    let (numbers, numbers_cut) = bounded(top, &[&common[..], &["--numstat"], range, &["--"]].concat(), LIST_BYTES)?;
     let stats = parse_numstat(&numbers);
     let mut entries = parse_status(&names, names_cut);
     for entry in &mut entries {
@@ -188,12 +189,12 @@ fn trim_to_line(diff: &mut String) {
 }
 
 /// The diff text of one file, at most `limit` bytes. The flag is true when the diff was cut.
-fn file_diff(top: &Path, base: &str, entry: &Entry, limit: usize) -> Result<(String, bool), String> {
+fn file_diff(top: &Path, range: &[&str], entry: &Entry, limit: usize) -> Result<(String, bool), String> {
     let flags = ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/"];
     let (mut diff, cut) = if entry.status == "?" {
         bounded(top, &[&flags[..], &["--no-index", "--", "/dev/null", &entry.path]].concat(), limit)?
     } else {
-        let mut args = [&flags[..], &["-M", base, "--"]].concat();
+        let mut args = [&flags[..], &["-M"], range, &["--"]].concat();
         if let Some(old) = &entry.old_path {
             args.push(old);
         }
@@ -215,6 +216,53 @@ fn untracked_stat(top: &Path, path: &str) -> Result<(u64, bool), String> {
         return Ok((0, true));
     }
     Ok((added.trim().parse().unwrap_or(0), false))
+}
+
+/// Sort and bound `entries`, then read each file's counts and diff against `range`. The flag is true when a
+/// limit cut the result.
+fn diff_files(top: &Path, mut entries: Vec<Entry>, range: &[&str]) -> Result<(Vec<ChangeFile>, bool), String> {
+    let mut truncated = false;
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    truncated |= entries.len() > MAX_FILES;
+    entries.truncate(MAX_FILES);
+
+    let mut remaining = TOTAL_BYTES;
+    let mut files = Vec::with_capacity(entries.len());
+    for mut entry in entries {
+        if entry.status == "?" {
+            let (added, binary) = untracked_stat(top, &entry.path)?;
+            (entry.additions, entry.binary) = (added, binary);
+        }
+        let limit = remaining.min(FILE_BYTES);
+        let (diff, cut) = if entry.binary {
+            (String::new(), false)
+        } else if limit == 0 {
+            (String::new(), true)
+        } else {
+            file_diff(top, range, &entry, limit)?
+        };
+        remaining -= diff.len();
+        truncated |= cut;
+        files.push(ChangeFile {
+            path: entry.path,
+            old_path: entry.old_path,
+            status: entry.status,
+            additions: entry.additions,
+            deletions: entry.deletions,
+            binary: entry.binary,
+            diff,
+            truncated: cut,
+        });
+    }
+    Ok((files, truncated))
+}
+
+/// The files that `head` changed since `base`, with bounded diffs. Used by the merge review.
+pub(crate) fn committed_files(top: &Path, base: &str, head: &str) -> Result<(Vec<ChangeFile>, bool), String> {
+    let range = [base, head];
+    let (entries, cut) = tracked(top, &range)?;
+    let (files, files_cut) = diff_files(top, entries, &range)?;
+    Ok((files, cut || files_cut))
 }
 
 /// The changes of the folder of a channel.
@@ -241,42 +289,12 @@ pub fn channel_changes(folder: &Path, scope: Scope) -> Result<ChannelChanges, St
     };
     let short = git(&top, &["rev-parse", "--short", &base])?;
 
-    let (mut entries, mut truncated) = tracked(&top, &base)?;
+    let (mut entries, mut truncated) = tracked(&top, &[&base])?;
     let (others, others_cut) = untracked(&top)?;
     entries.extend(others);
     truncated |= others_cut;
-    entries.sort_by(|a, b| a.path.cmp(&b.path));
-    truncated |= entries.len() > MAX_FILES;
-    entries.truncate(MAX_FILES);
-
-    let mut remaining = TOTAL_BYTES;
-    let mut files = Vec::with_capacity(entries.len());
-    for mut entry in entries {
-        if entry.status == "?" {
-            let (added, binary) = untracked_stat(&top, &entry.path)?;
-            (entry.additions, entry.binary) = (added, binary);
-        }
-        let limit = remaining.min(FILE_BYTES);
-        let (diff, cut) = if entry.binary {
-            (String::new(), false)
-        } else if limit == 0 {
-            (String::new(), true)
-        } else {
-            file_diff(&top, &base, &entry, limit)?
-        };
-        remaining -= diff.len();
-        truncated |= cut;
-        files.push(ChangeFile {
-            path: entry.path,
-            old_path: entry.old_path,
-            status: entry.status,
-            additions: entry.additions,
-            deletions: entry.deletions,
-            binary: entry.binary,
-            diff,
-            truncated: cut,
-        });
-    }
+    let (files, cut) = diff_files(&top, entries, &[&base])?;
+    truncated |= cut;
     Ok(result(Some(short), None, files, truncated))
 }
 
