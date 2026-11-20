@@ -157,6 +157,7 @@ test('merged shows its text and no actions', async () => {
   const view = await show(
     review({ state: 'merged', snapshot: snapshot({ merged: true, ahead: 0 }) }),
   )
+  expect(view.get('[data-ui-id="review-state"]').text()).toContain('Merged')
   expect(view.text()).toContain('This branch is already merged.')
   expect(hasButton(view, 'Approve')).toBe(false)
   expect(hasButton(view, 'Request changes')).toBe(false)
@@ -381,4 +382,73 @@ test('files render through the same tree and diff components as the Changes tab'
   await press(view, 'Split')
   expect(view.find('[data-layout="split"]').exists()).toBe(true)
   expect(localStorage.getItem('discard:review-layout')).toBe('split')
+})
+
+test('a reason state has a Refresh that reloads and shows a reload error', async () => {
+  let fail = false
+  const view = await open({
+    channel_review: () => {
+      if (fail) throw 'Git is busy.'
+      return review({
+        snapshot: snapshot({
+          reason: 'The source branch no longer exists.',
+          files: [],
+          commits: [],
+        }),
+      })
+    },
+  })
+  expect(calls('channel_review')).toHaveLength(1)
+  fail = true
+  await press(view, 'Refresh')
+  expect(calls('channel_review')).toHaveLength(2)
+  expect(view.get('[data-ui-id="review-unavailable"] [role="alert"]').text()).toContain(
+    'Git is busy.',
+  )
+})
+
+test('a successful reload clears an old error', async () => {
+  let fail = true
+  const view = await open({
+    channel_review: () => {
+      if (fail) throw 'Git is busy.'
+      return review()
+    },
+  })
+  expect(view.get('[role="alert"]').text()).toContain('Git is busy.')
+  fail = false
+  await press(view, 'Retry')
+  expect(view.find('[role="alert"]').exists()).toBe(false)
+})
+
+test('an action that ends after a channel switch changes nothing on the new channel', async () => {
+  let finish: (dto: ReviewDto) => void = () => undefined
+  const other = review({ snapshot: snapshot({ source: 'other-branch' }) })
+  const view = await open({
+    channel_review: (args) => (args.channelId === 'c2' ? other : review()),
+    review_decide: () => new Promise<ReviewDto>((resolve) => (finish = resolve)),
+  })
+  await press(view, 'Approve')
+  await view.setProps({ channelId: 'c2' })
+  await flushPromises()
+  finish(review({ state: 'approved', decisions: [decision()] }))
+  await flushPromises()
+  expect(view.get('[data-ui-id="review-header"]').text()).toContain('other-branch')
+  expect(view.get('[data-ui-id="review-state"]').text()).not.toContain('Approved')
+})
+
+test('a failure that ends after a channel switch shows no error on the new channel', async () => {
+  let fail: (reason: string) => void = () => undefined
+  const view = await open({
+    channel_review: () => review(),
+    review_decide: () => new Promise<ReviewDto>((_, reject) => (fail = reject)),
+  })
+  await press(view, 'Approve')
+  await view.setProps({ channelId: 'c2' })
+  await flushPromises()
+  const before = calls('channel_review').length
+  fail('The branch changed. Reload the review.')
+  await flushPromises()
+  expect(view.find('[role="alert"]').exists()).toBe(false)
+  expect(calls('channel_review')).toHaveLength(before)
 })

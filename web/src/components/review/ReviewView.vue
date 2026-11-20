@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { GitPullRequest, RefreshCw } from '@lucide/vue'
-import { computed, nextTick, onMounted, ref, useTemplateRef, watch } from 'vue'
+import { computed, onMounted, ref, useTemplateRef, watch } from 'vue'
 import {
   channelReview,
   reviewDecide,
@@ -8,13 +8,13 @@ import {
   reviewRetryPost,
 } from '../../bridge/api'
 import type { ReviewDecisionDto, ReviewDto, ReviewStateDto } from '../../bridge/types'
-import { activeFilePath } from '../changes/activeFile'
 import ChangesTree from '../changes/ChangesTree.vue'
 import FileDiff from '../changes/FileDiff.vue'
-import { LARGE_DIFF, MANY_FILES, OPEN_FILES } from '../changes/largeDiff'
 import { preferenceKeys, readChoice, saveChoice } from '../changes/preferences'
 import SegmentedControl from '../changes/SegmentedControl.vue'
 import { treeOrder } from '../changes/tree'
+import { useFilePane } from '../changes/useFilePane'
+import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '../ui/empty'
 import ReviewActions from './ReviewActions.vue'
@@ -34,12 +34,6 @@ const layout = ref(readChoice(preferenceKeys.reviewLayout, layouts, 'inline'))
 const fileMode = ref(readChoice(preferenceKeys.reviewFiles, fileModes, 'all'))
 watch(layout, (value) => saveChoice(preferenceKeys.reviewLayout, value))
 watch(fileMode, (value) => saveChoice(preferenceKeys.reviewFiles, value))
-watch(fileMode, async (value) => {
-  if (value !== 'all') return
-  pinnedTop = null
-  await nextTick()
-  trackActive()
-})
 const layoutOptions = [
   { value: 'split', label: 'Split' },
   { value: 'inline', label: 'Inline' },
@@ -69,6 +63,7 @@ async function load() {
     const result = await channelReview(props.channelId)
     if (request !== latest) return
     data.value = result
+    error.value = null
   } catch (failure) {
     if (request !== latest) return
     error.value = messageOf(failure)
@@ -90,10 +85,7 @@ watch(
     error.value = null
     loading.value = false
     pending.value = false
-    overrides.value = {}
-    selectedPath.value = null
-    activePath.value = null
-    pinnedTop = null
+    reset()
     actions.value?.close()
     void load()
   },
@@ -149,79 +141,38 @@ const stateLabel = computed(() => {
 })
 
 const files = computed(() => treeOrder(snapshot.value?.files ?? []))
-const selectedPath = ref<string | null>(null)
-const activePath = ref<string | null>(null)
-let pinnedTop: number | null = null
-const overrides = ref<Record<string, boolean>>({})
-const shown = computed(() => {
-  const chosen = files.value.find((file) => file.path === selectedPath.value)
-  return chosen ?? files.value[0]
-})
-const highlighted = computed(() => {
-  if (fileMode.value === 'selected') return shown.value?.path ?? null
-  const active = files.value.find((file) => file.path === activePath.value)
-  return active?.path ?? files.value[0]?.path ?? null
-})
-const visible = computed(() =>
-  fileMode.value === 'selected' ? (shown.value ? [shown.value] : []) : files.value,
-)
-const startsClosed = computed(
-  () =>
-    files.value.length > MANY_FILES ||
-    files.value.reduce((sum, file) => sum + file.diff.length, 0) > LARGE_DIFF,
-)
-function isOpen(path: string) {
-  const chosen = overrides.value[path]
-  if (chosen !== undefined) return chosen
-  if (fileMode.value === 'selected' || !startsClosed.value) return true
-  return files.value.findIndex((file) => file.path === path) < OPEN_FILES
-}
-
 const pane = useTemplateRef<HTMLElement>('pane')
-async function select(path: string) {
-  selectedPath.value = path
-  if (fileMode.value !== 'all') return
-  overrides.value = { ...overrides.value, [path]: true }
-  await nextTick()
-  const section = [...(pane.value?.querySelectorAll<HTMLElement>('[data-file-path]') ?? [])].find(
-    (element) => element.dataset.filePath === path,
-  )
-  section?.scrollIntoView?.({ block: 'start' })
-  activePath.value = path
-  pinnedTop = pane.value?.scrollTop ?? null
-}
-/** Find the file at the top of the pane. A clicked file stays active until the user scrolls. */
-function trackActive() {
-  const element = pane.value
-  if (!element || fileMode.value !== 'all') return
-  if (pinnedTop !== null && Math.abs(element.scrollTop - pinnedTop) < 1) return
-  pinnedTop = null
-  const found = [...element.querySelectorAll<HTMLElement>('[data-file-path]')].map((section) => ({
-    path: section.dataset.filePath ?? '',
-    top: section.getBoundingClientRect().top,
-  }))
-  activePath.value = activeFilePath(element.getBoundingClientRect().top, found)
-}
+const { highlighted, visible, isOpen, setOpen, select, trackActive, reset } = useFilePane(
+  files,
+  fileMode,
+  pane,
+)
 
 const actions = useTemplateRef<InstanceType<typeof ReviewActions>>('actions')
 
 /** Run an action. After a rejection, reload so the rows and the retry show. The error stays on screen. */
 async function act(run: () => Promise<ReviewDto | void>, reloadOnFailure: boolean) {
   if (pending.value) return
+  const channel = props.channelId
+  // The channel switched while the call ran. The result belongs to the old channel.
+  const stale = () => props.channelId !== channel
   pending.value = true
   error.value = null
   try {
     const result = await run()
+    if (stale()) return false
     if (result) data.value = result
     return true
   } catch (failure) {
+    if (stale()) return false
     const message = messageOf(failure)
     if (reloadOnFailure) await load()
+    if (stale()) return false
     error.value = message
     if (message.startsWith(SAVED_NOT_POSTED)) actions.value?.close()
     return false
   } finally {
-    pending.value = false
+    if (!stale()) pending.value = false
   }
 }
 
@@ -281,6 +232,10 @@ const date = (seconds: number) => new Date(seconds * 1000).toLocaleString()
           <EmptyTitle>No merge review</EmptyTitle>
           <EmptyDescription>{{ unavailable }}</EmptyDescription>
         </EmptyHeader>
+        <p v-if="error" role="alert" class="text-sm text-destructive">{{ error }}</p>
+        <Button type="button" variant="outline" size="sm" :disabled="loading" @click="refresh">
+          Refresh
+        </Button>
       </Empty>
     </div>
 
@@ -319,7 +274,10 @@ const date = (seconds: number) => new Date(seconds * 1000).toLocaleString()
           data-ui-id="review-state"
           class="flex shrink-0 flex-col gap-2 border-b border-border/60 px-3 py-3 sm:px-5"
         >
-          <p v-if="stateLabel" class="text-sm font-medium">{{ stateLabel }}</p>
+          <p v-if="stateLabel" class="flex flex-wrap items-center gap-2 text-sm font-medium">
+            <Badge v-if="state === 'merged'" variant="secondary">Merged</Badge>
+            <span>{{ stateLabel }}</span>
+          </p>
           <template v-if="!idle">
             <ReviewActions
               ref="actions"
@@ -419,7 +377,7 @@ const date = (seconds: number) => new Date(seconds * 1000).toLocaleString()
                     :layout="layout"
                     :open="isOpen(file.path)"
                     :selected="highlighted === file.path"
-                    @update:open="overrides = { ...overrides, [file.path]: $event }"
+                    @update:open="setOpen(file.path, $event)"
                   />
                 </div>
               </div>
