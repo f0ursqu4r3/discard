@@ -502,7 +502,7 @@ Task rows use Checkbox, not a custom clickable icon. Task counts update from act
 | Plan card | Step status, title, description, duration, progress count, Open run action | Tie stages to recorded work. |
 | Test card | Pass/fail totals, elapsed time, status badge | No fixture success data in live use. |
 | Implementation card | Changed files, add/delete counts, View diff | Links preserve project/run context. |
-| Merge review | Source/target, reviewer summary, diff, Approve/Request changes/Full diff | Implemented. Keep review approval separate from performing a Git merge. |
+| Merge review | Source/target, commits, diff, Approve, Request changes, Ask for a summary | Implemented. A stored reviewer summary and a Full diff action are not built. Keep review approval separate from performing a Git merge. |
 | Artifacts | Run outputs and artifact entries | Use safe, valid paths and available backend actions. |
 
 The target branch spec does not authorize merging, rebasing, or deleting branches from navigation. The reference’s “Merge request !127” is fictional. Implement a real review surface only with corresponding data, or use an honest empty state. Do not create a fake merge request to fill the tab.

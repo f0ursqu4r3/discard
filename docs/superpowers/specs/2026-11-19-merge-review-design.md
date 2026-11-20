@@ -1,6 +1,6 @@
 # Merge review design
 
-Status: draft for approval. Date: 2026-11-19.
+Status: approved and implemented. Date: 2026-11-19.
 
 ## Intent
 
@@ -69,7 +69,7 @@ A new function in `discard-core` (module `merge_review.rs`) takes the repository
 - `dirty`: number of uncommitted and untracked paths in the worktree
 - `reason`: set when no review is possible, with `files`/`commits` empty
 
-`reason` values (plain sentences, shown in the empty state): channel has no branch; channel is on the default branch; source branch no longer exists; target branch cannot be determined; no merge base; detached worktree; the repository is unavailable. Git errors become a `reason`, never a panic or a raw error dialog.
+`reason` values (plain sentences, shown in the empty state): channel has no branch; channel is on the default branch; source branch no longer exists; target branch cannot be determined; no merge base; the repository is unavailable. Git errors become a `reason`, never a panic or a raw error dialog.
 
 ### Decisions (store)
 
@@ -96,7 +96,7 @@ review_decisions (
   - `changes_requested` and row `head` = live `head` → `Changes requested`
   - `changes_requested` and row `head` ≠ live `head` → `Changes requested · new commits since` (the agent has pushed work, the user should look again)
 - The tab also shows `Merged` when `merged` is true, whatever the last decision. A merged branch and a branch with nothing to review hide both actions.
-- The user can record a new decision at any time. Older rows stay as history, shown in a short list.
+- The user can record a new decision at any time. Older rows stay as history, shown in a list of all decisions, newest first.
 - The backend checks that the `head` the UI sends still equals the live branch-ref head when it records the decision. It reads the ref again at that moment. If it moved, the call fails with "The branch changed. Reload the review." and the UI refreshes. This stops approving a diff the user did not see. A decision needs this check whether or not the note is optional.
 
 ### Request changes
@@ -121,7 +121,7 @@ review_decisions (
 
 - Threads have no branch and no tab bar, so they do not show the tab. An archived channel shows the tab read-only: no actions, with the reason `This channel is archived.`
 - Tab: always shown for project channels, enabled. Label `Merge review`, with a small state badge (`Approved`, `Changes requested`, `Out of date`, `Merged`) when there is one. No badge for `Not reviewed`.
-- Layout, top to bottom: header (source → target, ahead/behind, `Merged` marker), state line with the decision controls, uncommitted-work notice if any, commits list, files and diffs.
+- Layout, top to bottom: header (source → target, ahead/behind), state line with the decision controls and the `Merged` marker, uncommitted-work notice if any, commits list, files and diffs.
 - Files and diffs reuse the Changes tab components, with the same tree, split/inline choice, large-diff rules (`MANY_FILES`, `LARGE_DIFF`, `OPEN_FILES`), and safe diff rendering.
 - Refresh: a refresh button, and an automatic refresh when the channel's turn ends and when the tab opens.
 - Unavailable (`reason` set): an empty state with the reason and no actions.
@@ -152,7 +152,7 @@ These were not discussed. Mark any you want changed.
 
 ## Tests
 
-- Core, with temporary Git repositories: normal branch with commits; no commits ahead (`Nothing to review`, not `Merged`); branch behind the target; merged branch (stored decision whose head is on the target); default branch; missing source; no merge base; detached worktree; dirty worktree; truncation; renames disabled like `git_compare`.
+- Core, with temporary Git repositories: normal branch with commits; no commits ahead (`Nothing to review`, not `Merged`); branch behind the target; merged branch (stored decision whose head is on the target); default branch; missing source; no merge base; dirty worktree; truncation; the file list uses rename detection (`-M`).
 - Store: decision rows append; current-state rules for each of the five states; stale head; a rejected decision when the head moved.
 - Request changes: the row is written once; a busy channel is refused and leaves no row; the post failure keeps `posted_at` empty and allows retry after a restart; Retry posts the stored text even when the head moved.
 - Web (in `__tests__`): each state renders; actions disabled when busy; stale approval message; decision flow calls the bridge with the pinned head; empty state shows its reason; diff reuse renders.

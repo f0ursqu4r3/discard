@@ -97,7 +97,7 @@ from the merge base. The tab is read-only. It runs no Git write and does not mer
 - A note has at most 4000 characters.
 - **Ask for a summary** posts a summary request into the conversation.
 - The tab shows `Nothing to review` when the branch has no commits beyond the target.
-- The tab shows `Merged` only when the commit of the stored decision is on the target.
+- The tab shows `Merged` only when the branch has no commits beyond the target and the commit of the newest stored decision is on the target.
 - The tab does not review uncommitted files of the worktree. A notice shows their count.
 
 ## Limits you should know
