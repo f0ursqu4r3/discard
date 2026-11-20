@@ -444,3 +444,63 @@ export interface ChannelChangesDto {
   /** Some files or some of their diffs are not included. */
   truncated: boolean
 }
+
+export type ReviewStateDto =
+  | 'not_reviewed'
+  | 'approved'
+  | 'approval_out_of_date'
+  | 'changes_requested'
+  | 'changes_requested_new_commits'
+  | 'merged'
+  | 'nothing_to_review'
+export type ReviewDecisionKind = 'approved' | 'changes_requested'
+export interface ReviewCommitDto {
+  id: string
+  subject: string
+  author: string
+  /** Unix seconds. */
+  time: number
+}
+/** The read-only branch snapshot. Files have the shape of the Changes tab. */
+export interface ReviewSnapshotDto {
+  source: string | null
+  target: string | null
+  head: string | null
+  headShort: string | null
+  base: string | null
+  baseShort: string | null
+  ahead: number
+  behind: number
+  nothingToReview: boolean
+  merged: boolean
+  /** Uncommitted and untracked paths in the worktree. They are not reviewed. */
+  dirty: number
+  commits: ReviewCommitDto[]
+  files: ChangeFileDto[]
+  truncated: boolean
+  /** Why no review is possible. Null when the branch can be reviewed. */
+  reason: string | null
+}
+export interface ReviewDecisionDto {
+  id: string
+  channelId: string
+  decision: ReviewDecisionKind
+  head: string
+  base: string
+  target: string
+  note: string | null
+  /** Unix seconds. */
+  decidedAt: number
+  /** When the note reached the conversation. Null until then. */
+  postedAt: number | null
+}
+export interface ReviewDto {
+  snapshot: ReviewSnapshotDto
+  state: ReviewStateDto
+  /** Newest first. */
+  decisions: ReviewDecisionDto[]
+  /** The busy reason or the archived text. Actions are disabled when it is set. */
+  blocked: string | null
+  /** The id of a changes-requested row whose note was not posted. */
+  unposted: string | null
+}

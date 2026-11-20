@@ -11,6 +11,8 @@ import type {
   CommandDto,
   HistoryDto,
   ProjectChannelDto,
+  ReviewDecisionKind,
+  ReviewDto,
   SnapshotDto,
   ThreadHistoryDto,
   ThreadLinkDto,
@@ -472,3 +474,26 @@ export const runCommand = (channelId: string, name: string, args: string) =>
  */
 export const channelChanges = (channelId: string, scope: ChangesScope) =>
   invoke<ChannelChangesDto>('channel_changes', { channelId, scope })
+
+/** The merge review of a channel branch: snapshot, stored decisions, and derived state. */
+export const channelReview = (channelId: string) =>
+  invoke<ReviewDto>('channel_review', { channelId })
+
+/**
+ * Record a decision on the pinned head. Request changes also posts the note. A failed post rejects with
+ * a message that starts "Your decision is saved". Reload the review after any rejection.
+ */
+export const reviewDecide = (
+  channelId: string,
+  decision: ReviewDecisionKind,
+  head: string,
+  note: string | null,
+) => invoke<ReviewDto>('review_decide', { channelId, decision, head, note })
+
+/** Post the stored note of a changes-requested row that was not posted. */
+export const reviewRetryPost = (channelId: string, decisionId: string) =>
+  invoke<ReviewDto>('review_retry_post', { channelId, decisionId })
+
+/** Ask the channel agent to summarize the branch in the conversation. */
+export const reviewRequestSummary = (channelId: string) =>
+  invoke<void>('review_request_summary', { channelId })

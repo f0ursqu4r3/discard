@@ -4,6 +4,8 @@ export const preferenceKeys = {
   textScope: 'discard:changes-text-scope',
   layout: 'discard:changes-layout',
   files: 'discard:changes-files',
+  reviewLayout: 'discard:review-layout',
+  reviewFiles: 'discard:review-files',
 } as const
 
 /** Read a saved choice. Anything else than an allowed value, or no storage, gives the fallback. */

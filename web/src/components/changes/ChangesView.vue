@@ -11,6 +11,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '..
 import { activeFilePath } from './activeFile'
 import ChangesTree from './ChangesTree.vue'
 import FileDiff from './FileDiff.vue'
+import { LARGE_DIFF, MANY_FILES, OPEN_FILES } from './largeDiff'
 import { preferenceKeys, readChoice, saveChoice } from './preferences'
 import SegmentedControl from './SegmentedControl.vue'
 import { treeOrder } from './tree'
@@ -25,11 +26,6 @@ const props = withDefaults(
   }>(),
   { branchless: false },
 )
-
-/** With more files than this, or more diff text than `LARGE_DIFF`, sections after the first `OPEN_FILES` start closed. */
-const MANY_FILES = 50
-const LARGE_DIFF = 256 * 1024
-const OPEN_FILES = 20
 
 const scopes = ['uncommitted', 'branch', 'responses'] as const
 const textScopes = ['responses', 'uncommitted'] as const
