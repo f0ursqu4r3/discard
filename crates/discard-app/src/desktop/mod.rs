@@ -5,6 +5,7 @@ pub mod core;
 pub mod delegation;
 pub mod dto;
 pub mod pump;
+pub mod review;
 pub mod terminal;
 pub mod threads;
 pub mod view;
@@ -294,6 +295,7 @@ pub fn run(
             commands::search_agent_history, commands::restore_conversation, commands::get_conversations, commands::create_conversation, commands::open_agent_chat,
             commands::create_channel, commands::create_text_channel, commands::switch_channel, commands::open_branch_channel,
             commands::get_history, commands::channel_changes,
+            commands::channel_review, commands::review_decide, commands::review_retry_post, commands::review_request_summary,
             commands::send_message,
             commands::get_thread_history, commands::start_thread, commands::open_thread, commands::close_thread, commands::select_thread,
             commands::post_thread_message, commands::follow_thread, commands::leave_thread,

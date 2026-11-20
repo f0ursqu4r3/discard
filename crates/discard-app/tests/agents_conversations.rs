@@ -838,3 +838,50 @@ async fn a_model_change_saves_through_the_editor_path_for_every_channel_and_wait
     assert!(channels.change_agent_model(&agent, "new-model", &matrix("codex")).unwrap_err().ends_with("already uses new-model."));
     assert!(channels.change_agent_model(&agent, "x", &matrix("other")).is_err(), "the provider check of the editor applies");
 }
+
+#[tokio::test]
+async fn a_review_request_posts_into_the_open_channel_and_a_running_turn_refuses_it() {
+    use discard_app::desktop::review::{decide, request_summary, SUMMARY_REQUEST};
+    use discard_core::review_state::ReviewState;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let output = discard_core::process::spawn_std(std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
+            .args(args)
+            .current_dir(repo.path()).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()))
+            .and_then(|child| child.wait_with_output())
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["commit", "--allow-empty", "-qm", "initial"]);
+    git(&["checkout", "-q", "-b", "feature"]);
+    git(&["commit", "--allow-empty", "-qm", "work"]);
+    let head = git(&["rev-parse", "refs/heads/feature"]);
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    store.lock().unwrap().create_agent(&config()).unwrap();
+    let project = store.lock().unwrap().import_project_folder(repo.path()).unwrap();
+    let core = empty_core(dir.path());
+    let channels = service(core.clone(), store.clone());
+    let channel = ChannelId(channels.activate_project(&ViewId::main(), &project.id).unwrap().1);
+    store.lock().unwrap().bind_branch(&channel, "feature").unwrap();
+    let send = |text: String| core.send_to_agent(Some(&channel.0), text, None);
+    let s = store.lock().unwrap();
+    let outcome = decide(&s, &channel, repo.path(), core.channel_busy_reason(&channel.0), "changes_requested", &head, Some("Rename it."), send).unwrap();
+    assert_eq!(outcome.post_error, None);
+    assert_eq!(outcome.dto.state, ReviewState::ChangesRequested);
+    let expected = format!("Review of {}: Rename it.", &head[..7]);
+    let history = core.history_snapshot(&ViewId::main());
+    let texts = format!("{:?}", history.messages);
+    assert!(texts.contains(&expected), "the note is a message of the channel: {texts}");
+    // The posted message starts a turn. The channel is busy until it ends.
+    let busy = core.channel_busy_reason(&channel.0);
+    assert!(busy.is_some());
+    let refused = request_summary(&s, &channel, busy, |text| core.send_to_agent(Some(&channel.0), text, None));
+    assert_eq!(refused.err().as_deref(), busy);
+    core.apply(&ViewId::main(), discard_core::ui_state::Update::TurnFinished(discard_core::driver::TurnOutcome::Completed));
+    request_summary(&s, &channel, core.channel_busy_reason(&channel.0), |text| core.send_to_agent(Some(&channel.0), text, None)).unwrap();
+    assert!(format!("{:?}", core.history_snapshot(&ViewId::main()).messages).contains(SUMMARY_REQUEST));
+}

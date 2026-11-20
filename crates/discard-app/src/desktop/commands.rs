@@ -852,6 +852,87 @@ pub async fn channel_changes(channels: State<'_, Arc<super::channels::Channels>>
     .map_err(|e| e.to_string())?
 }
 
+/// The folder of a channel for the review. A direct message has no project, so it has no review.
+fn review_folder(channels: &super::channels::Channels, channel: &discard_core::model::ChannelId) -> Result<std::path::PathBuf, String> {
+    super::terminal::cwd::for_channel(&channels.store, channel)
+        .map(|(folder, _)| folder)
+        .map_err(|error| if error == super::terminal::cwd::NO_PROJECT { "Direct messages have no merge review.".to_owned() } else { error })
+}
+
+/// Post a review message the way the composer does: from the user, answered by the agent of the channel.
+fn review_send(channels: &super::channels::Channels, store: &discard_core::store::Store, channel: &discard_core::model::ChannelId, text: String) -> Result<(), String> {
+    let id = discard_core::mentions::recipient(store, channel, &text)?;
+    if store.agent_archived(&id).map_err(|e| e.to_string())? { return Err("This agent is archived. Restore it before sending a message.".into()); }
+    let config = store.load_agent(&id).map_err(|e| e.to_string())?;
+    let recipient = discard_core::model::MessageAuthor { agent_id: id, name: config.name, provider: config.provider, avatar: config.avatar };
+    channels.core.send_to_agent(Some(&channel.0), text, Some(recipient))
+}
+
+/// The merge review of a channel: the branch snapshot, the stored decisions, and the derived state. It reads Git only.
+#[tauri::command]
+pub async fn channel_review(channels: State<'_, Arc<super::channels::Channels>>, channel_id: String) -> Result<super::review::ReviewDto, String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let channel = discard_core::model::ChannelId(channel_id);
+        let folder = review_folder(&channels, &channel)?;
+        let busy = channels.core.channel_busy_reason(&channel.0);
+        let store = channels.store.lock().unwrap_or_else(|e| e.into_inner());
+        super::review::review(&store, &channel, &folder, busy)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Record a review decision. Request changes also posts the note to the conversation. A failed post returns its
+/// error, and the row stays unposted for `review_retry_post`.
+#[tauri::command]
+pub async fn review_decide(channels: State<'_, Arc<super::channels::Channels>>, channel_id: String, decision: String, head: String, note: Option<String>) -> Result<super::review::ReviewDto, String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let channel = discard_core::model::ChannelId(channel_id);
+        let folder = review_folder(&channels, &channel)?;
+        let busy = channels.core.channel_busy_reason(&channel.0);
+        let store = channels.store.lock().unwrap_or_else(|e| e.into_inner());
+        let send = |text: String| review_send(&channels, &store, &channel, text);
+        let outcome = super::review::decide(&store, &channel, &folder, busy, &decision, &head, note.as_deref(), send)?;
+        outcome.post_error.map_or(Ok(outcome.dto), Err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Post the stored note of a request for changes that never reached the conversation.
+#[tauri::command]
+pub async fn review_retry_post(channels: State<'_, Arc<super::channels::Channels>>, channel_id: String, decision_id: String) -> Result<super::review::ReviewDto, String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let channel = discard_core::model::ChannelId(channel_id);
+        let folder = review_folder(&channels, &channel)?;
+        let busy = channels.core.channel_busy_reason(&channel.0);
+        let store = channels.store.lock().unwrap_or_else(|e| e.into_inner());
+        let send = |text: String| review_send(&channels, &store, &channel, text);
+        let outcome = super::review::retry_post(&store, &channel, &folder, busy, &decision_id, send)?;
+        outcome.post_error.map_or(Ok(outcome.dto), Err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Ask the channel agent to summarize the branch against its target.
+#[tauri::command]
+pub async fn review_request_summary(channels: State<'_, Arc<super::channels::Channels>>, channel_id: String) -> Result<(), String> {
+    let channels = channels.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let channel = discard_core::model::ChannelId(channel_id);
+        let busy = channels.core.channel_busy_reason(&channel.0);
+        let store = channels.store.lock().unwrap_or_else(|e| e.into_inner());
+        let send = |text: String| review_send(&channels, &store, &channel, text);
+        super::review::request_summary(&store, &channel, busy, send)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

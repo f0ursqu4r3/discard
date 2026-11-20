@@ -46,10 +46,12 @@ impl Store {
     /// Append a decision. An identical newest row (decision, head, note) is returned instead of a second row.
     pub fn add_review_decision(&self, row: &ReviewDecision) -> Result<ReviewDecision> {
         let channel = ChannelId(row.channel_id.clone());
-        if let Some(newest) = self.review_decisions(&channel)?.into_iter().next() {
-            if newest.decision == row.decision && newest.head == row.head && newest.note == row.note {
-                return Ok(newest);
-            }
+        if let Some(newest) = self.review_decisions(&channel)?.into_iter().next()
+            && newest.decision == row.decision
+            && newest.head == row.head
+            && newest.note == row.note
+        {
+            return Ok(newest);
         }
         self.conn.execute(
             "INSERT INTO review_decisions(id,channel_id,decision,head,base,target,note,decided_at,posted_at)
