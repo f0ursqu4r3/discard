@@ -502,7 +502,7 @@ Task rows use Checkbox, not a custom clickable icon. Task counts update from act
 | Plan card | Step status, title, description, duration, progress count, Open run action | Tie stages to recorded work. |
 | Test card | Pass/fail totals, elapsed time, status badge | No fixture success data in live use. |
 | Implementation card | Changed files, add/delete counts, View diff | Links preserve project/run context. |
-| Merge review | Source/target, reviewer summary, diff, Approve/Request changes/Full diff | Keep review approval separate from performing a Git merge. |
+| Merge review | Source/target, reviewer summary, diff, Approve/Request changes/Full diff | Implemented. Keep review approval separate from performing a Git merge. |
 | Artifacts | Run outputs and artifact entries | Use safe, valid paths and available backend actions. |
 
 The target branch spec does not authorize merging, rebasing, or deleting branches from navigation. The reference’s “Merge request !127” is fictional. Implement a real review surface only with corresponding data, or use an honest empty state. Do not create a fake merge request to fill the tab.
@@ -775,6 +775,8 @@ These images were captured from the final prototype revision listed at the top. 
 ![Workspace with aligned headers, shared navigation footer, project members, and a model-free composer](discard-ui-reference/01-workspace.png)
 
 ### Merge review
+
+Implemented as a Rust-rendered tab. It reviews committed work only, stores approval as a decision, and never runs a Git merge. It shows an honest empty state, not a fake merge request, when a channel has no branch or nothing to review.
 
 ![Reference merge-review composition](discard-ui-reference/02-merge-review.png)
 

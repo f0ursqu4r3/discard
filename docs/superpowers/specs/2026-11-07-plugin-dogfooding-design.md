@@ -45,7 +45,7 @@ All decisions are the owner's unless marked *(Claude's call)*. The owner accepte
 - Changing the protected surfaces.
 - Changing `API_VERSION`.
 - The token-usage panel. The chart elements design owns it. This document only places it first in the order.
-- Planned surfaces that are not built yet: the Merge review tab and the Artifacts tab. They are decided when they are built.
+- Planned surface that is not built yet: the Artifacts tab. It is decided when it is built. The Merge review tab is built: Rust-rendered, no plugin surface.
 
 ## Anti-goals
 
@@ -114,7 +114,7 @@ Abbreviations in the table: **Q1** displays data only, **Q2** state small and sa
 | Transcript | `MessageList.vue`, `TranscriptContent.vue`, `MessageRow.vue`, `BlockView.vue`, `ToolCallBlock.vue`, `WorktreeApprovals.vue` | No | No: full message history, agent replies, tool output | No: streaming, scroll restore, jump to message, context menus, quote | High | Fail. |
 | Changes tab | `DiffBlock.vue` list in `App.vue` | Yes | No: diffs are large and can hold secrets | Yes | Low | Fail on Q2. |
 | Run tab | `ToolCallBlock.vue` list in `App.vue` | Yes | No: tool input and output | No: live tool state | Low | Fail on Q2. |
-| Merge review tab | `App.vue` | — | — | — | — | Planned (`Soon`). Out of scope. |
+| Merge review tab | `App.vue` | — | — | — | — | Rust-rendered, no plugin surface. |
 | Recovery actions | `App.vue`: copy unsaved reply, retry, choose model, restore conversation, read-only line | No | Yes | Yes | High | Keep Vue. They appear when something failed, which is the worst time for a plugin failure. |
 | Thinking line | `App.vue`, above the composer | Yes | Yes | Yes | Low | Passes, but not planned. Too small to test the API. |
 | Composer | `Composer.vue` | No | No: drafts | No: text input, attachment drag and drop, mentions | High | Fail. |
