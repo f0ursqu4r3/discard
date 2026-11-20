@@ -64,8 +64,8 @@ fn empty(source: Option<&str>, target: Option<String>, reason: impl Into<String>
 }
 
 /// Count the changed paths of the folder: tracked changes and untracked files. A rename counts once.
-fn dirty_count(folder: &Path) -> usize {
-    let Ok((text, _)) = git_bounded(folder, &["status", "--porcelain=v1", "-z", "--untracked-files=all"], LIST_BYTES, TIMEOUT) else { return 0 };
+fn dirty_count(folder: &Path) -> Result<usize, String> {
+    let (text, _) = git_bounded(folder, &["status", "--porcelain=v1", "-z", "--untracked-files=all"], LIST_BYTES, TIMEOUT)?;
     let mut fields = text.split('\0').filter(|field| !field.is_empty());
     let mut count = 0;
     while let Some(record) = fields.next() {
@@ -74,7 +74,19 @@ fn dirty_count(folder: &Path) -> usize {
             fields.next();
         }
     }
-    count
+    Ok(count)
+}
+
+/// Read the `behind<TAB>ahead` line of `rev-list --left-right --count`.
+fn parse_counts(text: &str) -> Result<(u64, u64), String> {
+    let mut parts = text.split_whitespace();
+    let (Some(behind), Some(ahead), None) = (parts.next(), parts.next(), parts.next()) else {
+        return Err("Git gave an unexpected commit count.".into());
+    };
+    match (behind.parse(), ahead.parse()) {
+        (Ok(behind), Ok(ahead)) => Ok((behind, ahead)),
+        _ => Err("Git gave an unexpected commit count.".into()),
+    }
 }
 
 /// The commits of `target..head`, newest first. The flag is true when the list was cut.
@@ -135,13 +147,15 @@ pub fn snapshot(folder: &Path, branch: Option<&str>, last_decided_head: Option<&
         return empty(Some(source), target, format!("The branch has no commit in common with {target_name}."));
     };
     let short = |id: &str| git(&top, &["rev-parse", "--short", id]).ok();
-    let (behind, ahead) = git(&top, &["rev-list", "--left-right", "--count", &format!("{target_id}...{head}")])
-        .ok()
-        .and_then(|text| {
-            let mut parts = text.split_whitespace();
-            Some((parts.next()?.parse::<u64>().ok()?, parts.next()?.parse::<u64>().ok()?))
-        })
-        .unwrap_or((0, 0));
+    let counted = git(&top, &["rev-list", "--left-right", "--count", &format!("{target_id}...{head}")]).and_then(|text| parse_counts(&text));
+    let (behind, ahead) = match counted {
+        Ok(counts) => counts,
+        Err(error) => return empty(Some(source), target, format!("Git could not read the branch: {error}")),
+    };
+    let dirty = match dirty_count(folder) {
+        Ok(dirty) => dirty,
+        Err(error) => return empty(Some(source), target, format!("Git could not read the branch: {error}")),
+    };
     let mut snap = empty(Some(source), target, "");
     snap.reason = None;
     snap.head_short = short(&head);
@@ -150,7 +164,7 @@ pub fn snapshot(folder: &Path, branch: Option<&str>, last_decided_head: Option<&
     snap.behind = behind;
     snap.nothing_to_review = ahead == 0;
     snap.merged = ahead == 0 && last_decided_head.is_some_and(|id| on_target(&top, id, &target_id));
-    snap.dirty = dirty_count(folder);
+    snap.dirty = dirty;
     if ahead > 0 {
         let read = commits(&top, &target_id, &head).and_then(|(commits, commits_cut)| {
             let (files, files_cut) = committed_files(&top, &base, &head)?;
@@ -294,7 +308,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         run(dir.path(), &["init", "-q", "-b", "main"]);
         let snap = snapshot(dir.path(), Some("feature"), None);
-        assert!(snap.reason.is_some());
+        assert_eq!(snap.reason.as_deref(), Some("This repository has no commits yet."));
         assert!(snap.commits.is_empty() && snap.files.is_empty());
     }
 
@@ -352,6 +366,20 @@ mod tests {
         let snap = snapshot(&root, Some("feature"), None);
         assert!(snap.truncated);
         assert!(snap.files[0].truncated && snap.files[0].diff.len() <= crate::workspace_diff::FILE_BYTES);
+    }
+
+    #[test]
+    fn a_count_that_cannot_be_read_is_an_error_not_zero() {
+        assert_eq!(parse_counts("3\t2"), Ok((3, 2)));
+        for text in ["", "3", "x\t2", "3\ty", "-1\t2"] {
+            assert!(parse_counts(text).is_err(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_status_failure_is_an_error_not_a_clean_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(dirty_count(&dir.path().join("nope")).is_err());
     }
 
     #[test]
