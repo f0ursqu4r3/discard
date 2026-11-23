@@ -2,6 +2,7 @@ pub mod commands;
 pub mod attachments;
 pub mod channels;
 pub mod core;
+pub mod mark_read;
 pub mod delegation;
 pub mod dto;
 pub mod notify;
@@ -351,6 +352,8 @@ pub fn run(
             commands::set_member_list_visible,
             commands::toggle_branch,
             commands::mark_read,
+            commands::mark_project_read,
+            commands::mark_group_read,
             commands::confirm_resolve,
             commands::archive_confirm,
             commands::plugin_action,
