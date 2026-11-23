@@ -34,7 +34,7 @@ test('all planned entries lack executable actions, including nested notification
   const planned = entries.filter(
     (entry) => entry.kind === 'planned' || entry.kind === 'planned-radio',
   )
-  expect(planned.length).toBeGreaterThan(15)
+  expect(planned.length).toBe(20)
   for (const entry of planned) expect(entry).not.toHaveProperty('action')
   expect(entries).toContainEqual({
     kind: 'action',
