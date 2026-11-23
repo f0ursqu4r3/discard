@@ -111,6 +111,8 @@ pub struct GeneralSettings {
     pub confirm_while_working: bool,
     /// Keep the app running when the last app window closes. The tray icon, or the Dock on macOS, is the way back.
     pub keep_running_in_background: bool,
+    /// Show a desktop notification when an approval waits or a turn ends and no window has focus.
+    pub desktop_notifications: bool,
 }
 
 /// The default of `keep_running_in_background`. Off on Linux: a tray icon is not available on every Linux desktop.
@@ -122,6 +124,7 @@ impl Default for GeneralSettings {
             default_provider: "claude".to_string(),
             confirm_while_working: true,
             keep_running_in_background: keep_running_in_background_default(cfg!(target_os = "linux")),
+            desktop_notifications: true,
         }
     }
 }
@@ -142,6 +145,7 @@ pub enum Change {
     DefaultProvider(String),
     ConfirmWhileWorking(bool),
     KeepRunningInBackground(bool),
+    DesktopNotifications(bool),
     ThemeSource(ThemeSource),
     /// A Ghostty `theme` value: `Name` or `light:X,dark:Y`.
     Theme(String),
@@ -452,6 +456,15 @@ fn evaluate(doc: &DocumentMut) -> (Settings, Vec<SettingsIssue>) {
                         ),
                     }
                 }
+                if let Some(item) = general.get("desktop_notifications") {
+                    match item.as_bool() {
+                        Some(on) => settings.general.desktop_notifications = on,
+                        None => issue(
+                            "general.desktop_notifications",
+                            "must be true or false".to_string(),
+                        ),
+                    }
+                }
             }
         },
     }
@@ -563,6 +576,9 @@ fn edit_doc(doc: &mut DocumentMut, change: Change) {
         }
         Change::KeepRunningInBackground(on) => {
             ("general", "keep_running_in_background", Value::from(on))
+        }
+        Change::DesktopNotifications(on) => {
+            ("general", "desktop_notifications", Value::from(on))
         }
         Change::ThemeSource(source) => {
             ("appearance", "theme_source", Value::from(source.as_str()))
@@ -697,6 +713,40 @@ mod tests {
         assert_eq!(store.settings().general.keep_running_in_background, GeneralSettings::default().keep_running_in_background);
         assert_eq!(store.issues().len(), 1);
         assert_eq!(store.issues()[0].key, "general.keep_running_in_background");
+    }
+
+    #[test]
+    fn desktop_notifications_defaults_to_on() {
+        assert!(GeneralSettings::default().desktop_notifications);
+        let dir = tempfile::tempdir().unwrap();
+        assert!(SettingsStore::open(&path_in(&dir)).settings().general.desktop_notifications);
+    }
+
+    #[test]
+    fn desktop_notifications_saves_each_value() {
+        for on in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = path_in(&dir);
+            let mut store = SettingsStore::open(&path);
+            store.apply(Change::DesktopNotifications(on)).unwrap();
+            assert_eq!(store.settings().general.desktop_notifications, on);
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(text.contains(&format!("desktop_notifications = {on}")), "{text}");
+            let reopened = SettingsStore::open(&path);
+            assert_eq!(reopened.settings().general.desktop_notifications, on);
+            assert!(reopened.issues().is_empty());
+        }
+    }
+
+    #[test]
+    fn desktop_notifications_with_a_wrong_type_falls_back_to_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        fs::write(&path, "version = 1\n[general]\ndesktop_notifications = \"no\"\n").unwrap();
+        let store = SettingsStore::open(&path);
+        assert!(store.settings().general.desktop_notifications);
+        assert_eq!(store.issues().len(), 1);
+        assert_eq!(store.issues()[0].key, "general.desktop_notifications");
     }
 
     #[test]

@@ -14,6 +14,7 @@ version = 1
 default_provider = "claude"       # claude or codex
 confirm_while_working = true      # ask before Quit or Safe Mode while a turn runs
 keep_running_in_background = true  # true: the app goes on when the last window closes. Default false on Linux
+desktop_notifications = true      # notify when an approval waits or a turn ends and no window is focused
 
 [appearance]
 theme_source = "default"          # default, ghostty, or custom
@@ -34,6 +35,7 @@ zoom = "cmd-shift-k"
 | `general.default_provider` | `"claude"` or `"codex"` | `"claude"` |
 | `general.confirm_while_working` | `true` or `false` | `true` |
 | `general.keep_running_in_background` | `true` or `false` | `true`. On Linux: `false` |
+| `general.desktop_notifications` | `true` or `false` | `true` |
 | `appearance.theme_source` | `"default"`, `"ghostty"`, or `"custom"` | `"default"` |
 | `appearance.theme` | A Ghostty `theme` value: `Name` or `light:X,dark:Y` | `"light:Catppuccin Latte,dark:Catppuccin Mocha"` |
 | `appearance.ignore_plugin_themes` | `true` or `false` | `false` |

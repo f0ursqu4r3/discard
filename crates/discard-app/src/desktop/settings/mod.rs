@@ -44,7 +44,7 @@ pub fn settings_search(query: String) -> Vec<SidebarEntry> { sidebar_entries(&qu
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GeneralPatch { pub default_provider: Option<String>, pub confirm_while_working: Option<bool>, pub keep_running_in_background: Option<bool> }
+pub struct GeneralPatch { pub default_provider: Option<String>, pub confirm_while_working: Option<bool>, pub keep_running_in_background: Option<bool>, pub desktop_notifications: Option<bool> }
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

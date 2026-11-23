@@ -16,6 +16,7 @@ pub fn general_page(general: &discard_core::settings::GeneralSettings, issues: &
         "defaultProvider": general.default_provider,
         "confirmWhileWorking": general.confirm_while_working,
         "keepRunningInBackground": general.keep_running_in_background,
+        "desktopNotifications": general.desktop_notifications,
         "backgroundUnavailable": background_unavailable,
         "providers": discard_core::bootstrap::PROVIDERS,
         "issues": issues,
@@ -29,6 +30,7 @@ pub fn general_changes(patch: super::GeneralPatch) -> Vec<Change> {
     if let Some(value) = patch.default_provider { changes.push(Change::DefaultProvider(value)); }
     if let Some(value) = patch.confirm_while_working { changes.push(Change::ConfirmWhileWorking(value)); }
     if let Some(value) = patch.keep_running_in_background { changes.push(Change::KeepRunningInBackground(value)); }
+    if let Some(value) = patch.desktop_notifications { changes.push(Change::DesktopNotifications(value)); }
     changes
 }
 
@@ -123,5 +125,14 @@ mod background_tests {
         apply_change(&mut store, Change::KeepRunningInBackground(false)).unwrap();
         assert!(!store.settings().general.keep_running_in_background);
         assert!(std::fs::read_to_string(path).unwrap().contains("keep_running_in_background = false"));
+    }
+
+    #[test]
+    fn general_changes_maps_desktop_notifications() {
+        let patch: crate::desktop::settings::GeneralPatch = serde_json::from_str(r#"{"desktopNotifications":false}"#).unwrap();
+        assert_eq!(patch.desktop_notifications, Some(false));
+        assert_eq!(general_changes(patch), vec![Change::DesktopNotifications(false)]);
+        let page = general_page(&GeneralSettings::default(), &[], serde_json::json!([]), None);
+        assert_eq!(page["desktopNotifications"], serde_json::json!(true));
     }
 }
