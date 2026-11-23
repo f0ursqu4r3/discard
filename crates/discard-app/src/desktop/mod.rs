@@ -4,6 +4,7 @@ pub mod channels;
 pub mod core;
 pub mod delegation;
 pub mod dto;
+pub mod notify;
 pub mod pump;
 pub mod review;
 pub mod terminal;
