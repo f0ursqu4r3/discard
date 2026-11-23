@@ -147,6 +147,17 @@ impl StateStore {
         self.save(next)
     }
 
+    /// Save several read markers with one file write. Each item is `(channel_or_thread_id, message_id)`.
+    /// No items means no write.
+    pub fn set_last_read_many(&mut self, items: &[(String, String)]) -> Result<(), String> {
+        if items.is_empty() { return Ok(()); }
+        let mut next = self.state.clone();
+        for (channel, message) in items {
+            next.last_read.insert(channel.clone(), message.clone());
+        }
+        self.save(next)
+    }
+
     /// Forget the read marker of a channel that no longer exists. No marker means nothing changes.
     pub fn clear_last_read(&mut self, channel: &str) -> Result<(), String> {
         if !self.state.last_read.contains_key(channel) { return Ok(()); }
@@ -415,6 +426,47 @@ mod tests {
         fs::write(&blocker, "x").unwrap();
         let mut store = StateStore::open(&blocker.join("state.toml"));
         assert!(store.set_bounds(bounds(0.0, 0.0, 800.0, 600.0)).is_err());
+    }
+
+    fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items.iter().map(|(a, b)| ((*a).to_owned(), (*b).to_owned())).collect()
+    }
+
+    #[test]
+    fn set_last_read_many_saves_every_marker_in_one_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        let mut store = StateStore::open(&path);
+        store.set_last_read_many(&pairs(&[("a", "m1"), ("b", "m2")])).unwrap();
+        assert_eq!((store.last_read("a"), store.last_read("b")), (Some("m1"), Some("m2")));
+        let reopened = StateStore::open(&path);
+        assert_eq!((reopened.last_read("a"), reopened.last_read("b")), (Some("m1"), Some("m2")));
+    }
+
+    #[test]
+    fn set_last_read_many_with_no_items_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        let mut store = StateStore::open(&path);
+        store.set_last_read_many(&[]).unwrap();
+        assert!(!path.exists());
+        store.set_last_read("a", "m1").unwrap();
+        let before = fs::metadata(&path).unwrap().modified().unwrap();
+        store.set_last_read_many(&[]).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before);
+    }
+
+    #[test]
+    fn a_failed_set_last_read_many_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&path_in(&dir));
+        store.set_last_read("a", "old-a").unwrap();
+        store.set_last_read("b", "old-b").unwrap();
+        let blocker = dir.path().join("file");
+        fs::write(&blocker, "x").unwrap();
+        store.path = blocker.join("state.toml");
+        assert!(store.set_last_read_many(&pairs(&[("a", "new-a"), ("b", "new-b")])).is_err());
+        assert_eq!((store.last_read("a"), store.last_read("b")), (Some("old-a"), Some("old-b")));
     }
 
     #[test]
