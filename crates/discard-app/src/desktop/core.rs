@@ -2077,10 +2077,6 @@ impl AppCore {
     pub fn clear_window_focus(&self) {
         self.notify.lock().unwrap_or_else(|e| e.into_inner()).focus.clear();
     }
-    /// The channel of a recent notification. Clears it.
-    pub fn take_notification_follow(&self) -> Option<String> {
-        self.notify.lock().unwrap_or_else(|e| e.into_inner()).focus.take_follow(std::time::Instant::now())
-    }
     /// Send a notification when the rules allow it. The `state` lock is not held here.
     fn maybe_notify(&self, trigger: &super::notify::Trigger, channel: &str, agent: &str, muted: bool, channel_id: &str) {
         // Cheap checks first, under the lock. The setting check reads a file and runs after the lock is released.
@@ -2092,8 +2088,7 @@ impl AppCore {
             sink
         };
         if !enabled() { return; }
-        let Some(notification) = super::notify::compose(trigger, channel, agent, muted) else { return };
-        self.notify.lock().unwrap_or_else(|e| e.into_inner()).focus.notified(channel_id, std::time::Instant::now());
+        let Some(notification) = super::notify::compose(trigger, channel, agent, muted, channel_id) else { return };
         notifier.notify(&notification);
     }
 
@@ -2976,7 +2971,6 @@ mod read_tests {
         let (_dir, core, notifier) = notifying_fixture(true);
         core.apply_channel("channel", approval_event("ap-1"));
         assert!(notifier.0.lock().unwrap().is_empty());
-        assert_eq!(core.take_notification_follow(), None);
     }
 
     #[test]
@@ -3055,8 +3049,8 @@ mod read_tests {
             let sent = notifier.0.lock().unwrap();
             assert_eq!(sent.len(), 1);
             assert_eq!((sent[0].title.as_str(), sent[0].body.as_str()), ("c · Quinn", "Finished"));
+            assert_eq!(sent[0].channel_id, "channel", "a click opens the parent channel");
         }
-        assert_eq!(core.take_notification_follow(), Some("channel".into()), "a click opens the parent channel");
         core.set_channel_muted("channel", true);
         core.apply_channel("thread", finished());
         assert_eq!(notifier.0.lock().unwrap().len(), 1, "a muted parent silences the finished turn");
@@ -3075,12 +3069,13 @@ mod read_tests {
     }
 
     #[test]
-    fn the_focus_that_follows_a_notification_returns_its_channel_id() {
-        let (_dir, core, _notifier) = notifying_fixture(true);
-        assert_eq!(core.take_notification_follow(), None);
+    fn a_sent_notification_carries_the_channel_id() {
+        let (_dir, core, notifier) = notifying_fixture(true);
         core.apply_channel("channel", approval_request("ap-1"));
-        assert_eq!(core.take_notification_follow(), Some("channel".into()));
-        assert_eq!(core.take_notification_follow(), None);
+        core.apply_channel("channel", finished());
+        let sent = notifier.0.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert_eq!((sent[0].channel_id.as_str(), sent[1].channel_id.as_str()), ("channel", "channel"));
     }
 
     #[test]

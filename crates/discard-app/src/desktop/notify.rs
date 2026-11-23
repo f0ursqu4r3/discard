@@ -2,11 +2,8 @@
 
 use discard_core::driver::TurnOutcome;
 use discard_core::ui_state::Update;
-use std::collections::{HashSet, VecDeque};
-use std::time::{Duration, Instant};
+use std::collections::{HashMap, HashSet, VecDeque};
 
-/// How long after a notification a window focus still opens its channel.
-pub const FOLLOW_WINDOW: Duration = Duration::from_secs(10);
 const MAX_NAME_CHARS: usize = 60;
 const SEEN_CAPACITY: usize = 128;
 
@@ -14,6 +11,8 @@ const SEEN_CAPACITY: usize = 128;
 pub struct Notification {
     pub title: String,
     pub body: String,
+    /// The channel a click on the notification opens. For a thread, this is the parent channel.
+    pub channel_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,7 +38,7 @@ pub fn trigger_of(update: &Update, is_thread: bool) -> Option<Trigger> {
 }
 
 /// Builds the notification for a trigger. Returns `None` when nothing should show.
-pub fn compose(trigger: &Trigger, channel: &str, agent: &str, muted: bool) -> Option<Notification> {
+pub fn compose(trigger: &Trigger, channel: &str, agent: &str, muted: bool, channel_id: &str) -> Option<Notification> {
     let body = match trigger {
         Trigger::Approval { tool, .. } => format!("Needs approval: {}", one_line(tool)),
         Trigger::Finished(_) if muted => return None,
@@ -47,7 +46,16 @@ pub fn compose(trigger: &Trigger, channel: &str, agent: &str, muted: bool) -> Op
         Trigger::Finished(TurnOutcome::Failed) => "Failed".to_string(),
         Trigger::Finished(TurnOutcome::Cancelled) => return None,
     };
-    Some(Notification { title: format!("{} · {}", one_line(channel), one_line(agent)), body })
+    Some(Notification { title: format!("{} · {}", one_line(channel), one_line(agent)), body, channel_id: channel_id.to_string() })
+}
+
+/// The channel a click on a notification opens. Only a `tap` counts, and only when the notification carries a
+/// non-empty string `channelId`.
+pub fn channel_from_click(action_id: &str, extra: &HashMap<String, serde_json::Value>) -> Option<String> {
+    if action_id != "tap" {
+        return None;
+    }
+    extra.get("channelId").and_then(serde_json::Value::as_str).filter(|id| !id.is_empty()).map(str::to_string)
 }
 
 /// Joins whitespace runs into one space, trims, and cuts to 60 characters with `…`.
@@ -61,11 +69,10 @@ fn one_line(text: &str) -> String {
     cut
 }
 
-/// Tracks which windows have focus and the newest notification.
+/// Tracks which windows have focus.
 #[derive(Debug, Default)]
 pub struct FocusTracker {
     focused: HashSet<String>,
-    last: Option<(String, Instant)>,
 }
 
 impl FocusTracker {
@@ -93,17 +100,6 @@ impl FocusTracker {
     /// Forgets every focused window.
     pub fn clear(&mut self) {
         self.focused.clear();
-    }
-
-    /// Remembers the newest notification. It replaces any earlier one.
-    pub fn notified(&mut self, channel_id: &str, now: Instant) {
-        self.last = Some((channel_id.to_string(), now));
-    }
-
-    /// Returns the newest notification's channel if it is recent. Always clears it.
-    pub fn take_follow(&mut self, now: Instant) -> Option<String> {
-        let (channel, at) = self.last.take()?;
-        (now.saturating_duration_since(at) <= FOLLOW_WINDOW).then_some(channel)
     }
 }
 
@@ -140,7 +136,6 @@ mod tests {
     use discard_core::driver::TurnOutcome;
     use discard_core::event::{ApprovalId, Event, EventId, EventKind, SessionId};
     use discard_core::ui_state::Update;
-    use std::time::{Duration, Instant};
 
     fn approval_update(tool: &str, input: serde_json::Value) -> Update {
         Update::Event(Box::new(Event {
@@ -169,29 +164,29 @@ mod tests {
 
     #[test]
     fn an_approval_composes_title_and_body() {
-        let n = compose(&approval("Bash"), "general", "Ada", false).unwrap();
+        let n = compose(&approval("Bash"), "general", "Ada", false, "chan-1").unwrap();
         assert_eq!(n.title, "general · Ada");
         assert_eq!(n.body, "Needs approval: Bash");
     }
 
     #[test]
     fn a_finished_turn_says_finished_and_a_failed_turn_says_failed() {
-        let done = compose(&Trigger::Finished(TurnOutcome::Completed), "general", "Ada", false).unwrap();
+        let done = compose(&Trigger::Finished(TurnOutcome::Completed), "general", "Ada", false, "chan-1").unwrap();
         assert_eq!(done.body, "Finished");
-        let failed = compose(&Trigger::Finished(TurnOutcome::Failed), "general", "Ada", false).unwrap();
+        let failed = compose(&Trigger::Finished(TurnOutcome::Failed), "general", "Ada", false, "chan-1").unwrap();
         assert_eq!(failed.body, "Failed");
     }
 
     #[test]
     fn a_cancelled_turn_composes_nothing() {
-        assert!(compose(&Trigger::Finished(TurnOutcome::Cancelled), "general", "Ada", false).is_none());
+        assert!(compose(&Trigger::Finished(TurnOutcome::Cancelled), "general", "Ada", false, "chan-1").is_none());
     }
 
     #[test]
     fn a_muted_channel_drops_finished_but_keeps_approvals() {
-        assert!(compose(&Trigger::Finished(TurnOutcome::Completed), "general", "Ada", true).is_none());
-        assert!(compose(&Trigger::Finished(TurnOutcome::Failed), "general", "Ada", true).is_none());
-        assert!(compose(&approval("Bash"), "general", "Ada", true).is_some());
+        assert!(compose(&Trigger::Finished(TurnOutcome::Completed), "general", "Ada", true, "chan-1").is_none());
+        assert!(compose(&Trigger::Finished(TurnOutcome::Failed), "general", "Ada", true, "chan-1").is_none());
+        assert!(compose(&approval("Bash"), "general", "Ada", true, "chan-1").is_some());
     }
 
     #[test]
@@ -228,11 +223,11 @@ mod tests {
 
     #[test]
     fn names_with_newlines_or_500_characters_become_one_short_line() {
-        let n = compose(&approval("a\n\tb   c"), "gen\neral", "Ada\r\nL", false).unwrap();
+        let n = compose(&approval("a\n\tb   c"), "gen\neral", "Ada\r\nL", false, "chan-1").unwrap();
         assert_eq!(n.title, "gen eral · Ada L");
         assert_eq!(n.body, "Needs approval: a b c");
         let long = "x".repeat(500);
-        let n = compose(&approval(&long), &long, &long, false).unwrap();
+        let n = compose(&approval(&long), &long, &long, false, "chan-1").unwrap();
         let name = format!("{}…", "x".repeat(59));
         assert_eq!(name.chars().count(), 60);
         assert_eq!(n.title, format!("{name} · {name}"));
@@ -243,7 +238,7 @@ mod tests {
     fn the_body_holds_only_the_tool_name_never_the_input() {
         let update = needed_update("Bash");
         let trigger = trigger_of(&update, false).unwrap();
-        let n = compose(&trigger, "general", "Ada", false).unwrap();
+        let n = compose(&trigger, "general", "Ada", false, "chan-1").unwrap();
         assert!(!n.title.contains("secret") && !n.body.contains("secret"));
     }
 
@@ -278,22 +273,34 @@ mod tests {
     }
 
     #[test]
-    fn a_focus_within_ten_seconds_follows_the_newest_notification_once() {
-        let mut focus = FocusTracker::new();
-        let t0 = Instant::now();
-        focus.notified("a", t0);
-        focus.notified("b", t0 + Duration::from_secs(2));
-        assert_eq!(focus.take_follow(t0 + Duration::from_secs(9)), Some("b".into()));
-        assert_eq!(focus.take_follow(t0 + Duration::from_secs(9)), None);
+    fn compose_carries_the_channel_id() {
+        let approval = compose(&approval("Bash"), "general", "Ada", false, "chan-7").unwrap();
+        assert_eq!(approval.channel_id, "chan-7");
+        let finished = compose(&Trigger::Finished(TurnOutcome::Completed), "general", "Ada", false, "chan-8").unwrap();
+        assert_eq!(finished.channel_id, "chan-8");
+    }
+
+    fn extra(value: serde_json::Value) -> std::collections::HashMap<String, serde_json::Value> {
+        std::collections::HashMap::from([("channelId".to_string(), value)])
     }
 
     #[test]
-    fn a_focus_after_ten_seconds_follows_nothing() {
-        let mut focus = FocusTracker::new();
-        let t0 = Instant::now();
-        focus.notified("a", t0);
-        assert_eq!(focus.take_follow(t0 + FOLLOW_WINDOW + Duration::from_millis(1)), None);
-        assert_eq!(focus.take_follow(t0 + Duration::from_secs(1)), None, "a late focus still clears it");
+    fn channel_from_click_returns_the_id_for_a_tap() {
+        assert_eq!(channel_from_click("tap", &extra(serde_json::json!("chan-1"))), Some("chan-1".to_string()));
+    }
+
+    #[test]
+    fn channel_from_click_ignores_another_action() {
+        assert_eq!(channel_from_click("approve", &extra(serde_json::json!("chan-1"))), None);
+        assert_eq!(channel_from_click("", &extra(serde_json::json!("chan-1"))), None);
+    }
+
+    #[test]
+    fn channel_from_click_ignores_a_missing_or_non_string_id() {
+        assert_eq!(channel_from_click("tap", &std::collections::HashMap::new()), None);
+        assert_eq!(channel_from_click("tap", &extra(serde_json::json!(7))), None);
+        assert_eq!(channel_from_click("tap", &extra(serde_json::Value::Null)), None);
+        assert_eq!(channel_from_click("tap", &extra(serde_json::json!(""))), None);
     }
 
     #[test]
