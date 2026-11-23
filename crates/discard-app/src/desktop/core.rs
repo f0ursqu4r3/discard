@@ -1984,7 +1984,7 @@ impl AppCore {
         let memory_changed = matches!(&update, Update::MemoryChanges { .. });
         // What a notification needs, read before the update moves into the state.
         // Only a sub-agent thread turn is silent: its parent channel reports the result. A question thread notifies
-        // like a channel. A thread shows its parent's name, mute flag, and channel to follow.
+        // like a channel. A thread shows its parent's name and mute flag, and carries its parent's channel id.
         let notice = s.channels.get(channel).and_then(|c| {
             let record = s.threads.get(channel);
             let sub_agent = record.is_some_and(|r| r.kind == discard_core::model::ThreadKind::SubAgent);

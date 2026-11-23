@@ -36,7 +36,7 @@ Discard can keep running in the background with a tray icon. Today nothing tells
 3. **Content.** The title is the channel name and the agent name. The body is one of: `Needs approval: <tool name>`, `Finished`, `Failed`. The body never holds message or tool-argument text.
 4. **Switch.** Settings, General has one switch, **Desktop notifications**. It is on by default and saved in `settings.toml` with the other general settings. An invalid value falls back to on, with the usual settings error. The macOS permission prompt appears at the first notification. If the user denies it, nothing fires and nothing breaks.
 5. **Muted channels.** A muted channel sends no finished-turn notification. Approvals still notify, as badges do.
-6. **Click.** A click only brings the app to the front. If a window gains focus within 10 seconds after a notification, it selects the channel of the newest notification in that time. A focus change after that does not move the selection.
+6. **Click.** *(Amended by `2026-11-23-notification-click-design.md`: a click now opens the notification's channel. The 10-second follow rule was removed.)* A click only brings the app to the front. If a window gains focus within 10 seconds after a notification, it selects the channel of the newest notification in that time. A focus change after that does not move the selection.
 7. **Planned item.** The project menu item **Desktop Notifications** stays visible, disabled, and labelled Soon, with its existing `TODO`. This change adds no planned item and no no-op handler.
 
 ## Constraints

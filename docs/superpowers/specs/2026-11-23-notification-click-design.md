@@ -1,6 +1,6 @@
 # Notification click design
 
-Date: 2026-11-23. Size: small change. Status: awaiting approval. Amends `2026-11-23-desktop-notifications-design.md` decision 6.
+Date: 2026-11-23. Size: small change. Status: implemented. Amends `2026-11-23-desktop-notifications-design.md` decision 6.
 
 ## Intent
 
