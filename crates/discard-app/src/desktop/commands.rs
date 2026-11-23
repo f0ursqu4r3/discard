@@ -328,19 +328,23 @@ pub fn mark_read(core: State<'_, Arc<AppCore>>, channel_id: String, message_id: 
     core.mark_read_in(Some(&channel_id), &message_id)
 }
 
-/// Mark every loaded channel of a project, and the threads under them, as read.
+/// Mark every channel of a project, and the threads under them, as read.
 #[tauri::command]
-pub fn mark_project_read(context: State<'_, super::settings::SettingsContext>, project_id: String) -> Result<(), String> {
-    super::mark_read::mark_projects_read(&context.core, &context.store, &[project_id]).map(|_| ())
+pub async fn mark_project_read(context: State<'_, super::settings::SettingsContext>, project_id: String) -> Result<(), String> {
+    let (core, store) = (context.core.clone(), context.store.clone());
+    tauri::async_runtime::spawn_blocking(move || super::mark_read::mark_projects_read(&core, &store, &[project_id]).map(|_| ())).await.map_err(|e| e.to_string())?
 }
 
 /// Mark every project of a rail group as read.
 #[tauri::command]
-pub fn mark_group_read(context: State<'_, super::settings::SettingsContext>, group_id: String) -> Result<(), String> {
-    let layout = context.store.lock().unwrap_or_else(|e| e.into_inner()).rail_layout().map_err(|e| e.to_string())?;
-    let projects = super::mark_read::group_project_ids(&layout, &group_id)?;
-    if projects.is_empty() { return Ok(()); }
-    super::mark_read::mark_projects_read(&context.core, &context.store, &projects).map(|_| ())
+pub async fn mark_group_read(context: State<'_, super::settings::SettingsContext>, group_id: String) -> Result<(), String> {
+    let (core, store) = (context.core.clone(), context.store.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let layout = store.lock().unwrap_or_else(|e| e.into_inner()).rail_layout().map_err(|e| e.to_string())?;
+        let projects = super::mark_read::group_project_ids(&layout, &group_id)?;
+        if projects.is_empty() { return Ok(()); }
+        super::mark_read::mark_projects_read(&core, &store, &projects).map(|_| ())
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

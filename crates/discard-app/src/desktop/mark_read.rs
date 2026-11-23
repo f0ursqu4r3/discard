@@ -1,6 +1,6 @@
 //! Mark a project, or every project of a rail group, as read.
 use super::core::AppCore;
-use discard_core::model::{ChannelId, Role};
+use discard_core::model::{ChannelId, ProjectId, Role};
 use discard_core::store::{RailItem, RailLayout, Store};
 use std::sync::Mutex;
 
@@ -27,16 +27,28 @@ pub fn thread_markers(store: &Store, channel_ids: &[String]) -> Result<Vec<(Stri
     Ok(markers)
 }
 
-/// Mark the loaded channels of these projects, and the threads under them, as read.
+/// Mark every non-thread channel of these projects, archived ones included, and the threads under them, as read.
+/// A loaded channel uses its in-memory tail. Any other channel uses its last stored message.
 /// Returns whether any marker changed.
 pub fn mark_projects_read(core: &AppCore, store: &Mutex<Store>, project_ids: &[String]) -> Result<bool, String> {
-    let tails = core.loaded_channel_tails(project_ids);
-    let channel_ids: Vec<String> = tails.iter().map(|(id, _)| id.clone()).collect();
-    let threads = {
+    let loaded: std::collections::HashMap<String, Option<String>> = core.loaded_channel_tails(project_ids).into_iter().collect();
+    let (mut markers, threads) = {
         let store = store.lock().unwrap_or_else(|e| e.into_inner());
-        thread_markers(&store, &channel_ids)?
+        let mut channel_ids = Vec::new();
+        for project in project_ids {
+            for (channel, _archived) in store.all_channels_for_project(&ProjectId(project.clone())).map_err(|e| e.to_string())? { channel_ids.push(channel.id.0); }
+        }
+        for id in loaded.keys() { if !channel_ids.contains(id) { channel_ids.push(id.clone()); } }
+        let mut markers = Vec::new();
+        for id in &channel_ids {
+            let tail = match loaded.get(id) {
+                Some(tail) => tail.clone(),
+                None => store.last_message_id(&ChannelId(id.clone())).map_err(|e| e.to_string())?.map(|m| m.0),
+            };
+            if let Some(tail) = tail { markers.push((id.clone(), tail)); }
+        }
+        (markers, thread_markers(&store, &channel_ids)?)
     };
-    let mut markers: Vec<(String, String)> = tails.into_iter().filter_map(|(id, tail)| tail.map(|t| (id, t))).collect();
     markers.extend(threads);
     core.apply_read_markers(&markers)
 }
@@ -148,5 +160,31 @@ mod tests {
         assert_eq!(core.last_read(&w.two.id.0), Some("m2".to_string()));
         assert_eq!(core.last_read(&thread.0), Some(thread_last.0));
         assert_eq!(mark_projects_read(&core, &store, &project), Ok(false));
+    }
+
+    #[test]
+    fn mark_projects_read_covers_channels_that_are_not_loaded_and_archived_ones() {
+        let w = world();
+        let thread = thread_in(&w);
+        let thread_last = say(&w.store, &thread, Role::Agent);
+        say(&w.store, &w.one.id, Role::Agent);
+        let one_last = say(&w.store, &w.one.id, Role::Agent);
+        let archived = Channel { id: ChannelId::new(), agent_id: w.agent.clone(), project_id: Some(w.project.id.clone()), name: "old".into(), workspace_mode: WorkspaceMode::MainCheckout };
+        w.store.insert_channel(&archived).unwrap();
+        say(&w.store, &archived.id, Role::User);
+        let archived_last = say(&w.store, &archived.id, Role::Agent);
+        w.store.archive_channel(&archived.id).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        discard_core::window_state::StateStore::open(&dir.path().join("state.toml")).set_last_read(&archived.id.0, "stale").unwrap();
+        let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        std::mem::forget(receiver);
+        // Only `two` is loaded. `one` and the archived channel are not.
+        let core = AppCore::new(CoreInit { state: UiState::new(w.two.id.clone(), vec![]), commands, project: w.project.id.0.clone(), channel: w.two.id.0.clone(), agent: "a".into(), provider: "fake".into() });
+        core.configure_read_marker(&ViewId::main(), dir.path(), &w.two.id.0);
+        let store = Mutex::new(w.store);
+        assert_eq!(mark_projects_read(&core, &store, std::slice::from_ref(&w.project.id.0)), Ok(true));
+        assert_eq!(core.last_read(&w.one.id.0), Some(one_last.0));
+        assert_eq!(core.last_read(&archived.id.0), Some(archived_last.0));
+        assert_eq!(core.last_read(&thread.0), Some(thread_last.0));
     }
 }

@@ -4,7 +4,7 @@
 
 **Goal:** Make **Mark Project as Read** and **Mark Group as Read** work: one click marks every channel of the project (or of every member project of the group) and every thread under those channels as read.
 
-**Architecture:** `StateStore` gets one batched marker write. `AppCore` reports the last message of each loaded channel of a set of projects and applies a batch of markers (clearing divider anchors and waking the pump). Two Tauri commands compute the thread markers from storage, resolve a group to its projects, and call `AppCore`. The two menu items become real actions that call the commands.
+**Architecture:** `StateStore` gets one batched marker write. `AppCore` reports the last message of each loaded channel of a set of projects (the command also covers channels that are not loaded and archived ones, using the last stored message) and applies a batch of markers (clearing divider anchors and waking the pump). Two Tauri commands compute the thread markers from storage, resolve a group to its projects, and call `AppCore`. The two menu items become real actions that call the commands.
 
 **Tech Stack:** Rust (discard-core, discard-app), Tauri 2, Vue 3 + TypeScript, Vite+ tests.
 

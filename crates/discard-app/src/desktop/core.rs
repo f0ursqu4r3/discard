@@ -1214,7 +1214,14 @@ impl AppCore {
     /// Callers pass current tails, so a marker does not move backward in practice.
     pub fn apply_read_markers(&self, markers: &[(String, String)]) -> Result<bool, String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let changed: Vec<(String, String)> = markers.iter().filter(|(id, message)| s.window.last_read(id) != Some(message.as_str())).cloned().collect();
+        // A marker never moves backward. A channel that is not loaded has no history to compare, so it takes the new marker.
+        let position = |s: &State, channel: &str, message: &str| channel_state(s, channel).and_then(|c| c.ui.history().iter().position(|m| m.id.0 == message));
+        let changed: Vec<(String, String)> = markers.iter().filter(|(id, message)| {
+            let current = s.window.last_read(id);
+            if current == Some(message.as_str()) { return false; }
+            let behind = current.and_then(|current| position(&s, id, current)).zip(position(&s, id, message)).is_some_and(|(current, new)| current >= new);
+            !behind
+        }).cloned().collect();
         if changed.is_empty() { return Ok(false); }
         s.window.set_last_read_many(&changed)?;
         let mut shown = false;
@@ -3229,6 +3236,17 @@ mod read_tests {
         assert!(!channel_unread(&core, "a"));
         core.apply_channel("a", Update::ConversationMarker(Message { id: MessageId("three".into()), channel_id: ChannelId("a".into()), role: Role::Agent, blocks: vec![] }));
         assert!(channel_unread(&core, "a"));
+    }
+    #[test]
+    fn apply_read_markers_never_moves_a_loaded_marker_backward() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = core_for_markers(dir.path());
+        add_channel_with_history(&core, Some("p"), "a", &["one", "two", "three"]);
+        assert_eq!(core.apply_read_markers(&[marker_pair("a", "three")]), Ok(true));
+        let (rev, conversations) = (core.snapshot(&main()).rev, core.conversations_rev());
+        assert_eq!(core.apply_read_markers(&[marker_pair("a", "two")]), Ok(false));
+        assert_eq!((core.snapshot(&main()).rev, core.conversations_rev()), (rev, conversations));
+        assert_eq!(core.last_read("a"), Some("three".to_string()));
     }
     #[test]
     fn apply_read_markers_changes_nothing_when_the_write_fails() {

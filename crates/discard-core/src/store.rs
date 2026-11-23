@@ -2497,6 +2497,11 @@ impl Store {
         Ok(json.map(|json| serde_json::from_str(&json)).transpose()?)
     }
 
+    /// The ID of the last saved message of a channel, of any role. A channel without messages gives `None`.
+    pub fn last_message_id(&self, c: &ChannelId) -> Result<Option<MessageId>> {
+        Ok(self.conn.query_row("SELECT id FROM messages WHERE channel_id = ?1 ORDER BY ord DESC LIMIT 1", params![c.0], |r| r.get::<_, String>(0)).optional()?.map(MessageId))
+    }
+
     /// Saved messages, oldest first. A posted reference row loads with its source message's role and blocks.
     pub fn messages_for_channel(&self, c: &ChannelId) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(

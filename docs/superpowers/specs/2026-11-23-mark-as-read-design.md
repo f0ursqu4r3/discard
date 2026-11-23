@@ -26,18 +26,18 @@ The project menu item **Mark Project as Read** and the group menu item **Mark Gr
 
 ## Approaches
 
-- **A. One Rust command per scope (chosen).** Rust walks the loaded channels and thread records, sets each marker to the last message, and saves once.
+- **A. One Rust command per scope (chosen).** Rust walks the channels in storage and their threads, sets each marker to the last message, and saves once.
 - **B. The web app calls `mark_read` per channel (rejected).** `mark_read_in` works only for a channel that a window shows.
 - **C. A per-project watermark (rejected).** It changes how unread works everywhere.
 
 ## Decisions
 
-1. **Scope of a project.** Every loaded non-thread channel whose project is the target (the same rule the rail uses to list a project's channels), and every thread record whose parent is one of those channels. Muted channels count: marking them is harmless.
+1. **Scope of a project.** Every non-thread channel of the project in storage, archived ones included (the same rule the rail uses to list a project's channels). A loaded channel uses its in-memory tail. Any other channel uses its last stored message, and every thread record whose parent is one of those channels. Muted channels count: marking them is harmless.
 2. **The marker.** A channel's or thread's marker becomes the ID of the last message of its history, whatever its role. An empty history changes nothing. A marker never moves backward: a marker already at or after the last message stays.
 3. **One write.** `StateStore` gains `set_last_read_many(&mut self, items: &[(String, String)]) -> Result<(), String>`. It saves the file once. On error the file and the in-memory state stay as they were.
 4. **Commands.** `mark_project_read(project_id: String)` and `mark_group_read(group_id: String)` in `discard-app`. The group command reads the member projects from the saved rail layout. An unknown group ID is an error. A project with no channels, or an empty group, is `Ok` with no change.
 5. **Refresh.** For each channel whose marker changed, clear its `new_anchor`. Bump `rev`, and bump `history_rev` when a changed channel is one that a view shows (as `mark_read_in` does). Wake the pump once.
-6. **Menus.** In `web/src/components/project-menu.ts` the project item becomes the action `mark-read` and the group item becomes `mark-group-read`. Remove the `planned(...)` calls and their `TODO` comments. The items are always enabled.
+6. **Menus.** In `web/src/components/project-menu.ts` the project item becomes the action `mark-read` and the group item becomes `group-mark-read`. Remove the `planned(...)` calls and their `TODO` comments. The items are always enabled.
 7. **Docs.** Update `docs/settings.md` (the project and group menu paragraphs that list these items as Soon) and `docs/project-channel-status.md`.
 
 ## Constraints
