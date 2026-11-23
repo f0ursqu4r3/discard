@@ -8,6 +8,7 @@ const page = vi.hoisted(() => ({
     defaultProvider: 'claude',
     confirmWhileWorking: true,
     keepRunningInBackground: true,
+    desktopNotifications: true,
     backgroundUnavailable: null as string | null,
     providers: ['claude', 'codex'],
     issues: [] as string[],
@@ -31,6 +32,27 @@ beforeEach(() => {
   invoke.mockClear()
   page.state.keepRunningInBackground = true
   page.state.backgroundUnavailable = null
+  page.state.desktopNotifications = true
+})
+
+describe('general settings: desktop notifications', () => {
+  const NOTIFY = '[role="switch"][aria-label="Desktop notifications"]'
+
+  it('shows the Desktop notifications switch on by default', async () => {
+    const view = mount(General)
+    await flushPromises()
+    expect(view.get(NOTIFY).attributes('aria-checked')).toBe('true')
+  })
+
+  it('sends a patch when the user turns it off', async () => {
+    const view = mount(General)
+    await flushPromises()
+    await view.get(NOTIFY).trigger('click')
+    await flushPromises()
+    expect(invoke).toHaveBeenCalledWith('settings_set_general', {
+      patch: { desktopNotifications: false },
+    })
+  })
 })
 
 describe('general settings: background mode', () => {

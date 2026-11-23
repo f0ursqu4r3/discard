@@ -190,7 +190,20 @@ change and names the action. Key changes apply at the next launch. Plugins canno
 - **Default provider.** One button for each provider. A note says "Applies at next launch".
 - **Confirm while working.** A switch. A note says it confirms Quit and the Safe Mode relaunch while a turn runs.
 - **Reopen last channel.** Greyed, "Soon". It has no setting yet.
+- **Desktop notifications.** A switch in the Notifications card. See "Desktop notifications" below.
 - A write error shows inline, and stays until the next change succeeds.
+
+#### Desktop notifications
+
+- A notification fires for an approval that waits for you. It also fires for a finished or failed turn.
+- A notification fires only when no Discard window is focused.
+- The title is `<channel> · <agent>`.
+- The body is `Needs approval: <tool>`, `Finished`, or `Failed`. It never shows message text.
+- A cancelled turn sends nothing. A sub-agent thread turn sends nothing.
+- A muted channel sends no finished-turn notification. Approvals still notify.
+- A click only brings the app to the front. If a window gains focus within 10 seconds after a notification, it opens the channel of the newest notification.
+- If the system permission is denied, no notification shows.
+- The project menu items for notification modes stay planned ("Soon").
 
 ### Appearance page
 

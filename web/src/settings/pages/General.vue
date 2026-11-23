@@ -12,6 +12,7 @@ type General = {
   defaultProvider: string
   confirmWhileWorking: boolean
   keepRunningInBackground: boolean
+  desktopNotifications: boolean
   backgroundUnavailable: string | null
   providers: string[]
   issues: string[]
@@ -97,6 +98,22 @@ onUnmounted(() => stop?.())
           aria-describedby="keep-running-in-background-help"
           :model-value="value.keepRunningInBackground"
           @update:model-value="patch({ keepRunningInBackground: $event })"
+        />
+      </SettingsRow>
+    </SettingsCard>
+    <SettingsCard title="Notifications">
+      <SettingsRow
+        label="Desktop notifications"
+        label-for="desktop-notifications"
+        help="Notify when an approval waits or a turn ends while no Discard window is focused"
+        help-id="desktop-notifications-help"
+      >
+        <Switch
+          id="desktop-notifications"
+          aria-label="Desktop notifications"
+          aria-describedby="desktop-notifications-help"
+          :model-value="value.desktopNotifications"
+          @update:model-value="patch({ desktopNotifications: $event })"
         />
       </SettingsRow>
     </SettingsCard>
