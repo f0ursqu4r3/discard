@@ -442,7 +442,16 @@ pub struct AppCore {
     /// Moves when a thread list that the webview reads from storage changed without a command of the webview.
     conversations_rev: AtomicU64,
     sub_agents: super::delegation::SubAgents,
+    /// Focus, seen approvals, and the notifier. Never locked together with `state`.
+    notify: Mutex<NotifyState>,
     pub(crate) changed: Notify,
+}
+type EnabledFn = Arc<dyn Fn() -> bool + Send + Sync>;
+#[derive(Default)]
+struct NotifyState {
+    focus: super::notify::FocusTracker,
+    seen: super::notify::Seen,
+    sink: Option<(Arc<dyn super::notify::Notifier>, EnabledFn)>,
 }
 impl AppCore {
     pub fn new(init: CoreInit) -> Self {
@@ -488,6 +497,7 @@ impl AppCore {
             plugin_signature: Mutex::new(String::new()),
             conversations_rev: AtomicU64::new(0),
             sub_agents: super::delegation::SubAgents::default(),
+            notify: Mutex::new(NotifyState::default()),
             changed: Notify::new(),
         }
     }
@@ -1938,6 +1948,11 @@ impl AppCore {
             return false;
         }
         let memory_changed = matches!(&update, Update::MemoryChanges { .. });
+        // What a notification needs, read before the update moves into the state.
+        let notice = s.channels.get(channel).and_then(|c| {
+            let trigger = super::notify::trigger_of(&update, c.thread_parent.is_some())?;
+            Some((trigger, c.channel.clone(), c.agent.clone(), c.muted, c.channel_id.clone()))
+        });
         // A posted thread message is a message of the parent channel. The thread's own state has nothing to change.
         if let Update::MessagePosted { reference, source } = update {
             post_into_parent(&mut s, channel, reference, source);
@@ -1995,6 +2010,7 @@ impl AppCore {
         }
         let conversations = self.apply_thread_note(&mut s, channel, &note);
         drop(s);
+        if let Some((trigger, name, agent, muted, channel_id)) = notice { self.maybe_notify(&trigger, &name, &agent, muted, &channel_id); }
         if conversations { self.conversations_rev.fetch_add(1, Ordering::SeqCst); }
         // Tell the task of a sub-agent thread, and stop the tasks of a parent whose turn ended while they ran.
         self.sub_agents.observe(channel, &note);
@@ -2004,6 +2020,36 @@ impl AppCore {
         }
         self.changed.notify_one();
         finished
+    }
+
+    /// Install the notifier and the check of the desktop notifications setting.
+    pub fn set_notifier(&self, notifier: Arc<dyn super::notify::Notifier>, enabled: EnabledFn) {
+        self.notify.lock().unwrap_or_else(|e| e.into_inner()).sink = Some((notifier, enabled));
+    }
+    /// Record that a window gained or lost focus. Any window label counts.
+    pub fn window_focus(&self, label: &str, focused: bool) {
+        self.notify.lock().unwrap_or_else(|e| e.into_inner()).focus.set_focus(label, focused);
+    }
+    /// Record that a window closed. A closed window sends no focus-lost event.
+    pub fn window_closed(&self, label: &str) {
+        self.notify.lock().unwrap_or_else(|e| e.into_inner()).focus.window_closed(label);
+    }
+    /// The channel of a recent notification. Clears it.
+    pub fn take_notification_follow(&self) -> Option<String> {
+        self.notify.lock().unwrap_or_else(|e| e.into_inner()).focus.take_follow(std::time::Instant::now())
+    }
+    /// Send a notification when the rules allow it. The `state` lock is not held here.
+    fn maybe_notify(&self, trigger: &super::notify::Trigger, channel: &str, agent: &str, muted: bool, channel_id: &str) {
+        let notification = {
+            let mut n = self.notify.lock().unwrap_or_else(|e| e.into_inner());
+            let Some((notifier, enabled)) = n.sink.clone() else { return };
+            if !enabled() || n.focus.app_focused() { return; }
+            if let super::notify::Trigger::Approval { id, .. } = trigger && !n.seen.first(id) { return; }
+            let Some(notification) = super::notify::compose(trigger, channel, agent, muted) else { return };
+            n.focus.notified(channel_id, std::time::Instant::now());
+            (notifier, notification)
+        };
+        notification.0.notify(&notification.1);
     }
 
     /// Apply what an update says about a thread record. Returns whether a list that the webview reads from storage changed.
@@ -2849,6 +2895,108 @@ mod read_tests {
         core.set_channel_muted("channel", true);
         let snapshot = core.snapshot(&ViewId::main());
         assert_eq!((snapshot.pending_approvals, snapshot.channels[0].pending_approvals, snapshot.channels[0].unread), (1, 1, false));
+    }
+
+    #[derive(Default)]
+    struct RecordingNotifier(Mutex<Vec<super::super::notify::Notification>>);
+    impl super::super::notify::Notifier for RecordingNotifier {
+        fn notify(&self, notification: &super::super::notify::Notification) { self.0.lock().unwrap().push(notification.clone()); }
+    }
+    fn notifying_fixture(enabled: bool) -> (tempfile::TempDir, AppCore, Arc<RecordingNotifier>) {
+        let (dir, core, _received) = muted_fixture();
+        let notifier = Arc::new(RecordingNotifier::default());
+        core.set_notifier(notifier.clone(), Arc::new(move || enabled));
+        (dir, core, notifier)
+    }
+    fn approval_request(id: &str) -> Update {
+        use discard_core::event::{Event, EventId, EventKind, SessionId};
+        Update::Event(Box::new(Event { id: EventId::new(), session_id: SessionId::new(), seq: 1, raw: None,
+            kind: EventKind::ApprovalRequest { kind: Default::default(), paths: vec![], approval_id: ApprovalId(id.into()), call_id: "c".into(), tool: "Bash".into(), input: serde_json::json!({"command": "ls"}) } }))
+    }
+    fn finished() -> Update { Update::TurnFinished(discard_core::driver::TurnOutcome::Completed) }
+
+    #[test]
+    fn an_approval_notifies_when_no_window_is_focused() {
+        let (_dir, core, notifier) = notifying_fixture(true);
+        core.apply_channel("channel", approval_request("ap-1"));
+        let sent = notifier.0.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].title, "c · a");
+        assert_eq!(sent[0].body, "Needs approval: Bash");
+    }
+
+    #[test]
+    fn nothing_notifies_while_a_window_is_focused() {
+        let (_dir, core, notifier) = notifying_fixture(true);
+        core.window_focus("main", true);
+        core.apply_channel("channel", approval_request("ap-1"));
+        assert!(notifier.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn nothing_notifies_while_only_the_settings_window_is_focused() {
+        let (_dir, core, notifier) = notifying_fixture(true);
+        core.window_focus("settings", true);
+        core.apply_channel("channel", approval_request("ap-1"));
+        assert!(notifier.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn nothing_notifies_when_the_setting_is_off() {
+        let (_dir, core, notifier) = notifying_fixture(false);
+        core.apply_channel("channel", approval_request("ap-1"));
+        assert!(notifier.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_finished_turn_notifies_once() {
+        let (_dir, core, notifier) = notifying_fixture(true);
+        core.apply_channel("channel", finished());
+        let sent = notifier.0.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].body, "Finished");
+    }
+
+    #[test]
+    fn a_duplicate_approval_id_notifies_once() {
+        let (_dir, core, notifier) = notifying_fixture(true);
+        core.apply_channel("channel", approval_request("ap-1"));
+        core.apply_channel("channel", approval_request("ap-1"));
+        assert_eq!(notifier.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_cancelled_turn_does_not_notify() {
+        let (_dir, core, notifier) = notifying_fixture(true);
+        core.apply_channel("channel", Update::TurnFinished(discard_core::driver::TurnOutcome::Cancelled));
+        assert!(notifier.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_sub_agent_thread_turn_does_not_notify() {
+        let (_dir, core, notifier) = notifying_fixture(true);
+        core.state.lock().unwrap().channels.get_mut("channel").unwrap().thread_parent = Some("parent".into());
+        core.apply_channel("channel", finished());
+        assert!(notifier.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_muted_channel_notifies_for_an_approval_but_not_for_a_finished_turn() {
+        let (_dir, core, notifier) = notifying_fixture(true);
+        core.set_channel_muted("channel", true);
+        core.apply_channel("channel", finished());
+        assert!(notifier.0.lock().unwrap().is_empty());
+        core.apply_channel("channel", approval_request("ap-1"));
+        assert_eq!(notifier.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_focus_that_follows_a_notification_returns_its_channel_id() {
+        let (_dir, core, _notifier) = notifying_fixture(true);
+        assert_eq!(core.take_notification_follow(), None);
+        core.apply_channel("channel", approval_request("ap-1"));
+        assert_eq!(core.take_notification_follow(), Some("channel".into()));
+        assert_eq!(core.take_notification_follow(), None);
     }
 
     #[test]

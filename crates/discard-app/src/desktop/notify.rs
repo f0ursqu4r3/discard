@@ -204,6 +204,14 @@ mod tests {
         assert_eq!(trigger_of(&Update::Notice("hi".into()), false), None);
         assert_eq!(trigger_of(&Update::Error("bad".into()), false), None);
         assert_eq!(trigger_of(&Update::ThreadFollowed, false), None);
+        let delta = Update::Event(Box::new(Event {
+            id: EventId::new(),
+            session_id: SessionId::new(),
+            seq: 1,
+            raw: None,
+            kind: EventKind::TextDelta { text: "hi".into() },
+        }));
+        assert_eq!(trigger_of(&delta, false), None);
     }
 
     #[test]

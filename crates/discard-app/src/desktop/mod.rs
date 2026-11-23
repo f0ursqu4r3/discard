@@ -146,10 +146,13 @@ pub fn run(
     let dark = Arc::new(AtomicBool::new(true));
     let event_dark = dark.clone();
     let event_core = core.clone();
+    let event_channels = channels.clone();
+    let notify_settings = settings.clone();
     let event_runtime = runtime.clone();
     let geometry_generation = Arc::new(AtomicU64::new(0));
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(core.clone())
         .manage(channels)
         .manage(config.worktree_access)
@@ -176,6 +179,15 @@ pub fn run(
             if let tauri::WindowEvent::ThemeChanged(value) = event {
                 event_dark.store(*value == tauri::Theme::Dark, Ordering::Relaxed);
             }
+            // Focus of every window decides whether the app notifies. A window that closes loses its focus.
+            if let tauri::WindowEvent::Focused(focused) = event {
+                event_core.window_focus(window.label(), *focused);
+                // A focus soon after a notification opens its channel.
+                if *focused && let Some(view) = view::ViewId::from_label(window.label()) && let Some(channel_id) = event_core.take_notification_follow()
+                    && let Err(error) = event_channels.select(&view, &channel_id)
+                { tracing::warn!(%error, "cannot open the channel of a notification"); }
+            }
+            if matches!(event, tauri::WindowEvent::Destroyed) { event_core.window_closed(window.label()); }
             // The last app window that had focus decides the view of the menu, the quit question, and the plugins.
             if let tauri::WindowEvent::Focused(true) = event && let Some(view) = view::ViewId::from_label(window.label()) {
                 event_core.set_focused_view(&view);
@@ -198,6 +210,15 @@ pub fn run(
             }
         })
         .setup(move |app| {
+            let enabled_settings = notify_settings.clone();
+            core.set_notifier(
+                Arc::new(TauriNotifier { app: app.handle().clone() }),
+                Arc::new(move || {
+                    let mut store = enabled_settings.lock().unwrap_or_else(|e| e.into_inner());
+                    store.reload_if_changed();
+                    store.settings().general.desktop_notifications
+                }),
+            );
             if let Some(window) = app.get_webview_window("main") {
                 if let Ok(value) = window.theme() {
                     dark.store(value == tauri::Theme::Dark, Ordering::Relaxed);
@@ -393,3 +414,17 @@ pub mod tray;
 mod slash;
 
 pub mod settings;
+
+/// Shows desktop notifications through the notification plugin.
+struct TauriNotifier {
+    app: tauri::AppHandle,
+}
+impl notify::Notifier for TauriNotifier {
+    fn notify(&self, notification: &notify::Notification) {
+        use tauri_plugin_notification::NotificationExt;
+        // A denied permission is not an error of the app. Log it and go on.
+        if let Err(error) = self.app.notification().builder().title(&notification.title).body(&notification.body).show() {
+            tracing::warn!(%error, "cannot show a desktop notification");
+        }
+    }
+}
