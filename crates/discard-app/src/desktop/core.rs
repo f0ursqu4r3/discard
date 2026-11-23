@@ -1211,6 +1211,7 @@ impl AppCore {
     }
     /// Save read markers for channels and threads with one write. Returns whether any marker changed.
     /// A save error changes nothing in memory. Pending approvals stay as they are.
+    /// Callers pass current tails, so a marker does not move backward in practice.
     pub fn apply_read_markers(&self, markers: &[(String, String)]) -> Result<bool, String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let changed: Vec<(String, String)> = markers.iter().filter(|(id, message)| s.window.last_read(id) != Some(message.as_str())).cloned().collect();
@@ -1219,7 +1220,7 @@ impl AppCore {
         let mut shown = false;
         for (id, _) in &changed {
             if let Some(channel) = s.channels.get_mut(id) { channel.new_anchor = None; }
-            shown |= is_shown(&s, id);
+            shown |= is_shown(&s, id) || s.threads.get(id).is_some_and(|record| is_shown(&s, &record.parent));
         }
         if shown { s.history_rev += 1; }
         s.rev += 1;
@@ -3247,6 +3248,23 @@ mod read_tests {
         assert_eq!(core.conversations_rev(), conversations);
         assert_eq!(core.state.lock().unwrap().channels["a"].new_anchor, anchor);
         assert_eq!(core.state.lock().unwrap().window.last_read("a"), None);
+    }
+    #[test]
+    fn a_thread_marker_bumps_history_rev_when_its_parent_is_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        StateStore::open(&dir.path().join("state.toml")).set_last_read("t", "t1").unwrap();
+        let core = core_for_markers(dir.path());
+        add_channel_with_history(&core, Some("p"), "a", &["one", "two"]);
+        core.switch_channel(&main(), "a").unwrap();
+        let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        std::mem::forget(receiver);
+        let history: Vec<_> = ["t1", "t2"].iter().map(|m| Message { id: MessageId((*m).into()), channel_id: ChannelId("t".into()), role: Role::Agent, blocks: vec![] }).collect();
+        let info = discard_core::model::ThreadInfo { channel_id: ChannelId("t".into()), parent_channel_id: ChannelId("a".into()), anchor_message_id: None, kind: ThreadKind::SubAgent, followed: false, name: "t".into(), state: None, agent_id: AgentId("agent".into()), agent_name: "a".into() };
+        let thread = discard_core::model::Channel { id: ChannelId("t".into()), agent_id: AgentId("agent".into()), project_id: project_of("p"), name: "t".into(), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout };
+        core.add_thread(CoreInit { state: UiState::new(ChannelId("t".into()), history), commands, project: "p".into(), channel: "t".into(), agent: "a".into(), provider: "fake".into() }, &thread, &info);
+        let before = core.snapshot(&main()).history_rev;
+        assert_eq!(core.apply_read_markers(&[marker_pair("t", "t2")]), Ok(true));
+        assert!(core.snapshot(&main()).history_rev > before, "the open parent shows the thread chip");
     }
     #[test]
     fn apply_read_markers_leaves_pending_approvals_alone() {
