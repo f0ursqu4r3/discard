@@ -90,6 +90,11 @@ impl FocusTracker {
         !self.focused.is_empty()
     }
 
+    /// Forgets every focused window.
+    pub fn clear(&mut self) {
+        self.focused.clear();
+    }
+
     /// Remembers the newest notification. It replaces any earlier one.
     pub fn notified(&mut self, channel_id: &str, now: Instant) {
         self.last = Some((channel_id.to_string(), now));
@@ -260,6 +265,15 @@ mod tests {
         let mut focus = FocusTracker::new();
         focus.set_focus("project-a", true);
         focus.window_closed("project-a");
+        assert!(!focus.app_focused());
+    }
+
+    #[test]
+    fn clear_drops_every_focused_window() {
+        let mut focus = FocusTracker::new();
+        focus.set_focus("main", true);
+        focus.set_focus("project-a", true);
+        focus.clear();
         assert!(!focus.app_focused());
     }
 

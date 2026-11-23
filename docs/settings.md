@@ -200,7 +200,9 @@ change and names the action. Key changes apply at the next launch. Plugins canno
 - The title is `<channel> · <agent>`.
 - The body is `Needs approval: <tool>`, `Finished`, or `Failed`. It never shows message text.
 - A cancelled turn sends nothing. A sub-agent thread turn sends nothing.
-- A muted channel sends no finished-turn notification. Approvals still notify.
+- A turn in a question thread notifies like a channel turn. Its title shows the parent channel name, and the parent's mute setting applies.
+- A muted channel sends no finished or failed notification. Approvals still notify.
+- A click raises the app only when a window is open. With every window hidden, a click does not open a window (known limit).
 - A click only brings the app to the front. If a window gains focus within 10 seconds after a notification, it opens the channel of the newest notification.
 - If the system permission is denied, no notification shows.
 - The project menu items for notification modes stay planned ("Soon").

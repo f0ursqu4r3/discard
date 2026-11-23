@@ -94,7 +94,12 @@ pub fn run(app: &AppHandle, core: &Arc<AppCore>, actions: &DesktopActions, view:
         // The close request decides: a window that is not the last closes alone, and the last one follows the Quit rule.
         Plan::CloseWindow => if let Some(window) = app.get_webview_window(view.label()) { let _ = window.close(); },
         Plan::ShowMainWindow => super::windows::show_main_window(app),
-        Plan::HideApp => { #[cfg(target_os = "macos")] let _ = app.hide(); #[cfg(not(target_os = "macos"))] if let Some(window) = app.get_webview_window(view.label()) { let _ = window.hide(); } },
+        Plan::HideApp => {
+            #[cfg(target_os = "macos")] let _ = app.hide();
+            #[cfg(not(target_os = "macos"))] if let Some(window) = app.get_webview_window(view.label()) { let _ = window.hide(); }
+            // Hiding may send no focus-lost event. Drop every window focus here.
+            core.clear_window_focus();
+        },
         Plan::HideOthers => other_apps(app, false),
         Plan::ShowAll => other_apps(app, true),
         Plan::Nothing => {},

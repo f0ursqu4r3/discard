@@ -532,6 +532,8 @@ pub fn on_close_requested(window: &tauri::Window, core: &super::core::AppCore, a
     match close {
         Close::Hide => {
             let _ = window.hide();
+            // A hidden window may send no focus-lost event. Drop its focus here.
+            core.window_focus(window.label(), false);
             // A window stays visible (no background mode): the focus goes to it, not to the hidden window.
             if !stay.is_empty() { apply_refocus(app, core, &stay); }
         }

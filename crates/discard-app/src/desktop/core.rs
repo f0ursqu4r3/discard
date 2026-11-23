@@ -1949,9 +1949,14 @@ impl AppCore {
         }
         let memory_changed = matches!(&update, Update::MemoryChanges { .. });
         // What a notification needs, read before the update moves into the state.
+        // Only a sub-agent thread turn is silent: its parent channel reports the result. A question thread notifies
+        // like a channel. A thread shows its parent's name, mute flag, and channel to follow.
         let notice = s.channels.get(channel).and_then(|c| {
-            let trigger = super::notify::trigger_of(&update, c.thread_parent.is_some())?;
-            Some((trigger, c.channel.clone(), c.agent.clone(), c.muted, c.channel_id.clone()))
+            let record = s.threads.get(channel);
+            let sub_agent = record.is_some_and(|r| r.kind == discard_core::model::ThreadKind::SubAgent);
+            let trigger = super::notify::trigger_of(&update, sub_agent)?;
+            let owner = record.and_then(|r| s.channels.get(&r.parent)).unwrap_or(c);
+            Some((trigger, owner.channel.clone(), c.agent.clone(), owner.muted, owner.channel_id.clone()))
         });
         // A posted thread message is a message of the parent channel. The thread's own state has nothing to change.
         if let Update::MessagePosted { reference, source } = update {
@@ -2033,6 +2038,10 @@ impl AppCore {
     /// Record that a window closed. A closed window sends no focus-lost event.
     pub fn window_closed(&self, label: &str) {
         self.notify.lock().unwrap_or_else(|e| e.into_inner()).focus.window_closed(label);
+    }
+    /// Forget every window focus. Use it when the app hides its windows and the OS may send no focus-lost event.
+    pub fn clear_window_focus(&self) {
+        self.notify.lock().unwrap_or_else(|e| e.into_inner()).focus.clear();
     }
     /// The channel of a recent notification. Clears it.
     pub fn take_notification_follow(&self) -> Option<String> {
@@ -2983,12 +2992,42 @@ mod read_tests {
         assert!(notifier.0.lock().unwrap().is_empty());
     }
 
+    /// Load a thread of the channel `channel` through `add_thread`. Its own name and agent differ from the parent's.
+    fn add_notifying_thread(core: &AppCore, kind: discard_core::model::ThreadKind) {
+        let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        std::mem::forget(receiver);
+        let init = CoreInit { state: UiState::new(ChannelId("thread".into()), vec![]), commands, project: "p".into(), channel: "Why?".into(), agent: "Quinn".into(), provider: "fake".into() };
+        let channel = discard_core::model::Channel { id: ChannelId("thread".into()), agent_id: AgentId("agent".into()), project_id: None, name: "Why?".into(), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout };
+        let info = discard_core::model::ThreadInfo { channel_id: ChannelId("thread".into()), parent_channel_id: ChannelId("channel".into()), anchor_message_id: None, kind, followed: true, name: "Why?".into(), state: None, agent_id: AgentId("agent".into()), agent_name: "Quinn".into() };
+        core.add_thread(init, &channel, &info);
+    }
+
     #[test]
-    fn a_sub_agent_thread_turn_does_not_notify() {
+    fn a_sub_agent_thread_turn_does_not_notify_but_its_approval_does() {
         let (_dir, core, notifier) = notifying_fixture(true);
-        core.state.lock().unwrap().channels.get_mut("channel").unwrap().thread_parent = Some("parent".into());
-        core.apply_channel("channel", finished());
+        add_notifying_thread(&core, discard_core::model::ThreadKind::SubAgent);
+        core.apply_channel("thread", finished());
         assert!(notifier.0.lock().unwrap().is_empty());
+        core.apply_channel("thread", approval_request("ap-1"));
+        assert_eq!(notifier.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_question_thread_turn_notifies_with_the_parent_name_unless_the_parent_is_muted() {
+        let (_dir, core, notifier) = notifying_fixture(true);
+        add_notifying_thread(&core, discard_core::model::ThreadKind::Question);
+        core.apply_channel("thread", finished());
+        {
+            let sent = notifier.0.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            assert_eq!((sent[0].title.as_str(), sent[0].body.as_str()), ("c · Quinn", "Finished"));
+        }
+        assert_eq!(core.take_notification_follow(), Some("channel".into()), "a click opens the parent channel");
+        core.set_channel_muted("channel", true);
+        core.apply_channel("thread", finished());
+        assert_eq!(notifier.0.lock().unwrap().len(), 1, "a muted parent silences the finished turn");
+        core.apply_channel("thread", approval_request("ap-1"));
+        assert_eq!(notifier.0.lock().unwrap().len(), 2, "an approval still notifies");
     }
 
     #[test]
