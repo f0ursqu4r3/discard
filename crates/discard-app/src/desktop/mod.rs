@@ -147,9 +147,10 @@ pub fn run(
     let dark = Arc::new(AtomicBool::new(true));
     let event_dark = dark.clone();
     let event_core = core.clone();
-    let event_channels = channels.clone();
+    let setup_channels = channels.clone();
     let notify_settings = settings.clone();
     let event_runtime = runtime.clone();
+    let setup_runtime = runtime.clone();
     let geometry_generation = Arc::new(AtomicU64::new(0));
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -207,6 +208,22 @@ pub fn run(
             }
         })
         .setup(move |app| {
+            // The handler must exist before the first notification shows: the plugin reports no click for one that
+            // was shown earlier. The plugin calls it on a background thread, so it only starts the work and returns.
+            {
+                use tauri_plugin_notification::NotificationExt;
+                let click_app = app.handle().clone();
+                let click_channels = setup_channels.clone();
+                let click_runtime = setup_runtime.clone();
+                if let Err(error) = app.notification().on_action(move |performed| {
+                    let Some(extra) = performed.notification().map(|notification| notification.extra()) else { return };
+                    if let Some(channel_id) = notify::channel_from_click(performed.action_id(), extra) {
+                        open_notified_channel(click_app.clone(), click_channels.clone(), click_runtime.clone(), channel_id);
+                    }
+                }) {
+                    tracing::warn!(%error, "cannot listen for clicks on desktop notifications");
+                }
+            }
             let enabled_settings = notify_settings.clone();
             core.set_notifier(
                 Arc::new(TauriNotifier { app: app.handle().clone() }),
@@ -414,6 +431,32 @@ mod slash;
 
 pub mod settings;
 
+/// Open the channel of a clicked notification in the main window. This takes the steps of `switch_channel`: select off
+/// the event thread, then show the view that changed. A channel that is gone still brings the main window up.
+fn open_notified_channel(app: tauri::AppHandle, channels: Arc<channels::Channels>, runtime: tokio::runtime::Handle, channel_id: String) {
+    runtime.spawn(async move {
+        let id = channel_id.clone();
+        let selected = tokio::task::spawn_blocking(move || channels.select(&view::ViewId::main(), &id).map(|changed| (changed, channels.in_project(&id)))).await;
+        match selected {
+            Ok(Ok((changed, in_project))) => {
+                if !in_project {
+                    use tauri::Emitter;
+                    let _ = app.emit("discard://conversations", ());
+                }
+                windows::show_conversation(&app, &changed);
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, channel = %channel_id, "cannot open the channel of a notification");
+                windows::show_main_window(&app);
+            }
+            Err(error) => {
+                tracing::warn!(%error, channel = %channel_id, "cannot open the channel of a notification");
+                windows::show_main_window(&app);
+            }
+        }
+    });
+}
+
 /// Shows desktop notifications through the notification plugin.
 struct TauriNotifier {
     app: tauri::AppHandle,
@@ -422,7 +465,9 @@ impl notify::Notifier for TauriNotifier {
     fn notify(&self, notification: &notify::Notification) {
         use tauri_plugin_notification::NotificationExt;
         // A denied permission is not an error of the app. Log it and go on.
-        if let Err(error) = self.app.notification().builder().title(&notification.title).body(&notification.body).show() {
+        // The channel travels with the notification, so a click can open it (see `open_notified_channel`).
+        let builder = self.app.notification().builder().title(&notification.title).body(&notification.body).extra("channelId", &notification.channel_id);
+        if let Err(error) = builder.show() {
             tracing::warn!(%error, "cannot show a desktop notification");
         }
     }

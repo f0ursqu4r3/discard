@@ -202,8 +202,10 @@ change and names the action. Key changes apply at the next launch. Plugins canno
 - A cancelled turn sends nothing. A sub-agent thread turn sends nothing.
 - A turn in a question thread notifies like a channel turn. Its title shows the parent channel name, and the parent's mute setting applies.
 - A muted channel sends no finished or failed notification. Approvals still notify.
-- A click raises the app only when a window is open. With every window hidden, a click does not open a window (known limit).
-- A click only brings the app to the front. If a window gains focus within 10 seconds after a notification, it opens the channel of the newest notification.
+- A click on a notification opens its channel in the main window. For a thread, it opens the parent channel. The click shows the main window when every window is hidden.
+- If the channel no longer exists, the click still shows the main window.
+- A click works in a bundled macOS app, and on Linux servers that report the `default` action. Elsewhere a click only raises the app.
+- In `cargo tauri dev` on macOS, the system shows the notification as coming from Terminal, so a click does not reach Discard.
 - If the system permission is denied, no notification shows.
 - The project menu items for notification modes stay planned ("Soon").
 
