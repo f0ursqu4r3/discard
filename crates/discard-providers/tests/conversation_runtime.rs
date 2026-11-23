@@ -2220,3 +2220,40 @@ async fn the_byte_estimate_counts_full_tool_outputs() {
     assert!(notices(&updates).iter().any(|n| n == "Fresh replay: the session grew past its size limit. Discard sends the history again."), "{updates:?}");
     rig.close().await;
 }
+
+fn user_approvals_needed(updates: &[Update]) -> Vec<String> {
+    updates.iter().filter_map(|u| match u { Update::UserApprovalNeeded { tool, .. } => Some(tool.clone()), _ => None }).collect()
+}
+
+#[tokio::test]
+async fn an_auto_approved_request_sends_no_user_approval_needed() {
+    let tool = format!("{}memory_search", discard_core::engine::MEMORY_TOOL_PREFIX);
+    let provider = FakeProvider::new(vec![Step::Approval { tool: tool.clone(), input: serde_json::json!({}) }, Step::text("answer"), Step::idle()]);
+    let mut rig = native_rig(provider).await;
+    rig.commands.send(Command::Send("request".into())).unwrap();
+    let updates = rig.done().await;
+    assert!(updates.iter().any(|u| matches!(u, Update::Event(e) if matches!(&e.kind, discard_core::event::EventKind::ApprovalRequest { tool: t, .. } if *t == tool))), "{updates:?}");
+    assert!(user_approvals_needed(&updates).is_empty(), "{updates:?}");
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_request_that_waits_for_the_user_sends_one_user_approval_needed() {
+    let provider = FakeProvider::new(vec![Step::Approval { tool: "Bash".into(), input: serde_json::json!({"command": "ls"}) }, Step::text("answer"), Step::idle()]);
+    let mut rig = native_rig(provider).await;
+    rig.commands.send(Command::Send("request".into())).unwrap();
+    let mut seen = Vec::new();
+    let approval = loop {
+        let Some(update) = rig.updates.recv().await else { panic!("no approval request: {seen:?}") };
+        let found = match &update {
+            Update::Event(event) => match &event.kind { discard_core::event::EventKind::ApprovalRequest { approval_id, .. } => Some(approval_id.clone()), _ => None },
+            _ => None,
+        };
+        seen.push(update);
+        if let Some(id) = found { break id; }
+    };
+    rig.commands.send(Command::Decide { approval_id: approval, decision: discard_core::approval::Decision::Approve, rule_cut: None }).unwrap();
+    seen.extend(rig.done().await);
+    assert_eq!(user_approvals_needed(&seen), vec!["Bash".to_string()], "{seen:?}");
+    rig.close().await;
+}

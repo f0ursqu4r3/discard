@@ -1,7 +1,6 @@
 //! Rules for desktop notifications. This module has no GUI dependency.
 
 use discard_core::driver::TurnOutcome;
-use discard_core::event::EventKind;
 use discard_core::ui_state::Update;
 use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -31,12 +30,9 @@ pub trait Notifier: Send + Sync {
 /// Finds the trigger in an update. A thread turn never triggers. A thread approval does.
 pub fn trigger_of(update: &Update, is_thread: bool) -> Option<Trigger> {
     match update {
-        Update::Event(event) => match &event.kind {
-            EventKind::ApprovalRequest { approval_id, tool, .. } => {
-                Some(Trigger::Approval { id: approval_id.0.clone(), tool: tool.clone() })
-            }
-            _ => None,
-        },
+        // The request event alone is not enough: a policy may approve it. The engine sends this update only
+        // when the user must decide.
+        Update::UserApprovalNeeded { approval_id, tool } => Some(Trigger::Approval { id: approval_id.0.clone(), tool: tool.clone() }),
         Update::TurnFinished(outcome) if !is_thread => Some(Trigger::Finished(*outcome)),
         _ => None,
     }
@@ -158,6 +154,10 @@ mod tests {
         }))
     }
 
+    fn needed_update(tool: &str) -> Update {
+        Update::UserApprovalNeeded { approval_id: ApprovalId("ap-1".into()), tool: tool.into() }
+    }
+
     fn approval(tool: &str) -> Trigger {
         Trigger::Approval { id: "ap-1".into(), tool: tool.into() }
     }
@@ -194,9 +194,16 @@ mod tests {
         let finished = Update::TurnFinished(TurnOutcome::Completed);
         assert_eq!(trigger_of(&finished, false), Some(Trigger::Finished(TurnOutcome::Completed)));
         assert_eq!(trigger_of(&finished, true), None);
+        let needed = needed_update("Bash");
+        assert_eq!(trigger_of(&needed, true), Some(approval("Bash")));
+        assert_eq!(trigger_of(&needed, false), Some(approval("Bash")));
+    }
+
+    #[test]
+    fn an_approval_request_event_alone_gives_no_trigger() {
         let request = approval_update("Bash", serde_json::json!({}));
-        assert_eq!(trigger_of(&request, true), Some(approval("Bash")));
-        assert_eq!(trigger_of(&request, false), Some(approval("Bash")));
+        assert_eq!(trigger_of(&request, false), None);
+        assert_eq!(trigger_of(&request, true), None);
     }
 
     #[test]
@@ -229,7 +236,7 @@ mod tests {
 
     #[test]
     fn the_body_holds_only_the_tool_name_never_the_input() {
-        let update = approval_update("Bash", serde_json::json!({"command": "echo secret"}));
+        let update = needed_update("Bash");
         let trigger = trigger_of(&update, false).unwrap();
         let n = compose(&trigger, "general", "Ada", false).unwrap();
         assert!(!n.title.contains("secret") && !n.body.contains("secret"));

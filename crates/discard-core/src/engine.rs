@@ -1055,6 +1055,12 @@ impl Engine {
                         }
                         // A thread with an approval that waits for the user shows in the channel bar.
                         if thread_turn && automatic_approval.is_none() && matches!(event.kind, EventKind::ApprovalRequest { .. }) { self.follow_thread(updates); }
+                        let waiting = match &event.kind {
+                            EventKind::ApprovalRequest { approval_id, tool, .. } if automatic_approval.is_none() => Some((approval_id.clone(), tool.clone())),
+                            _ => None,
+                        };
+                        // Sent before the request event, so a reader that waits for the event sees no extra update after it.
+                        if let Some((approval_id, tool)) = waiting { send(updates, Update::UserApprovalNeeded { approval_id, tool }); }
                         send(updates, Update::Event(Box::new(event)));
                         if let Some((approval_id, policy)) = automatic_approval {
                             let _ = decisions_tx.send(DecisionMsg {

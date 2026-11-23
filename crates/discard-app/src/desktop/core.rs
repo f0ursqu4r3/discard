@@ -2040,16 +2040,18 @@ impl AppCore {
     }
     /// Send a notification when the rules allow it. The `state` lock is not held here.
     fn maybe_notify(&self, trigger: &super::notify::Trigger, channel: &str, agent: &str, muted: bool, channel_id: &str) {
-        let notification = {
+        // Cheap checks first, under the lock. The setting check reads a file and runs after the lock is released.
+        let (notifier, enabled) = {
             let mut n = self.notify.lock().unwrap_or_else(|e| e.into_inner());
-            let Some((notifier, enabled)) = n.sink.clone() else { return };
-            if !enabled() || n.focus.app_focused() { return; }
+            let Some(sink) = n.sink.clone() else { return };
+            if n.focus.app_focused() { return; }
             if let super::notify::Trigger::Approval { id, .. } = trigger && !n.seen.first(id) { return; }
-            let Some(notification) = super::notify::compose(trigger, channel, agent, muted) else { return };
-            n.focus.notified(channel_id, std::time::Instant::now());
-            (notifier, notification)
+            sink
         };
-        notification.0.notify(&notification.1);
+        if !enabled() { return; }
+        let Some(notification) = super::notify::compose(trigger, channel, agent, muted) else { return };
+        self.notify.lock().unwrap_or_else(|e| e.into_inner()).focus.notified(channel_id, std::time::Instant::now());
+        notifier.notify(&notification);
     }
 
     /// Apply what an update says about a thread record. Returns whether a list that the webview reads from storage changed.
@@ -2908,7 +2910,8 @@ mod read_tests {
         core.set_notifier(notifier.clone(), Arc::new(move || enabled));
         (dir, core, notifier)
     }
-    fn approval_request(id: &str) -> Update {
+    fn approval_request(id: &str) -> Update { Update::UserApprovalNeeded { approval_id: ApprovalId(id.into()), tool: "Bash".into() } }
+    fn approval_event(id: &str) -> Update {
         use discard_core::event::{Event, EventId, EventKind, SessionId};
         Update::Event(Box::new(Event { id: EventId::new(), session_id: SessionId::new(), seq: 1, raw: None,
             kind: EventKind::ApprovalRequest { kind: Default::default(), paths: vec![], approval_id: ApprovalId(id.into()), call_id: "c".into(), tool: "Bash".into(), input: serde_json::json!({"command": "ls"}) } }))
@@ -2923,6 +2926,14 @@ mod read_tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].title, "c · a");
         assert_eq!(sent[0].body, "Needs approval: Bash");
+    }
+
+    #[test]
+    fn an_auto_approved_request_does_not_notify() {
+        let (_dir, core, notifier) = notifying_fixture(true);
+        core.apply_channel("channel", approval_event("ap-1"));
+        assert!(notifier.0.lock().unwrap().is_empty());
+        assert_eq!(core.take_notification_follow(), None);
     }
 
     #[test]

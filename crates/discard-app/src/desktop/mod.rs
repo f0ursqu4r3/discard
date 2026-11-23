@@ -183,9 +183,25 @@ pub fn run(
             if let tauri::WindowEvent::Focused(focused) = event {
                 event_core.window_focus(window.label(), *focused);
                 // A focus soon after a notification opens its channel.
-                if *focused && let Some(view) = view::ViewId::from_label(window.label()) && let Some(channel_id) = event_core.take_notification_follow()
-                    && let Err(error) = event_channels.select(&view, &channel_id)
-                { tracing::warn!(%error, "cannot open the channel of a notification"); }
+                // The same steps as `switch_channel`: select off the event thread, then show the view that changed.
+                if *focused && let Some(view) = view::ViewId::from_label(window.label()) && let Some(channel_id) = event_core.take_notification_follow() {
+                    let channels = event_channels.clone();
+                    let app = window.app_handle().clone();
+                    event_runtime.spawn(async move {
+                        let result = tokio::task::spawn_blocking(move || channels.select(&view, &channel_id).map(|changed| (changed, channels.in_project(&channel_id)))).await;
+                        match result {
+                            Ok(Ok((changed, in_project))) => {
+                                if !in_project {
+                                    use tauri::Emitter;
+                                    let _ = app.emit("discard://conversations", ());
+                                }
+                                windows::show_conversation(&app, &changed);
+                            }
+                            Ok(Err(error)) => tracing::warn!(%error, "cannot open the channel of a notification"),
+                            Err(error) => tracing::warn!(%error, "cannot open the channel of a notification"),
+                        }
+                    });
+                }
             }
             if matches!(event, tauri::WindowEvent::Destroyed) { event_core.window_closed(window.label()); }
             // The last app window that had focus decides the view of the menu, the quit question, and the plugins.

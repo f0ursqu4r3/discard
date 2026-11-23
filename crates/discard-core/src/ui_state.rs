@@ -97,6 +97,9 @@ pub enum Update {
     /// The engine followed the thread of this channel: it got a pending approval, or an agent message in it wrote
     /// `@you`. The thread's `followed` flag is now true in storage. Read the thread again to update lists.
     ThreadFollowed,
+    /// An approval request waits for the user. The engine sends it just before the request event, and only when no policy
+    /// approves the request. The state ignores it. The desktop uses it to notify the user.
+    UserApprovalNeeded { approval_id: ApprovalId, tool: String },
     /// The parent turn ended and these sub-agent threads now have their anchor (the saved response, or the user
     /// message that started the turn). Sent on the parent channel after `ResponseCompleted`. Read the threads again.
     ThreadsAnchored(Vec<crate::model::ThreadInfo>),
@@ -186,7 +189,7 @@ impl UiState {
                 self.live = Timeline::new(); self.history.push(message);
             },
             Update::ConversationMarker(message) => self.history.push(message),
-            Update::MemoryChanges { .. } | Update::MessagePosted { .. } | Update::ThreadFollowed | Update::ThreadsAnchored(_) | Update::SubAgentFinished { .. } => {},
+            Update::MemoryChanges { .. } | Update::MessagePosted { .. } | Update::ThreadFollowed | Update::UserApprovalNeeded { .. } | Update::ThreadsAnchored(_) | Update::SubAgentFinished { .. } => {},
             Update::UserMessageSaved(saved) => {
                 if let Some(local) = self.unsaved_user.take() {
                     // An author set on the local message (a sub-agent brief) follows the saved ID.
