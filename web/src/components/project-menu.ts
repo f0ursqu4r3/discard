@@ -9,10 +9,16 @@ export type ProjectMenuAction =
   | 'copy-name'
   | 'copy-path'
   | 'copy-id'
+  | 'mark-read'
 /** Rail actions of a project. `group-join` carries the group ID as `arg`. The rail applies them. */
 export type RailMenuAction = 'group-none' | 'group-join' | 'group-new' | 'move-first' | 'move-last'
 /** Actions of a group menu. `group-color` carries the color as `arg`, or none for the default. */
-export type GroupMenuAction = 'group-rename' | 'group-color' | 'group-toggle' | 'group-ungroup'
+export type GroupMenuAction =
+  | 'group-rename'
+  | 'group-color'
+  | 'group-toggle'
+  | 'group-ungroup'
+  | 'group-mark-read'
 export type MenuAction = ProjectMenuAction | RailMenuAction | GroupMenuAction
 
 export type PlannedMenuEntry =
@@ -56,8 +62,7 @@ export function projectMenu(
   rail: ProjectRailContext = { groups: [], groupId: null },
 ): ProjectMenuEntry[] {
   return [
-    // TODO: Persist read markers for all channels in the target project.
-    planned('Mark Project as Read'),
+    { kind: 'action', label: 'Mark Project as Read', action: 'mark-read' },
     separator,
     // TODO: Create and assign agents to the target project.
     planned('Add Agent…'),
@@ -170,8 +175,7 @@ export function projectMenu(
 
 export function groupMenu(collapsed: boolean): ProjectMenuEntry[] {
   return [
-    // TODO: Persist read markers for all channels of the projects in the group.
-    planned('Mark Group as Read'),
+    { kind: 'action', label: 'Mark Group as Read', action: 'group-mark-read' },
     separator,
     { kind: 'action', label: 'Rename Group…', action: 'group-rename' },
     {

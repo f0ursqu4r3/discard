@@ -36,6 +36,7 @@ const emit = defineEmits<{
   leaveThread: [threadId: string]
   projectAction: [action: ProjectMenuAction, project: ProjectEntry]
   railChange: [change: RailChange]
+  markGroupRead: [groupId: string]
 }>()
 </script>
 <template>
@@ -52,6 +53,7 @@ const emit = defineEmits<{
         :busy="busy || snapshot.archiveBusy || snapshot.channels.some((channel) => channel.running)"
         @project-action="(action, project) => emit('projectAction', action, project)"
         @rail-change="(change) => emit('railChange', change)"
+        @mark-group-read="(groupId) => emit('markGroupRead', groupId)"
         :project-id="snapshot.projectId"
         :compact="compact"
         :project="snapshot.project"

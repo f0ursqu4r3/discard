@@ -285,6 +285,14 @@ test('group menu actions become rail changes', async () => {
   expect(document.body.textContent).toContain('Rename group')
 })
 
+test('the group menu action Mark Group as Read emits the group ID and no rail change', async () => {
+  const wrapper = mountRail({ items: [group('g', ['a', 'b'])] })
+  wrapper.getComponent(GroupContextMenu).vm.$emit('action', 'group-mark-read')
+  await flushPromises()
+  expect(wrapper.emitted('markGroupRead')).toEqual([['g']])
+  expect(changes(wrapper)).toEqual([])
+})
+
 test('the group menu opens from a right click with planned and real items', async () => {
   const wrapper = mountRail({ items: [group('g', ['a', 'b'])] })
   await wrapper
@@ -293,8 +301,8 @@ test('the group menu opens from a right click with planned and real items', asyn
   await flushPromises()
   const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')]
   const item = (text: string) => items.find((entry) => entry.textContent?.includes(text))
-  expect(item('Mark Group as Read')?.getAttribute('aria-disabled')).toBe('true')
-  expect(item('Mark Group as Read')?.textContent).toContain('Soon')
+  expect(item('Mark Group as Read')?.getAttribute('aria-disabled')).toBeNull()
+  expect(item('Mark Group as Read')?.textContent).not.toContain('Soon')
   expect(item('Rename Group')?.getAttribute('aria-disabled')).toBeNull()
   expect(item('Expand')).toBeDefined()
   expect(item('Ungroup')).toBeDefined()

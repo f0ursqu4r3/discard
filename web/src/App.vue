@@ -35,6 +35,8 @@ import {
   setRailGroupColor,
   setRailGroupCollapsed,
   ungroupRailGroup,
+  markProjectRead,
+  markGroupRead,
   getProjectChannels,
   getConversations,
   selectProject,
@@ -647,6 +649,15 @@ async function projectAction(id: ProjectMenuAction, project: ProjectEntry) {
     }
     return
   }
+  if (id === 'mark-read') {
+    // This action changes no selection, so a busy navigation does not block it.
+    try {
+      await markProjectRead(project.id)
+    } catch (error) {
+      toast.error('Could not mark the project as read', { description: String(error) })
+    }
+    return
+  }
   if (switching.value) return
   switching.value = true
   try {
@@ -699,6 +710,13 @@ async function railChange(change: RailChange) {
     toast.error('Could not update the project rail', {
       description: String(error),
     })
+  }
+}
+async function markGroupAsRead(groupId: string) {
+  try {
+    await markGroupRead(groupId)
+  } catch (error) {
+    toast.error('Could not mark the group as read', { description: String(error) })
   }
 }
 async function searchHistory(query: string) {
@@ -1196,6 +1214,7 @@ watch(
       <NavigationPanel
         @project-action="projectAction"
         @rail-change="railChange"
+        @mark-group-read="markGroupAsRead"
         :projects="projects"
         :rail-layout="railLayout"
         :rail="!projectWindow"
@@ -1232,6 +1251,7 @@ watch(
             <NavigationPanel
               @project-action="projectAction"
               @rail-change="railChange"
+              @mark-group-read="markGroupAsRead"
               :projects="projects"
               :rail-layout="railLayout"
               :rail="!projectWindow"

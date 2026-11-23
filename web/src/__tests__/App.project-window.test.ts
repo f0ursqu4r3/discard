@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   getProjects: vi.fn(async () => []),
   getConversations: vi.fn(async () => []),
   openProjectWindow: vi.fn(async () => {}),
+  markProjectRead: vi.fn(async () => {}),
+  markGroupRead: vi.fn(async () => {}),
   showMainWindow: vi.fn(async () => {}),
   switchChannel: vi.fn(async () => {}),
   error: vi.fn(),
@@ -36,6 +38,8 @@ vi.mock('../bridge/api', async (original) => ({
   selectProject: mocks.selectProject,
   switchChannel: mocks.switchChannel,
   openProjectWindow: mocks.openProjectWindow,
+  markProjectRead: mocks.markProjectRead,
+  markGroupRead: mocks.markGroupRead,
   showMainWindow: mocks.showMainWindow,
 }))
 vi.mock('vue-sonner', () => ({
@@ -196,6 +200,40 @@ test('a failed Open in New Window shows an error', async () => {
   await flushPromises()
   expect(mocks.error).toHaveBeenCalledWith('Could not complete project action', {
     description: 'Error: no window',
+  })
+})
+
+test('Mark Project as Read calls the command and keeps the selection', async () => {
+  const wrapper = app('')
+  await flushPromises()
+  wrapper.getComponent(NavigationPanel).vm.$emit('projectAction', 'mark-read', project)
+  await flushPromises()
+  expect(mocks.markProjectRead).toHaveBeenCalledWith('p1')
+  expect(mocks.selectProject).not.toHaveBeenCalled()
+})
+
+test('a failed Mark Project as Read shows an error', async () => {
+  mocks.markProjectRead.mockRejectedValueOnce(new Error('boom'))
+  const wrapper = app('')
+  await flushPromises()
+  wrapper.getComponent(NavigationPanel).vm.$emit('projectAction', 'mark-read', project)
+  await flushPromises()
+  expect(mocks.error).toHaveBeenCalledWith('Could not mark the project as read', {
+    description: 'Error: boom',
+  })
+})
+
+test('Mark Group as Read calls the command, and a failure shows an error', async () => {
+  const wrapper = app('')
+  await flushPromises()
+  wrapper.getComponent(NavigationPanel).vm.$emit('markGroupRead', 'g1')
+  await flushPromises()
+  expect(mocks.markGroupRead).toHaveBeenCalledWith('g1')
+  mocks.markGroupRead.mockRejectedValueOnce(new Error('boom'))
+  wrapper.getComponent(NavigationPanel).vm.$emit('markGroupRead', 'g1')
+  await flushPromises()
+  expect(mocks.error).toHaveBeenCalledWith('Could not mark the group as read', {
+    description: 'Error: boom',
   })
 })
 

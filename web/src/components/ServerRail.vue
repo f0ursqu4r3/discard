@@ -98,6 +98,8 @@ const emit = defineEmits<{
   projectAction: [action: ProjectMenuAction, project: ProjectEntry]
   /** A change to the saved rail: order, groups, or group settings. */
   railChange: [change: RailChange]
+  /** The user chose Mark Group as Read. This changes no rail layout. */
+  markGroupRead: [groupId: string]
 }>()
 const scroller = ref<HTMLElement | null>(null)
 const { drag, onPointerDown, onClickCapture } = useRailDrag({
@@ -174,6 +176,7 @@ function onGroupAction(group: RailGroupView, action: GroupMenuAction, arg?: stri
   else if (action === 'group-toggle')
     emit('railChange', { type: 'collapse-group', groupId: group.id, collapsed: !group.collapsed })
   else if (action === 'group-ungroup') emit('railChange', { type: 'ungroup', groupId: group.id })
+  else if (action === 'group-mark-read') emit('markGroupRead', group.id)
 }
 const setCollapsed = (group: RailGroupView, collapsed: boolean) =>
   emit('railChange', { type: 'collapse-group', groupId: group.id, collapsed })

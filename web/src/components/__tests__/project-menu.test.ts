@@ -34,12 +34,12 @@ test('all planned entries lack executable actions, including nested notification
   const planned = entries.filter(
     (entry) => entry.kind === 'planned' || entry.kind === 'planned-radio',
   )
-  expect(planned.length).toBeGreaterThan(20)
+  expect(planned.length).toBeGreaterThan(15)
   for (const entry of planned) expect(entry).not.toHaveProperty('action')
   expect(entries).toContainEqual({
-    kind: 'planned',
+    kind: 'action',
     label: 'Mark Project as Read',
-    control: undefined,
+    action: 'mark-read',
   })
   expect(entries).toContainEqual({ kind: 'planned', label: 'New Channel…', control: undefined })
   expect(entries).toContainEqual({
@@ -57,6 +57,7 @@ test('busy projects block navigation and removal but retain copy and reveal', ()
     'remove',
   ])
   expect(actions.filter((entry) => !entry.disabled).map((entry) => entry.action)).toEqual([
+    'mark-read',
     'open-window',
     'reveal',
     'group-new',
@@ -247,17 +248,13 @@ test('First and Last in Group are real actions', () => {
   ])
 })
 
-test('the group menu has real actions, a planned Mark Group as Read, and swatches', () => {
+test('the group menu has real actions and swatches', () => {
   const entries = flatten(groupMenu(false))
-  expect(entries).toContainEqual({
-    kind: 'planned',
-    label: 'Mark Group as Read',
-    control: undefined,
-  })
-  expect(entries.find((entry) => entry.kind === 'planned')).not.toHaveProperty('action')
+  expect(entries.some((entry) => entry.kind === 'planned')).toBe(false)
   expect(
     entries.filter((entry) => entry.kind === 'action').map((entry) => [entry.label, entry.action]),
   ).toEqual([
+    ['Mark Group as Read', 'group-mark-read'],
     ['Rename Group…', 'group-rename'],
     ['Default', 'group-color'],
     ['Red', 'group-color'],

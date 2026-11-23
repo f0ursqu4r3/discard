@@ -279,6 +279,9 @@ export const setRailGroupColor = (groupId: string, color: string | null) =>
 export const setRailGroupCollapsed = (groupId: string, collapsed: boolean) =>
   invoke<void>('set_rail_group_collapsed', { groupId, collapsed })
 export const ungroupRailGroup = (groupId: string) => invoke<void>('ungroup_rail_group', { groupId })
+export const markProjectRead = (projectId: string) =>
+  invoke<void>('mark_project_read', { projectId })
+export const markGroupRead = (groupId: string) => invoke<void>('mark_group_read', { groupId })
 export const selectProject = (projectId: string) => invoke<string>('select_project', { projectId })
 export const removeProject = (projectId: string) => invoke<void>('remove_project', { projectId })
 /** Opens the project window of a project, or focuses it if it is open. */
