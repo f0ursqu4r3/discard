@@ -1201,6 +1201,32 @@ impl AppCore {
         if changed || cleared { s.rev += 1; self.changed.notify_one(); }
         Ok(())
     }
+    /// The last message id of each loaded non-thread channel of these projects. An empty history gives `None`.
+    pub fn loaded_channel_tails(&self, project_ids: &[String]) -> Vec<(String, Option<String>)> {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.channels.values()
+            .filter(|c| c.thread_parent.is_none() && c.project_id.as_ref().is_some_and(|p| project_ids.contains(&p.0)))
+            .map(|c| (c.channel_id.clone(), c.ui.history().last().map(|m| m.id.0.clone())))
+            .collect()
+    }
+    /// Save read markers for channels and threads with one write. Returns whether any marker changed.
+    /// A save error changes nothing in memory. Pending approvals stay as they are.
+    pub fn apply_read_markers(&self, markers: &[(String, String)]) -> Result<bool, String> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let changed: Vec<(String, String)> = markers.iter().filter(|(id, message)| s.window.last_read(id) != Some(message.as_str())).cloned().collect();
+        if changed.is_empty() { return Ok(false); }
+        s.window.set_last_read_many(&changed)?;
+        let mut shown = false;
+        for (id, _) in &changed {
+            if let Some(channel) = s.channels.get_mut(id) { channel.new_anchor = None; }
+            shown |= is_shown(&s, id);
+        }
+        if shown { s.history_rev += 1; }
+        s.rev += 1;
+        self.conversations_rev.fetch_add(1, Ordering::SeqCst);
+        self.changed.notify_one();
+        Ok(true)
+    }
     pub fn window_bounds(&self) -> Option<Bounds> {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).window.state().bounds
     }
@@ -3135,5 +3161,102 @@ mod read_tests {
         assert_eq!(StateStore::open(&dir.path().join("state.toml")).last_read("channel"), Some("one"));
         core.mark_read(&ViewId::main(), "unknown").unwrap();
         assert_eq!(StateStore::open(&dir.path().join("state.toml")).last_read("channel"), Some("one"));
+    }
+
+    /// A core with a channel "main" that has no project. State lives in `dir`, where `a` holds an older marker.
+    fn core_for_markers(dir: &Path) -> AppCore {
+        StateStore::open(&dir.join("state.toml")).set_last_read("a", "one").unwrap();
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let core = AppCore::new(CoreInit { state: UiState::new(ChannelId("main".into()), vec![]), commands, project: "p".into(), channel: "main".into(), agent: "a".into(), provider: "fake".into() });
+        core.configure_read_marker(&main(), dir, "main");
+        core
+    }
+    fn add_channel_with_history(core: &AppCore, project: Option<&str>, id: &str, messages: &[&str]) {
+        let history: Vec<_> = messages.iter().map(|m| Message { id: MessageId((*m).into()), channel_id: ChannelId(id.into()), role: Role::Agent, blocks: vec![] }).collect();
+        let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        std::mem::forget(receiver);
+        let channel = discard_core::model::Channel { id: ChannelId(id.into()), agent_id: AgentId("agent".into()), project_id: project.and_then(project_of), name: id.into(), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout };
+        core.add_channel(CoreInit { state: UiState::new(ChannelId(id.into()), history), commands, project: project.unwrap_or_default().into(), channel: id.into(), agent: "a".into(), provider: "fake".into() }, &channel);
+    }
+    fn channel_unread(core: &AppCore, id: &str) -> bool { core.snapshot(&main()).channels.into_iter().find(|c| c.id == id).unwrap().unread }
+    fn marker_pair(channel: &str, message: &str) -> (String, String) { (channel.to_string(), message.to_string()) }
+    #[test]
+    fn loaded_channel_tails_lists_only_channels_of_the_given_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = core_for_markers(dir.path());
+        add_channel_with_history(&core, Some("p"), "a", &["one", "two"]);
+        add_channel_with_history(&core, Some("p"), "empty", &[]);
+        add_channel_with_history(&core, Some("q"), "other", &["x"]);
+        add_channel_with_history(&core, None, "dm", &["y"]);
+        let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        std::mem::forget(receiver);
+        let info = discard_core::model::ThreadInfo { channel_id: ChannelId("t".into()), parent_channel_id: ChannelId("a".into()), anchor_message_id: None, kind: ThreadKind::SubAgent, followed: false, name: "t".into(), state: None, agent_id: AgentId("agent".into()), agent_name: "a".into() };
+        let thread = discard_core::model::Channel { id: ChannelId("t".into()), agent_id: AgentId("agent".into()), project_id: project_of("p"), name: "t".into(), workspace_mode: discard_core::model::WorkspaceMode::MainCheckout };
+        core.add_thread(CoreInit { state: UiState::new(ChannelId("t".into()), vec![]), commands, project: "p".into(), channel: "t".into(), agent: "a".into(), provider: "fake".into() }, &thread, &info);
+        let mut tails = core.loaded_channel_tails(&["p".to_string()]);
+        tails.sort();
+        assert_eq!(tails, vec![("a".to_string(), Some("two".to_string())), ("empty".to_string(), None)]);
+    }
+    #[test]
+    fn apply_read_markers_marks_a_channel_read_and_clears_its_divider_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = core_for_markers(dir.path());
+        add_channel_with_history(&core, Some("p"), "a", &["one", "two"]);
+        assert!(channel_unread(&core, "a"));
+        assert_eq!(core.apply_read_markers(&[marker_pair("a", "two")]), Ok(true));
+        assert!(!channel_unread(&core, "a"));
+        assert!(core.state.lock().unwrap().channels["a"].new_anchor.is_none());
+        assert_eq!(StateStore::open(&dir.path().join("state.toml")).last_read("a"), Some("two"));
+    }
+    #[test]
+    fn apply_read_markers_skips_a_marker_that_already_matches_and_reports_no_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = core_for_markers(dir.path());
+        add_channel_with_history(&core, Some("p"), "a", &["one", "two"]);
+        assert_eq!(core.apply_read_markers(&[marker_pair("a", "two")]), Ok(true));
+        let (rev, conversations) = (core.snapshot(&main()).rev, core.conversations_rev());
+        assert_eq!(core.apply_read_markers(&[marker_pair("a", "two")]), Ok(false));
+        assert_eq!((core.snapshot(&main()).rev, core.conversations_rev()), (rev, conversations));
+    }
+    #[test]
+    fn a_reply_saved_after_the_tails_were_read_stays_unread() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = core_for_markers(dir.path());
+        add_channel_with_history(&core, Some("p"), "a", &["one", "two"]);
+        let markers: Vec<_> = core.loaded_channel_tails(&["p".to_string()]).into_iter().filter_map(|(id, tail)| tail.map(|t| (id, t))).collect();
+        assert_eq!(core.apply_read_markers(&markers), Ok(true));
+        assert!(!channel_unread(&core, "a"));
+        core.apply_channel("a", Update::ConversationMarker(Message { id: MessageId("three".into()), channel_id: ChannelId("a".into()), role: Role::Agent, blocks: vec![] }));
+        assert!(channel_unread(&core, "a"));
+    }
+    #[test]
+    fn apply_read_markers_changes_nothing_when_the_write_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("file");
+        std::fs::write(&blocker, "x").unwrap();
+        let core = core_for_markers(dir.path());
+        // The state file now lives under a regular file, so every save fails.
+        core.configure_read_marker(&main(), &blocker, "main");
+        add_channel_with_history(&core, Some("p"), "a", &["one", "two"]);
+        add_channel_with_history(&core, Some("p"), "b", &["one", "two"]);
+        let before = core.snapshot(&main()).rev;
+        let conversations = core.conversations_rev();
+        let anchor = core.state.lock().unwrap().channels["a"].new_anchor.clone();
+        assert!(core.apply_read_markers(&[marker_pair("a", "two"), marker_pair("b", "two")]).is_err());
+        assert_eq!(core.snapshot(&main()).rev, before);
+        assert_eq!(core.conversations_rev(), conversations);
+        assert_eq!(core.state.lock().unwrap().channels["a"].new_anchor, anchor);
+        assert_eq!(core.state.lock().unwrap().window.last_read("a"), None);
+    }
+    #[test]
+    fn apply_read_markers_leaves_pending_approvals_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = core_for_markers(dir.path());
+        add_channel_with_history(&core, Some("p"), "a", &["one", "two"]);
+        ask_approval(&core, "a");
+        let pending = |core: &AppCore| core.snapshot(&main()).channels.into_iter().find(|c| c.id == "a").unwrap().pending_approvals;
+        assert_eq!(pending(&core), 1);
+        assert_eq!(core.apply_read_markers(&[marker_pair("a", "two")]), Ok(true));
+        assert_eq!(pending(&core), 1);
     }
 }
