@@ -878,11 +878,19 @@ impl Channels {
     /// the result text.
     fn approve_branch_create(&self, view: &ViewId, workspace: &discard_core::workspace::GitWorkspace, channel: &ChannelId, request: &discard_core::write_requests::WriteRequest, note: &mut Option<String>) -> Result<String, String> {
         let agent = AgentId(request.agent_id.clone());
-        let (project, repository) = {
+        let (project, recorded) = {
             let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
             let project = store.load_channel(channel).map_err(|e| e.to_string())?.project_id;
-            let repository = store.project_channel_metadata(channel).map_err(|e| e.to_string())?.map(|metadata| metadata.repository).unwrap_or_default();
-            (project, repository)
+            let recorded = store.worktree_for(channel).map_err(|e| e.to_string())?.map(|record| record.repo);
+            (project, recorded)
+        };
+        // A detached channel has no saved repository key. Find the repository of its worktree, as Open Branch does.
+        let repository = {
+            let recorded = std::path::PathBuf::from(recorded.ok_or("This channel has no saved worktree binding.")?);
+            let canonical = recorded.canonicalize().ok();
+            discard_core::worktree::discover_repositories(&self.project_dir(view)).map_err(|e| e.to_string())?.into_iter()
+                .find(|repo| repo.path == recorded || (canonical.is_some() && repo.path.canonicalize().ok() == canonical))
+                .ok_or("The repository of this worktree is no longer part of the project.")?.id
         };
         let (path, commit, name) = workspace.branch_create_target(channel, &agent, project.as_ref(), &request.branch)?;
         if request.branch != name || std::path::Path::new(&request.path) != path || request.commit.as_deref() != Some(commit.as_str()) {
@@ -2781,6 +2789,39 @@ mod navigation_action_tests {
         let config = r.store.lock().unwrap().load_agent(&r.agent).unwrap();
         let binding = discard_core::workspace_session::eligibility(&r.store.lock().unwrap(), &channel, &config).unwrap();
         assert_eq!(discard_core::workspace_session::verify_binding(binding, false).unwrap().branch.as_deref(), Some("topic/new"));
+    }
+
+    #[tokio::test]
+    async fn branch_create_approval_binds_under_the_repository_of_the_worktree() {
+        let r = rig().await;
+        let mut config = r.store.lock().unwrap().load_agent(&r.agent).unwrap();
+        config.workspace_write = true;
+        r.store.lock().unwrap().update_agent(&r.agent, &config).unwrap();
+        let api = r.repo.join("api");
+        std::fs::create_dir(&api).unwrap();
+        run(&api, &["init", "-q", "-b", "main"]);
+        run(&api, &["commit", "--allow-empty", "-q", "-m", "init"]);
+        let path = r.dir.path().join("api-detached");
+        run(&api, &["worktree", "add", "--detach", path.to_str().unwrap(), "HEAD"]);
+        // The root repository has an unrelated branch channel with the same name.
+        r.git(&["branch", "topic"]);
+        r.service.activate_project(&ViewId::main(), &r.project.id).unwrap();
+        settle(&r.core).await;
+        let nested = discard_core::worktree::discover_repositories(&r.repo).unwrap().into_iter().find(|repo| !repo.id.is_empty()).unwrap().id;
+        let snapshot = r.core.snapshot(&ViewId::main());
+        let root_row = snapshot.branches.iter().find(|row| row.label == "topic").unwrap();
+        let root_channel = ChannelId(r.service.open_branch(&ViewId::main(), &root_row.key).unwrap());
+        let row = snapshot.branches.iter().find(|row| row.detached && row.repository.ends_with("api")).expect("the nested detached row");
+        let channel = ChannelId(r.service.open_branch(&ViewId::main(), &row.key).unwrap());
+        let saved = r.worktree_record(&channel).unwrap().path;
+        let head = run(std::path::Path::new(&saved), &["rev-parse", "HEAD"]);
+        let request = r.branch_request(&channel, "topic", &std::path::Path::new(&saved).canonicalize().unwrap().to_string_lossy(), &head);
+        let done = r.decide_in(&channel, &request.id, true).unwrap();
+        assert_eq!(done.state, "completed", "{done:?}");
+        let found = |repository: &str| r.store.lock().unwrap().project_repository_branch_channel(&r.project.id, repository, "topic").unwrap().map(|c| c.id);
+        assert_eq!(found(&nested), Some(channel.clone()));
+        assert_eq!(found(""), Some(root_channel.clone()));
+        assert!(!r.store.lock().unwrap().channel_archived(&root_channel).unwrap());
     }
 
     #[tokio::test]
