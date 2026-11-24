@@ -11,6 +11,38 @@ export const heightKey = 'discard:terminal-height'
 export const NO_PROJECT_REASON =
   'Direct messages have no terminal. Open a project channel to use the terminal.'
 
+export const MAX_TABS = 8
+
+/** The reason shown on the disabled add button when a channel has the most tabs. */
+export const TAB_LIMIT_REASON = 'A channel can have 8 terminals.'
+
+export const tabName = (n: number): string => `Terminal ${n}`
+
+export const canAddTab = (count: number): boolean => count < MAX_TABS
+
+/** The remembered tab if it still exists, else the first tab, else none. */
+export function pickActive(tabs: { sessionId: string }[], remembered?: string): string | null {
+  if (remembered && tabs.some((tab) => tab.sessionId === remembered)) return remembered
+  return tabs[0]?.sessionId ?? null
+}
+
+/** The tab to show after `closed` goes: the right neighbour, else the left, else none. */
+export function nextActive(tabs: { sessionId: string }[], closed: string): string | null {
+  const index = tabs.findIndex((tab) => tab.sessionId === closed)
+  if (index < 0) return tabs[0]?.sessionId ?? null
+  return tabs[index + 1]?.sessionId ?? tabs[index - 1]?.sessionId ?? null
+}
+
+const activeByChannel = new Map<string, string>()
+
+export function rememberActive(channelId: string, sessionId: string): void {
+  activeByChannel.set(channelId, sessionId)
+}
+
+export function recallActive(channelId: string): string | undefined {
+  return activeByChannel.get(channelId)
+}
+
 function read(key: string): string | null {
   try {
     return localStorage.getItem(key)

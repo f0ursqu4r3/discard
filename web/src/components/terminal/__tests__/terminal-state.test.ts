@@ -3,9 +3,12 @@ import { defineComponent, h, nextTick } from 'vue'
 import { mount } from '@vue/test-utils'
 import {
   DEFAULT_HEIGHT,
+  MAX_TABS,
   MIN_HEIGHT,
   NO_PROJECT_REASON,
+  TAB_LIMIT_REASON,
   applyEvent,
+  canAddTab,
   canKill,
   canRestart,
   clampHeight,
@@ -14,10 +17,15 @@ import {
   heightKey,
   loadHeight,
   loadVisible,
+  nextActive,
   opened,
+  pickActive,
+  recallActive,
+  rememberActive,
   saveHeight,
   saveVisible,
   statusLine,
+  tabName,
   terminalAvailability,
   useTerminalVisibility,
   visibleKey,
@@ -122,6 +130,7 @@ test('a session goes from connecting to running, and an exit offers a restart', 
   expect(canRestart(view)).toBe(false)
   view = opened(view, {
     sessionId: 's',
+    number: 1,
     cwd: '/work',
     scrollback: '',
     running: true,
@@ -142,6 +151,7 @@ test('a session goes from connecting to running, and an exit offers a restart', 
 test('a session that ended before the panel attached opens as exited', () => {
   const view = opened(connecting(), {
     sessionId: 's',
+    number: 1,
     cwd: '/work',
     scrollback: '',
     running: false,
@@ -155,6 +165,7 @@ test('a session that ended before the panel attached opens as exited', () => {
 test('a moved session shows the notice and cannot restart or be killed from this window', () => {
   const running = opened(connecting(), {
     sessionId: 's',
+    number: 1,
     cwd: '/work',
     scrollback: '',
     running: true,
@@ -177,4 +188,35 @@ test('a closed or failed session shows its reason and can restart', () => {
   expect(broken.phase).toBe('failed')
   expect(canRestart(broken)).toBe(true)
   expect(statusLine(broken)).toBe('Could not start the shell /bin/zsh')
+})
+
+test('tab names and the tab limit', () => {
+  expect(tabName(2)).toBe('Terminal 2')
+  expect(MAX_TABS).toBe(8)
+  expect(TAB_LIMIT_REASON).toBe('A channel can have 8 terminals.')
+  expect(canAddTab(7)).toBe(true)
+  expect(canAddTab(8)).toBe(false)
+})
+
+test('pickActive prefers the remembered tab, then the first, then none', () => {
+  const tabs = [{ sessionId: 'a' }, { sessionId: 'b' }]
+  expect(pickActive(tabs, 'b')).toBe('b')
+  expect(pickActive(tabs, 'gone')).toBe('a')
+  expect(pickActive(tabs)).toBe('a')
+  expect(pickActive([], 'b')).toBeNull()
+})
+
+test('nextActive picks the right neighbour, then the left, then none', () => {
+  const tabs = [{ sessionId: 'a' }, { sessionId: 'b' }, { sessionId: 'c' }]
+  expect(nextActive(tabs, 'b')).toBe('c')
+  expect(nextActive(tabs, 'c')).toBe('b')
+  expect(nextActive([{ sessionId: 'a' }], 'a')).toBeNull()
+})
+
+test('the active tab is remembered per channel', () => {
+  rememberActive('c1', 's1')
+  rememberActive('c2', 's2')
+  expect(recallActive('c1')).toBe('s1')
+  expect(recallActive('c2')).toBe('s2')
+  expect(recallActive('c3')).toBeUndefined()
 })

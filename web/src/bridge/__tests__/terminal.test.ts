@@ -8,10 +8,13 @@ import {
   decodeBytes,
   matchesDisplayChord,
   terminalClose,
+  terminalCreate,
   terminalDetach,
+  terminalKill,
   terminalOpen,
   terminalResize,
-  terminalStatus,
+  terminalRestart,
+  terminalTabs,
   terminalWrite,
   useActionShortcut,
   type TerminalEvent,
@@ -37,9 +40,10 @@ beforeEach(() => {
   mocks.channels.length = 0
 })
 
-test('open passes the channel ID, the size, and a stream that delivers events in order', async () => {
+test('open passes the session ID, the size, and a stream that delivers events in order', async () => {
   const opened = {
     sessionId: 's1',
+    number: 1,
     cwd: '/work',
     scrollback: '',
     running: true,
@@ -48,31 +52,47 @@ test('open passes the channel ID, the size, and a stream that delivers events in
   }
   vi.mocked(invoke).mockResolvedValue(opened)
   const heard: TerminalEvent[] = []
-  await expect(terminalOpen('channel-1', 100, 30, (event) => heard.push(event))).resolves.toEqual(
-    opened,
-  )
+  await expect(terminalOpen('s1', 100, 30, (event) => heard.push(event))).resolves.toEqual(opened)
   const [command, args] = vi.mocked(invoke).mock.calls[0]!
   expect(command).toBe('terminal_open')
-  expect(args).toMatchObject({ channelId: 'channel-1', cols: 100, rows: 30 })
+  expect(args).toMatchObject({ sessionId: 's1', cols: 100, rows: 30 })
   expect((args as { onEvent: unknown }).onEvent).toBe(mocks.channels[0])
   mocks.channels[0]!.onmessage({ kind: 'output', data: 'YQ==' })
   mocks.channels[0]!.onmessage({ kind: 'exit', exitCode: 0, signal: null })
   expect(heard.map((event) => event.kind)).toEqual(['output', 'exit'])
 })
 
+test('create and restart pass a stream and exact arguments', async () => {
+  vi.mocked(invoke).mockResolvedValue({})
+  await terminalCreate('channel-1', 100, 30, () => {})
+  await terminalRestart('s1', 90, 20, () => {})
+  const [create, restart] = vi.mocked(invoke).mock.calls
+  expect(create![0]).toBe('terminal_create')
+  expect(create![1]).toEqual({
+    channelId: 'channel-1',
+    cols: 100,
+    rows: 30,
+    onEvent: mocks.channels[0],
+  })
+  expect(restart![0]).toBe('terminal_restart')
+  expect(restart![1]).toEqual({ sessionId: 's1', cols: 90, rows: 20, onEvent: mocks.channels[1] })
+})
+
 test('the other commands use exact names and camel case arguments', async () => {
   vi.mocked(invoke).mockResolvedValue(null)
-  await terminalWrite('c', 'ls\n')
-  await terminalResize('c', 80, 24)
-  await terminalDetach('c')
-  await terminalClose('c')
-  await terminalStatus('c')
+  await terminalTabs('c')
+  await terminalWrite('s', 'ls\n')
+  await terminalResize('s', 80, 24)
+  await terminalDetach('s')
+  await terminalClose('s')
+  await terminalKill('s')
   expect(vi.mocked(invoke).mock.calls).toEqual([
-    ['terminal_write', { channelId: 'c', data: 'ls\n' }],
-    ['terminal_resize', { channelId: 'c', cols: 80, rows: 24 }],
-    ['terminal_detach', { channelId: 'c' }],
-    ['terminal_close', { channelId: 'c' }],
-    ['terminal_status', { channelId: 'c' }],
+    ['terminal_tabs', { channelId: 'c' }],
+    ['terminal_write', { sessionId: 's', data: 'ls\n' }],
+    ['terminal_resize', { sessionId: 's', cols: 80, rows: 24 }],
+    ['terminal_detach', { sessionId: 's' }],
+    ['terminal_close', { sessionId: 's' }],
+    ['terminal_kill', { sessionId: 's' }],
   ])
 })
 
