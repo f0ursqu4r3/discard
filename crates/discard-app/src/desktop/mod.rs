@@ -340,7 +340,7 @@ pub fn run(
             attachments::choose_attachments,
             attachments::import_attachments,
             attachments::attachment_preview,
-            terminal::terminal_open, terminal::terminal_write, terminal::terminal_resize, terminal::terminal_detach, terminal::terminal_close, terminal::terminal_status,
+            terminal::terminal_tabs, terminal::terminal_create, terminal::terminal_open, terminal::terminal_restart, terminal::terminal_write, terminal::terminal_resize, terminal::terminal_detach, terminal::terminal_close, terminal::terminal_kill,
             commands::get_worktree_requests,
             commands::decide_worktree_removal,
             commands::decide_approval,
