@@ -127,6 +127,36 @@ pub fn commit_exists(repo: &Path, commit: &str) -> bool {
     git(repo, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).is_ok()
 }
 
+/// The listed branch that a rename made outside Discard turned `old` into. Git writes
+/// `Branch: renamed refs/heads/X to refs/heads/Y` to the reflog of the new branch. The reflogs of the `listed`
+/// branches give rename edges X to Y, and chains of renames join them. The answer is the one listed branch that
+/// the edges reach from `old`. It is `None` when no listed branch or more than one is reachable. A reflog that
+/// Git cannot read gives no edges.
+pub fn renamed_to(repo: &Path, old: &str, listed: &[String]) -> Option<String> {
+    use std::collections::{HashMap, HashSet};
+    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+    for name in listed {
+        let Ok(log) = git(repo, &["reflog", "show", "--format=%gs", &format!("refs/heads/{name}"), "--"]) else { continue };
+        for line in log.lines() {
+            let Some(rest) = line.strip_prefix("Branch: renamed refs/heads/") else { continue };
+            let Some((from, to)) = rest.split_once(" to refs/heads/") else { continue };
+            edges.entry(from.to_owned()).or_default().push(to.to_owned());
+        }
+    }
+    let mut seen: HashSet<&str> = HashSet::from([old]);
+    let mut queue = vec![old];
+    while let Some(from) = queue.pop() {
+        for to in edges.get(from).into_iter().flatten() {
+            if seen.insert(to) { queue.push(to); }
+        }
+    }
+    let mut reached = listed.iter().filter(|name| name.as_str() != old && seen.contains(name.as_str()));
+    match (reached.next(), reached.next()) {
+        (Some(only), None) => Some(only.clone()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,5 +362,40 @@ mod tests {
         assert!(!commit_exists(&r.repo, &"0".repeat(40)), "a well-formed ID can name no object");
         assert!(!commit_exists(&r.repo, "--version"), "Git must not read the commit as an option");
         assert!(!commit_exists(&r.repo, ""));
+    }
+
+    #[test]
+    fn renamed_to_follows_one_rename() {
+        let r = rig();
+        run(&r.repo, &["branch", "a"]);
+        run(&r.repo, &["branch", "-m", "a", "b"]);
+        assert_eq!(renamed_to(&r.repo, "a", &branches(&r.repo)), Some("b".to_string()));
+    }
+
+    #[test]
+    fn renamed_to_follows_a_chain() {
+        let r = rig();
+        run(&r.repo, &["branch", "a"]);
+        run(&r.repo, &["branch", "-m", "a", "b"]);
+        run(&r.repo, &["branch", "-m", "b", "c"]);
+        assert_eq!(renamed_to(&r.repo, "a", &branches(&r.repo)), Some("c".to_string()));
+    }
+
+    #[test]
+    fn renamed_to_is_none_for_a_deleted_branch() {
+        let r = rig();
+        run(&r.repo, &["branch", "a"]);
+        run(&r.repo, &["branch", "-D", "a"]);
+        assert_eq!(renamed_to(&r.repo, "a", &branches(&r.repo)), None);
+    }
+
+    #[test]
+    fn renamed_to_is_none_when_two_branches_claim_the_old_name() {
+        let r = rig();
+        run(&r.repo, &["branch", "a"]);
+        run(&r.repo, &["branch", "-m", "a", "b"]);
+        run(&r.repo, &["branch", "a"]);
+        run(&r.repo, &["branch", "-m", "a", "c"]);
+        assert_eq!(renamed_to(&r.repo, "a", &branches(&r.repo)), None);
     }
 }
