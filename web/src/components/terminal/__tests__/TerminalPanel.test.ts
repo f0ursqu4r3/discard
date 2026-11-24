@@ -784,3 +784,106 @@ test('arrow keys keep focus on the tab strip and do not focus xterm', async () =
   expect(document.activeElement).toBe(buttons()[2])
   expect(term().focused).toBe(focusedAfterStart)
 })
+
+const ENDED = 'This terminal session has ended.'
+
+test('after an app-side close, inactive ghost tabs disappear after the reload', async () => {
+  backend.tabs = [tab('s1', 1), tab('s2', 2)]
+  const view = show()
+  await flushPromises()
+  backend.tabs = []
+  stream().onmessage({ kind: 'closed', reason: 'The worktree of this terminal was removed.' })
+  await flushPromises()
+  expect(tabsOf(view).map((entry) => entry.text())).toEqual(['Terminal 1'])
+  expect(view.find('[data-testid="terminal-restart"]').exists()).toBe(true)
+})
+
+test('Restart after an app-side close starts a new shell with terminal_create in the old place', async () => {
+  backend.tabs = [tab('s1', 1), tab('s2', 2)]
+  const view = show()
+  await flushPromises()
+  backend.answers.terminal_restart = () => Promise.reject(ENDED)
+  backend.answers.terminal_open = () => Promise.reject(ENDED)
+  backend.tabs = []
+  stream().onmessage({ kind: 'closed', reason: 'The worktree of this terminal was removed.' })
+  await flushPromises()
+  await view.get('[data-testid="terminal-restart"]').trigger('click')
+  await flushPromises()
+  expect(calls('terminal_create')).toHaveLength(1)
+  expect(tabsOf(view)).toHaveLength(1)
+  expect(tabsOf(view)[0]!.attributes('aria-selected')).toBe('true')
+  term().dataHandler('q')
+  await flushPromises()
+  expect(calls('terminal_write')[0]![1]).toMatchObject({ sessionId: 'n1' })
+  expect(view.find('[data-testid="terminal-status"]').exists()).toBe(false)
+})
+
+test('opening a tab that the backend dropped reloads the list', async () => {
+  backend.tabs = [tab('s1', 1), tab('s2', 2)]
+  const view = show()
+  await flushPromises()
+  backend.answers.terminal_open = () => Promise.reject(ENDED)
+  backend.tabs = []
+  await tabsOf(view)[1]!.trigger('click')
+  await flushPromises()
+  expect(tabsOf(view).map((entry) => entry.text())).toEqual(['Terminal 2'])
+  expect(view.get('[data-testid="terminal-status"]').text()).toBe(ENDED)
+})
+
+test('a refused close keeps the tab and shows the message', async () => {
+  backend.tabs = [tab('s1', 1), tab('s2', 2)]
+  backend.answers.terminal_close = () => Promise.reject('This terminal is open in another window.')
+  const view = show()
+  await flushPromises()
+  await closeOf(view)[1]!.trigger('click')
+  await flushPromises()
+  expect(tabsOf(view)).toHaveLength(2)
+  expect(view.get('[data-testid="terminal-status"]').text()).toBe(
+    'This terminal is open in another window.',
+  )
+  await closeOf(view)[0]!.trigger('click')
+  await flushPromises()
+  expect(tabsOf(view)).toHaveLength(2)
+  expect(view.emitted('hide')).toBeUndefined()
+})
+
+test('a close of a tab that already ended removes it', async () => {
+  backend.tabs = [tab('s1', 1), tab('s2', 2)]
+  backend.answers.terminal_close = () => Promise.reject(ENDED)
+  const view = show()
+  await flushPromises()
+  await closeOf(view)[1]!.trigger('click')
+  await flushPromises()
+  expect(tabsOf(view)).toHaveLength(1)
+})
+
+test('a tab the person selects during a close is not overridden', async () => {
+  backend.tabs = [tab('s1', 1), tab('s2', 2), tab('s3', 3)]
+  let finish!: (value: unknown) => void
+  backend.answers.terminal_close = () =>
+    new Promise((resolve) => {
+      finish = resolve
+    })
+  const view = show()
+  await flushPromises()
+  await closeOf(view)[0]!.trigger('click')
+  await tabsOf(view)[2]!.trigger('click')
+  await flushPromises()
+  finish(undefined)
+  await flushPromises()
+  expect(tabsOf(view).map((entry) => entry.text())).toEqual(['Terminal 2', 'Terminal 3'])
+  expect(tabsOf(view)[1]!.attributes('aria-selected')).toBe('true')
+  expect(calls('terminal_open').at(-1)![1]).toMatchObject({ sessionId: 's3' })
+})
+
+test('a refused new tab reloads the list and shows tabs from other windows', async () => {
+  backend.answers.terminal_create = () => Promise.reject('A channel can have 8 terminals.')
+  const view = show()
+  await flushPromises()
+  backend.tabs = [tab('s1', 1), tab('s5', 5, { running: false })]
+  await view.get('[data-testid="terminal-new-tab"]').trigger('click')
+  await flushPromises()
+  expect(tabsOf(view).map((entry) => entry.text())).toEqual(['Terminal 1', 'Terminal 5'])
+  expect(tabsOf(view)[0]!.attributes('aria-selected')).toBe('true')
+  expect(view.get('[data-testid="terminal-status"]').text()).toBe('A channel can have 8 terminals.')
+})

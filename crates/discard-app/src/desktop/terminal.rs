@@ -136,11 +136,11 @@ impl Terminals {
     pub fn restart(&self, session_id: &str, spec: SpawnSpec) -> Result<(Arc<Session>, u32), String> {
         let mut registry = lock(&self.sessions);
         if !registry.entries.contains_key(session_id) {
-            return Err(format!("Terminal session {session_id} not found."));
+            return Err(missing(session_id));
         }
         let session = Session::spawn(spec, None)?;
         let Some(old) = registry.entries.remove(session_id) else {
-            return Err(format!("Terminal session {session_id} not found."));
+            return Err(missing(session_id));
         };
         let number = old.number;
         registry.entries.insert(session.id().to_owned(), Entry { session: session.clone(), project: old.project, channel: old.channel, order: old.order, number });
@@ -290,8 +290,9 @@ fn owned_session(terminals: &Terminals, session_id: &str, window: &str) -> Resul
     Ok(session)
 }
 
-fn missing(session_id: &str) -> String {
-    format!("Terminal session {session_id} not found.")
+/// The error of a session that no longer exists. The webview matches this text, so keep it in step with it.
+fn missing(_session_id: &str) -> String {
+    "This terminal session has ended.".to_owned()
 }
 
 /// Attach the window to the session and describe the session for the webview.

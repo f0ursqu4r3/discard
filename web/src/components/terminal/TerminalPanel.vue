@@ -103,6 +103,34 @@ function refit() {
   }
 }
 
+/** The error text of a session that the backend no longer holds. Keep it in step with terminal.rs. */
+const ENDED = 'This terminal session has ended.'
+const isGone = (error: unknown) => String(error).includes(ENDED)
+
+/**
+ * Bring the strip in step with the backend: drop tabs it no longer has, refresh the others, add tabs that
+ * another window opened. The active tab stays even when it is gone, so Restart can replace it in place.
+ */
+async function reconcile() {
+  const channelId = props.channelId
+  let list: TerminalTab[]
+  try {
+    list = await terminalTabs(channelId)
+  } catch {
+    return
+  }
+  if (props.channelId !== channelId) return
+  const known = new Map(list.map((tab) => [tab.sessionId, tab]))
+  const shown = new Set(tabs.value.map((tab) => tab.sessionId))
+  const merged: TerminalTab[] = []
+  for (const tab of tabs.value) {
+    const fresh = known.get(tab.sessionId)
+    if (fresh) merged.push(fresh)
+    else if (tab.sessionId === activeId.value) merged.push({ ...tab, running: false })
+  }
+  tabs.value = [...merged, ...list.filter((tab) => !shown.has(tab.sessionId))]
+}
+
 function deliver(event: TerminalEvent) {
   if (event.kind === 'output') {
     term?.write(decodeBytes(event.data))
@@ -110,7 +138,11 @@ function deliver(event: TerminalEvent) {
   }
   view.value = applyEvent(view.value, event)
   if (event.kind === 'exit' || event.kind === 'closed') markEnded(activeId.value)
+  // The app closed the session, and it can have closed the other tabs of the channel too.
+  if (event.kind === 'closed' && event.reason !== KILLED) void reconcile()
 }
+
+const KILLED = 'The session was killed.'
 
 function markEnded(id: string | null) {
   tabs.value = tabs.value.map((tab) => (tab.sessionId === id ? { ...tab, running: false } : tab))
@@ -178,7 +210,10 @@ async function attach(
     if (focusTerminal) current.focus()
     return null
   } catch (error) {
-    if (run === generation) view.value = failed(view.value, error)
+    if (run === generation) {
+      view.value = failed(view.value, error)
+      if (isGone(error)) void reconcile()
+    }
     return { error }
   }
 }
@@ -261,6 +296,7 @@ function addTab() {
       // The backend refused the tab. Show the tab that was open and tell the user why.
       if (failure && previous && run === generation) {
         await attach(run, openTab(previous))
+        await reconcile()
         refusal.value = String(failure.error)
       }
     })
@@ -284,13 +320,22 @@ function moveTab(event: KeyboardEvent, id: string) {
 }
 
 async function closeTab(id: string) {
+  try {
+    await terminalClose(id)
+  } catch (error) {
+    // A refused close keeps the tab. A session that is already gone has no tab to keep.
+    if (!isGone(error)) {
+      refusal.value = String(error)
+      return
+    }
+  }
+  // The person can select another tab while the close runs. That choice stays.
   const wasActive = id === activeId.value
-  const next = wasActive ? nextActive(tabs.value, id) : activeId.value
+  const next = wasActive ? nextActive(tabs.value, id) : null
   if (wasActive) {
     generation++
     attached = null
   }
-  await terminalClose(id).catch(ignore)
   tabs.value = tabs.value.filter((tab) => tab.sessionId !== id)
   if (!wasActive) return
   if (!next) {
@@ -319,14 +364,26 @@ function restart() {
     return
   }
   const run = ++generation
+  const channelId = props.channelId
   attached = null
   queue = queue
     .then(() =>
       attach(
         run,
-        (cols, rows, onEvent) => terminalRestart(id, cols, rows, onEvent),
+        async (cols, rows, onEvent) => {
+          try {
+            return await terminalRestart(id, cols, rows, onEvent)
+          } catch (error) {
+            // The app closed the session. Start a new shell in its place.
+            if (!isGone(error)) throw error
+            return terminalCreate(channelId, cols, rows, onEvent)
+          }
+        },
         (result, current) => {
-          tabs.value = tabs.value.map((tab) => (tab.sessionId === id ? tabOf(result) : tab))
+          if (props.channelId !== channelId) return
+          tabs.value = tabs.value.some((tab) => tab.sessionId === id)
+            ? tabs.value.map((tab) => (tab.sessionId === id ? tabOf(result) : tab))
+            : [...tabs.value, tabOf(result)]
           if (current) setActive(result.sessionId)
         },
       ),
@@ -344,7 +401,7 @@ async function kill() {
     return
   }
   if (activeId.value !== id) return
-  view.value = { ...view.value, phase: 'closed', message: 'The session was killed.' }
+  view.value = { ...view.value, phase: 'closed', message: KILLED }
   markEnded(id)
 }
 
@@ -410,7 +467,11 @@ onMounted(() => {
   created.onData((data) => {
     const id = attached
     if (!id || view.value.phase !== 'running') return
-    writes = writes.then(() => terminalWrite(id, data)).catch(ignore)
+    writes = writes
+      .then(() => terminalWrite(id, data))
+      .catch((error) => {
+        if (isGone(error)) void reconcile()
+      })
   })
   created.onResize(({ cols, rows }) => {
     if (attached && view.value.phase === 'running')
