@@ -137,6 +137,7 @@ impl GitWorkspace {
 
     /// Resolve saved authority under the store lock, then verify Git outside it.
     pub fn write_request_target(&self, channel: &ChannelId, agent: &crate::model::AgentId, project: Option<&crate::model::ProjectId>, kind: crate::write_requests::WriteRequestKind) -> Result<(PathBuf, String, PathBuf), String> {
+        if kind == crate::write_requests::WriteRequestKind::BranchCreate { return Err("Use branch_create_target for a branch creation.".into()); }
         let (repo, branch, binding) = {
             let store = self.store();
             let actual = store.load_channel(channel).map_err(|e| e.to_string())?;
@@ -168,7 +169,39 @@ impl GitWorkspace {
                 Ok((repo, branch, root))
             },
             crate::write_requests::WriteRequestKind::ConversationMove => Err("Use move_request_target for a conversation move.".into()),
+            crate::write_requests::WriteRequestKind::BranchCreate => Err("Use branch_create_target for a branch creation.".into()),
         }
+    }
+
+    /// The gate for "create a branch here". The channel must be a detached-worktree channel (Legacy kind with a worktree
+    /// record) of an agent that may edit files. The saved worktree must be a linked worktree whose HEAD is detached at
+    /// the recorded commit. `name` must be a new, valid branch name. Returns the worktree path, the HEAD commit and the
+    /// validated name.
+    pub fn branch_create_target(&self, channel: &ChannelId, agent: &crate::model::AgentId, project: Option<&crate::model::ProjectId>, name: &str) -> Result<(PathBuf, String, String), String> {
+        let record = {
+            let store = self.store();
+            let actual = store.load_channel(channel).map_err(|e| e.to_string())?;
+            if project.is_none() || actual.project_id.as_ref() != project { return Err("Write requests require this conversation's project.".into()); }
+            if store.channel_archived(channel).map_err(|e| e.to_string())? || store.agent_archived(agent).map_err(|e| e.to_string())? { return Err("This agent or channel is archived.".into()); }
+            let config = store.load_agent(agent).map_err(|e| e.to_string())?;
+            if !config.workspace_write || config.policy != crate::capability::ApprovalPolicy::Ask { return Err("This agent is not allowed to edit files.".into()); }
+            store.project_channel_metadata(channel).map_err(|e| e.to_string())?.filter(|m| m.kind == crate::model::ProjectChannelKind::Legacy).ok_or("Branch creation needs a channel for a detached worktree.")?;
+            store.worktree_for(channel).map_err(|e| e.to_string())?.ok_or("This channel has no saved worktree binding.")?
+        };
+        let root = Path::new(&record.path).canonicalize().map_err(|_| "The worktree folder is missing.".to_string())?;
+        let run = |args: &[&str]| crate::worktree_access::git(&root, args);
+        let top = PathBuf::from(run(&["rev-parse", "--show-toplevel"])?).canonicalize().map_err(|e| e.to_string())?;
+        if top != root { return Err("The saved path is not a worktree root.".into()); }
+        let git_dir = PathBuf::from(run(&["rev-parse", "--absolute-git-dir"])?).canonicalize().map_err(|e| e.to_string())?;
+        let common = PathBuf::from(run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?).canonicalize().map_err(|e| e.to_string())?;
+        if git_dir == common || common.starts_with(&root) { return Err("The main checkout cannot get a branch this way.".into()); }
+        let repo_common = crate::worktree_access::git(Path::new(&record.repo), &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+        if Path::new(&repo_common).canonicalize().map_err(|e| e.to_string())? != common { return Err("The repository binding changed. Ask again.".into()); }
+        if run(&["rev-parse", "--abbrev-ref", "HEAD"])? != "HEAD" { return Err("This worktree is no longer detached.".into()); }
+        let commit = run(&["rev-parse", "HEAD"])?;
+        if !record.base_commit.is_empty() && record.base_commit != commit { return Err("The worktree HEAD moved from the recorded commit. Ask again.".into()); }
+        let name = crate::branch_actions::validate_branch_name(Path::new(&record.repo), name, None)?;
+        Ok((root, commit, name))
     }
 
     /// The moderator gate for a conversation move. It reads saved facts only. It does not look at messages and it does
@@ -572,6 +605,87 @@ mod tests {
         git(&prepared.cwd, &["checkout", "-b", "changed-outside-discard"]);
         let error = r.ws.prepare(&r.repo, &r.channel.id, "work").unwrap_err();
         assert!(error.contains("different branch"), "{error}");
+    }
+
+    struct DetachedRig { r: Rig, agent: AgentId, project: ProjectId, root: PathBuf, channel: Channel, head: String }
+    fn detached_rig() -> DetachedRig {
+        let r = rig();
+        let root = r._dir.path().join("detached");
+        git(&r.repo, &["worktree", "add", "--detach", root.to_str().unwrap()]);
+        let head = git(&root, &["rev-parse", "HEAD"]);
+        let (agent, project) = {
+            let store = r.store.lock().unwrap();
+            let mut config = store.load_agent(&r.channel.agent_id).unwrap();
+            config.workspace_write = true; config.model = Some("m".into());
+            let agent = store.create_agent(&config).unwrap();
+            (agent, r.channel.project_id.clone().unwrap())
+        };
+        let channel = Channel { id: ChannelId::new(), project_id: Some(project.clone()), name: head[..7].into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+        let record = WorktreeRecord { channel_id: channel.id.clone(), path: root.to_string_lossy().into(), branch: head[..7].into(), base_commit: head.clone(), repo: r.repo.to_string_lossy().into(), owned: false };
+        {
+            let store = r.store.lock().unwrap();
+            store.create_named_channel(&channel, None, Some(&record)).unwrap();
+            store.register_bootstrap_project_channel(&channel.id).unwrap();
+        }
+        DetachedRig { r, agent, project, root, channel, head }
+    }
+    fn branch_create(d: &DetachedRig, name: &str) -> Result<(PathBuf, String, String), String> {
+        d.r.ws.branch_create_target(&d.channel.id, &d.agent, Some(&d.project), name)
+    }
+    #[test]
+    fn branch_create_gate_accepts_a_detached_linked_worktree() {
+        let d = detached_rig();
+        let (path, commit, name) = branch_create(&d, "  topic/one ").unwrap();
+        assert_eq!((path, commit, name), (d.root.canonicalize().unwrap(), d.head.clone(), "topic/one".to_string()));
+    }
+    #[test]
+    fn branch_create_gate_refuses_a_branch_channel() {
+        let d = detached_rig();
+        git(&d.r.repo, &["branch", "feature"]);
+        let channel = Channel { id: ChannelId::new(), name: "feature".into(), ..d.channel.clone() };
+        let path = d.r._dir.path().join("feature-wt");
+        git(&d.r.repo, &["worktree", "add", path.to_str().unwrap(), "feature"]);
+        let record = WorktreeRecord { channel_id: channel.id.clone(), path: path.to_string_lossy().into(), branch: "feature".into(), base_commit: d.head.clone(), repo: d.r.repo.to_string_lossy().into(), owned: false };
+        d.r.store.lock().unwrap().create_named_channel(&channel, Some("feature"), Some(&record)).unwrap();
+        assert_eq!(d.r.ws.branch_create_target(&channel.id, &d.agent, Some(&d.project), "topic").unwrap_err(), "Branch creation needs a channel for a detached worktree.");
+    }
+    #[test]
+    fn branch_create_gate_refuses_a_bad_name() {
+        let d = detached_rig();
+        git(&d.r.repo, &["branch", "taken"]);
+        assert!(branch_create(&d, "taken").unwrap_err().contains("already exists"));
+        assert!(branch_create(&d, "bad name").unwrap_err().contains("not a valid branch name"));
+        assert!(branch_create(&d, "  ").is_err());
+    }
+    #[test]
+    fn branch_create_gate_refuses_an_agent_that_may_not_edit_files() {
+        let d = detached_rig();
+        let other = {
+            let store = d.r.store.lock().unwrap();
+            let mut config = store.load_agent(&d.agent).unwrap();
+            config.workspace_write = false; config.model = Some("m".into());
+            store.create_agent(&config).unwrap()
+        };
+        assert_eq!(d.r.ws.branch_create_target(&d.channel.id, &other, Some(&d.project), "topic").unwrap_err(), "This agent is not allowed to edit files.");
+        assert!(d.r.ws.branch_create_target(&d.channel.id, &d.agent, None, "topic").is_err());
+    }
+    #[test]
+    fn branch_create_gate_refuses_a_main_checkout() {
+        let d = detached_rig();
+        git(&d.r.repo, &["checkout", "-q", "--detach"]);
+        let mut record = d.r.store.lock().unwrap().worktree_for(&d.channel.id).unwrap().unwrap();
+        record.path = d.r.repo.to_string_lossy().into();
+        record.base_commit = String::new();
+        d.r.store.lock().unwrap().save_worktree(&record).unwrap();
+        assert_eq!(branch_create(&d, "topic").unwrap_err(), "The main checkout cannot get a branch this way.");
+    }
+    #[test]
+    fn branch_create_gate_refuses_a_worktree_that_has_a_branch_or_moved() {
+        let d = detached_rig();
+        git(&d.root, &["commit", "-q", "--allow-empty", "-m", "more"]);
+        assert_eq!(branch_create(&d, "topic").unwrap_err(), "The worktree HEAD moved from the recorded commit. Ask again.");
+        git(&d.root, &["checkout", "-q", "-b", "already"]);
+        assert_eq!(branch_create(&d, "topic").unwrap_err(), "This worktree is no longer detached.");
     }
 
     struct MoveRig {

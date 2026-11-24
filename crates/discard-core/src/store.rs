@@ -1295,6 +1295,24 @@ impl Store {
         }
         Ok(())
     }
+    /// Convert every active detached-worktree channel (a Legacy channel with a worktree record at `worktree_path`) into
+    /// a branch channel of `branch`. The channel ID, history and sessions stay. Returns the channels moved.
+    pub fn rebind_detached_to_branch(&self, project: &ProjectId, repository: &str, worktree_path: &str, branch: &str) -> Result<Vec<ChannelId>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut moved = Vec::new();
+        for channel in self.channels_for_project(project)? {
+            if self.channel_archived(&channel.id)? { continue; }
+            if !self.project_channel_metadata(&channel.id)?.is_some_and(|m| m.kind == ProjectChannelKind::Legacy) { continue; }
+            if !self.worktree_for(&channel.id)?.is_some_and(|record| record.path == worktree_path) { continue; }
+            moved.push(channel.id);
+        }
+        for channel in &moved {
+            self.bind_repository_branch(channel, repository, branch)?;
+            self.conn.execute("UPDATE worktrees SET branch=?2 WHERE channel_id=?1", params![channel.0, branch])?;
+        }
+        tx.commit()?;
+        Ok(moved)
+    }
     pub fn channel_branch(&self, channel: &ChannelId) -> Result<Option<String>> {
         Ok(self
             .conn
@@ -5619,6 +5637,51 @@ mod navigation_action_tests {
         assert!(f.store.rename_project_branch(&f.project.id, &one.id, "two").is_err());
         assert_eq!(f.store.channel_branch(&one.id).unwrap().as_deref(), Some("one"), "the failed rename rolls back");
         assert_eq!(f.store.channel_branch(&two.id).unwrap().as_deref(), Some("two"));
+    }
+
+    fn detached_channel(f: &Fixture, path: &str) -> (Channel, WorktreeRecord) {
+        let channel = Channel { id: ChannelId::new(), project_id: Some(f.project.id.clone()), name: "abc1234".into(), agent_id: f.agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+        let record = WorktreeRecord { channel_id: channel.id.clone(), path: path.into(), branch: "abc1234".into(), base_commit: "abc1234ffff".into(), repo: "/p".into(), owned: true };
+        f.store.create_named_repository_channel(&channel, "", None, Some(&record)).unwrap();
+        f.store.register_bootstrap_project_channel(&channel.id).unwrap();
+        (channel, record)
+    }
+
+    #[test]
+    fn rebind_detached_to_branch_keeps_the_channel_and_its_history() {
+        let f = fixture();
+        let (channel, record) = detached_channel(&f, "/w/detached");
+        assert_eq!(f.store.project_channel_metadata(&channel.id).unwrap().unwrap().kind, ProjectChannelKind::Legacy);
+        let message = note(&f.store, &channel.id, "keep me");
+        let session = f.store.latest_session(&channel.id).unwrap();
+        let moved = f.store.rebind_detached_to_branch(&f.project.id, "", "/w/detached", "feature/new").unwrap();
+        assert_eq!(moved, vec![channel.id.clone()]);
+        let metadata = f.store.project_channel_metadata(&channel.id).unwrap().unwrap();
+        assert_eq!((metadata.kind, metadata.branch.as_deref()), (ProjectChannelKind::Branch, Some("feature/new")));
+        assert_eq!(f.store.project_branch_channel(&f.project.id, "feature/new").unwrap().unwrap().id, channel.id);
+        assert_eq!(f.store.worktree_for(&channel.id).unwrap().unwrap(), WorktreeRecord { branch: "feature/new".into(), ..record });
+        assert_eq!(f.store.messages_for_channel(&channel.id).unwrap().iter().map(|m| m.id.clone()).collect::<Vec<_>>(), [message]);
+        assert_eq!(f.store.latest_session(&channel.id).unwrap(), session);
+        assert_eq!(f.store.load_channel(&channel.id).unwrap(), channel);
+    }
+
+    #[test]
+    fn rebind_detached_to_branch_moves_every_active_channel_at_the_path_and_skips_others() {
+        let f = fixture();
+        let (first, _) = detached_channel(&f, "/w/shared");
+        let (second, _) = detached_channel(&f, "/w/shared");
+        let (elsewhere, _) = detached_channel(&f, "/w/elsewhere");
+        let (archived, _) = detached_channel(&f, "/w/shared");
+        f.store.archive_channel(&archived.id).unwrap();
+        let mut moved = f.store.rebind_detached_to_branch(&f.project.id, "", "/w/shared", "topic").unwrap();
+        moved.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut expected = vec![first.id.clone(), second.id.clone()];
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(moved, expected);
+        assert_eq!(f.store.project_channel_metadata(&elsewhere.id).unwrap().unwrap().kind, ProjectChannelKind::Legacy);
+        assert_eq!(f.store.worktree_for(&elsewhere.id).unwrap().unwrap().branch, "abc1234");
+        assert!(f.store.channel_archived(&archived.id).unwrap());
+        assert_eq!(f.store.worktree_for(&archived.id).unwrap().unwrap().branch, "abc1234");
     }
 
     #[test]

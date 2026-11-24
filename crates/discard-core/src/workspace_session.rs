@@ -435,6 +435,18 @@ mod tests {
         let r = rig(true); assert_eq!(eligibility(&r.store, &r.channel, &r.agent).unwrap().branch, None);
     }
     #[test]
+    fn a_detached_channel_rebound_to_a_new_branch_keeps_write_access() {
+        let r = rig(true);
+        r.store.register_bootstrap_project_channel(&r.channel).unwrap();
+        let project = r.store.load_channel(&r.channel).unwrap().project_id.unwrap();
+        assert_eq!(eligibility(&r.store, &r.channel, &r.agent).unwrap().branch, None);
+        git(&r.root, &["checkout", "-q", "-b", "topic"]).unwrap();
+        assert_eq!(eligibility(&r.store, &r.channel, &r.agent), Err(ReadOnlyReason::NotProjectChannel), "a legacy channel cannot hold a branch");
+        r.store.rebind_detached_to_branch(&project, "", &r.root.to_string_lossy(), "topic").unwrap();
+        let grant = eligibility(&r.store, &r.channel, &r.agent).unwrap();
+        assert_eq!((grant.branch.as_deref(), grant.channel), (Some("topic"), r.channel.clone()));
+    }
+    #[test]
     fn repository_instructions_reads_root_files_with_limit() {
         let dir = tempfile::tempdir().unwrap(); assert_eq!(repository_instructions(dir.path()), None);
         std::fs::write(dir.path().join("AGENTS.md"), "x".repeat(40 * 1024)).unwrap();

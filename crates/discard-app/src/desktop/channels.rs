@@ -806,8 +806,10 @@ impl Channels {
             let request = requests.begin(&channel_id, id, approve)?;
             let mut note = None;
             let request = if !approve { request } else {
-                use discard_core::write_requests::WriteRequestKind::{ConversationMove, MainCheckoutWrite, WorktreeCreate};
+                use discard_core::write_requests::WriteRequestKind::{BranchCreate, ConversationMove, MainCheckoutWrite, WorktreeCreate};
                 match request.kind {
+                    // TODO: approve a branch creation (create the branch, then rebind the detached channels). Task 2.
+                    BranchCreate => requests.finish(id, Err("Branch creation is not available yet.".into())),
                     ConversationMove => {
                         let action = self.approve_move(view, workspace, &channel_id, &request).map_err(|error| format!("Conversation move failed: {error}"));
                         requests.finish(id, action)
@@ -827,12 +829,13 @@ impl Channels {
                                     note = Some("The user allowed writes in the main checkout for one response.".into());
                                     Ok("The user allowed writes in the main checkout for one response.".into())
                                 }
-                                ConversationMove => Err("Conversation moves use their own approval path.".into()),
+                                ConversationMove | BranchCreate => Err("This request uses its own approval path.".into()),
                             }
                         })().map_err(|error: String| match request.kind {
                             WorktreeCreate => format!("Worktree creation failed: {error}"),
                             MainCheckoutWrite => format!("Main-checkout write access failed: {error}"),
                             ConversationMove => format!("Conversation move failed: {error}"),
+                            BranchCreate => format!("Branch creation failed: {error}"),
                         });
                         requests.finish(id, action)
                     }

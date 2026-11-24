@@ -13,6 +13,7 @@ pub enum WriteRequestKind {
     WorktreeCreate,
     MainCheckoutWrite,
     ConversationMove,
+    BranchCreate,
 }
 const HANDOFF_MAX_BYTES: usize = 4096;
 const LIST_FIELDS: [&str; 3] = ["constraints", "decisions", "open_questions"];
@@ -157,6 +158,9 @@ pub struct WriteRequest {
     pub result: Option<String>,
     #[serde(rename = "move", skip_serializing_if = "Option::is_none")]
     pub details: Option<MoveDetails>,
+    /// The commit a branch-creation request names. `None` for other kinds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 struct Pending {
     request: WriteRequest,
@@ -192,7 +196,16 @@ impl WriteRequests {
         }) {
             return Ok(existing.request.clone());
         }
-        Self::insert(&mut rows, kind, channel, agent, branch, path, None)
+        Self::insert(&mut rows, kind, channel, agent, branch, path, None, None)
+    }
+    /// Ask to create `branch` at `commit` in the detached worktree at `path`. One request per channel stays pending.
+    pub fn request_branch_create(&self, channel: &ChannelId, agent: &AgentId, branch: String, path: String, commit: String) -> Result<WriteRequest, String> {
+        let mut rows = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        Self::expire(&mut rows);
+        if let Some(existing) = rows.values().find(|p| p.request.channel_id == channel.0 && p.request.kind == WriteRequestKind::BranchCreate && matches!(p.request.state.as_str(), "pending" | "running")) {
+            return Ok(existing.request.clone());
+        }
+        Self::insert(&mut rows, WriteRequestKind::BranchCreate, channel, agent, branch, path, None, Some(commit))
     }
     pub fn request_move(&self, channel: &ChannelId, agent: &AgentId, details: MoveDetails) -> Result<WriteRequest, String> {
         let mut rows = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -204,7 +217,7 @@ impl WriteRequests {
             MoveTarget::NewBranch { branch, .. } => branch.clone(),
             MoveTarget::Channel { .. } => String::new(),
         };
-        Self::insert(&mut rows, WriteRequestKind::ConversationMove, channel, agent, branch, String::new(), Some(details))
+        Self::insert(&mut rows, WriteRequestKind::ConversationMove, channel, agent, branch, String::new(), Some(details), None)
     }
     fn insert(
         rows: &mut HashMap<String, Pending>,
@@ -214,6 +227,7 @@ impl WriteRequests {
         branch: String,
         path: String,
         details: Option<MoveDetails>,
+        commit: Option<String>,
     ) -> Result<WriteRequest, String> {
         if rows.len() >= 100 {
             let oldest = rows
@@ -237,6 +251,7 @@ impl WriteRequests {
             state: "pending".into(),
             result: None,
             details,
+            commit,
         };
         rows.insert(
             request.id.clone(),
@@ -279,6 +294,7 @@ impl WriteRequests {
                     WriteRequestKind::WorktreeCreate => "Worktree creation denied.",
                     WriteRequestKind::MainCheckoutWrite => "Main-checkout write access denied.",
                     WriteRequestKind::ConversationMove => "Conversation move denied.",
+                    WriteRequestKind::BranchCreate => "Branch creation was denied.",
                 }
                 .into(),
             );
@@ -372,6 +388,36 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(requests.list(&channel).len(), 2);
+    }
+    #[test]
+    fn branch_create_request_carries_branch_path_and_commit() {
+        let requests = WriteRequests::default();
+        let channel = ChannelId::new();
+        let r = requests.request_branch_create(&channel, &AgentId::new(), "topic".into(), "/wt".into(), "abc123".into()).unwrap();
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!((json["kind"].as_str(), json["branch"].as_str(), json["path"].as_str(), json["commit"].as_str()), (Some("branch_create"), Some("topic"), Some("/wt"), Some("abc123")));
+        assert!(serde_json::to_value(request(&requests, &channel)).unwrap().get("commit").is_none());
+    }
+    #[test]
+    fn one_pending_branch_create_request_per_channel() {
+        let requests = WriteRequests::default();
+        let channel = ChannelId::new();
+        let make = |c: &ChannelId| requests.request_branch_create(c, &AgentId::new(), "topic".into(), "/wt".into(), "abc".into()).unwrap();
+        let first = make(&channel);
+        assert_eq!(make(&channel).id, first.id);
+        assert_ne!(make(&ChannelId::new()).id, first.id);
+        assert_ne!(request(&requests, &channel).id, first.id, "another kind is separate");
+        assert_eq!(requests.begin(&channel, &first.id, false).unwrap().result.as_deref(), Some("Branch creation was denied."));
+        assert_ne!(make(&channel).id, first.id, "a decided request frees the slot");
+    }
+    #[test]
+    fn branch_create_requests_expire_after_ttl() {
+        let requests = WriteRequests::default();
+        let channel = ChannelId::new();
+        let r = requests.request_branch_create(&channel, &AgentId::new(), "topic".into(), "/wt".into(), "abc".into()).unwrap();
+        requests.inner.lock().unwrap().get_mut(&r.id).unwrap().created = Instant::now() - TTL;
+        assert!(requests.begin(&channel, &r.id, true).is_err());
+        assert_eq!(requests.list(&channel)[0].state, "expired");
     }
     fn details() -> MoveDetails {
         MoveDetails {
