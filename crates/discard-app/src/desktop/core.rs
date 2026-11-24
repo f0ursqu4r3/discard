@@ -1129,13 +1129,17 @@ impl AppCore {
     pub fn branch_refresh_pending(&self, view: &ViewId) -> bool { self.state.lock().unwrap_or_else(|e| e.into_inner()).views.get(view).is_some_and(|v| v.branch_refreshes_pending > 0) }
     /// Reload repositories for the project of a view, even without an active conversation.
     pub fn refresh_branches(&self, view: &ViewId, generation: u64) {
-        let Some((project, hint)) = self.branch_hint(view) else { return };
+        let Some((project, _)) = self.branch_hint(view) else { return };
         let discovered = discard_core::worktree::discover_repositories(&project).unwrap_or_default();
         let mut rows = Vec::new();
         let mut branch_repositories = Vec::new();
         let mut repositories = Vec::new();
         for repository in discovered {
-            let repo_rows = discard_core::worktree::list_branch_tree(&repository.path).unwrap_or_default();
+            let mut repo_rows = discard_core::worktree::list_branch_tree(&repository.path).unwrap_or_default();
+            let listed: Vec<String> = repo_rows.iter().filter(|row| !row.detached).map(|row| row.name.clone()).collect();
+            if self.follow_renamed_branches(view, &repository.id, &repository.path, &listed) {
+                repo_rows = discard_core::worktree::list_branch_tree(&repository.path).unwrap_or_default();
+            }
             branch_repositories.extend(std::iter::repeat_n(repository.id.clone(), repo_rows.len()));
             rows.extend(repo_rows);
             repositories.push(RepositoryDto {
@@ -1144,6 +1148,8 @@ impl AppCore {
                 path: repository.path.to_string_lossy().into_owned(),
             });
         }
+        // Read the hint after the renames: a followed branch changes the binding that marks the selected row.
+        let Some((_, hint)) = self.branch_hint(view) else { return };
         let selected = Self::pick_branch(&rows, &branch_repositories, hint);
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(v) = state.views.get_mut(view) else { return };
@@ -1156,6 +1162,57 @@ impl AppCore {
             state.rev += 1;
             self.changed.notify_one();
         }
+    }
+    /// Move the binding of each active branch channel whose branch was renamed outside Discard. A channel moves only
+    /// when the reflog gives one new name that no other channel binds or reaches, and the channel is not busy.
+    /// A busy channel moves on a later refresh. Errors skip the channel. Returns true when a binding moved.
+    fn follow_renamed_branches(&self, view: &ViewId, repository: &str, repo_path: &Path, listed: &[String]) -> bool {
+        use discard_core::model::{Block, ChannelId, Message, MessageId, ProjectChannelKind, ProjectId, Role};
+        let (source, project) = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(v) = state.views.get(view) else { return false };
+            (v.branch_source.clone(), v.project_id.clone())
+        };
+        let Some(source) = source else { return false };
+        if project.is_empty() { return false; }
+        let project = ProjectId(project);
+        // Stranded channels and the listed names that no active channel binds.
+        let (stranded, candidates) = {
+            let store = source.store.lock().unwrap_or_else(|e| e.into_inner());
+            let Ok(channels) = store.all_channels_for_project(&project) else { return false };
+            let mut bound = std::collections::HashSet::new();
+            let mut stranded = Vec::new();
+            for (channel, archived) in channels {
+                if archived { continue; }
+                let Ok(Some(metadata)) = store.project_channel_metadata(&channel.id) else { continue };
+                if metadata.kind != ProjectChannelKind::Branch || metadata.repository != repository { continue; }
+                let Some(branch) = metadata.branch else { continue };
+                if listed.contains(&branch) { bound.insert(branch); } else { stranded.push((channel.id, branch)); }
+            }
+            let candidates: Vec<String> = listed.iter().filter(|name| !bound.contains(*name)).cloned().collect();
+            (stranded, candidates)
+        };
+        if stranded.is_empty() || candidates.is_empty() { return false; }
+        // A busy channel still counts when it looks for conflicts, so its target stays unclaimed until it moves.
+        let mut targets: Vec<(ChannelId, String, String)> = Vec::new();
+        for (id, old) in stranded {
+            if let Some(new) = discard_core::branch_actions::renamed_to(repo_path, &old, &candidates) { targets.push((id, old, new)); }
+        }
+        let mut moved = false;
+        for (id, old, new) in &targets {
+            if self.channel_busy_reason(&id.0).is_some() { continue; }
+            if targets.iter().filter(|(_, _, other)| other == new).count() > 1 { continue; }
+            let store = source.store.lock().unwrap_or_else(|e| e.into_inner());
+            if store.project_repository_branch_channel(&project, repository, new).ok().flatten().is_some() { continue; }
+            if store.rename_project_branch(&project, id, new).is_err() { continue; }
+            moved = true;
+            let note = Message { id: MessageId::new(), channel_id: id.clone(), role: Role::System, blocks: vec![Block::Markdown { text: format!("Branch renamed from `{old}` to `{new}`.") }] };
+            if store.insert_message(&note).is_ok() {
+                drop(store);
+                self.apply_channel(&id.0, Update::ConversationMarker(note));
+            }
+        }
+        moved
     }
     pub fn configure_targets(&self, view: &ViewId, project_id: String, project_dir: &Path, agent_id: String) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());

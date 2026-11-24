@@ -2373,6 +2373,123 @@ mod tests {
         assert!(core.send_to(Some(&channel.id.0), "must not be sent".into()).is_err());
         assert!(matches!(receivers.lock().unwrap()[0].try_recv(), Err(mpsc::error::TryRecvError::Empty)));
     }
+
+    struct RenameRig { repo: tempfile::TempDir, store: Arc<Mutex<Store>>, core: Arc<AppCore>, project: ProjectId, channels: Vec<(String, String)> }
+    impl RenameRig {
+        /// A repository with `main` and each named branch, and one branch channel for each named branch.
+        async fn new(names: &[&str]) -> Self {
+            let repo = tempfile::tempdir().unwrap();
+            for args in [vec!["init", "-q", "-b", "main"], vec!["commit", "--allow-empty", "-m", "initial"]] { git_in(repo.path(), &args); }
+            for name in names { git_in(repo.path(), &["branch", name]); }
+            let store = Store::open_in_memory().unwrap();
+            let project = store.import_project_folder(repo.path()).unwrap();
+            configured_agent(&store);
+            let (commands, _) = mpsc::unbounded_channel();
+            let core = Arc::new(AppCore::new(CoreInit {
+                state: UiState::new(ChannelId(String::new()), vec![]), commands,
+                project: String::new(), channel: String::new(), agent: String::new(), provider: String::new(),
+            }));
+            let store = Arc::new(Mutex::new(store));
+            let service = Channels::new(core.clone(), store.clone(), Handle::current(), launcher());
+            service.activate_project(&ViewId::main(), &project.id).unwrap();
+            settle(&core).await;
+            let mut channels = Vec::new();
+            for name in names {
+                let key = core.snapshot(&ViewId::main()).branches.iter().find(|row| row.label == *name).unwrap().key.clone();
+                channels.push(((*name).to_owned(), service.open_branch(&ViewId::main(), &key).unwrap()));
+            }
+            Self { repo, store, core, project: project.id, channels }
+        }
+        fn id(&self, name: &str) -> String { self.channels.iter().find(|(n, _)| n == name).unwrap().1.clone() }
+        fn git(&self, args: &[&str]) { git_in(self.repo.path(), args); }
+        fn refresh(&self) { self.core.refresh_branches(&ViewId::main(), self.core.request_branch_refresh(&ViewId::main())); }
+        fn repository(&self) -> String { discard_core::worktree::discover_repositories(self.repo.path()).unwrap().remove(0).id }
+        fn bound(&self, name: &str) -> Option<String> {
+            self.store.lock().unwrap().project_repository_branch_channel(&self.project, &self.repository(), name).unwrap().map(|channel| channel.id.0)
+        }
+        fn notes(&self, id: &str) -> Vec<String> {
+            self.store.lock().unwrap().messages_for_channel(&ChannelId(id.into())).unwrap().into_iter()
+                .filter(|m| m.role == discard_core::model::Role::System)
+                .flat_map(|m| m.blocks.into_iter().filter_map(|b| match b { discard_core::model::Block::Markdown { text } if text.starts_with("Branch renamed") => Some(text), _ => None }))
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn outside_rename_moves_the_binding_and_posts_the_note() {
+        let rig = RenameRig::new(&["feature"]).await;
+        let id = rig.id("feature");
+        rig.git(&["branch", "-m", "feature", "topic"]);
+        rig.refresh();
+        assert_eq!(rig.bound("topic"), Some(id.clone()));
+        assert_eq!(rig.bound("feature"), None);
+        let last = rig.store.lock().unwrap().messages_for_channel(&ChannelId(id)).unwrap().pop().unwrap();
+        assert_eq!((last.role, last.blocks), (discard_core::model::Role::System, vec![discard_core::model::Block::Markdown { text: "Branch renamed from `feature` to `topic`.".into() }]));
+    }
+
+    #[tokio::test]
+    async fn outside_rename_chain_moves_once() {
+        let rig = RenameRig::new(&["feature"]).await;
+        let id = rig.id("feature");
+        rig.git(&["branch", "-m", "feature", "middle"]);
+        rig.git(&["branch", "-m", "middle", "final"]);
+        rig.refresh();
+        rig.refresh();
+        assert_eq!(rig.bound("final"), Some(id.clone()));
+        assert_eq!(rig.notes(&id), vec!["Branch renamed from `feature` to `final`.".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn deleted_branch_keeps_the_binding_and_posts_nothing() {
+        let rig = RenameRig::new(&["feature"]).await;
+        let id = rig.id("feature");
+        rig.git(&["branch", "-D", "feature"]);
+        rig.refresh();
+        assert_eq!(rig.bound("feature"), Some(id.clone()));
+        assert!(rig.notes(&id).is_empty());
+    }
+
+    #[tokio::test]
+    async fn busy_channel_is_skipped_then_moved_on_a_later_refresh() {
+        let rig = RenameRig::new(&["feature"]).await;
+        let id = rig.id("feature");
+        rig.git(&["branch", "-m", "feature", "topic"]);
+        rig.core.begin_channel_action(&id).unwrap();
+        rig.refresh();
+        assert_eq!(rig.bound("feature"), Some(id.clone()));
+        assert!(rig.notes(&id).is_empty());
+        rig.core.end_channel_change(&id);
+        rig.refresh();
+        assert_eq!(rig.bound("topic"), Some(id.clone()));
+        assert_eq!(rig.notes(&id).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rename_onto_a_name_with_an_active_channel_changes_nothing() {
+        let rig = RenameRig::new(&["feature", "other"]).await;
+        let (feature, other) = (rig.id("feature"), rig.id("other"));
+        rig.git(&["branch", "-D", "other"]);
+        rig.git(&["branch", "-m", "feature", "other"]);
+        rig.refresh();
+        assert_eq!(rig.bound("feature"), Some(feature.clone()));
+        assert_eq!(rig.bound("other"), Some(other));
+        assert!(rig.notes(&feature).is_empty());
+    }
+
+    #[tokio::test]
+    async fn two_stranded_bindings_reaching_one_target_do_not_move() {
+        let rig = RenameRig::new(&["a", "b"]).await;
+        let (a, b) = (rig.id("a"), rig.id("b"));
+        // The reflog of `c` holds a to b and b to c, so both bound names reach `c`.
+        rig.git(&["branch", "-m", "b", "tmp"]);
+        rig.git(&["branch", "-m", "a", "b"]);
+        rig.git(&["branch", "-D", "tmp"]);
+        rig.git(&["branch", "-m", "b", "c"]);
+        rig.refresh();
+        assert_eq!(rig.bound("a"), Some(a.clone()));
+        assert_eq!(rig.bound("b"), Some(b.clone()));
+        assert!(rig.notes(&a).is_empty() && rig.notes(&b).is_empty());
+    }
 }
 
 /// The menu actions of the channel list, against temporary repositories and an in-memory store.
