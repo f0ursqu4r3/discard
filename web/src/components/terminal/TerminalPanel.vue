@@ -3,32 +3,45 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
-import { ChevronDown, Plus, Power, RotateCcw, SquareTerminal } from '@lucide/vue'
+import { ChevronDown, Plus, Power, X, RotateCcw, SquareTerminal } from '@lucide/vue'
 import { Button } from '../ui/button'
 import { activeTheme } from '@/bridge/theme'
 import { shortPath } from '@/settings/paths'
 import {
   decodeBytes,
   terminalClose,
+  terminalCreate,
   terminalDetach,
+  terminalKill,
   terminalOpen,
   terminalResize,
+  terminalRestart,
+  terminalTabs,
   terminalWrite,
   type TerminalEvent,
+  type TerminalOpened,
+  type TerminalTab,
 } from '@/bridge/terminal'
 import { terminalFont, terminalTheme } from './terminal-theme'
 import { terminalKey } from './terminal-keys'
 import {
   applyEvent,
+  canAddTab,
   canKill,
   canRestart,
   clampHeight,
   connecting,
   failed,
   loadHeight,
+  nextActive,
   opened,
+  pickActive,
+  recallActive,
+  rememberActive,
   saveHeight,
   statusLine,
+  tabName,
+  TAB_LIMIT_REASON,
   type SessionView,
 } from './terminal-state'
 
@@ -42,13 +55,17 @@ const emit = defineEmits<{ hide: [] }>()
 const panel = ref<HTMLElement | null>(null)
 const host = ref<HTMLElement | null>(null)
 const view = ref<SessionView>(connecting())
+const tabs = ref<TerminalTab[]>([])
+const activeId = ref<string | null>(null)
+// The text of a refused action. It shows in the status strip until the next open.
+const refusal = ref('')
 const height = ref(loadHeight())
 const dragging = ref(false)
 
 let term: Terminal | null = null
 let fit: FitAddon | null = null
 let observers: ResizeObserver[] = []
-// The channel whose session this view shows. Input and resize go there.
+// The session that this view shows. Input and resize go there.
 let attached: string | null = null
 let generation = 0
 // Opens run one at a time, so a later open of a channel always replaces the stream of an earlier one.
@@ -57,8 +74,11 @@ let queue: Promise<unknown> = Promise.resolve()
 let writes: Promise<unknown> = Promise.resolve()
 let frame = 0
 
-const status = computed(() => statusLine(view.value))
-const cwdText = computed(() => (view.value.cwd ? shortPath(view.value.cwd) : ''))
+const status = computed(() => refusal.value || statusLine(view.value))
+const activeTab = computed(() => tabs.value.find((tab) => tab.sessionId === activeId.value))
+const activeCwd = computed(() => activeTab.value?.cwd || view.value.cwd)
+const cwdText = computed(() => (activeCwd.value ? shortPath(activeCwd.value) : ''))
+const tabsFull = computed(() => !canAddTab(tabs.value.length))
 const theme = computed(() => terminalTheme(activeTheme.value))
 const font = computed(() => terminalFont(activeTheme.value))
 const ignore = () => {}
@@ -84,28 +104,68 @@ function refit() {
 }
 
 function deliver(event: TerminalEvent) {
-  if (event.kind === 'output') term?.write(decodeBytes(event.data))
-  else view.value = applyEvent(view.value, event)
+  if (event.kind === 'output') {
+    term?.write(decodeBytes(event.data))
+    return
+  }
+  view.value = applyEvent(view.value, event)
+  if (event.kind === 'exit' || event.kind === 'closed') markEnded(activeId.value)
 }
 
-async function attach(channelId: string, run: number) {
+function markEnded(id: string | null) {
+  tabs.value = tabs.value.map((tab) => (tab.sessionId === id ? { ...tab, running: false } : tab))
+}
+
+function tabOf(result: TerminalOpened): TerminalTab {
+  return {
+    sessionId: result.sessionId,
+    number: result.number,
+    cwd: result.cwd,
+    running: result.running,
+    exitCode: result.exitCode,
+    signal: result.signal,
+  }
+}
+
+function setActive(id: string) {
+  activeId.value = id
+  rememberActive(props.channelId, id)
+}
+
+type Opener = (
+  cols: number,
+  rows: number,
+  onEvent: (event: TerminalEvent) => void,
+) => Promise<TerminalOpened>
+
+/**
+ * Show one session. `open` attaches it: it opens, creates, or restarts. `onOpened` records the result in the tab list.
+ * Returns the error when the open failed.
+ */
+async function attach(
+  run: number,
+  open: Opener,
+  onOpened?: (result: TerminalOpened) => void,
+): Promise<{ error: unknown } | null> {
   const current = term
-  if (!current || run !== generation) return
+  if (!current || run !== generation) return null
   current.reset()
   view.value = connecting()
+  refusal.value = ''
   let early: TerminalEvent[] | null = []
   refit()
   try {
-    const result = await terminalOpen(channelId, current.cols, current.rows, (event) => {
+    const result = await open(current.cols, current.rows, (event) => {
       if (early) early.push(event)
       else if (run === generation) deliver(event)
     })
     if (run !== generation) {
-      // A newer attach took over. Another channel must stop streaming here.
-      if (props.channelId !== channelId) void terminalDetach(channelId).catch(ignore)
-      return
+      // A newer attach took over. A session that is not the active tab must stop streaming here.
+      if (activeId.value !== result.sessionId) void terminalDetach(result.sessionId).catch(ignore)
+      return null
     }
-    attached = channelId
+    onOpened?.(result)
+    attached = result.sessionId
     const bytes = decodeBytes(result.scrollback)
     if (bytes.length) current.write(bytes)
     view.value = opened(view.value, result)
@@ -113,36 +173,158 @@ async function attach(channelId: string, run: number) {
     early = null
     pending.forEach(deliver)
     current.focus()
+    return null
   } catch (error) {
     if (run === generation) view.value = failed(view.value, error)
+    return { error }
   }
+}
+
+const openTab =
+  (id: string): Opener =>
+  (cols, rows, onEvent) =>
+    terminalOpen(id, cols, rows, onEvent)
+
+async function load(channelId: string, run: number) {
+  const current = term
+  if (!current || run !== generation) return
+  view.value = connecting()
+  let list: TerminalTab[]
+  try {
+    list = await terminalTabs(channelId)
+  } catch (error) {
+    if (run === generation) view.value = failed(view.value, error)
+    return
+  }
+  if (run !== generation) return
+  if (list.length === 0) {
+    await attach(
+      run,
+      (cols, rows, onEvent) => terminalCreate(channelId, cols, rows, onEvent),
+      (result) => {
+        tabs.value = [tabOf(result)]
+        setActive(result.sessionId)
+      },
+    )
+    return
+  }
+  tabs.value = list
+  const id = pickActive(list, recallActive(channelId))!
+  setActive(id)
+  await attach(run, openTab(id))
 }
 
 function start(channelId: string) {
   const run = ++generation
   attached = null
-  queue = queue.then(() => attach(channelId, run)).catch(ignore)
+  tabs.value = []
+  activeId.value = null
+  refusal.value = ''
+  queue = queue.then(() => load(channelId, run)).catch(ignore)
+}
+
+/** Stop the stream of the shown session. The session keeps running. */
+function detachCurrent() {
+  if (attached) void terminalDetach(attached).catch(ignore)
+  attached = null
+}
+
+function selectTab(id: string) {
+  if (id === activeId.value) return
+  detachCurrent()
+  setActive(id)
+  const run = ++generation
+  queue = queue.then(() => attach(run, openTab(id))).catch(ignore)
+}
+
+function addTab() {
+  if (!canAddTab(tabs.value.length)) return
+  const channelId = props.channelId
+  const previous = activeId.value
+  detachCurrent()
+  const run = ++generation
+  queue = queue
+    .then(async () => {
+      const failure = await attach(
+        run,
+        (cols, rows, onEvent) => terminalCreate(channelId, cols, rows, onEvent),
+        (result) => {
+          tabs.value = [...tabs.value, tabOf(result)]
+          setActive(result.sessionId)
+        },
+      )
+      // The backend refused the tab. Show the tab that was open and tell the user why.
+      if (failure && previous && run === generation) {
+        await attach(run, openTab(previous))
+        refusal.value = String(failure.error)
+      }
+    })
+    .catch(ignore)
+}
+
+async function closeTab(id: string) {
+  const wasActive = id === activeId.value
+  const next = wasActive ? nextActive(tabs.value, id) : activeId.value
+  if (wasActive) {
+    generation++
+    attached = null
+  }
+  await terminalClose(id).catch(ignore)
+  tabs.value = tabs.value.filter((tab) => tab.sessionId !== id)
+  if (!wasActive) return
+  if (!next) {
+    activeId.value = null
+    emit('hide')
+    return
+  }
+  setActive(next)
+  const run = ++generation
+  queue = queue.then(() => attach(run, openTab(next))).catch(ignore)
 }
 
 // Opening again moves the session to this window. The other window gets the moved notice.
 function showHere() {
-  start(props.channelId)
+  const id = activeId.value
+  if (!id) return
+  const run = ++generation
+  attached = null
+  queue = queue.then(() => attach(run, openTab(id))).catch(ignore)
 }
 
-async function restart() {
-  const id = props.channelId
-  generation++
+function restart() {
+  const id = activeId.value
+  if (!id) {
+    start(props.channelId)
+    return
+  }
+  const run = ++generation
   attached = null
-  await terminalClose(id).catch(ignore)
-  start(id)
+  queue = queue
+    .then(() =>
+      attach(
+        run,
+        (cols, rows, onEvent) => terminalRestart(id, cols, rows, onEvent),
+        (result) => {
+          tabs.value = tabs.value.map((tab) => (tab.sessionId === id ? tabOf(result) : tab))
+          setActive(result.sessionId)
+        },
+      ),
+    )
+    .catch(ignore)
 }
 
 async function kill() {
-  const id = props.channelId
-  generation++
-  attached = null
-  await terminalClose(id).catch(ignore)
+  const id = activeId.value
+  if (!id) return
+  try {
+    await terminalKill(id)
+  } catch (error) {
+    refusal.value = String(error)
+    return
+  }
+  if (activeId.value !== id) return
   view.value = { ...view.value, phase: 'closed', message: 'The session was killed.' }
+  markEnded(id)
 }
 
 function startDrag(event: PointerEvent) {
@@ -232,8 +414,8 @@ onMounted(() => {
 
 watch(
   () => props.channelId,
-  (next, previous) => {
-    if (previous) void terminalDetach(previous).catch(ignore)
+  (next) => {
+    detachCurrent()
     start(next)
   },
 )
@@ -244,8 +426,8 @@ onBeforeUnmount(() => {
   cancelAnimationFrame(frame)
   observers.forEach((observer) => observer.disconnect())
   observers = []
-  const id = attached ?? props.channelId
-  void terminalDetach(id).catch(ignore)
+  const id = attached ?? activeId.value
+  if (id) void terminalDetach(id).catch(ignore)
   term?.dispose()
   term = null
   fit = null
@@ -276,27 +458,57 @@ defineExpose({ restart, kill, view })
       @pointerdown.prevent="startDrag"
       @keydown="resizeFromKeyboard"
     />
+    <div
+      data-testid="terminal-tabs"
+      role="tablist"
+      aria-label="Terminal tabs"
+      class="flex h-8 shrink-0 items-center gap-0.5 overflow-x-auto border-b border-border/60 px-2 text-xs"
+    >
+      <div
+        v-for="tab in tabs"
+        :key="tab.sessionId"
+        data-testid="terminal-tab"
+        role="tab"
+        tabindex="0"
+        :aria-selected="tab.sessionId === activeId"
+        class="group flex h-6 shrink-0 cursor-pointer items-center gap-1 rounded px-2 hover:bg-muted"
+        :class="tab.sessionId === activeId ? 'bg-muted text-foreground' : 'text-muted-foreground'"
+        @click="selectTab(tab.sessionId)"
+        @keydown.enter.prevent="selectTab(tab.sessionId)"
+        @keydown.space.prevent="selectTab(tab.sessionId)"
+      >
+        <span :class="{ 'opacity-60': !tab.running }">{{ tabName(tab.number) }}</span>
+        <button
+          type="button"
+          data-testid="terminal-tab-close"
+          class="rounded p-0.5 hover:bg-border"
+          :aria-label="`Close ${tabName(tab.number)}`"
+          @click.stop="closeTab(tab.sessionId)"
+        >
+          <X class="size-3" aria-hidden="true" />
+        </button>
+      </div>
+      <Button
+        data-testid="terminal-new-tab"
+        variant="ghost"
+        size="icon-xs"
+        aria-label="New terminal tab"
+        :disabled="tabsFull"
+        :title="tabsFull ? TAB_LIMIT_REASON : 'New terminal tab'"
+        @click="addTab"
+      >
+        <Plus />
+      </Button>
+    </div>
     <header class="flex h-8 shrink-0 items-center gap-1.5 border-b border-border/60 px-3 text-xs">
       <SquareTerminal class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
       <span
         data-testid="terminal-cwd"
         class="min-w-0 flex-1 truncate font-mono text-muted-foreground"
-        :title="view.cwd"
+        :title="activeCwd"
       >
         {{ cwdText }}
       </span>
-      <!-- TODO: Add several terminal sessions per channel with a tab strip. The backend holds one session per channel. -->
-      <Button
-        data-testid="terminal-new-tab"
-        variant="ghost"
-        size="xs"
-        disabled
-        aria-label="New Terminal Tab (Soon)"
-        title="New Terminal Tab · Soon"
-      >
-        <Plus />
-        <span class="hidden sm:inline">New Terminal Tab · Soon</span>
-      </Button>
       <Button
         v-if="canRestart(view)"
         data-testid="terminal-restart"

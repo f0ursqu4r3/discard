@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import type { ThemeDto } from '@/bridge/types'
 import { activeTheme } from '@/bridge/theme'
 import TerminalPanel from '../TerminalPanel.vue'
-import { heightKey } from '../terminal-state'
+import { TAB_LIMIT_REASON, heightKey, rememberActive } from '../terminal-state'
 
 const mocks = vi.hoisted(() => {
   class FakeTerminal {
@@ -91,6 +91,7 @@ class ResizeObserverStub {
 const bytes = (text: string) => btoa(text)
 const opened = (overrides: Record<string, unknown> = {}) => ({
   sessionId: 's1',
+  number: 1,
   cwd: '/Users/dev/project',
   scrollback: '',
   running: true,
@@ -98,6 +99,36 @@ const opened = (overrides: Record<string, unknown> = {}) => ({
   signal: null,
   ...overrides,
 })
+const tab = (sessionId: string, number: number, overrides: Record<string, unknown> = {}) => ({
+  sessionId,
+  number,
+  cwd: '/Users/dev/project',
+  running: true,
+  exitCode: null,
+  signal: null,
+  ...overrides,
+})
+const numberOf = (sessionId: string) => Number(sessionId.replace(/\D/g, '')) || 1
+// The backend double: it answers the tab commands. Tests replace the tab list or single answers.
+const backend = {
+  tabs: [] as ReturnType<typeof tab>[],
+  created: 0,
+  answers: {} as Record<string, (args: Record<string, unknown>) => unknown>,
+}
+async function answer(command: string, args?: Record<string, unknown>) {
+  const custom = backend.answers[command]
+  if (custom) return custom(args ?? {})
+  const id = String(args?.sessionId ?? 's1')
+  if (command === 'terminal_tabs') return backend.tabs
+  if (command === 'terminal_create') {
+    backend.created++
+    const sessionId = `n${backend.created}`
+    return opened({ sessionId, number: backend.tabs.length + backend.created })
+  }
+  if (command === 'terminal_open') return opened({ sessionId: id, number: numberOf(id) })
+  if (command === 'terminal_restart') return opened({ sessionId: `${id}r`, number: numberOf(id) })
+  return undefined
+}
 const calls = (name: string) => vi.mocked(invoke).mock.calls.filter(([command]) => command === name)
 const term = () => mocks.FakeTerminal.instances.at(-1)!
 const views: ReturnType<typeof mount>[] = []
@@ -123,8 +154,13 @@ function stream(index = -1) {
 beforeEach(() => {
   vi.stubGlobal('ResizeObserver', ResizeObserverStub)
   vi.mocked(invoke).mockReset()
-  vi.mocked(invoke).mockImplementation(async (command) =>
-    command === 'terminal_open' ? opened() : undefined,
+  backend.tabs = [tab('s1', 1)]
+  backend.created = 0
+  backend.answers = {}
+  // The window remembers the active tab per channel. Each test starts without it.
+  for (const channel of ['c1', 'c2']) rememberActive(channel, '')
+  vi.mocked(invoke).mockImplementation(async (command, args) =>
+    answer(command, args as Record<string, unknown>),
   )
   mocks.FakeTerminal.instances.length = 0
   mocks.channels.length = 0
@@ -138,11 +174,11 @@ afterEach(() => {
   document.body.innerHTML = ''
 })
 
-test('it opens the channel session at the terminal size and shows the short folder', async () => {
+test('it opens the tab at the terminal size and shows the short folder', async () => {
   const view = show()
   await flushPromises()
   expect(calls('terminal_open')).toHaveLength(1)
-  expect(calls('terminal_open')[0]![1]).toMatchObject({ channelId: 'c1', cols: 80, rows: 24 })
+  expect(calls('terminal_open')[0]![1]).toMatchObject({ sessionId: 's1', cols: 80, rows: 24 })
   expect(view.get('[data-testid="terminal-cwd"]').text()).toBe('~/project')
   expect(view.get('[data-testid="terminal-cwd"]').attributes('title')).toBe('/Users/dev/project')
   expect(term().focused).toBe(1)
@@ -150,13 +186,10 @@ test('it opens the channel session at the terminal size and shows the short fold
 
 test('the scrollback is drawn first, then output that arrived while it opened, in order', async () => {
   let finish!: (value: unknown) => void
-  vi.mocked(invoke).mockImplementation((command) =>
-    command === 'terminal_open'
-      ? new Promise((resolve) => {
-          finish = resolve
-        })
-      : Promise.resolve(undefined),
-  )
+  backend.answers.terminal_open = () =>
+    new Promise((resolve) => {
+      finish = resolve
+    })
   show()
   await flushPromises()
   // Output can reach the page before the open call returns.
@@ -192,7 +225,7 @@ test('keystrokes go to the shell one call at a time and in order', async () => {
     's',
     '\r',
   ])
-  expect(calls('terminal_write')[0]![1]).toMatchObject({ channelId: 'c1' })
+  expect(calls('terminal_write')[0]![1]).toMatchObject({ sessionId: 's1' })
 })
 
 test('a resize of the terminal reaches the session', async () => {
@@ -200,11 +233,11 @@ test('a resize of the terminal reaches the session', async () => {
   await flushPromises()
   term().resizeHandler({ cols: 120, rows: 40 })
   expect(calls('terminal_resize')).toEqual([
-    ['terminal_resize', { channelId: 'c1', cols: 120, rows: 40 }],
+    ['terminal_resize', { sessionId: 's1', cols: 120, rows: 40 }],
   ])
 })
 
-test('a shell that exits shows its code and a Restart button, and Restart starts a new session', async () => {
+test('a shell that exits shows its code and a Restart button, and Restart starts a new shell in the tab', async () => {
   const view = show()
   await flushPromises()
   expect(view.find('[data-testid="terminal-restart"]').exists()).toBe(false)
@@ -220,33 +253,31 @@ test('a shell that exits shows its code and a Restart button, and Restart starts
 
   await view.get('[data-testid="terminal-restart"]').trigger('click')
   await flushPromises()
-  const order = vi.mocked(invoke).mock.calls.map(([command]) => command)
-  expect(order.indexOf('terminal_close')).toBeGreaterThan(-1)
-  expect(order.lastIndexOf('terminal_open')).toBeGreaterThan(order.indexOf('terminal_close'))
-  expect(calls('terminal_open')).toHaveLength(2)
+  expect(calls('terminal_restart')).toHaveLength(1)
+  expect(calls('terminal_restart')[0]![1]).toMatchObject({ sessionId: 's1', cols: 80, rows: 24 })
+  expect(calls('terminal_close')).toHaveLength(0)
   expect(term().resets).toBe(2)
   expect(view.find('[data-testid="terminal-status"]').exists()).toBe(false)
   expect(view.find('[data-testid="terminal-kill"]').exists()).toBe(true)
 })
 
 test('a session that had already ended opens as exited with its scrollback', async () => {
-  vi.mocked(invoke).mockImplementation(async (command) =>
-    command === 'terminal_open'
-      ? opened({ running: false, exitCode: 0, scrollback: bytes('done\r\n') })
-      : undefined,
-  )
+  backend.answers.terminal_open = () =>
+    opened({ running: false, exitCode: 0, scrollback: bytes('done\r\n') })
   const view = show()
   await flushPromises()
   expect(term().text()).toBe('done\r\n')
   expect(view.find('[data-testid="terminal-restart"]').exists()).toBe(true)
 })
 
-test('Kill closes the session and offers Restart', async () => {
+test('Kill calls terminal_kill and keeps the tab as closed', async () => {
   const view = show()
   await flushPromises()
   await view.get('[data-testid="terminal-kill"]').trigger('click')
   await flushPromises()
-  expect(calls('terminal_close')).toEqual([['terminal_close', { channelId: 'c1' }]])
+  expect(calls('terminal_kill')).toEqual([['terminal_kill', { sessionId: 's1' }]])
+  expect(calls('terminal_close')).toHaveLength(0)
+  expect(view.findAll('[data-testid="terminal-tab"]')).toHaveLength(1)
   expect(view.get('[data-testid="terminal-status"]').text()).toBe('The session was killed.')
   expect(view.find('[data-testid="terminal-restart"]').exists()).toBe(true)
 })
@@ -301,10 +332,8 @@ test('a moved terminal offers only Show Here: no Kill and no Restart, whatever t
   expect(calls('terminal_close')).toHaveLength(0)
 })
 
-test('Show Here opens the terminal of the channel again and removes the notice', async () => {
-  vi.mocked(invoke).mockImplementation(async (command) =>
-    command === 'terminal_open' ? opened({ scrollback: bytes('kept') }) : undefined,
-  )
+test('Show Here opens the tab again and removes the notice', async () => {
+  backend.answers.terminal_open = () => opened({ scrollback: bytes('kept') })
   const view = show()
   await flushPromises()
   stream().onmessage({ kind: 'moved' })
@@ -313,14 +342,14 @@ test('Show Here opens the terminal of the channel again and removes the notice',
   await view.get('[data-testid="terminal-show-here"]').trigger('click')
   await flushPromises()
   expect(calls('terminal_open')).toHaveLength(2)
-  expect(calls('terminal_open')[1]![1]).toMatchObject({ channelId: 'c1' })
+  expect(calls('terminal_open')[1]![1]).toMatchObject({ sessionId: 's1' })
   expect(view.find('[data-testid="terminal-status"]').exists()).toBe(false)
   expect(view.find('[data-testid="terminal-show-here"]').exists()).toBe(false)
   expect(term().text()).toBe('kept')
   // The session is shown here again, so keystrokes flow.
   term().dataHandler('y')
   await flushPromises()
-  expect(calls('terminal_write')[0]![1]).toMatchObject({ channelId: 'c1', data: 'y' })
+  expect(calls('terminal_write')[0]![1]).toMatchObject({ sessionId: 's1', data: 'y' })
 })
 
 test('an open that fails shows the error and offers Restart', async () => {
@@ -334,29 +363,28 @@ test('an open that fails shows the error and offers Restart', async () => {
 })
 
 test('a channel switch detaches the old session, clears the view, and replays the new scrollback', async () => {
-  vi.mocked(invoke).mockImplementation(async (command, args) =>
-    command === 'terminal_open'
-      ? opened({
-          scrollback: bytes(
-            (args as { channelId: string }).channelId === 'c2' ? 'second' : 'first',
-          ),
-        })
-      : undefined,
-  )
+  backend.answers.terminal_tabs = (args) => [
+    tab((args.channelId as string) === 'c2' ? 's9' : 's1', 1),
+  ]
+  backend.answers.terminal_open = (args) =>
+    opened({
+      sessionId: args.sessionId,
+      scrollback: bytes(args.sessionId === 's9' ? 'second' : 'first'),
+    })
   const view = show()
   await flushPromises()
   expect(term().text()).toBe('first')
   await view.setProps({ channelId: 'c2' })
   await flushPromises()
-  expect(calls('terminal_detach')).toEqual([['terminal_detach', { channelId: 'c1' }]])
+  expect(calls('terminal_detach')).toEqual([['terminal_detach', { sessionId: 's1' }]])
   expect(
-    calls('terminal_open').map(([, args]) => (args as { channelId: string }).channelId),
-  ).toEqual(['c1', 'c2'])
+    calls('terminal_open').map(([, args]) => (args as { sessionId: string }).sessionId),
+  ).toEqual(['s1', 's9'])
   expect(term().text()).toBe('second')
   // Input now goes to the new channel.
   term().dataHandler('y')
   await flushPromises()
-  expect(calls('terminal_write')[0]![1]).toMatchObject({ channelId: 'c2' })
+  expect(calls('terminal_write')[0]![1]).toMatchObject({ sessionId: 's9' })
   expect(mocks.FakeTerminal.instances).toHaveLength(1)
 })
 
@@ -378,22 +406,207 @@ test('hiding detaches from the session without killing it and disposes xterm', a
   view.unmount()
   views.pop()
   expect(term().disposed).toBe(true)
-  expect(calls('terminal_detach')).toEqual([['terminal_detach', { channelId: 'c1' }]])
+  expect(calls('terminal_detach')).toEqual([['terminal_detach', { sessionId: 's1' }]])
   expect(calls('terminal_close')).toHaveLength(0)
 })
 
-test('New Terminal Tab is visible, disabled, labelled Soon, and has no handler', async () => {
+const tabsOf = (view: ReturnType<typeof mount>) => view.findAll('[data-testid="terminal-tab"]')
+const eight = () => Array.from({ length: 8 }, (_, index) => tab(`s${index + 1}`, index + 1))
+
+test('it lists the tabs of the channel and opens the remembered one', async () => {
+  backend.tabs = [tab('s1', 1), tab('s2', 2), tab('s3', 4)]
+  const first = show()
+  await flushPromises()
+  expect(first.find('[data-testid="terminal-tabs"]').exists()).toBe(true)
+  expect(tabsOf(first).map((entry) => entry.text())).toEqual([
+    'Terminal 1',
+    'Terminal 2',
+    'Terminal 4',
+  ])
+  expect(calls('terminal_open')[0]![1]).toMatchObject({ sessionId: 's1' })
+  await tabsOf(first)[2]!.trigger('click')
+  await flushPromises()
+  first.unmount()
+  views.pop()
+  vi.mocked(invoke).mockClear()
+  const second = show()
+  await flushPromises()
+  expect(calls('terminal_open')[0]![1]).toMatchObject({ sessionId: 's3' })
+  expect(tabsOf(second)[2]!.attributes('aria-selected')).toBe('true')
+  expect(tabsOf(second)[0]!.attributes('aria-selected')).toBe('false')
+  expect(calls('terminal_create')).toHaveLength(0)
+})
+
+test('a channel without tabs starts one with terminal_create', async () => {
+  backend.tabs = []
   const view = show()
   await flushPromises()
-  const planned = view.get('[data-testid="terminal-new-tab"]')
-  expect(planned.attributes('disabled')).toBeDefined()
-  expect(planned.text()).toContain('New Terminal Tab')
-  expect(planned.text()).toContain('Soon')
-  expect(planned.text()).not.toContain('TODO')
-  const before = vi.mocked(invoke).mock.calls.length
-  await planned.trigger('click')
-  expect(vi.mocked(invoke).mock.calls.length).toBe(before)
-  expect(view.emitted()).not.toHaveProperty('new-tab')
+  expect(calls('terminal_create')).toHaveLength(1)
+  expect(calls('terminal_create')[0]![1]).toMatchObject({ channelId: 'c1', cols: 80, rows: 24 })
+  expect(calls('terminal_open')).toHaveLength(0)
+  expect(tabsOf(view)).toHaveLength(1)
+  expect(tabsOf(view)[0]!.attributes('aria-selected')).toBe('true')
+})
+
+test('+ creates a tab and makes it active', async () => {
+  const view = show()
+  await flushPromises()
+  await view.get('[data-testid="terminal-new-tab"]').trigger('click')
+  await flushPromises()
+  expect(calls('terminal_create')).toHaveLength(1)
+  expect(calls('terminal_create')[0]![1]).toMatchObject({ channelId: 'c1' })
+  expect(calls('terminal_detach')).toEqual([['terminal_detach', { sessionId: 's1' }]])
+  expect(tabsOf(view)).toHaveLength(2)
+  expect(tabsOf(view)[1]!.attributes('aria-selected')).toBe('true')
+  expect(tabsOf(view)[0]!.attributes('aria-selected')).toBe('false')
+  term().dataHandler('z')
+  await flushPromises()
+  expect(calls('terminal_write')[0]![1]).toMatchObject({ sessionId: 'n1', data: 'z' })
+})
+
+test('+ is disabled with the limit reason at 8 tabs', async () => {
+  backend.tabs = eight()
+  const view = show()
+  await flushPromises()
+  const add = view.get('[data-testid="terminal-new-tab"]')
+  expect(add.attributes('disabled')).toBeDefined()
+  expect(add.attributes('title')).toBe(TAB_LIMIT_REASON)
+  await add.trigger('click')
+  expect(calls('terminal_create')).toHaveLength(0)
+})
+
+test('a backend refusal of the ninth tab shows its message', async () => {
+  backend.answers.terminal_create = () => Promise.reject('A channel can have 8 terminals.')
+  const view = show()
+  await flushPromises()
+  await view.get('[data-testid="terminal-new-tab"]').trigger('click')
+  await flushPromises()
+  expect(view.get('[data-testid="terminal-status"]').text()).toBe('A channel can have 8 terminals.')
+  expect(tabsOf(view)).toHaveLength(1)
+  expect(tabsOf(view)[0]!.attributes('aria-selected')).toBe('true')
+  // The kept tab shows again and takes input.
+  expect(calls('terminal_open').at(-1)![1]).toMatchObject({ sessionId: 's1' })
+  term().dataHandler('k')
+  await flushPromises()
+  expect(calls('terminal_write')[0]![1]).toMatchObject({ sessionId: 's1' })
+})
+
+test('switching tabs detaches the old session and opens the new one', async () => {
+  backend.tabs = [tab('s1', 1), tab('s2', 2)]
+  backend.answers.terminal_open = (args) =>
+    opened({ sessionId: args.sessionId, scrollback: bytes(`out-${args.sessionId}`) })
+  const view = show()
+  await flushPromises()
+  expect(term().text()).toBe('out-s1')
+  await tabsOf(view)[1]!.trigger('click')
+  await flushPromises()
+  const order = vi
+    .mocked(invoke)
+    .mock.calls.filter(([command]) => command === 'terminal_detach' || command === 'terminal_open')
+    .map(([command, args]) => `${command}:${(args as { sessionId: string }).sessionId}`)
+  expect(order).toEqual(['terminal_open:s1', 'terminal_detach:s1', 'terminal_open:s2'])
+  expect(term().text()).toBe('out-s2')
+  expect(tabsOf(view)[1]!.attributes('aria-selected')).toBe('true')
+  expect(view.get('[data-testid="terminal-cwd"]').text()).toBe('~/project')
+})
+
+test('closing an inactive tab keeps the active stream', async () => {
+  backend.tabs = [tab('s1', 1), tab('s2', 2)]
+  const view = show()
+  await flushPromises()
+  await tabsOf(view)[1]!.get('[data-testid="terminal-tab-close"]').trigger('click')
+  await flushPromises()
+  expect(calls('terminal_close')).toEqual([['terminal_close', { sessionId: 's2' }]])
+  expect(calls('terminal_detach')).toHaveLength(0)
+  expect(calls('terminal_open')).toHaveLength(1)
+  expect(tabsOf(view)).toHaveLength(1)
+  stream().onmessage({ kind: 'output', data: bytes('still live') })
+  expect(term().text()).toBe('still live')
+})
+
+test('closing the active tab opens its neighbour', async () => {
+  backend.tabs = [tab('s1', 1), tab('s2', 2), tab('s3', 3)]
+  const view = show()
+  await flushPromises()
+  await tabsOf(view)[1]!.trigger('click')
+  await flushPromises()
+  await tabsOf(view)[1]!.get('[data-testid="terminal-tab-close"]').trigger('click')
+  await flushPromises()
+  expect(calls('terminal_close')).toEqual([['terminal_close', { sessionId: 's2' }]])
+  expect(calls('terminal_open').at(-1)![1]).toMatchObject({ sessionId: 's3' })
+  expect(tabsOf(view).map((entry) => entry.text())).toEqual(['Terminal 1', 'Terminal 3'])
+  expect(tabsOf(view)[1]!.attributes('aria-selected')).toBe('true')
+  expect(view.emitted('hide')).toBeUndefined()
+})
+
+test('closing the last tab emits hide', async () => {
+  const view = show()
+  await flushPromises()
+  await tabsOf(view)[0]!.get('[data-testid="terminal-tab-close"]').trigger('click')
+  await flushPromises()
+  expect(calls('terminal_close')).toEqual([['terminal_close', { sessionId: 's1' }]])
+  expect(view.emitted('hide')).toHaveLength(1)
+  expect(tabsOf(view)).toHaveLength(0)
+})
+
+test('Restart calls terminal_restart and keeps the tab in place', async () => {
+  backend.tabs = [tab('s1', 1), tab('s2', 2), tab('s3', 3)]
+  const view = show()
+  await flushPromises()
+  await tabsOf(view)[1]!.trigger('click')
+  await flushPromises()
+  stream().onmessage({ kind: 'exit', exitCode: 0, signal: null })
+  await flushPromises()
+  await view.get('[data-testid="terminal-restart"]').trigger('click')
+  await flushPromises()
+  expect(calls('terminal_restart')[0]![1]).toMatchObject({ sessionId: 's2' })
+  expect(tabsOf(view).map((entry) => entry.text())).toEqual([
+    'Terminal 1',
+    'Terminal 2',
+    'Terminal 3',
+  ])
+  expect(tabsOf(view)[1]!.attributes('aria-selected')).toBe('true')
+  // The tab takes the new session id.
+  term().dataHandler('r')
+  await flushPromises()
+  expect(calls('terminal_write')[0]![1]).toMatchObject({ sessionId: 's2r' })
+})
+
+test('a failed restart shows the error and keeps the tab', async () => {
+  backend.answers.terminal_restart = () => Promise.reject('Could not start the shell /bin/zsh')
+  const view = show()
+  await flushPromises()
+  stream().onmessage({ kind: 'exit', exitCode: 1, signal: null })
+  await flushPromises()
+  await view.get('[data-testid="terminal-restart"]').trigger('click')
+  await flushPromises()
+  expect(view.get('[data-testid="terminal-status"]').text()).toBe(
+    'Could not start the shell /bin/zsh',
+  )
+  expect(tabsOf(view)).toHaveLength(1)
+  expect(tabsOf(view)[0]!.text()).toBe('Terminal 1')
+  expect(view.find('[data-testid="terminal-restart"]').exists()).toBe(true)
+})
+
+test('a channel switch detaches only the active tab and recalls the remembered tab on return', async () => {
+  backend.answers.terminal_tabs = (args) =>
+    args.channelId === 'c1' ? [tab('s1', 1), tab('s2', 2)] : [tab('s7', 1)]
+  const view = show()
+  await flushPromises()
+  await tabsOf(view)[1]!.trigger('click')
+  await flushPromises()
+  vi.mocked(invoke).mockClear()
+  await view.setProps({ channelId: 'c2' })
+  await flushPromises()
+  expect(calls('terminal_detach')).toEqual([['terminal_detach', { sessionId: 's2' }]])
+  expect(calls('terminal_open')[0]![1]).toMatchObject({ sessionId: 's7' })
+  vi.mocked(invoke).mockClear()
+  await view.setProps({ channelId: 'c1' })
+  await flushPromises()
+  expect(calls('terminal_detach')).toEqual([['terminal_detach', { sessionId: 's7' }]])
+  expect(calls('terminal_open')[0]![1]).toMatchObject({ sessionId: 's2' })
+  expect(tabsOf(view)[1]!.attributes('aria-selected')).toBe('true')
+  expect(calls('terminal_close')).toHaveLength(0)
 })
 
 test('the app theme sets colors, font, and size, and a theme change restyles the live terminal', async () => {
