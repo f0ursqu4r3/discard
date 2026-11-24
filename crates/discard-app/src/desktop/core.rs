@@ -1194,9 +1194,12 @@ impl AppCore {
         };
         if stranded.is_empty() || candidates.is_empty() { return false; }
         // A busy channel still counts when it looks for conflicts, so its target stays unclaimed until it moves.
+        // A channel without a creation time moves nothing: an old rename could belong to another branch.
+        let edges = discard_core::branch_actions::rename_edges(repo_path, &candidates);
         let mut targets: Vec<(ChannelId, String, String)> = Vec::new();
         for (id, old) in stranded {
-            if let Some(new) = discard_core::branch_actions::renamed_to(repo_path, &old, &candidates) { targets.push((id, old, new)); }
+            let Some(created) = id.created_at() else { continue };
+            if let Some(new) = discard_core::branch_actions::follow_rename(&edges, &old, &candidates, created) { targets.push((id, old, new)); }
         }
         let mut moved = false;
         for (id, old, new) in &targets {

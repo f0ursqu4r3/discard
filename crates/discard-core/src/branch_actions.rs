@@ -127,30 +127,46 @@ pub fn commit_exists(repo: &Path, commit: &str) -> bool {
     git(repo, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).is_ok()
 }
 
-/// The listed branch that a rename made outside Discard turned `old` into. Git writes
-/// `Branch: renamed refs/heads/X to refs/heads/Y` to the reflog of the new branch. The reflogs of the `listed`
-/// branches give rename edges X to Y, and chains of renames join them. The answer is the one listed branch that
-/// the edges reach from `old`. It is `None` when no listed branch or more than one is reachable. A reflog that
-/// Git cannot read gives no edges.
-pub fn renamed_to(repo: &Path, old: &str, listed: &[String]) -> Option<String> {
-    use std::collections::{HashMap, HashSet};
-    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+/// One rename that Git recorded in a branch reflog: `from` became `to` at `at` (Unix seconds).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameEdge { pub from: String, pub to: String, pub at: i64 }
+
+/// The renames that the reflogs of the `listed` branches hold. Git writes
+/// `Branch: renamed refs/heads/X to refs/heads/Y` to the reflog of the new branch. Each reflog is read once.
+/// A reflog that Git cannot read gives no edges.
+pub fn rename_edges(repo: &Path, listed: &[String]) -> Vec<RenameEdge> {
+    let mut edges = Vec::new();
     for name in listed {
-        let Ok(log) = git(repo, &["reflog", "show", "--format=%gs", &format!("refs/heads/{name}"), "--"]) else { continue };
+        let Ok(log) = git(repo, &["reflog", "show", "--date=unix", "--format=%gd%x09%gs", &format!("refs/heads/{name}"), "--"]) else { continue };
         for line in log.lines() {
-            let Some(rest) = line.strip_prefix("Branch: renamed refs/heads/") else { continue };
+            let Some((selector, subject)) = line.split_once('\t') else { continue };
+            let Some(rest) = subject.strip_prefix("Branch: renamed refs/heads/") else { continue };
             let Some((from, to)) = rest.split_once(" to refs/heads/") else { continue };
-            edges.entry(from.to_owned()).or_default().push(to.to_owned());
+            let Some(at) = selector.rsplit_once("@{").and_then(|(_, time)| time.strip_suffix('}')).and_then(|time| time.parse::<i64>().ok()) else { continue };
+            edges.push(RenameEdge { from: from.to_owned(), to: to.to_owned(), at });
         }
     }
-    let mut seen: HashSet<&str> = HashSet::from([old]);
-    let mut queue = vec![old];
-    while let Some(from) = queue.pop() {
-        for to in edges.get(from).into_iter().flatten() {
-            if seen.insert(to) { queue.push(to); }
+    edges
+}
+
+/// The listed branch that renames turned `old` into. A chain of renames counts only when each edge is at or after
+/// `not_before` and no edge is older than the one before it. The answer is the one listed branch that such a chain
+/// reaches. It is `None` when no listed branch or more than one is reachable.
+pub fn follow_rename(edges: &[RenameEdge], old: &str, listed: &[String], not_before: i64) -> Option<String> {
+    use std::collections::HashMap;
+    // The earliest time at which each name is reachable. A name reached earlier allows every later edge.
+    let mut reached_at: HashMap<&str, i64> = HashMap::from([(old, not_before)]);
+    let mut queue = vec![(old, not_before)];
+    while let Some((from, since)) = queue.pop() {
+        if reached_at.get(from).is_some_and(|best| *best < since) { continue; }
+        for edge in edges.iter().filter(|edge| edge.from == from && edge.at >= since) {
+            if reached_at.get(edge.to.as_str()).is_none_or(|best| edge.at < *best) {
+                reached_at.insert(&edge.to, edge.at);
+                queue.push((&edge.to, edge.at));
+            }
         }
     }
-    let mut reached = listed.iter().filter(|name| name.as_str() != old && seen.contains(name.as_str()));
+    let mut reached = listed.iter().filter(|name| name.as_str() != old && reached_at.contains_key(name.as_str()));
     match (reached.next(), reached.next()) {
         (Some(only), None) => Some(only.clone()),
         _ => None,
@@ -369,7 +385,7 @@ mod tests {
         let r = rig();
         run(&r.repo, &["branch", "a"]);
         run(&r.repo, &["branch", "-m", "a", "b"]);
-        assert_eq!(renamed_to(&r.repo, "a", &branches(&r.repo)), Some("b".to_string()));
+        assert_eq!(follow_rename(&rename_edges(&r.repo, &branches(&r.repo)), "a", &branches(&r.repo), 0), Some("b".to_string()));
     }
 
     #[test]
@@ -378,7 +394,7 @@ mod tests {
         run(&r.repo, &["branch", "a"]);
         run(&r.repo, &["branch", "-m", "a", "b"]);
         run(&r.repo, &["branch", "-m", "b", "c"]);
-        assert_eq!(renamed_to(&r.repo, "a", &branches(&r.repo)), Some("c".to_string()));
+        assert_eq!(follow_rename(&rename_edges(&r.repo, &branches(&r.repo)), "a", &branches(&r.repo), 0), Some("c".to_string()));
     }
 
     #[test]
@@ -386,7 +402,7 @@ mod tests {
         let r = rig();
         run(&r.repo, &["branch", "a"]);
         run(&r.repo, &["branch", "-D", "a"]);
-        assert_eq!(renamed_to(&r.repo, "a", &branches(&r.repo)), None);
+        assert_eq!(follow_rename(&rename_edges(&r.repo, &branches(&r.repo)), "a", &branches(&r.repo), 0), None);
     }
 
     #[test]
@@ -396,6 +412,18 @@ mod tests {
         run(&r.repo, &["branch", "-m", "a", "b"]);
         run(&r.repo, &["branch", "a"]);
         run(&r.repo, &["branch", "-m", "a", "c"]);
-        assert_eq!(renamed_to(&r.repo, "a", &branches(&r.repo)), None);
+        assert_eq!(follow_rename(&rename_edges(&r.repo, &branches(&r.repo)), "a", &branches(&r.repo), 0), None);
+    }
+
+    #[test]
+    fn follow_rename_walks_edges_in_memory_and_checks_time() {
+        let edge = |from: &str, to: &str, at: i64| RenameEdge { from: from.into(), to: to.into(), at };
+        let listed = vec!["c".to_string(), "x".to_string()];
+        let edges = [edge("a", "b", 10), edge("b", "c", 12), edge("a", "x", 5)];
+        assert_eq!(follow_rename(&edges, "a", &listed[..1], 10), Some("c".into()));
+        assert_eq!(follow_rename(&edges, "a", &listed[..1], 11), None, "the first edge is older than the channel");
+        assert_eq!(follow_rename(&[edge("a", "b", 12), edge("b", "c", 10)], "a", &listed[..1], 0), None, "an older edge cannot follow a newer one");
+        assert_eq!(follow_rename(&edges, "a", &listed, 0), None, "two listed names are reachable");
+        assert_eq!(follow_rename(&[edge("a", "c", 7)], "a", &listed, 7), Some("c".into()), "the same second counts");
     }
 }

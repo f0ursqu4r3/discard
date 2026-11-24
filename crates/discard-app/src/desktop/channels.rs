@@ -2374,7 +2374,7 @@ mod tests {
         assert!(matches!(receivers.lock().unwrap()[0].try_recv(), Err(mpsc::error::TryRecvError::Empty)));
     }
 
-    struct RenameRig { repo: tempfile::TempDir, store: Arc<Mutex<Store>>, core: Arc<AppCore>, project: ProjectId, channels: Vec<(String, String)> }
+    struct RenameRig { repo: tempfile::TempDir, store: Arc<Mutex<Store>>, core: Arc<AppCore>, service: Channels, project: ProjectId, channels: Vec<(String, String)> }
     impl RenameRig {
         /// A repository with `main` and each named branch, and one branch channel for each named branch.
         async fn new(names: &[&str]) -> Self {
@@ -2398,7 +2398,20 @@ mod tests {
                 let key = core.snapshot(&ViewId::main()).branches.iter().find(|row| row.label == *name).unwrap().key.clone();
                 channels.push(((*name).to_owned(), service.open_branch(&ViewId::main(), &key).unwrap()));
             }
-            Self { repo, store, core, project: project.id, channels }
+            Self { repo, store, core, service, project: project.id, channels }
+        }
+        /// Open a branch channel for a branch that exists now.
+        fn open(&mut self, name: &str) {
+            self.refresh();
+            let key = self.core.snapshot(&ViewId::main()).branches.iter().find(|row| row.label == name).unwrap().key.clone();
+            self.channels.push((name.to_owned(), self.service.open_branch(&ViewId::main(), &key).unwrap()));
+        }
+        /// Run Git with a fixed committer date, so a reflog entry can be old.
+        fn git_at(&self, date: &str, args: &[&str]) {
+            let output = discard_core::process::spawn_std(std::process::Command::new("git")
+                .args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
+                .args(args).env("GIT_COMMITTER_DATE", date).current_dir(self.repo.path()).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())).and_then(|child| child.wait_with_output()).unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         }
         fn id(&self, name: &str) -> String { self.channels.iter().find(|(n, _)| n == name).unwrap().1.clone() }
         fn git(&self, args: &[&str]) { git_in(self.repo.path(), args); }
@@ -2489,6 +2502,31 @@ mod tests {
         assert_eq!(rig.bound("a"), Some(a.clone()));
         assert_eq!(rig.bound("b"), Some(b.clone()));
         assert!(rig.notes(&a).is_empty() && rig.notes(&b).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_rename_older_than_the_channel_does_not_move_a_new_binding() {
+        let mut rig = RenameRig::new(&[]).await;
+        rig.git(&["branch", "wip"]);
+        rig.git_at("2020-01-01T00:00:00 +0000", &["branch", "-m", "wip", "feature-x"]);
+        rig.git(&["branch", "wip"]);
+        rig.open("wip");
+        let id = rig.id("wip");
+        rig.git(&["branch", "-D", "wip"]);
+        rig.refresh();
+        assert_eq!(rig.bound("wip"), Some(id.clone()));
+        assert_eq!(rig.bound("feature-x"), None);
+        assert!(rig.notes(&id).is_empty());
+    }
+
+    #[tokio::test]
+    async fn outside_rename_with_a_sibling_at_the_same_commit_moves_to_the_renamed_branch() {
+        let rig = RenameRig::new(&["a", "c"]).await;
+        let (a, c) = (rig.id("a"), rig.id("c"));
+        rig.git(&["branch", "-m", "a", "b"]);
+        rig.refresh();
+        assert_eq!(rig.bound("b"), Some(a));
+        assert_eq!(rig.bound("c"), Some(c));
     }
 }
 

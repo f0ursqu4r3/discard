@@ -22,6 +22,14 @@ macro_rules! text_id {
 text_id!(ProjectId);
 text_id!(AgentId);
 text_id!(ChannelId);
+
+impl ChannelId {
+    /// When the channel was created, in Unix seconds. The ID is a time-ordered UUID. `None` for any other ID.
+    pub fn created_at(&self) -> Option<i64> {
+        let (seconds, _) = uuid::Uuid::parse_str(&self.0).ok()?.get_timestamp()?.to_unix();
+        i64::try_from(seconds).ok()
+    }
+}
 text_id!(MessageId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
