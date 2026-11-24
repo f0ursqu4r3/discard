@@ -808,8 +808,10 @@ impl Channels {
             let request = if !approve { request } else {
                 use discard_core::write_requests::WriteRequestKind::{BranchCreate, ConversationMove, MainCheckoutWrite, WorktreeCreate};
                 match request.kind {
-                    // TODO: approve a branch creation (create the branch, then rebind the detached channels). Task 2.
-                    BranchCreate => requests.finish(id, Err("Branch creation is not available yet.".into())),
+                    BranchCreate => {
+                        let action = self.approve_branch_create(view, workspace, &channel_id, &request, &mut note).map_err(|error| format!("Branch creation failed: {error}"));
+                        requests.finish(id, action)
+                    }
                     ConversationMove => {
                         let action = self.approve_move(view, workspace, &channel_id, &request).map_err(|error| format!("Conversation move failed: {error}"));
                         requests.finish(id, action)
@@ -869,6 +871,38 @@ impl Channels {
             }
         }
         Ok(request)
+    }
+
+    /// Carry out an approved branch request. The gate runs again, and the name, the path and the commit must match the
+    /// request. The branch is created in the worktree, and the requesting channel becomes the branch channel. Returns
+    /// the result text.
+    fn approve_branch_create(&self, view: &ViewId, workspace: &discard_core::workspace::GitWorkspace, channel: &ChannelId, request: &discard_core::write_requests::WriteRequest, note: &mut Option<String>) -> Result<String, String> {
+        let agent = AgentId(request.agent_id.clone());
+        let (project, repository) = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            let project = store.load_channel(channel).map_err(|e| e.to_string())?.project_id;
+            let repository = store.project_channel_metadata(channel).map_err(|e| e.to_string())?.map(|metadata| metadata.repository).unwrap_or_default();
+            (project, repository)
+        };
+        let (path, commit, name) = workspace.branch_create_target(channel, &agent, project.as_ref(), &request.branch)?;
+        if request.branch != name || std::path::Path::new(&request.path) != path || request.commit.as_deref() != Some(commit.as_str()) {
+            return Err("The request target changed. Ask again.".into());
+        }
+        discard_core::branch_actions::create_branch(&path, &name).map_err(|e| e.to_string())?;
+        self.after_git(view);
+        let project = project.ok_or("Write requests require this conversation's project.")?;
+        let rebound = {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            // The saved path can differ from the canonical one, for example through a symbolic link.
+            match store.worktree_for(channel) {
+                Ok(Some(record)) => store.rebind_detached_to_branch(&project, &repository, &record.path, channel, &name).map_err(|e| e.to_string()),
+                Ok(None) => Err("the worktree binding is gone".to_string()),
+                Err(error) => Err(error.to_string()),
+            }
+        };
+        if let Err(error) = rebound { return Err(format!("The branch `{name}` exists, but this channel could not use it: {error}")); }
+        *note = Some(format!("Discard created the branch {name} at {commit}. This channel now uses it."));
+        Ok(format!("Created the branch `{name}`. This channel now uses it."))
     }
 
     /// Before an approval takes a pending move request, refuse a target channel that is loaded and busy. The request
@@ -1276,12 +1310,34 @@ impl Channels {
         let held = self.hold(&users)?;
         let result = (|| {
             let name = discard_core::branch_actions::validate_branch_name(&repo.path, name, None)?;
+            // A detached tree names itself by the short SHA of its HEAD. Read it before the switch.
+            let detached_label = entry.detached.then(|| entry.branch.clone());
             discard_core::branch_actions::create_branch(&root, &name)?;
+            if let Some(label) = detached_label {
+                self.rebind_detached_channel(project, &repo.id, &root, &label, &name)
+                    .map_err(|error| format!("The branch `{name}` exists, but its channel could not use it: {error}"))?;
+            }
             Ok(name)
         })();
         self.release(held);
         if result.is_ok() { self.after_git(view); }
         result
+    }
+
+    /// After a detached worktree got a branch: the active detached channel at the path whose record holds the old short
+    /// SHA becomes the branch channel. Other detached channels at the path stay as they are.
+    fn rebind_detached_channel(&self, project: &ProjectId, repository: &str, root: &std::path::Path, label: &str, branch: &str) -> Result<(), String> {
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let canonical = root.canonicalize().ok();
+        for channel in store.channels_for_project(project).map_err(|e| e.to_string())? {
+            if store.channel_archived(&channel.id).map_err(|e| e.to_string())? { continue; }
+            if !store.project_channel_metadata(&channel.id).map_err(|e| e.to_string())?.is_some_and(|metadata| metadata.kind == discard_core::model::ProjectChannelKind::Legacy) { continue; }
+            let Some(record) = store.worktree_for(&channel.id).map_err(|e| e.to_string())? else { continue };
+            let path = std::path::Path::new(&record.path);
+            if record.branch != label || !(path == root || (canonical.is_some() && path.canonicalize().ok() == canonical)) { continue; }
+            return store.rebind_detached_to_branch(project, repository, &record.path, &channel.id, branch).map_err(|e| e.to_string());
+        }
+        Ok(())
     }
 
     /// The files that Remove Worktree… would discard, or the reason the working tree cannot be removed.
@@ -2646,6 +2702,27 @@ mod navigation_action_tests {
         fn to_branch(&self, branch: &str, base_commit: &str) -> discard_core::write_requests::MoveTarget {
             discard_core::write_requests::MoveTarget::NewBranch { repository: String::new(), repo_path: self.repo.to_string_lossy().into_owned(), branch: branch.into(), base: "main".into(), base_commit: base_commit.into() }
         }
+        /// A detached linked worktree with its own channel, open, for a main agent that may edit files. Returns the
+        /// channel, the saved worktree path and the HEAD commit.
+        async fn detached_channel(&self) -> (ChannelId, String, String) {
+            let mut config = self.store.lock().unwrap().load_agent(&self.agent).unwrap();
+            config.workspace_write = true;
+            self.store.lock().unwrap().update_agent(&self.agent, &config).unwrap();
+            let path = self.dir.path().join("detached");
+            self.git(&["worktree", "add", "--detach", path.to_str().unwrap(), "HEAD"]);
+            self.service.activate_project(&ViewId::main(), &self.project.id).unwrap();
+            settle(&self.core).await;
+            let row = self.core.snapshot(&ViewId::main()).branches.into_iter().find(|row| row.detached).expect("the detached row");
+            let id = ChannelId(self.service.open_branch(&ViewId::main(), &row.key).unwrap());
+            let saved = self.worktree_record(&id).unwrap().path;
+            (id, saved, self.git(&["rev-parse", "HEAD"]))
+        }
+        fn branch_request(&self, channel: &ChannelId, name: &str, path: &str, commit: &str) -> discard_core::write_requests::WriteRequest {
+            self.requests.request_branch_create(channel, &self.agent, name.into(), path.into(), commit.into()).unwrap()
+        }
+        fn decide_in(&self, channel: &ChannelId, id: &str, approve: bool) -> Result<discard_core::write_requests::WriteRequest, String> {
+            self.service.decide_write_request(&ViewId::main(), &self.requests, &self.workspace, &self.grants, &channel.0, id, approve)
+        }
         fn decide(&self, id: &str, approve: bool) -> Result<discard_core::write_requests::WriteRequest, String> {
             self.service.decide_write_request(&ViewId::main(), &self.requests, &self.workspace, &self.grants, &self.general.id.0, id, approve)
         }
@@ -2682,6 +2759,88 @@ mod navigation_action_tests {
             let last = self.messages(&self.general.id).pop().unwrap();
             assert_eq!((last.role, last.blocks), (Role::System, vec![Block::ChannelLink { direction: discard_core::model::LinkDirection::MovedTo, channel_id: target.0.clone(), channel_name: name.into() }]));
         }
+    }
+
+    #[tokio::test]
+    async fn branch_create_approval_creates_the_branch_and_rebinds_the_channel() {
+        let r = rig().await;
+        let (channel, saved, head) = r.detached_channel().await;
+        let canonical = std::path::Path::new(&saved).canonicalize().unwrap().to_string_lossy().into_owned();
+        r.received(&channel);
+        let request = r.branch_request(&channel, "topic/new", &canonical, &head);
+        let done = r.decide_in(&channel, &request.id, true).unwrap();
+        assert_eq!((done.state.as_str(), done.result.as_deref()), ("completed", Some("Created the branch `topic/new`. This channel now uses it.")));
+        assert_eq!(r.git(&["rev-parse", "topic/new"]), head);
+        assert_eq!(run(std::path::Path::new(&saved), &["rev-parse", "--abbrev-ref", "HEAD"]), "topic/new");
+        assert_eq!(r.branch_channel("topic/new").map(|c| c.id), Some(channel.clone()));
+        assert_eq!(r.worktree_record(&channel).unwrap().branch, "topic/new");
+        let received = r.received(&channel);
+        assert!(matches!(&received[..], [Command::Continue { .. }]), "{received:?}");
+        assert!(r.messages(&channel).iter().all(|m| m.role == Role::System));
+        // The channel now passes the binding check with its branch.
+        let config = r.store.lock().unwrap().load_agent(&r.agent).unwrap();
+        let binding = discard_core::workspace_session::eligibility(&r.store.lock().unwrap(), &channel, &config).unwrap();
+        assert_eq!(discard_core::workspace_session::verify_binding(binding, false).unwrap().branch.as_deref(), Some("topic/new"));
+    }
+
+    #[tokio::test]
+    async fn branch_create_denial_changes_nothing() {
+        let r = rig().await;
+        let (channel, saved, head) = r.detached_channel().await;
+        r.received(&channel);
+        let request = r.branch_request(&channel, "topic", &std::path::Path::new(&saved).canonicalize().unwrap().to_string_lossy(), &head);
+        let done = r.decide_in(&channel, &request.id, false).unwrap();
+        assert_eq!((done.state.as_str(), done.result.as_deref()), ("denied", Some("Branch creation was denied.")));
+        assert!(!r.branches().contains(&"topic".to_string()));
+        assert!(r.branch_channel("topic").is_none());
+        assert!(r.received(&channel).is_empty());
+        assert_eq!(run(std::path::Path::new(&saved), &["rev-parse", "--abbrev-ref", "HEAD"]), "HEAD");
+        let last = r.messages(&channel).pop().unwrap();
+        assert_eq!(last.blocks, vec![Block::Markdown { text: "Branch creation was denied.".into() }]);
+    }
+
+    #[tokio::test]
+    async fn branch_create_refuses_when_head_moved() {
+        let r = rig().await;
+        let (channel, saved, head) = r.detached_channel().await;
+        let canonical = std::path::Path::new(&saved).canonicalize().unwrap();
+        r.received(&channel);
+        let request = r.branch_request(&channel, "topic", &canonical.to_string_lossy(), &head);
+        run(&canonical, &["commit", "--allow-empty", "-q", "-m", "moved"]);
+        let done = r.decide_in(&channel, &request.id, true).unwrap();
+        assert_eq!((done.state.as_str(), done.result.as_deref()), ("failed", Some("Branch creation failed: The request target changed. Ask again.")));
+        assert!(!r.branches().contains(&"topic".to_string()));
+        assert!(r.branch_channel("topic").is_none());
+        assert!(r.received(&channel).is_empty());
+    }
+
+    #[tokio::test]
+    async fn branch_create_git_failure_rebinds_nothing() {
+        let r = rig().await;
+        let (channel, saved, head) = r.detached_channel().await;
+        let canonical = std::path::Path::new(&saved).canonicalize().unwrap();
+        r.received(&channel);
+        let request = r.branch_request(&channel, "taken", &canonical.to_string_lossy(), &head);
+        r.git(&["branch", "taken"]);
+        let done = r.decide_in(&channel, &request.id, true).unwrap();
+        assert_eq!(done.state, "failed");
+        assert!(done.result.as_deref().unwrap().starts_with("Branch creation failed: "), "{done:?}");
+        assert!(r.branch_channel("taken").is_none());
+        assert_eq!(r.store.lock().unwrap().channel_branch(&channel).unwrap(), None);
+        assert_ne!(r.worktree_record(&channel).unwrap().branch, "taken");
+        assert!(r.received(&channel).is_empty());
+    }
+
+    #[tokio::test]
+    async fn menu_create_branch_rebinds_a_detached_channel() {
+        let r = rig().await;
+        let (channel, saved, _) = r.detached_channel().await;
+        assert_eq!(r.service.create_branch(&ViewId::main(), &r.project.id, "", &saved, "topic").unwrap(), "topic");
+        assert_eq!(r.branch_channel("topic").map(|c| c.id), Some(channel.clone()));
+        assert_eq!(r.worktree_record(&channel).unwrap().branch, "topic");
+        let config = r.store.lock().unwrap().load_agent(&r.agent).unwrap();
+        let binding = discard_core::workspace_session::eligibility(&r.store.lock().unwrap(), &channel, &config).unwrap();
+        assert_eq!(discard_core::workspace_session::verify_binding(binding, false).unwrap().branch.as_deref(), Some("topic"));
     }
 
     #[tokio::test]
