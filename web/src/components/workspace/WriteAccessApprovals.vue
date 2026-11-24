@@ -10,12 +10,14 @@ const busy = ref<string | null>(null)
 const error = ref('')
 function title(request: WriteRequest) {
   if (request.kind === 'conversation_move') return 'Move this conversation?'
+  if (request.kind === 'branch_create') return `Create branch ${request.branch} here?`
   return request.kind === 'worktree_create'
     ? 'Create a worktree for this branch?'
     : 'Write in the main checkout for one response?'
 }
 function approveLabel(request: WriteRequest) {
   if (request.kind === 'conversation_move') return 'Move'
+  if (request.kind === 'branch_create') return 'Create branch'
   return request.kind === 'worktree_create' ? 'Create worktree' : 'Allow once'
 }
 function moveExplanation(request: WriteRequest) {
@@ -101,6 +103,10 @@ onUnmounted(() => {
         <dd class="break-all font-mono">{{ shortPath(request.path) }}</dd>
         <dt class="mt-2 font-medium">Branch</dt>
         <dd class="break-all font-mono">{{ request.branch }}</dd>
+        <template v-if="request.kind === 'branch_create' && request.commit">
+          <dt class="mt-2 font-medium">Commit</dt>
+          <dd class="break-all font-mono">{{ request.commit.slice(0, 7) }}</dd>
+        </template>
       </dl>
       <template v-if="request.state === 'pending'">
         <p v-if="request.kind === 'conversation_move'">{{ moveExplanation(request) }}</p>

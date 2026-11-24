@@ -417,7 +417,7 @@ export interface MoveDetails {
 }
 export interface WriteRequest {
   id: string
-  kind: 'worktree_create' | 'main_checkout_write' | 'conversation_move'
+  kind: 'worktree_create' | 'main_checkout_write' | 'conversation_move' | 'branch_create'
   channelId: string
   agentId: string
   branch: string
@@ -426,6 +426,8 @@ export interface WriteRequest {
   result: string | null
   /** Set only when `kind` is `conversation_move`. */
   move?: MoveDetails
+  /** Full HEAD commit. Set only when `kind` is `branch_create`. */
+  commit?: string
 }
 export const getWriteRequests = (channelId: string) =>
   invoke<WriteRequest[]>('get_write_requests', { channelId })

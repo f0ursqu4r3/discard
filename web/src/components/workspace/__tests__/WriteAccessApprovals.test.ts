@@ -130,6 +130,49 @@ test('move approval is disabled while the channel is running', async () => {
   expect(view.text()).toContain('Wait for the current response to finish before approving.')
   view.unmount()
 })
+const branchRequest = {
+  ...pending,
+  kind: 'branch_create',
+  branch: 'feat/x',
+  path: '/work/tree',
+  commit: '0123456789abcdef0123456789abcdef01234567',
+} as WriteRequest
+test('a branch request shows the branch, path and short commit', async () => {
+  const view = await mountMove(branchRequest)
+  expect(view.get('p.font-semibold').text()).toBe('Create branch feat/x here?')
+  expect(view.text()).toContain('/work/tree')
+  expect(view.text()).toContain('0123456')
+  expect(view.text()).not.toContain('01234567')
+  view.unmount()
+})
+test('a branch request without a commit shows no commit', async () => {
+  const view = await mountMove({ ...branchRequest, commit: undefined } as WriteRequest)
+  expect(view.findAll('dt').map((d) => d.text())).not.toContain('Commit')
+  expect(view.text()).not.toContain('0123456')
+  view.unmount()
+})
+test('a branch request renders the name as plain text', async () => {
+  const view = await mountMove({ ...branchRequest, branch: '<b>x</b>' } as WriteRequest)
+  expect(view.find('section b').exists()).toBe(false)
+  view.unmount()
+})
+test('create branch and deny call the command once', async () => {
+  for (const approve of [true, false]) {
+    api.decideWriteRequest.mockResolvedValue({
+      ...branchRequest,
+      state: approve ? 'completed' : 'denied',
+    })
+    const view = await mountMove(branchRequest)
+    await view
+      .findAll('button')
+      .find((b) => b.text() === (approve ? 'Create branch' : 'Deny'))!
+      .trigger('click')
+    await flushPromises()
+    expect(api.decideWriteRequest).toHaveBeenLastCalledWith('c', 'r', approve)
+    view.unmount()
+  }
+  expect(api.decideWriteRequest).toHaveBeenCalledTimes(2)
+})
 test('move and deny call the command once', async () => {
   for (const approve of [true, false]) {
     api.decideWriteRequest.mockResolvedValue({ ...move, state: approve ? 'completed' : 'denied' })
