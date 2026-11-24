@@ -61,7 +61,9 @@ with an argument list, checks the rules again in the backend, and refreshes the 
 - **Create Worktree…** calls the same service as the agent request: the worktree gets the path of an owned
   worktree and a saved record. It is greyed when a working tree holds the branch or the channel has a worktree.
 - **Rename Branch…** works for a checked-out branch and moves the channel binding. It is greyed while the channel
-  is busy.
+  is busy. Discard also follows a rename made outside the app, such as `git branch -m` in a terminal. It reads
+  the Git reflog on each branch refresh and moves the binding only when the result is exact. See
+  `docs/project-channel-status.md`.
 - **Delete Branch…** warns about commits that the default branch does not have. You must choose to delete them
   before Discard runs `git branch -D`. It is greyed for the default branch, for a checked-out branch, and while
   the channel is busy.
