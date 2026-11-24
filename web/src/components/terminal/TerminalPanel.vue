@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -145,7 +145,7 @@ type Opener = (
 async function attach(
   run: number,
   open: Opener,
-  onOpened?: (result: TerminalOpened) => void,
+  onOpened?: (result: TerminalOpened, current: boolean) => void,
 ): Promise<{ error: unknown } | null> {
   const current = term
   if (!current || run !== generation) return null
@@ -160,11 +160,13 @@ async function attach(
       else if (run === generation) deliver(event)
     })
     if (run !== generation) {
+      // The backend holds the session, so the tab list keeps it. Only the active tab streams here.
+      onOpened?.(result, false)
       // A newer attach took over. A session that is not the active tab must stop streaming here.
       if (activeId.value !== result.sessionId) void terminalDetach(result.sessionId).catch(ignore)
       return null
     }
-    onOpened?.(result)
+    onOpened?.(result, true)
     attached = result.sessionId
     const bytes = decodeBytes(result.scrollback)
     if (bytes.length) current.write(bytes)
@@ -201,7 +203,8 @@ async function load(channelId: string, run: number) {
     await attach(
       run,
       (cols, rows, onEvent) => terminalCreate(channelId, cols, rows, onEvent),
-      (result) => {
+      (result, current) => {
+        if (!current) return
         tabs.value = [tabOf(result)]
         setActive(result.sessionId)
       },
@@ -248,9 +251,10 @@ function addTab() {
       const failure = await attach(
         run,
         (cols, rows, onEvent) => terminalCreate(channelId, cols, rows, onEvent),
-        (result) => {
+        (result, current) => {
+          if (props.channelId !== channelId) return
           tabs.value = [...tabs.value, tabOf(result)]
-          setActive(result.sessionId)
+          if (current) setActive(result.sessionId)
         },
       )
       // The backend refused the tab. Show the tab that was open and tell the user why.
@@ -260,6 +264,22 @@ function addTab() {
       }
     })
     .catch(ignore)
+}
+
+/** Left and Right move the active tab. The strip wraps at its ends. */
+function moveTab(event: KeyboardEvent, id: string) {
+  const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0
+  if (!step) return
+  event.preventDefault()
+  const list = tabs.value
+  const index = list.findIndex((tab) => tab.sessionId === id)
+  const target = list[(index + step + list.length) % list.length]
+  if (!target) return
+  selectTab(target.sessionId)
+  void nextTick(() => {
+    const buttons = panel.value?.querySelectorAll<HTMLElement>('[data-testid="terminal-tab"]')
+    buttons?.[(index + step + list.length) % list.length]?.focus()
+  })
 }
 
 async function closeTab(id: string) {
@@ -304,9 +324,9 @@ function restart() {
       attach(
         run,
         (cols, rows, onEvent) => terminalRestart(id, cols, rows, onEvent),
-        (result) => {
+        (result, current) => {
           tabs.value = tabs.value.map((tab) => (tab.sessionId === id ? tabOf(result) : tab))
-          setActive(result.sessionId)
+          if (current) setActive(result.sessionId)
         },
       ),
     )
@@ -467,23 +487,27 @@ defineExpose({ restart, kill, view })
       <div
         v-for="tab in tabs"
         :key="tab.sessionId"
-        data-testid="terminal-tab"
-        role="tab"
-        tabindex="0"
-        :aria-selected="tab.sessionId === activeId"
-        class="group flex h-6 shrink-0 cursor-pointer items-center gap-1 rounded px-2 hover:bg-muted"
+        class="flex h-6 shrink-0 items-center rounded hover:bg-muted"
         :class="tab.sessionId === activeId ? 'bg-muted text-foreground' : 'text-muted-foreground'"
-        @click="selectTab(tab.sessionId)"
-        @keydown.enter.prevent="selectTab(tab.sessionId)"
-        @keydown.space.prevent="selectTab(tab.sessionId)"
       >
-        <span :class="{ 'opacity-60': !tab.running }">{{ tabName(tab.number) }}</span>
+        <button
+          type="button"
+          data-testid="terminal-tab"
+          role="tab"
+          :tabindex="tab.sessionId === activeId ? 0 : -1"
+          :aria-selected="tab.sessionId === activeId"
+          class="h-6 rounded-l pr-1 pl-2 outline-none focus-visible:ring-1 focus-visible:ring-primary"
+          @click="selectTab(tab.sessionId)"
+          @keydown="moveTab($event, tab.sessionId)"
+        >
+          <span :class="{ 'opacity-60': !tab.running }">{{ tabName(tab.number) }}</span>
+        </button>
         <button
           type="button"
           data-testid="terminal-tab-close"
-          class="rounded p-0.5 hover:bg-border"
+          class="mr-1 rounded p-0.5 hover:bg-border"
           :aria-label="`Close ${tabName(tab.number)}`"
-          @click.stop="closeTab(tab.sessionId)"
+          @click="closeTab(tab.sessionId)"
         >
           <X class="size-3" aria-hidden="true" />
         </button>

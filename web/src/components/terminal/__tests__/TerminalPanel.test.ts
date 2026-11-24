@@ -411,6 +411,8 @@ test('hiding detaches from the session without killing it and disposes xterm', a
 })
 
 const tabsOf = (view: ReturnType<typeof mount>) => view.findAll('[data-testid="terminal-tab"]')
+const closeOf = (view: ReturnType<typeof mount>) =>
+  view.findAll('[data-testid="terminal-tab-close"]')
 const eight = () => Array.from({ length: 8 }, (_, index) => tab(`s${index + 1}`, index + 1))
 
 test('it lists the tabs of the channel and opens the remembered one', async () => {
@@ -514,7 +516,7 @@ test('closing an inactive tab keeps the active stream', async () => {
   backend.tabs = [tab('s1', 1), tab('s2', 2)]
   const view = show()
   await flushPromises()
-  await tabsOf(view)[1]!.get('[data-testid="terminal-tab-close"]').trigger('click')
+  await closeOf(view)[1]!.trigger('click')
   await flushPromises()
   expect(calls('terminal_close')).toEqual([['terminal_close', { sessionId: 's2' }]])
   expect(calls('terminal_detach')).toHaveLength(0)
@@ -530,7 +532,7 @@ test('closing the active tab opens its neighbour', async () => {
   await flushPromises()
   await tabsOf(view)[1]!.trigger('click')
   await flushPromises()
-  await tabsOf(view)[1]!.get('[data-testid="terminal-tab-close"]').trigger('click')
+  await closeOf(view)[1]!.trigger('click')
   await flushPromises()
   expect(calls('terminal_close')).toEqual([['terminal_close', { sessionId: 's2' }]])
   expect(calls('terminal_open').at(-1)![1]).toMatchObject({ sessionId: 's3' })
@@ -542,7 +544,7 @@ test('closing the active tab opens its neighbour', async () => {
 test('closing the last tab emits hide', async () => {
   const view = show()
   await flushPromises()
-  await tabsOf(view)[0]!.get('[data-testid="terminal-tab-close"]').trigger('click')
+  await closeOf(view)[0]!.trigger('click')
   await flushPromises()
   expect(calls('terminal_close')).toEqual([['terminal_close', { sessionId: 's1' }]])
   expect(view.emitted('hide')).toHaveLength(1)
@@ -704,4 +706,64 @@ test('the saved height is restored and the arrow keys move the edge', async () =
   await view.get('[data-testid="terminal-resizer"]').trigger('keydown', { key: 'ArrowUp' })
   expect(panel.attributes('style')).toContain('height: 316px')
   expect(localStorage.getItem(heightKey)).toBe('316')
+})
+
+test('Enter on a close button closes the tab and does not select it', async () => {
+  backend.tabs = [tab('s1', 1), tab('s2', 2)]
+  const view = show()
+  await flushPromises()
+  const close = closeOf(view)[1]!
+  const press = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+  close.element.dispatchEvent(press)
+  // The browser turns the unprevented key into a click.
+  expect(press.defaultPrevented).toBe(false)
+  await close.trigger('click')
+  await flushPromises()
+  expect(calls('terminal_close')).toEqual([['terminal_close', { sessionId: 's2' }]])
+  expect(calls('terminal_detach')).toHaveLength(0)
+  expect(calls('terminal_open')).toHaveLength(1)
+  expect(tabsOf(view)[0]!.attributes('aria-selected')).toBe('true')
+})
+
+test('tabs use a roving tabindex and the arrow keys move the active tab', async () => {
+  backend.tabs = [tab('s1', 1), tab('s2', 2), tab('s3', 3)]
+  const view = show()
+  await flushPromises()
+  expect(tabsOf(view).map((entry) => entry.attributes('tabindex'))).toEqual(['0', '-1', '-1'])
+  await tabsOf(view)[0]!.trigger('keydown', { key: 'ArrowRight' })
+  await flushPromises()
+  expect(tabsOf(view)[1]!.attributes('aria-selected')).toBe('true')
+  expect(tabsOf(view).map((entry) => entry.attributes('tabindex'))).toEqual(['-1', '0', '-1'])
+  await tabsOf(view)[1]!.trigger('keydown', { key: 'ArrowLeft' })
+  await flushPromises()
+  expect(tabsOf(view)[0]!.attributes('aria-selected')).toBe('true')
+  await tabsOf(view)[0]!.trigger('keydown', { key: 'ArrowLeft' })
+  await flushPromises()
+  expect(tabsOf(view)[2]!.attributes('aria-selected')).toBe('true')
+  expect(calls('terminal_open').at(-1)![1]).toMatchObject({ sessionId: 's3' })
+})
+
+test('a new tab whose create was superseded still joins the strip', async () => {
+  backend.tabs = [tab('s1', 1), tab('s2', 2)]
+  let finish!: (value: unknown) => void
+  backend.answers.terminal_create = () =>
+    new Promise((resolve) => {
+      finish = resolve
+    })
+  const view = show()
+  await flushPromises()
+  await view.get('[data-testid="terminal-new-tab"]').trigger('click')
+  await flushPromises()
+  await tabsOf(view)[1]!.trigger('click')
+  await flushPromises()
+  finish(opened({ sessionId: 'n1', number: 3 }))
+  await flushPromises()
+  expect(tabsOf(view).map((entry) => entry.text())).toEqual([
+    'Terminal 1',
+    'Terminal 2',
+    'Terminal 3',
+  ])
+  expect(tabsOf(view)[1]!.attributes('aria-selected')).toBe('true')
+  expect(tabsOf(view)[2]!.attributes('aria-selected')).toBe('false')
+  expect(calls('terminal_detach')).toContainEqual(['terminal_detach', { sessionId: 'n1' }])
 })
