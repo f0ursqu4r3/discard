@@ -230,7 +230,7 @@ const setCollapsed = (group: RailGroupView, collapsed: boolean) =>
           <TooltipContent side="right">Direct messages</TooltipContent>
         </Tooltip>
       </div>
-      <Separator :class="mini ? 'max-w-6' : 'max-w-8'" />
+      <Separator v-if="view" :class="mini ? 'max-w-6' : 'max-w-8'" />
       <div
         ref="scroller"
         data-ui-id="rail-projects"
@@ -310,7 +310,7 @@ const setCollapsed = (group: RailGroupView, collapsed: boolean) =>
             />
           </RailGroupContainer>
         </template>
-        <Separator :class="mini ? 'max-w-6' : 'max-w-8'" />
+        <Separator v-if="view" :class="mini ? 'max-w-6' : 'max-w-8'" />
         <Tooltip>
           <TooltipTrigger as-child>
             <Button
