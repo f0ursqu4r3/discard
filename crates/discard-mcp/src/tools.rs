@@ -39,6 +39,9 @@ impl McpHandler {
                     if workspace.write_request_target(channel, &identity.agent, identity.project.as_ref(), discard_core::write_requests::WriteRequestKind::WorktreeCreate).is_ok() {
                         tools.push(creation_tool());
                     }
+                    if branch_tool_applies(workspace, channel, &identity.agent, identity.project.as_ref()) {
+                        tools.push(branch_tool());
+                    }
                     if workspace.move_source(channel, &identity.agent, identity.project.as_ref()).is_ok() {
                         tools.push(move_tool());
                     }
@@ -116,6 +119,18 @@ impl McpHandler {
         let (_, branch, path) = workspace.write_request_target(channel, &identity.agent, identity.project.as_ref(), kind)?;
         let request = requests.request(kind, channel, &identity.agent, branch, path.to_string_lossy().into_owned())?;
         Ok(json!({"approvalRequired":true,"request":request,"message":if name == "worktree_request_creation" { "Worktree creation is pending in the app. No folder exists yet. You cannot approve this request." } else { "Main-checkout write access is pending in the app. You cannot approve this request." }}).to_string())
+    }
+
+    fn run_branch_request(&self, identity: &Identity, args: &Value) -> Result<String, String> {
+        let (requests, workspace) = self.writes.as_ref().ok_or("Write requests are unavailable.")?;
+        if !identity.can_write { return Err("Write requests are unavailable during summarization.".into()); }
+        let object = args.as_object().ok_or("This tool needs a name.")?;
+        if object.keys().any(|k| k != "name") { return Err("This tool accepts only name.".into()); }
+        let name = object.get("name").and_then(Value::as_str).ok_or("name must be a string.")?;
+        let channel = identity.source_conversation.as_ref().ok_or("A channel is required.")?;
+        let (path, commit, name) = workspace.branch_create_target(channel, &identity.agent, identity.project.as_ref(), name)?;
+        let request = requests.request_branch_create(channel, &identity.agent, name, path.to_string_lossy().into_owned(), commit)?;
+        Ok(json!({"approvalRequired":true,"request":request,"message":"Branch creation is pending in the app. No branch exists yet. You cannot approve this request."}).to_string())
     }
 
     fn run_move_request(&self, identity: &Identity, args: &Value) -> Result<String, String> {
@@ -247,7 +262,7 @@ impl McpHandler {
     fn call(&self, identity: &Identity, id: &Value, params: &Value) -> Value {
         let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
         let known = match identity.surface {
-            Surface::Memory => (DELEGATION_TOOLS.contains(&name) && self.delegation.is_some() && identity.delegation && identity.can_write) || (matches!(name, "worktree_request_creation" | "main_checkout_request_write" | "conversation_request_move") && self.writes.is_some() && identity.can_write && identity.project.is_some()) || ALL_TOOLS.contains(&name) || (self.worktrees.is_some() && identity.project.is_some() && identity.can_write && (WORKTREE_TOOLS.contains(&name) || PROJECT_TOOLS.contains(&name))),
+            Surface::Memory => (DELEGATION_TOOLS.contains(&name) && self.delegation.is_some() && identity.delegation && identity.can_write) || (matches!(name, "worktree_request_creation" | "worktree_request_branch" | "main_checkout_request_write" | "conversation_request_move") && self.writes.is_some() && identity.can_write && identity.project.is_some()) || ALL_TOOLS.contains(&name) || (self.worktrees.is_some() && identity.project.is_some() && identity.can_write && (WORKTREE_TOOLS.contains(&name) || PROJECT_TOOLS.contains(&name))),
             Surface::Plugins => self.plugins.is_some() && PLUGIN_ALL_TOOLS.contains(&name),
         };
         if !known {
@@ -257,6 +272,7 @@ impl McpHandler {
         let outcome = match identity.surface {
             Surface::Memory if DELEGATION_TOOLS.contains(&name) => self.run_delegation_tool(identity, name, args),
             Surface::Memory if name == "conversation_request_move" => self.run_move_request(identity, args),
+            Surface::Memory if name == "worktree_request_branch" => self.run_branch_request(identity, args),
             Surface::Memory if matches!(name, "worktree_request_creation" | "main_checkout_request_write") => self.run_write_request(identity, name, args),
             Surface::Memory if PROJECT_TOOLS.contains(&name) => self.run_project_tool(identity, name, args),
             Surface::Memory if WORKTREE_TOOLS.contains(&name) => self.run_worktree_tool(identity, name, args),
@@ -658,6 +674,18 @@ impl McpHandler {
 }
 
 
+/// True when the channel is a detached worktree channel. The gate needs a name, so a probe name asks only about the channel.
+pub(crate) fn branch_tool_applies(workspace: &discard_core::workspace::GitWorkspace, channel: &discard_core::model::ChannelId, agent: &discard_core::model::AgentId, project: Option<&discard_core::model::ProjectId>) -> bool {
+    match workspace.branch_create_target(channel, agent, project, "discard-branch-probe") {
+        Ok(_) => true,
+        Err(error) => error.contains("already exists"),
+    }
+}
+
+fn branch_tool() -> Value {
+    json!({"name":"worktree_request_branch","description":"Ask the user to create a branch for this detached worktree. Does nothing until the user approves in the app. After approval, the worktree is on the new branch and commits are possible.","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"The new branch name."}},"required":["name"],"additionalProperties":false}})
+}
+
 fn creation_tool() -> Value {
     json!({"name":"worktree_request_creation","description":"Ask the user to create a worktree for this branch channel. Does nothing until the user approves in the app. After approval, the app starts a new response with file edits enabled.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}})
 }
@@ -861,6 +889,67 @@ mod tests {
         let mut config = store.lock().unwrap().load_agent(&who.agent).unwrap(); config.workspace_write = false;
         store.lock().unwrap().update_agent(&who.agent, &config).unwrap(); assert!(!listed(&who));
         who.project = None; assert!(!listed(&who));
+    }
+    fn detached_rig() -> (Rig, Identity, Arc<std::sync::Mutex<discard_core::store::Store>>, tempfile::TempDir, std::path::PathBuf) {
+        use discard_core::{model::{Channel, ChannelId, WorkspaceMode}, store::{Store, WorktreeRecord}};
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo"); std::fs::create_dir(&repo).unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| assert!(discard_core::process::spawn_std(std::process::Command::new("git").current_dir(cwd).args(["-c", "core.hooksPath=/dev/null", "-c", "user.name=T", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args)).and_then(|mut child| child.wait()).unwrap().success());
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["commit", "--allow-empty", "-qm", "init"]);
+        git(&repo, &["branch", "taken"]);
+        let root = dir.path().join("detached");
+        git(&repo, &["worktree", "add", "-q", "--detach", root.to_str().unwrap()]);
+        let store = Store::open_in_memory().unwrap();
+        let config = discard_core::agent::AgentConfig::from_toml("name='A'\nprovider='fake'\nmodel='test'\npolicy='ask'\nworkspace_write=true").unwrap();
+        let agent = store.create_agent(&config).unwrap(); let project = store.import_project_folder(&repo).unwrap();
+        let channel = Channel { id: ChannelId::new(), project_id: Some(project.id.clone()), name: "detached".into(), agent_id: agent.clone(), workspace_mode: WorkspaceMode::Worktree };
+        let record = WorktreeRecord { channel_id: channel.id.clone(), path: root.to_string_lossy().into_owned(), branch: "detached".into(), base_commit: String::new(), repo: repo.to_string_lossy().into_owned(), owned: false };
+        store.create_named_channel(&channel, None, Some(&record)).unwrap();
+        store.register_bootstrap_project_channel(&channel.id).unwrap();
+        let store = Arc::new(std::sync::Mutex::new(store));
+        let workspace = Arc::new(discard_core::workspace::GitWorkspace::new(&dir.path().join("worktrees"), store.clone()));
+        let mut r = rig(); r.handler = r.handler.with_write_requests(Arc::default(), workspace);
+        let mut who = full(); who.agent = agent; who.project = Some(project.id); who.source_conversation = Some(channel.id);
+        (r, who, store, dir, repo)
+    }
+    fn branches(repo: &std::path::Path) -> String {
+        String::from_utf8(std::process::Command::new("git").current_dir(repo).args(["branch", "--list"]).output().unwrap().stdout).unwrap()
+    }
+    #[test]
+    fn branch_tool_is_listed_only_for_detached_worktree_channels_with_opted_in_agents() {
+        let (r, mut who, store, _dir, _repo) = detached_rig();
+        let listed = |who: &Identity| r.handler.handle(who, &rpc("tools/list", json!({}))).unwrap().to_string().contains("worktree_request_branch");
+        assert!(listed(&who));
+        who.can_write = false; assert!(!listed(&who)); who.can_write = true;
+        let mut config = store.lock().unwrap().load_agent(&who.agent).unwrap(); config.workspace_write = false;
+        store.lock().unwrap().update_agent(&who.agent, &config).unwrap(); assert!(!listed(&who));
+        let (r2, who2, _s, _d) = creation_rig(false);
+        assert!(!r2.handler.handle(&who2, &rpc("tools/list", json!({}))).unwrap().to_string().contains("worktree_request_branch"));
+    }
+    #[test]
+    fn branch_tool_call_returns_approval_required_and_creates_nothing() {
+        let (r, who, _store, _dir, repo) = detached_rig();
+        let before = branches(&repo);
+        let reply = call(&r, &who, "worktree_request_branch", json!({"name":"topic"}));
+        assert!(!is_error(&reply), "{reply}");
+        let body: Value = serde_json::from_str(&text(&reply)).unwrap();
+        assert_eq!(body["approvalRequired"], true);
+        assert_eq!(body["message"], "Branch creation is pending in the app. No branch exists yet. You cannot approve this request.");
+        assert_eq!(body["request"]["kind"], "branch_create");
+        assert_eq!(branches(&repo), before);
+        assert!(is_error(&call(&r, &who, "worktree_request_branch", json!({}))));
+        assert!(is_error(&call(&r, &who, "worktree_request_branch", json!({"name":"topic","extra":1}))));
+    }
+    #[test]
+    fn branch_tool_refuses_an_existing_branch_name() {
+        let (r, who, _store, _dir, _repo) = detached_rig();
+        let reply = call(&r, &who, "worktree_request_branch", json!({"name":"taken"}));
+        assert!(is_error(&reply));
+        assert!(text(&reply).contains("already exists"), "{}", text(&reply));
+        assert!(r.handler.writes.as_ref().unwrap().0.list(who.source_conversation.as_ref().unwrap()).is_empty());
+        let (r2, who2, _s, _d) = creation_rig(false);
+        assert!(is_error(&call(&r2, &who2, "worktree_request_branch", json!({"name":"topic"}))));
     }
     #[test]
     fn creation_tool_refuses_a_branch_checked_out_in_the_main_checkout() {

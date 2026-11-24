@@ -197,6 +197,10 @@ impl MemoryRuntime {
             && workspace.write_request_target(source, agent, project, discard_core::write_requests::WriteRequestKind::WorktreeCreate).is_ok() {
             segments.push((false, "\nThis branch channel has no worktree. Call worktree_request_creation when the user asks you to change files.\n".into()));
         }
+        if can_write && let Some((_, workspace)) = &self.writes
+            && crate::tools::branch_tool_applies(workspace, source, agent, project) {
+            segments.push((false, "\nThis channel is a detached worktree. Call worktree_request_branch with a name to get a branch, so commits become possible.\n".into()));
+        }
         if can_write && workspace_root.is_none() && let Some((_, workspace)) = &self.writes
             && workspace.write_request_target(source, agent, project, discard_core::write_requests::WriteRequestKind::MainCheckoutWrite).is_ok() {
             segments.push((false, if main_checkout_requests {
