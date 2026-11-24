@@ -67,7 +67,9 @@ with an argument list, checks the rules again in the backend, and refreshes the 
 - **Delete Branch…** warns about commits that the default branch does not have. You must choose to delete them
   before Discard runs `git branch -D`. It is greyed for the default branch, for a checked-out branch, and while
   the channel is busy.
-- **Create Branch…** switches the working tree to a new branch at its HEAD. Uncommitted changes stay.
+- **Create Branch…** switches the working tree to a new branch at its HEAD. Uncommitted changes stay. On a
+  detached worktree, the channel of that worktree becomes a branch channel of the new branch. It keeps its
+  history and can commit afterwards.
 - **Remove Worktree…** lists up to ten changed or untracked files and asks you to choose **Discard these
   changes** before it removes the tree. It never deletes the branch. It is greyed for the main checkout and while
   a channel that uses the tree is busy.
@@ -166,6 +168,21 @@ before approving.
 
 Slices A and B do not change the `--builder` Coding path.
 
+## Create a branch here (detached worktrees)
+
+An agent that can write in a detached worktree channel can edit files but cannot commit. A write-capable agent
+(**Edit files in branch channels** on, policy Ask) can call `worktree_request_branch` with a branch name. The tool
+is listed only in a detached worktree channel. It creates nothing. A protected card in the channel shows the
+branch name, the worktree path, and the short commit.
+
+- Only the user approves. A request expires after ten minutes, and an app restart cancels it. Denial changes
+  nothing.
+- Approval checks the worktree again. If the name, the path, or the commit no longer match the card, it refuses
+  with "The request target changed. Ask again." Otherwise Discard creates the branch at the commit and rebinds
+  the same channel to it. The channel keeps its history. Discard then starts a new response for the agent.
+- A Git failure, such as a name that exists now, creates nothing and rebinds nothing.
+- Other detached channels at the same path stay as they are.
+
 ## Conversation moves (slice C)
 
 The project's Primary / Moderator agent (the project main agent) can ask to move a
@@ -235,8 +252,6 @@ Nothing else changes.
 
 Not built:
 
-- "Create a branch here" for detached worktrees (spec decision 17). It needs a
-  different gate.
 - A move to an existing branch that has no channel.
 
 Native provider resume per agent is also planned.
