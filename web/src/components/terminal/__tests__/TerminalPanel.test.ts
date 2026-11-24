@@ -767,3 +767,20 @@ test('a new tab whose create was superseded still joins the strip', async () => 
   expect(tabsOf(view)[2]!.attributes('aria-selected')).toBe('false')
   expect(calls('terminal_detach')).toContainEqual(['terminal_detach', { sessionId: 'n1' }])
 })
+
+test('arrow keys keep focus on the tab strip and do not focus xterm', async () => {
+  backend.tabs = [tab('s1', 1), tab('s2', 2), tab('s3', 3)]
+  const view = show()
+  await flushPromises()
+  const focusedAfterStart = term().focused
+  const buttons = () => tabsOf(view).map((entry) => entry.element as HTMLElement)
+  buttons()[0]!.focus()
+  await tabsOf(view)[0]!.trigger('keydown', { key: 'ArrowRight' })
+  await flushPromises()
+  expect(document.activeElement).toBe(buttons()[1])
+  await tabsOf(view)[1]!.trigger('keydown', { key: 'ArrowRight' })
+  await flushPromises()
+  expect(tabsOf(view)[2]!.attributes('aria-selected')).toBe('true')
+  expect(document.activeElement).toBe(buttons()[2])
+  expect(term().focused).toBe(focusedAfterStart)
+})

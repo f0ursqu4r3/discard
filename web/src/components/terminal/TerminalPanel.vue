@@ -146,6 +146,7 @@ async function attach(
   run: number,
   open: Opener,
   onOpened?: (result: TerminalOpened, current: boolean) => void,
+  focusTerminal = true,
 ): Promise<{ error: unknown } | null> {
   const current = term
   if (!current || run !== generation) return null
@@ -174,7 +175,7 @@ async function attach(
     const pending = early
     early = null
     pending.forEach(deliver)
-    current.focus()
+    if (focusTerminal) current.focus()
     return null
   } catch (error) {
     if (run === generation) view.value = failed(view.value, error)
@@ -232,12 +233,12 @@ function detachCurrent() {
   attached = null
 }
 
-function selectTab(id: string) {
+function selectTab(id: string, focusTerminal = true) {
   if (id === activeId.value) return
   detachCurrent()
   setActive(id)
   const run = ++generation
-  queue = queue.then(() => attach(run, openTab(id))).catch(ignore)
+  queue = queue.then(() => attach(run, openTab(id), undefined, focusTerminal)).catch(ignore)
 }
 
 function addTab() {
@@ -275,7 +276,7 @@ function moveTab(event: KeyboardEvent, id: string) {
   const index = list.findIndex((tab) => tab.sessionId === id)
   const target = list[(index + step + list.length) % list.length]
   if (!target) return
-  selectTab(target.sessionId)
+  selectTab(target.sessionId, false)
   void nextTick(() => {
     const buttons = panel.value?.querySelectorAll<HTMLElement>('[data-testid="terminal-tab"]')
     buttons?.[(index + step + list.length) % list.length]?.focus()
