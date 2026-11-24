@@ -1295,23 +1295,20 @@ impl Store {
         }
         Ok(())
     }
-    /// Convert every active detached-worktree channel (a Legacy channel with a worktree record at `worktree_path`) into
-    /// a branch channel of `branch`. The channel ID, history and sessions stay. Returns the channels moved.
-    pub fn rebind_detached_to_branch(&self, project: &ProjectId, repository: &str, worktree_path: &str, branch: &str) -> Result<Vec<ChannelId>> {
+    /// Convert one active detached-worktree channel (a Legacy channel with a worktree record at `worktree_path`) into a
+    /// branch channel of `branch`. The channel ID, history and sessions stay. Other channels, including other detached
+    /// channels at the same path, stay as they are.
+    pub fn rebind_detached_to_branch(&self, project: &ProjectId, repository: &str, worktree_path: &str, channel: &ChannelId, branch: &str) -> Result<()> {
+        let found = self.channels_for_project(project)?.iter().any(|c| c.id == *channel)
+            && !self.channel_archived(channel)?
+            && self.project_channel_metadata(channel)?.is_some_and(|m| m.kind == ProjectChannelKind::Legacy)
+            && self.worktree_for(channel)?.is_some_and(|record| record.path == worktree_path);
+        if !found { return Err(StoreError::NotFound(format!("detached channel {}", channel.0))); }
         let tx = self.conn.unchecked_transaction()?;
-        let mut moved = Vec::new();
-        for channel in self.channels_for_project(project)? {
-            if self.channel_archived(&channel.id)? { continue; }
-            if !self.project_channel_metadata(&channel.id)?.is_some_and(|m| m.kind == ProjectChannelKind::Legacy) { continue; }
-            if !self.worktree_for(&channel.id)?.is_some_and(|record| record.path == worktree_path) { continue; }
-            moved.push(channel.id);
-        }
-        for channel in &moved {
-            self.bind_repository_branch(channel, repository, branch)?;
-            self.conn.execute("UPDATE worktrees SET branch=?2 WHERE channel_id=?1", params![channel.0, branch])?;
-        }
+        self.bind_repository_branch(channel, repository, branch)?;
+        self.conn.execute("UPDATE worktrees SET branch=?2 WHERE channel_id=?1", params![channel.0, branch])?;
         tx.commit()?;
-        Ok(moved)
+        Ok(())
     }
     pub fn channel_branch(&self, channel: &ChannelId) -> Result<Option<String>> {
         Ok(self
@@ -5654,8 +5651,7 @@ mod navigation_action_tests {
         assert_eq!(f.store.project_channel_metadata(&channel.id).unwrap().unwrap().kind, ProjectChannelKind::Legacy);
         let message = note(&f.store, &channel.id, "keep me");
         let session = f.store.latest_session(&channel.id).unwrap();
-        let moved = f.store.rebind_detached_to_branch(&f.project.id, "", "/w/detached", "feature/new").unwrap();
-        assert_eq!(moved, vec![channel.id.clone()]);
+        f.store.rebind_detached_to_branch(&f.project.id, "", "/w/detached", &channel.id, "feature/new").unwrap();
         let metadata = f.store.project_channel_metadata(&channel.id).unwrap().unwrap();
         assert_eq!((metadata.kind, metadata.branch.as_deref()), (ProjectChannelKind::Branch, Some("feature/new")));
         assert_eq!(f.store.project_branch_channel(&f.project.id, "feature/new").unwrap().unwrap().id, channel.id);
@@ -5666,22 +5662,27 @@ mod navigation_action_tests {
     }
 
     #[test]
-    fn rebind_detached_to_branch_moves_every_active_channel_at_the_path_and_skips_others() {
+    fn rebind_detached_to_branch_converts_only_the_chosen_channel() {
         let f = fixture();
+        let repository = crate::worktree::repository_branch_key("repo-id", "x");
         let (first, _) = detached_channel(&f, "/w/shared");
         let (second, _) = detached_channel(&f, "/w/shared");
-        let (elsewhere, _) = detached_channel(&f, "/w/elsewhere");
         let (archived, _) = detached_channel(&f, "/w/shared");
         f.store.archive_channel(&archived.id).unwrap();
-        let mut moved = f.store.rebind_detached_to_branch(&f.project.id, "", "/w/shared", "topic").unwrap();
-        moved.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut expected = vec![first.id.clone(), second.id.clone()];
-        expected.sort_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(moved, expected);
-        assert_eq!(f.store.project_channel_metadata(&elsewhere.id).unwrap().unwrap().kind, ProjectChannelKind::Legacy);
-        assert_eq!(f.store.worktree_for(&elsewhere.id).unwrap().unwrap().branch, "abc1234");
+        f.store.rebind_detached_to_branch(&f.project.id, &repository, "/w/shared", &first.id, "topic").unwrap();
+        let metadata = f.store.project_channel_metadata(&first.id).unwrap().unwrap();
+        assert_eq!((metadata.kind, metadata.branch.as_deref(), metadata.repository.as_str()), (ProjectChannelKind::Branch, Some("topic"), repository.as_str()));
+        assert!(!f.store.channel_archived(&first.id).unwrap());
+        assert_eq!(f.store.channel_branch(&first.id).unwrap().as_deref(), Some("topic"));
+        assert_eq!(f.store.project_channel_metadata(&second.id).unwrap().unwrap().kind, ProjectChannelKind::Legacy);
+        assert!(!f.store.channel_archived(&second.id).unwrap());
+        assert_eq!(f.store.worktree_for(&second.id).unwrap().unwrap().branch, "abc1234");
         assert!(f.store.channel_archived(&archived.id).unwrap());
-        assert_eq!(f.store.worktree_for(&archived.id).unwrap().unwrap().branch, "abc1234");
+        assert_eq!(f.store.project_channel_metadata(&archived.id).unwrap().unwrap().kind, ProjectChannelKind::Legacy);
+        // An archived channel, a missing channel, and a wrong path are all refused.
+        assert!(f.store.rebind_detached_to_branch(&f.project.id, &repository, "/w/shared", &archived.id, "other").is_err());
+        assert!(f.store.rebind_detached_to_branch(&f.project.id, &repository, "/w/elsewhere", &second.id, "other").is_err());
+        assert!(f.store.rebind_detached_to_branch(&f.project.id, &repository, "/w/shared", &first.id, "other").is_err(), "already a branch channel");
     }
 
     #[test]

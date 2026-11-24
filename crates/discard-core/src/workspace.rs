@@ -174,8 +174,7 @@ impl GitWorkspace {
     }
 
     /// The gate for "create a branch here". The channel must be a detached-worktree channel (Legacy kind with a worktree
-    /// record) of an agent that may edit files. The saved worktree must be a linked worktree whose HEAD is detached at
-    /// the recorded commit. `name` must be a new, valid branch name. Returns the worktree path, the HEAD commit and the
+    /// record) of an agent that may edit files. The saved worktree must be a linked worktree whose HEAD is detached. `name` must be a new, valid branch name. Returns the worktree path, the HEAD commit and the
     /// validated name.
     pub fn branch_create_target(&self, channel: &ChannelId, agent: &crate::model::AgentId, project: Option<&crate::model::ProjectId>, name: &str) -> Result<(PathBuf, String, String), String> {
         let record = {
@@ -199,7 +198,6 @@ impl GitWorkspace {
         if Path::new(&repo_common).canonicalize().map_err(|e| e.to_string())? != common { return Err("The repository binding changed. Ask again.".into()); }
         if run(&["rev-parse", "--abbrev-ref", "HEAD"])? != "HEAD" { return Err("This worktree is no longer detached.".into()); }
         let commit = run(&["rev-parse", "HEAD"])?;
-        if !record.base_commit.is_empty() && record.base_commit != commit { return Err("The worktree HEAD moved from the recorded commit. Ask again.".into()); }
         let name = crate::branch_actions::validate_branch_name(Path::new(&record.repo), name, None)?;
         Ok((root, commit, name))
     }
@@ -680,12 +678,18 @@ mod tests {
         assert_eq!(branch_create(&d, "topic").unwrap_err(), "The main checkout cannot get a branch this way.");
     }
     #[test]
-    fn branch_create_gate_refuses_a_worktree_that_has_a_branch_or_moved() {
+    fn branch_create_gate_refuses_a_worktree_that_has_a_branch() {
         let d = detached_rig();
-        git(&d.root, &["commit", "-q", "--allow-empty", "-m", "more"]);
-        assert_eq!(branch_create(&d, "topic").unwrap_err(), "The worktree HEAD moved from the recorded commit. Ask again.");
         git(&d.root, &["checkout", "-q", "-b", "already"]);
         assert_eq!(branch_create(&d, "topic").unwrap_err(), "This worktree is no longer detached.");
+    }
+    #[test]
+    fn branch_create_gate_accepts_a_head_that_moved_and_returns_the_live_commit() {
+        let d = detached_rig();
+        git(&d.root, &["commit", "-q", "--allow-empty", "-m", "more"]);
+        let moved = git(&d.root, &["rev-parse", "HEAD"]);
+        assert_ne!(moved, d.head);
+        assert_eq!(branch_create(&d, "topic").unwrap().1, moved);
     }
 
     struct MoveRig {

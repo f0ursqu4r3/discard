@@ -442,7 +442,7 @@ mod tests {
         assert_eq!(eligibility(&r.store, &r.channel, &r.agent).unwrap().branch, None);
         git(&r.root, &["checkout", "-q", "-b", "topic"]).unwrap();
         assert_eq!(eligibility(&r.store, &r.channel, &r.agent), Err(ReadOnlyReason::NotProjectChannel), "a legacy channel cannot hold a branch");
-        r.store.rebind_detached_to_branch(&project, "", &r.root.to_string_lossy(), "topic").unwrap();
+        r.store.rebind_detached_to_branch(&project, "", &r.root.to_string_lossy(), &r.channel, "topic").unwrap();
         let grant = eligibility(&r.store, &r.channel, &r.agent).unwrap();
         assert_eq!((grant.branch.as_deref(), grant.channel), (Some("topic"), r.channel.clone()));
     }
