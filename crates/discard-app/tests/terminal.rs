@@ -15,6 +15,7 @@ use std::{
 struct Heard {
     output: Vec<u8>,
     exit: Option<Exit>,
+    closed: Option<String>,
 }
 
 fn sink(heard: &Arc<Mutex<Heard>>) -> Sink {
@@ -24,7 +25,8 @@ fn sink(heard: &Arc<Mutex<Heard>>) -> Sink {
         match event {
             Event::Output(bytes) => heard.output.extend(bytes),
             Event::Exit(exit) => heard.exit = Some(exit),
-            Event::Moved | Event::Closed(_) => {}
+            Event::Closed(reason) => heard.closed = Some(reason),
+            Event::Moved => {}
         }
         true
     })
@@ -264,8 +266,11 @@ fn kill_keeps_the_tab_and_ends_the_shell() {
     let dir = tempfile::tempdir().unwrap();
     let terminals = Terminals::default();
     let (session, _) = terminals.create("c", "p", shell_spec(dir.path().to_path_buf())).unwrap();
-    terminals.kill(session.id(), "Stopped.");
+    let heard = Arc::new(Mutex::new(Heard::default()));
+    session.attach("main", sink(&heard));
+    terminals.kill(session.id(), "The session was killed.");
     wait_for("the shell to end", || session.exit().is_some());
+    assert_eq!(heard.lock().unwrap().closed.as_deref(), Some("The session was killed."));
     assert!(terminals.get(session.id()).is_some());
     assert_eq!(numbers(&terminals, "c"), [1]);
     terminals.close_all();

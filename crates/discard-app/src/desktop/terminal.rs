@@ -449,7 +449,7 @@ pub async fn terminal_close(window: tauri::WebviewWindow, terminals: State<'_, A
 pub async fn terminal_kill(window: tauri::WebviewWindow, terminals: State<'_, Arc<Terminals>>, session_id: String) -> Result<(), String> {
     app_window_only(&window)?;
     owned_session(&terminals, &session_id, window.label())?.ok_or_else(|| missing(&session_id))?;
-    terminals.kill(&session_id, "The terminal was stopped.");
+    terminals.kill(&session_id, "The session was killed.");
     Ok(())
 }
 
